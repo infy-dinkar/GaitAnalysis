@@ -1,0 +1,24 @@
+# Conda Virtual Environment
+Gait/
+.conda/
+.env/
+env/
+venv/
+
+# Streamlit and Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.streamlit/
+.ipynb_checkpoints/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Do not track uploaded/sample video files due to size limits
+*.mp4
+*.mov
+*.avi
+*.mkv
