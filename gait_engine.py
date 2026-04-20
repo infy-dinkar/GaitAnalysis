@@ -50,6 +50,8 @@ def extract_poses(video_path: str, pose_model, progress_callback=None):
     raw = {name: [] for name in LM}
 
     frame_idx = 0
+    last_timestamp_ms = -1
+    
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -58,8 +60,11 @@ def extract_poses(video_path: str, pose_model, progress_callback=None):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         
-        # Calculate timestamp in ms
+        # Calculate timestamp in ms, strictly enforce monotonicity
         timestamp_ms = int((frame_idx * 1000) / fps)
+        if timestamp_ms <= last_timestamp_ms:
+            timestamp_ms = last_timestamp_ms + 1
+        last_timestamp_ms = timestamp_ms
         
         result = pose_model.detect_for_video(mp_image, timestamp_ms)
 
