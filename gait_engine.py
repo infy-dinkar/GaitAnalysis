@@ -56,13 +56,18 @@ def extract_poses(video_path: str, pose_model, progress_callback=None):
             break
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        result = pose_model.process(rgb)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        
+        # Calculate timestamp in ms
+        timestamp_ms = int((frame_idx * 1000) / fps)
+        
+        result = pose_model.detect_for_video(mp_image, timestamp_ms)
 
-        if result.pose_landmarks:
-            lms = result.pose_landmarks.landmark
+        if result.pose_landmarks and len(result.pose_landmarks) > 0:
+            lms = result.pose_landmarks[0]
             for name, idx in LM.items():
                 lm = lms[idx]
-                if lm.visibility >= VISIBILITY_THRESHOLD:
+                if lm.visibility and lm.visibility >= VISIBILITY_THRESHOLD:
                     raw[name].append((lm.x, lm.y, lm.visibility))
                 else:
                     raw[name].append(None)

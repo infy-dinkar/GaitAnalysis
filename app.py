@@ -4,6 +4,7 @@ Streamlit entry point for the Video-Based Gait Analysis System.
 """
 
 import os
+import urllib.request
 import tempfile
 import streamlit as st
 import mediapipe as mp
@@ -181,13 +182,21 @@ st.markdown("""
 # ──────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def load_pose_model():
-    return mp.solutions.pose.Pose(
-        static_image_mode=False,
-        model_complexity=1,
-        smooth_landmarks=True,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
+    model_path = "pose_landmarker_lite.task"
+    if not os.path.exists(model_path):
+        url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+        urllib.request.urlretrieve(url, model_path)
+
+    BaseOptions = mp.tasks.BaseOptions
+    PoseLandmarker = mp.tasks.vision.PoseLandmarker
+    PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
+    VisionRunningMode = mp.tasks.vision.VisionRunningMode
+
+    options = PoseLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=model_path),
+        running_mode=VisionRunningMode.VIDEO
     )
+    return PoseLandmarker.create_from_options(options)
 
 
 # ──────────────────────────────────────────────
