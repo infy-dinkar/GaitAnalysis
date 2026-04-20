@@ -37,12 +37,15 @@ VISIBILITY_THRESHOLD = 0.4
 # ──────────────────────────────────────────────
 # STAGE 1: POSE EXTRACTION
 # ──────────────────────────────────────────────
-def extract_poses(video_path: str, pose_model, progress_callback=None):
+def extract_poses(video_path: str, pose_options, progress_callback=None):
     """
     Extract landmark coordinates from every frame of the video.
     Returns a dict: { landmark_name: [(x, y, visibility)] | None per frame }
     Also returns fps and total_frames.
     """
+    import mediapipe as mp
+    pose_model = mp.tasks.vision.PoseLandmarker.create_from_options(pose_options)
+    
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -85,6 +88,7 @@ def extract_poses(video_path: str, pose_model, progress_callback=None):
             progress_callback(frame_idx / total_frames)
 
     cap.release()
+    pose_model.close()
     return raw, fps, total_frames
 
 

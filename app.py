@@ -181,22 +181,20 @@ st.markdown("""
 # CACHED MODEL LOADER
 # ──────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
-def load_pose_model():
+def load_pose_model_options():
     model_path = "pose_landmarker_lite.task"
     if not os.path.exists(model_path):
         url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
         urllib.request.urlretrieve(url, model_path)
 
     BaseOptions = mp.tasks.BaseOptions
-    PoseLandmarker = mp.tasks.vision.PoseLandmarker
     PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
     VisionRunningMode = mp.tasks.vision.RunningMode
 
-    options = PoseLandmarkerOptions(
+    return PoseLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=model_path),
         running_mode=VisionRunningMode.VIDEO
     )
-    return PoseLandmarker.create_from_options(options)
 
 
 # ──────────────────────────────────────────────
@@ -347,7 +345,7 @@ if uploaded is not None:
 
     try:
         # Load model
-        pose_model = load_pose_model()
+        pose_options = load_pose_model_options()
         progress_bar.progress(0.02, text=" Extracting poses frame-by-frame…")
 
         def _progress_cb(frac: float):
@@ -355,7 +353,7 @@ if uploaded is not None:
             progress_bar.progress(pct / 100, text=f" Extracting poses… {pct}%")
 
         # Stage 1 — Extract
-        raw, fps, total_frames = extract_poses(tmp_path, pose_model, _progress_cb)
+        raw, fps, total_frames = extract_poses(tmp_path, pose_options, _progress_cb)
 
         progress_bar.progress(0.82, text="🔧 Preprocessing time series…")
         status_text.markdown("*Smoothing & interpolating landmark trajectories…*")
