@@ -190,7 +190,7 @@ def load_pose_model():
     BaseOptions = mp.tasks.BaseOptions
     PoseLandmarker = mp.tasks.vision.PoseLandmarker
     PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
-    VisionRunningMode = mp.tasks.vision.VisionRunningMode
+    VisionRunningMode = mp.tasks.vision.RunningMode
 
     options = PoseLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=model_path),
