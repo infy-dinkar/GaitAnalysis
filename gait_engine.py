@@ -211,7 +211,7 @@ def compute_knee_angles(ts: dict) -> dict:
             A = (hip_x[i], hip_y[i])
             B = (knee_x[i], knee_y[i])
             C = (ankle_x[i], ankle_y[i])
-            ang[i] = _angle3(A, B, C)
+            ang[i] = 180.0 - _angle3(A, B, C)
         angles[side] = ang
     angles["left_mean"] = float(np.nanmean(angles["left"]))
     angles["right_mean"] = float(np.nanmean(angles["right"]))
@@ -270,12 +270,17 @@ def compute_step_length(ts: dict, step_data: dict) -> dict:
     """F7: Normalized step length using heel separation at strike."""
     l_heel = ts["left_heel"]["x"]
     r_heel = ts["right_heel"]["x"]
-    l_hip = ts["left_hip"]["x"]
-    r_hip = ts["right_hip"]["x"]
-
-    hip_width = np.nanmean(np.abs(l_hip - r_hip))
-    if hip_width < 1e-9:
-        hip_width = 1.0
+    
+    # Calculate approx total body height using vertical (Y axis) shoulder-to-heel distance
+    sh_y = (ts["left_shoulder"]["y"] + ts["right_shoulder"]["y"]) / 2.0
+    hl_y = (ts["left_heel"]["y"] + ts["right_heel"]["y"]) / 2.0
+    
+    # Add ~15% to account for head height
+    heights = np.abs(hl_y - sh_y) * 1.15
+    body_height = np.nanmean(heights)
+    
+    if body_height < 1e-9:
+        body_height = 1.0
 
     step_lengths = []
     left_idx = step_data["left_indices"]
@@ -283,12 +288,12 @@ def compute_step_length(ts: dict, step_data: dict) -> dict:
 
     for li in left_idx:
         if li < len(l_heel) and li < len(r_heel):
-            sl = abs(l_heel[li] - r_heel[li]) / hip_width
+            sl = abs(l_heel[li] - r_heel[li]) / body_height
             step_lengths.append(sl)
 
     for ri in right_idx:
         if ri < len(l_heel) and ri < len(r_heel):
-            sl = abs(l_heel[ri] - r_heel[ri]) / hip_width
+            sl = abs(l_heel[ri] - r_heel[ri]) / body_height
             step_lengths.append(sl)
 
     if not step_lengths:
@@ -398,75 +403,86 @@ def interpret(features: dict) -> dict:
 
     # ── Cadence ──────────────────────────────
     if cadence == 0:
-        obs.append("⚠️ No steps detected — the subject may not be walking clearly in this video.")
+        obs.append(" No steps detected — the subject may not be walking clearly in this video.")
         sug.append("Ensure a clear lateral (side-view) video showing a full walking cycle.")
     elif cadence < 80:
-        obs.append(f"🐢 Cadence is low ({cadence} steps/min). Normal range is 100–120 steps/min.")
+        obs.append(f" Cadence is low ({cadence} steps/min). Normal range is 100–120 steps/min.")
         sug.append("Focus on increasing walking pace with shorter, quicker steps.")
     elif cadence > 140:
-        obs.append(f"🏃 Cadence is very high ({cadence} steps/min). May indicate running or rapid movement.")
+        obs.append(f" Cadence is very high ({cadence} steps/min). May indicate running or rapid movement.")
         sug.append("If walking, ensure video captures a full stride cycle clearly.")
     else:
-        obs.append(f"✅ Cadence is within normal range ({cadence} steps/min).")
+        obs.append(f"Cadence is within normal range ({cadence} steps/min).")
 
     # ── Symmetry ─────────────────────────────
     if symmetry < 0.85:
-        obs.append(f"⚠️ Gait asymmetry detected (score: {symmetry:.2f}). Left/right movement differs significantly.")
+        obs.append(f"Gait asymmetry detected (score: {symmetry:.2f}). Left/right movement differs significantly.")
         sug.append("Consult a physical therapist to evaluate potential limb-length discrepancy or muscle imbalance.")
     elif symmetry < 0.93:
-        obs.append(f"🟡 Mild asymmetry detected (score: {symmetry:.2f}). Slight left/right variation.")
+        obs.append(f" Mild asymmetry detected (score: {symmetry:.2f}). Slight left/right variation.")
         sug.append("Add single-leg balance exercises to improve bilateral coordination.")
     else:
-        obs.append(f"✅ Gait symmetry is excellent (score: {symmetry:.2f}).")
+        obs.append(f" Gait symmetry is excellent (score: {symmetry:.2f}).")
 
-    # ── Knee Angle ───────────────────────────
-    if knee_mean < 150:
-        obs.append(f"🦵 Average knee angle is {knee_mean:.1f}°. Knees flex well during stance phase.")
-        if knee_mean < 130:
-            sug.append("Excessive knee flexion detected — consider quadriceps strengthening exercises.")
-        else:
-            sug.append("Good knee flexion. Maintain with regular stretching.")
+    # ── Knee Range of Motion ─────────────────
+    left_knee = features["knee_angles"]["left"]
+    right_knee = features["knee_angles"]["right"]
+    
+    if len(left_knee) > 0 and len(right_knee) > 0:
+        max_flexion = float(np.nanmax([np.nanmax(left_knee), np.nanmax(right_knee)]))
+        min_flexion = float(np.nanmin([np.nanmin(left_knee), np.nanmin(right_knee)]))
     else:
-        obs.append(f"🦵 Average knee angle is {knee_mean:.1f}°. Minimal knee flexion — possible stiff-legged walking.")
-        sug.append("Work on hip flexor and hamstring flexibility to improve knee bend during walking.")
+        max_flexion, min_flexion = 0, 0
+    
+    if min_flexion > 12:
+        obs.append(f" Knee lacks full extension (minimum flexion is {min_flexion:.1f}°). Normal is ~0° (straight leg).")
+        sug.append("Focus on hamstring and calf stretching to allow full knee extension during stance.")
+    else:
+        obs.append(f" Good knee extension achieved ({min_flexion:.1f}°).")
+        
+    if max_flexion < 50:
+        obs.append(f" Restricted knee flexion during swing phase (peak is {max_flexion:.1f}°). Normal walking is ~65°.")
+        sug.append("Consider knee mobility exercises or recumbent biking to improve flexion range.")
+    else:
+        obs.append(f" Adequate knee flexion during swing phase ({max_flexion:.1f}°).")
 
     # ── Stride Consistency ───────────────────
     if stride_cv > 0.25:
-        obs.append(f"📉 High stride variability (CV: {stride_cv:.2f}). Inconsistent step rhythm detected.")
+        obs.append(f" High stride variability (CV: {stride_cv:.2f}). Inconsistent step rhythm detected.")
         sug.append("Practice metronome-paced walking to improve stride regularity.")
     elif stride_cv > 0.15:
-        obs.append(f"🟡 Moderate stride variability (CV: {stride_cv:.2f}).")
+        obs.append(f" Moderate stride variability (CV: {stride_cv:.2f}).")
         sug.append("Focus on rhythmic walking patterns to reduce stride timing variation.")
     else:
-        obs.append(f"✅ Stride consistency is good (CV: {stride_cv:.2f}).")
+        obs.append(f" Stride consistency is good (CV: {stride_cv:.2f}).")
 
     # ── Torso Lean ───────────────────────────
     abs_lean = abs(torso_mean)
     if abs_lean > 15:
         direction_str = "forward" if torso_mean > 0 else "backward"
-        obs.append(f"🏋️ Significant torso lean {direction_str} ({torso_mean:.1f}°).")
+        obs.append(f" Significant torso lean {direction_str} ({torso_mean:.1f}°).")
         sug.append("Practice upright posture walking — engage core and keep gaze forward.")
     elif abs_lean > 7:
-        obs.append(f"🟡 Mild torso lean detected ({torso_mean:.1f}°).")
+        obs.append(f" Mild torso lean detected ({torso_mean:.1f}°).")
         sug.append("Strengthen core muscles (planks, bird-dogs) to improve trunk stability.")
     else:
-        obs.append(f"✅ Torso is well-aligned ({torso_mean:.1f}° lean).")
+        obs.append(f" Torso is well-aligned ({torso_mean:.1f}° lean).")
 
     # ── Step Length ──────────────────────────
     if step_length_mean > 0:
-        if step_length_mean < 0.3:
-            obs.append(f"👣 Step length is relatively short ({step_length_mean:.2f} normalized).")
+        if step_length_mean < 0.35:
+            obs.append(f" Step length is relatively short ({step_length_mean:.2f} normalized). Ideal is ~0.42 times body height.")
             sug.append("Focus on lengthening stride with hip extension exercises.")
-        elif step_length_mean > 1.0:
-            obs.append(f"👣 Step length is long ({step_length_mean:.2f} normalized). May indicate overstriding.")
+        elif step_length_mean > 0.55:
+            obs.append(f" Step length is long ({step_length_mean:.2f} normalized). May indicate overstriding.")
             sug.append("Reduce overstride to lower heel-strike impact forces.")
         else:
-            obs.append(f"✅ Step length appears normal ({step_length_mean:.2f} normalized).")
+            obs.append(f" Step length appears normal ({step_length_mean:.2f} normalized). It matches the typical ~41% of body height.")
 
     # ── Walking Direction ─────────────────────
-    obs.append(f"🧭 Walking direction detected: {direction}.")
+    obs.append(f" Walking direction detected: {direction}.")
 
     # ── Duration ─────────────────────────────
-    obs.append(f"⏱️ Video duration analyzed: {duration:.1f} seconds, {step_count} steps detected.")
+    obs.append(f"⏱ Video duration analyzed: {duration:.1f} seconds, {step_count} steps detected.")
 
     return {"observations": obs, "suggestions": sug}

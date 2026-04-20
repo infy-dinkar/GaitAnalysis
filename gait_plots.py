@@ -67,7 +67,7 @@ def plot_knee_angles(features: dict, fps: float) -> plt.Figure:
         (axes[0], "left", PALETTE["left"], "Left Knee (User Data)"),
         (axes[1], "right", PALETTE["right"], "Right Knee (User Data)"),
     ]:
-        ax.fill_between(times, 120, 160, color=PALETTE["normal"], alpha=0.15, label="Normal Range (120°-160°)")
+        ax.fill_between(times, 0, 65, color=PALETTE["normal"], alpha=0.15, label="Normal Range (0°-65°)")
         ax.plot(times, ka[side], color=color, linewidth=1.6, label=label, alpha=0.9)
         mean_val = ka[f"{side}_mean"]
         ax.axhline(mean_val, color=PALETTE["accent"], linestyle="--",
@@ -149,7 +149,7 @@ def plot_step_length(features: dict) -> plt.Figure:
                 transform=ax.transAxes)
     else:
         x = np.arange(len(vals))
-        ax.axhspan(0.4, 0.6, color=PALETTE["normal"], alpha=0.15, label="Normal Range (0.4 - 0.6)")
+        ax.axhspan(0.35, 0.55, color=PALETTE["normal"], alpha=0.15, label="Normal Range (0.35 - 0.55)")
         bars = ax.bar(x, vals, color=PALETTE["left"], alpha=0.75, edgecolor=PALETTE["border"],
                       linewidth=0.8, label="Step Length (User Data)")
         # Color bars above/below mean
@@ -168,7 +168,7 @@ def plot_step_length(features: dict) -> plt.Figure:
         ax.legend(facecolor=PALETTE["panel"], labelcolor=PALETTE["text"],
                   fontsize=9, framealpha=0.6)
 
-    ax.set_title("Step Length (Normalized to Hip Width)",
+    ax.set_title("Step Length (Normalized to Body Height)",
                  color=PALETTE["text"], fontsize=13, fontweight="bold", pad=10)
     fig.tight_layout()
     return fig
