@@ -317,26 +317,59 @@ def compute_meters_per_pixel(ts: dict, user_height_cm: float,
 # CORE PER-FRAME COMPUTATIONS
 # (used by compute_metrics; computed once per video)
 # ══════════════════════════════════════════════
-def _detect_strikes(ts: dict, fps: float) -> dict:
+def _detect_strikes(ts: dict, fps: float, pass_segments=None) -> dict:
     """
-    Heel strikes per leg = local MAXIMA of heel y in image coords
-    (largest y = lowest point on screen = foot planted).
+    Heel-strike detection from PEAKS OF HEEL-TO-HEEL HORIZONTAL SEPARATION.
 
-    distance = int(fps * 0.4)  ⇒ at least 0.4s between same-leg strikes
-                                  (cadence ≤ ~150 steps/min cap).
+    Why this signal (and not heel-y peaks):
+      Heel y from MediaPipe has a long flat plateau during stance, on which
+      `find_peaks` either misses the true strike or fires multiple times,
+      destroying step-length and stride-CV.  Heel-to-heel separation is
+      direction-agnostic and topologically clean: it is at a local MAXIMUM
+      exactly when one foot is fully forward = a heel strike. So peaks of
+      `|L_heel_x − R_heel_x|` give one event per strike.
+
+    Leg assignment (which heel just struck):
+      The heel that's FORWARD in the walking direction is the one that just
+      struck.  We look up the pass direction at each peak's frame:
+        +1 (L→R): forward = larger x  → struck leg = whichever has larger heel x
+        -1 (R→L): forward = smaller x → struck leg = whichever has smaller heel x
     """
+    l_heel_x = ts["left_heel"]["x_px"]
+    r_heel_x = ts["right_heel"]["x_px"]
+    n = len(l_heel_x)
+    if n < int(fps * 0.4) * 2:
+        return {"left": np.array([], dtype=int), "right": np.array([], dtype=int)}
+
+    sep = np.abs(l_heel_x - r_heel_x)
     distance = max(int(fps * 0.4), 3)
-    strikes  = {}
-    for side in ("left", "right"):
-        heel_y = ts[f"{side}_heel"]["y"]
-        if len(heel_y) < distance * 2:
-            strikes[side] = np.array([], dtype=int)
-            continue
-        rng  = float(np.ptp(heel_y))
-        prom = max(rng * 0.10, 0.003)        # adaptive prominence, floor at 0.3% image-height
-        peaks, _ = find_peaks(heel_y, distance=distance, prominence=prom)
-        strikes[side] = peaks.astype(int)
-    return strikes
+    rng = float(np.ptp(sep))
+    prom = max(rng * 0.10, 1.0)       # adaptive prominence, floor at 1 px
+    peaks, _ = find_peaks(sep, distance=distance, prominence=prom)
+
+    # direction at each frame (+1 / -1, 0 outside any pass)
+    if pass_segments:
+        dir_per_frame = np.zeros(n, dtype=int)
+        for p in pass_segments:
+            dir_per_frame[p["start"]:p["end"]] = p["direction"]
+    else:
+        dir_per_frame = np.ones(n, dtype=int)
+
+    L_strikes, R_strikes = [], []
+    for peak in peaks:
+        d = dir_per_frame[peak]
+        if d == 0:
+            d = 1                      # fall back to +1 outside passes
+        signed_diff = (l_heel_x[peak] - r_heel_x[peak]) * d
+        if signed_diff > 0:
+            L_strikes.append(int(peak))
+        else:
+            R_strikes.append(int(peak))
+
+    return {
+        "left":  np.array(L_strikes, dtype=int),
+        "right": np.array(R_strikes, dtype=int),
+    }
 
 
 def _knee_angles_px(ts: dict) -> dict:
@@ -419,7 +452,7 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
     dur_sec = n_mask / fps if fps > 0 else 0.0
 
     # --- per-frame caches (compute once, reuse for Total + Clean) ---
-    if strikes    is None: strikes    = _detect_strikes(ts, fps)
+    if strikes    is None: strikes    = _detect_strikes(ts, fps, pass_segments)
     if knee_full  is None: knee_full  = _knee_angles_px(ts)
     if torso_full is None: torso_full = _torso_lean_arr(ts, pass_segments)
 
@@ -604,7 +637,7 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
     mpp = compute_meters_per_pixel(ts, user_height_cm, pass_segments=pass_segments)
 
     # 3. Pre-compute per-frame caches (shared by Total & Clean).
-    strikes    = _detect_strikes(ts, fps)
+    strikes    = _detect_strikes(ts, fps, pass_segments)
     knee_full  = _knee_angles_px(ts)
     torso_full = _torso_lean_arr(ts, pass_segments)
 
