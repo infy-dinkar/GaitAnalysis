@@ -500,14 +500,34 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
     else:
         cv_pct = 0.0
 
-    # --- step length (heel separation in PIXELS at strike, × mpp) ---
+    # --- step length (distance the body advances per step) ---
+    # Biomechanical definition: step length = horizontal distance between two
+    # CONSECUTIVE heel strikes (one foot, then the other).  Measuring
+    # |L_heel - R_heel| AT a single strike is wrong — the swinging leg is
+    # mid-flight, not at its full back-position, so the separation is roughly
+    # half of the true step length.
     l_heel_px = ts["left_heel"]["x_px"]
     r_heel_px = ts["right_heel"]["x_px"]
-    sep_px = np.array([abs(l_heel_px[i] - r_heel_px[i]) for i in combined], dtype=float)
+    # Build chronological list of (frame, leg_label, x_at_planted_heel).
+    events = [(int(f), "L", float(l_heel_px[f])) for f in L_idx] + \
+             [(int(f), "R", float(r_heel_px[f])) for f in R_idx]
+    events.sort(key=lambda e: e[0])
+    sl_px_list = []
+    for i in range(1, len(events)):
+        f0, leg0, x0 = events[i - 1]
+        f1, leg1, x1 = events[i]
+        if leg0 == leg1:
+            continue                              # same-leg duplicate; skip
+        # Reject pathologically long gaps (e.g. across a turn that escaped pass trim).
+        # Adult step time is ~0.5s; >2× is almost certainly a pass-boundary artifact.
+        if (f1 - f0) / fps > 1.2:
+            continue
+        sl_px_list.append(abs(x1 - x0))
+    sep_px = np.array(sl_px_list, dtype=float)
     if mpp and mpp > 0:
         sl_vals, sl_unit = sep_px * mpp, "m"
     else:
-        sl_vals, sl_unit = sep_px,        "px"
+        sl_vals, sl_unit = sep_px, "px"
     step_length = {
         "values": sl_vals,
         "mean":   float(np.nanmean(sl_vals)) if len(sl_vals) else 0.0,
