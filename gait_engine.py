@@ -533,29 +533,30 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
     else:
         cv_pct = 0.0
 
-    # --- step length (distance the body advances per step) ---
-    # Biomechanical definition: step length = horizontal distance between two
-    # CONSECUTIVE heel strikes (one foot, then the other).  Measuring
-    # |L_heel - R_heel| AT a single strike is wrong — the swinging leg is
-    # mid-flight, not at its full back-position, so the separation is roughly
-    # half of the true step length.
+    # --- step length (per-leg stride length ÷ 2) ---
+    # Stride length = distance the body advances over ONE FULL gait cycle
+    #                = |heel_x at strike N+1  −  heel_x at strike N|  (same leg).
+    # Step length    = stride length / 2  (two steps per stride).
+    #
+    # We aggregate per leg independently — robust to leg-label mistakes and
+    # missed alternation that broke the previous "consecutive alternating
+    # strikes" formula.  Cross-pass strides are filtered out by interval cap.
     l_heel_px = ts["left_heel"]["x_px"]
     r_heel_px = ts["right_heel"]["x_px"]
-    # Build chronological list of (frame, leg_label, x_at_planted_heel).
-    events = [(int(f), "L", float(l_heel_px[f])) for f in L_idx] + \
-             [(int(f), "R", float(r_heel_px[f])) for f in R_idx]
-    events.sort(key=lambda e: e[0])
     sl_px_list = []
-    for i in range(1, len(events)):
-        f0, leg0, x0 = events[i - 1]
-        f1, leg1, x1 = events[i]
-        if leg0 == leg1:
-            continue                              # same-leg duplicate; skip
-        # Reject pathologically long gaps (e.g. across a turn that escaped pass trim).
-        # Adult step time is ~0.5s; >2× is almost certainly a pass-boundary artifact.
-        if (f1 - f0) / fps > 1.2:
+    max_stride_sec = 2.0
+    for side, side_idx, side_x in (
+        ("left",  L_idx, l_heel_px),
+        ("right", R_idx, r_heel_px),
+    ):
+        if len(side_idx) < 2:
             continue
-        sl_px_list.append(abs(x1 - x0))
+        positions = side_x[side_idx].astype(float)
+        intervals = np.diff(side_idx) / fps
+        strides   = np.abs(np.diff(positions))
+        keep = intervals < max_stride_sec        # reject across-pass strides
+        for s in (strides[keep] / 2.0).tolist():
+            sl_px_list.append(s)
     sep_px = np.array(sl_px_list, dtype=float)
     if mpp and mpp > 0:
         sl_vals, sl_unit = sep_px * mpp, "m"
