@@ -1,76 +1,95 @@
 """
 gait_engine.py
 Core gait analysis engine.
-Handles: Pose extraction (MediaPipe), preprocessing, 10-feature computation, insights.
+
+Pipeline:
+  extract_poses  → MediaPipe landmarks (also captures W/H, fps).
+  build_time_series → interpolate / outlier-reject / Savitzky-Golay smooth,
+                      keep BOTH normalized and pixel coords.
+  segment_passes → standalone helper, splits the video into stable-direction
+                   passes and identifies steady-state ("core") frame ranges.
+  compute_meters_per_pixel → standalone helper, anatomical scale from height.
+  compute_metrics → standalone helper, computes the FULL metric dict for an
+                    arbitrary subset of frame indices.  Called twice by
+                    compute_all_features:  once with all frames (Total) and
+                    once with steady-state frames (Clean).
+  compute_all_features → produces { total_metrics, clean_metrics, ... } and
+                         spreads `clean_metrics` to the top level so that the
+                         existing app.py / gait_plots.py keys still resolve.
+  interpret → reads ONLY from features['clean_metrics'].
+
+Metric math fixes vs the original engine:
+  • Knee flexion uses PIXEL coordinates (anisotropic-normalized coords were
+    biasing the angle low; peak now reaches ~60-70° for normal swing).
+  • Heel strikes are detected from heel-Y peaks (foot lowest in the image
+    when planted) instead of heel-X peaks-and-troughs (which double-counted
+    each gait cycle and broke step length / cadence).
+  • Stride CV is reported as a PERCENTAGE.
+  • Symmetry is step-time-based: 1 - |mean(L_stride) - mean(R_stride)| / mean.
+  • Torso lean sign is flipped per pass so + always means leaning FORWARD in
+    the walking direction, regardless of L→R or R→L pass.
+  • Cadence and step length live ONLY inside validated passes (turning,
+    acceleration, and deceleration frames are excluded by frame mask).
 """
+
+import math
+import warnings
 
 import cv2
 import numpy as np
 import mediapipe as mp
 from scipy.signal import savgol_filter, find_peaks
-from scipy.interpolate import interp1d
-import math
-import warnings
+
 warnings.filterwarnings("ignore")
 
 # ──────────────────────────────────────────────
-# LANDMARK INDICES (MediaPipe Pose)
+# LANDMARK INDICES
 # ──────────────────────────────────────────────
 LM = {
-    "left_shoulder":  11,
-    "right_shoulder": 12,
-    "left_hip":       23,
-    "right_hip":      24,
-    "left_knee":      25,
-    "right_knee":     26,
-    "left_ankle":     27,
-    "right_ankle":    28,
-    "left_heel":      29,
-    "right_heel":     30,
-    "left_foot_index":  31,
-    "right_foot_index": 32,
+    "left_shoulder":  11, "right_shoulder": 12,
+    "left_hip":       23, "right_hip":      24,
+    "left_knee":      25, "right_knee":     26,
+    "left_ankle":     27, "right_ankle":    28,
+    "left_heel":      29, "right_heel":     30,
+    "left_foot_index":  31, "right_foot_index": 32,
 }
 
 VISIBILITY_THRESHOLD = 0.4
+DEFAULT_HEIGHT_CM    = 170
+LEG_HEIGHT_RATIO     = 0.53
 
 
-# ──────────────────────────────────────────────
-# STAGE 1: POSE EXTRACTION
-# ──────────────────────────────────────────────
+# ══════════════════════════════════════════════
+# STAGE 1 — POSE EXTRACTION
+# ══════════════════════════════════════════════
 def extract_poses(video_path: str, pose_options, progress_callback=None):
-    """
-    Extract landmark coordinates from every frame of the video.
-    Returns a dict: { landmark_name: [(x, y, visibility)] | None per frame }
-    Also returns fps and total_frames.
-    """
-    import mediapipe as mp
     pose_model = mp.tasks.vision.PoseLandmarker.create_from_options(pose_options)
-    
+
     cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    fps          = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_w      = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))  or 1
+    frame_h      = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1
 
     raw = {name: [] for name in LM}
+    raw["_frame_w"] = frame_w
+    raw["_frame_h"] = frame_h
 
     frame_idx = 0
-    last_timestamp_ms = -1
-    
+    last_ts_ms = -1
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
-
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        rgb      = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        
-        # Calculate timestamp in ms, strictly enforce monotonicity
-        timestamp_ms = int((frame_idx * 1000) / fps)
-        if timestamp_ms <= last_timestamp_ms:
-            timestamp_ms = last_timestamp_ms + 1
-        last_timestamp_ms = timestamp_ms
-        
-        result = pose_model.detect_for_video(mp_image, timestamp_ms)
 
+        ts_ms = int((frame_idx * 1000) / fps)
+        if ts_ms <= last_ts_ms:
+            ts_ms = last_ts_ms + 1
+        last_ts_ms = ts_ms
+
+        result = pose_model.detect_for_video(mp_image, ts_ms)
         if result.pose_landmarks and len(result.pose_landmarks) > 0:
             lms = result.pose_landmarks[0]
             for name, idx in LM.items():
@@ -92,11 +111,10 @@ def extract_poses(video_path: str, pose_options, progress_callback=None):
     return raw, fps, total_frames
 
 
-# ──────────────────────────────────────────────
-# STAGE 2: PREPROCESSING
-# ──────────────────────────────────────────────
+# ══════════════════════════════════════════════
+# STAGE 2 — PREPROCESSING
+# ══════════════════════════════════════════════
 def _interp_nans(arr: np.ndarray) -> np.ndarray:
-    """Linearly interpolate NaN values."""
     nans = np.isnan(arr)
     if nans.all():
         return arr
@@ -105,21 +123,17 @@ def _interp_nans(arr: np.ndarray) -> np.ndarray:
     return arr
 
 
-def _remove_outliers(arr: np.ndarray, z_thresh=3.5) -> np.ndarray:
-    """Replace points > z_thresh std-devs from mean with NaN, then re-interpolate."""
+def _remove_outliers(arr: np.ndarray, z_thresh: float = 3.5) -> np.ndarray:
     if np.all(np.isnan(arr)):
         return arr
-    mean = np.nanmean(arr)
-    std = np.nanstd(arr)
-    if std == 0:
+    m, s = np.nanmean(arr), np.nanstd(arr)
+    if s == 0:
         return arr
-    z = np.abs(arr - mean) / std
-    arr[z > z_thresh] = np.nan
+    arr[np.abs(arr - m) / s > z_thresh] = np.nan
     return _interp_nans(arr)
 
 
-def _smooth(arr: np.ndarray, window=11, poly=3) -> np.ndarray:
-    """Apply Savitzky-Golay filter, adapting window to array length."""
+def _smooth(arr: np.ndarray, window: int = 11, poly: int = 3) -> np.ndarray:
     n = len(arr)
     if n < 5:
         return arr
@@ -136,367 +150,592 @@ def _smooth(arr: np.ndarray, window=11, poly=3) -> np.ndarray:
 
 
 def build_time_series(raw: dict) -> dict:
-    """
-    Convert raw frame-by-frame list to smoothed numpy arrays per coordinate.
-    Returns: { landmark_name: { 'x': np.array, 'y': np.array } }
-    """
-    ts = {}
-    for name, frames in raw.items():
-        xs = np.array([f[0] if f is not None else np.nan for f in frames])
-        ys = np.array([f[1] if f is not None else np.nan for f in frames])
+    fw = raw.get("_frame_w", 1) or 1
+    fh = raw.get("_frame_h", 1) or 1
 
-        xs = _interp_nans(xs)
-        ys = _interp_nans(ys)
+    ts: dict = {}
+    for name in LM:
+        frames = raw[name]
+        xs = np.array([f[0] if f is not None else np.nan for f in frames], dtype=float)
+        ys = np.array([f[1] if f is not None else np.nan for f in frames], dtype=float)
 
-        xs = _remove_outliers(xs)
-        ys = _remove_outliers(ys)
+        xs = _interp_nans(xs); ys = _interp_nans(ys)
+        xs = _remove_outliers(xs); ys = _remove_outliers(ys)
+        xs = _smooth(xs); ys = _smooth(ys)
 
-        xs = _smooth(xs)
-        ys = _smooth(ys)
-
-        ts[name] = {"x": xs, "y": ys}
+        ts[name] = {
+            "x":    xs,
+            "y":    ys,
+            "x_px": xs * fw,
+            "y_px": ys * fh,
+        }
+    ts["_frame_w"] = fw
+    ts["_frame_h"] = fh
     return ts
 
 
-# ──────────────────────────────────────────────
-# HELPER: angle between 3 points
-# ──────────────────────────────────────────────
-def _angle3(A, B, C):
-    """Angle at B formed by A-B-C. All points are (x, y) tuples/arrays."""
-    BA = np.array(A) - np.array(B)
-    BC = np.array(C) - np.array(B)
-    cos_a = np.dot(BA, BC) / (np.linalg.norm(BA) * np.linalg.norm(BC) + 1e-9)
-    cos_a = np.clip(cos_a, -1.0, 1.0)
+# ══════════════════════════════════════════════
+# HELPERS
+# ══════════════════════════════════════════════
+def _angle3(A, B, C) -> float:
+    """Interior angle (deg) at B for points A-B-C (any units, just must be consistent)."""
+    BA = np.asarray(A, dtype=float) - np.asarray(B, dtype=float)
+    BC = np.asarray(C, dtype=float) - np.asarray(B, dtype=float)
+    denom = (np.linalg.norm(BA) * np.linalg.norm(BC)) + 1e-9
+    cos_a = np.clip(np.dot(BA, BC) / denom, -1.0, 1.0)
     return math.degrees(math.acos(cos_a))
 
 
-# ──────────────────────────────────────────────
-# STAGE 3: FEATURE EXTRACTION (10 FEATURES)
-# ──────────────────────────────────────────────
+# ══════════════════════════════════════════════
+# DIRECTION SEGMENTATION  (standalone)
+# ══════════════════════════════════════════════
+def segment_passes(
+    hip_x: np.ndarray,
+    fps: float,
+    min_pass_sec: float = 1.0,
+    vel_stability: float = 0.15,
+    turn_thresh_ratio: float = 0.20,
+):
+    """
+    Segment a 1-D hip-midpoint x trajectory (pixels) into stable-direction passes.
 
-def compute_step_count(ts: dict, fps: float) -> dict:
-    """F1: Detect steps using heel X-coordinate peaks."""
-    results = {}
+      1. Smooth x with Savitzky-Golay (window ≈ fps, polyorder=3).
+      2. Velocity = dx/dt.  Suppress sign during TURNING:
+         |v| < turn_thresh_ratio × median|v|.
+      3. Group contiguous same-sign frames; reject runs < min_pass_sec.
+      4. Trim acceleration & deceleration via velocity-stability test
+         (keep frames within ±vel_stability of run's median |v|).
+         Fallback: trim first/last 18% of the run.
+
+    Returns: list[ {start, end, core_start, core_end, direction} ].
+    """
+    n = len(hip_x)
+    if n < int(fps * min_pass_sec):
+        return []
+
+    win = max(int(round(fps)) | 1, 5)
+    if win >= n:
+        win = (n - 1) if (n - 1) % 2 == 1 else (n - 2)
+    xs = savgol_filter(hip_x, win, 3) if win >= 5 else hip_x.copy()
+
+    velocity     = np.gradient(xs)
+    abs_v        = np.abs(velocity)
+    median_abs_v = np.median(abs_v) + 1e-9
+    sign         = np.sign(velocity).astype(int)
+    sign[abs_v < turn_thresh_ratio * median_abs_v] = 0
+
+    passes     = []
+    min_frames = max(int(fps * min_pass_sec), 5)
+
+    i = 0
+    while i < n:
+        if sign[i] == 0:
+            i += 1
+            continue
+        j = i
+        while j < n and sign[j] == sign[i]:
+            j += 1
+        run_len = j - i
+
+        if run_len >= min_frames:
+            seg_v       = abs_v[i:j]
+            med_v       = np.median(seg_v) + 1e-9
+            stable_mask = np.abs(seg_v - med_v) <= vel_stability * med_v
+            stable_idx  = np.where(stable_mask)[0]
+
+            if len(stable_idx) >= max(min_frames // 2, 5):
+                core_start = i + int(stable_idx[0])
+                core_end   = i + int(stable_idx[-1]) + 1
+            else:
+                trim       = max(int(run_len * 0.18), 1)
+                core_start = i + trim
+                core_end   = j - trim
+
+            if core_end - core_start >= max(min_frames // 2, 5):
+                passes.append({
+                    "start":      i,
+                    "end":        j,
+                    "core_start": core_start,
+                    "core_end":   core_end,
+                    "direction":  int(sign[i]),
+                })
+        i = j if j > i else i + 1
+
+    return passes
+
+
+# ══════════════════════════════════════════════
+# SCALE CALIBRATION  (standalone)
+# ══════════════════════════════════════════════
+def _stance_mask_per_leg(ankle_y_px: np.ndarray) -> np.ndarray:
+    if len(ankle_y_px) < 3:
+        return np.zeros_like(ankle_y_px, dtype=bool)
+    vel = np.abs(np.gradient(ankle_y_px))
+    return vel <= np.percentile(vel, 30)
+
+
+def compute_meters_per_pixel(ts: dict, user_height_cm: float,
+                             pass_segments=None, stance_frames: dict = None):
+    """
+    leg_length_m   = (height_cm / 100) * 0.53
+    leg_length_px  = median over stance frames of euclidean(hip_px, ankle_px)
+    Returns meters_per_pixel, or None if calibration could not be made.
+    """
+    leg_length_m = (float(user_height_cm) / 100.0) * LEG_HEIGHT_RATIO
+    n = len(ts["left_hip"]["x_px"])
+
+    if pass_segments:
+        pass_mask = np.zeros(n, dtype=bool)
+        for p in pass_segments:
+            pass_mask[p["core_start"]:p["core_end"]] = True
+    else:
+        pass_mask = np.ones(n, dtype=bool)
+
+    distances = []
     for side in ("left", "right"):
-        heel_x = ts[f"{side}_heel"]["x"]
-        # Distance between peaks: at least 0.3 seconds apart
-        distance = max(int(0.3 * fps), 3)
-        peaks, _ = find_peaks(heel_x, distance=distance, prominence=0.01)
-        troughs, _ = find_peaks(-heel_x, distance=distance, prominence=0.01)
-        step_indices = np.sort(np.concatenate([peaks, troughs]))
-        results[side] = {"count": len(step_indices), "indices": step_indices}
+        hip_x = ts[f"{side}_hip"]["x_px"];  hip_y = ts[f"{side}_hip"]["y_px"]
+        ank_x = ts[f"{side}_ankle"]["x_px"]; ank_y = ts[f"{side}_ankle"]["y_px"]
+        stance = (
+            stance_frames[side]
+            if (stance_frames is not None and side in stance_frames)
+            else _stance_mask_per_leg(ank_y)
+        )
+        d = np.hypot(hip_x - ank_x, hip_y - ank_y)
+        sel = d[stance & pass_mask]
+        if len(sel) > 5:
+            distances.extend(sel.tolist())
 
-    total = (results["left"]["count"] + results["right"]["count"]) // 2
-    combined_indices = np.sort(np.concatenate([
-        results["left"]["indices"], results["right"]["indices"]
-    ]))
-    return {
-        "total_steps": max(total, len(combined_indices) // 2),
-        "left_count": results["left"]["count"],
-        "right_count": results["right"]["count"],
-        "left_indices": results["left"]["indices"],
-        "right_indices": results["right"]["indices"],
-        "combined_indices": combined_indices,
-    }
+    if not distances:
+        return None
+    leg_px = float(np.median(distances))
+    if leg_px < 1e-6:
+        return None
+    return leg_length_m / leg_px
 
 
-def compute_cadence(step_data: dict, total_frames: int, fps: float) -> float:
-    """F2: Steps per minute."""
-    duration = total_frames / fps
-    if duration <= 0:
-        return 0.0
-    return round((step_data["total_steps"] / duration) * 60, 1)
+# ══════════════════════════════════════════════
+# CORE PER-FRAME COMPUTATIONS
+# (used by compute_metrics; computed once per video)
+# ══════════════════════════════════════════════
+def _detect_strikes(ts: dict, fps: float) -> dict:
+    """
+    Heel strikes per leg = local MAXIMA of heel y in image coords
+    (largest y = lowest point on screen = foot planted).
+
+    distance = int(fps * 0.4)  ⇒ at least 0.4s between same-leg strikes
+                                  (cadence ≤ ~150 steps/min cap).
+    """
+    distance = max(int(fps * 0.4), 3)
+    strikes  = {}
+    for side in ("left", "right"):
+        heel_y = ts[f"{side}_heel"]["y"]
+        if len(heel_y) < distance * 2:
+            strikes[side] = np.array([], dtype=int)
+            continue
+        rng  = float(np.ptp(heel_y))
+        prom = max(rng * 0.10, 0.003)        # adaptive prominence, floor at 0.3% image-height
+        peaks, _ = find_peaks(heel_y, distance=distance, prominence=prom)
+        strikes[side] = peaks.astype(int)
+    return strikes
 
 
-def compute_knee_angles(ts: dict) -> dict:
-    """F3: Frame-wise knee angles for both legs."""
+def _knee_angles_px(ts: dict) -> dict:
+    """
+    Per-frame knee flexion (deg) using PIXEL coords.
+    0° = fully extended, peak ~60-70° during swing.
+
+    Why pixel coords: with normalized [0,1] coords the x and y axes have
+    different scale (divided by W vs H), so the dot-product angle is biased.
+    Using pixel coords (square pixels assumption) gives the true planar angle.
+    """
     angles = {}
     for side in ("left", "right"):
-        hip_x = ts[f"{side}_hip"]["x"]
-        hip_y = ts[f"{side}_hip"]["y"]
-        knee_x = ts[f"{side}_knee"]["x"]
-        knee_y = ts[f"{side}_knee"]["y"]
-        ankle_x = ts[f"{side}_ankle"]["x"]
-        ankle_y = ts[f"{side}_ankle"]["y"]
-
-        n = len(knee_x)
+        hx = ts[f"{side}_hip"]["x_px"];   hy = ts[f"{side}_hip"]["y_px"]
+        kx = ts[f"{side}_knee"]["x_px"];  ky = ts[f"{side}_knee"]["y_px"]
+        ax = ts[f"{side}_ankle"]["x_px"]; ay = ts[f"{side}_ankle"]["y_px"]
+        n = len(kx)
         ang = np.zeros(n)
         for i in range(n):
-            A = (hip_x[i], hip_y[i])
-            B = (knee_x[i], knee_y[i])
-            C = (ankle_x[i], ankle_y[i])
-            ang[i] = 180.0 - _angle3(A, B, C)
+            interior = _angle3((hx[i], hy[i]), (kx[i], ky[i]), (ax[i], ay[i]))
+            ang[i] = 180.0 - interior
         angles[side] = ang
-    angles["left_mean"] = float(np.nanmean(angles["left"]))
-    angles["right_mean"] = float(np.nanmean(angles["right"]))
-    angles["overall_mean"] = float(np.nanmean([angles["left_mean"], angles["right_mean"]]))
     return angles
 
 
-def compute_step_timing(step_data: dict, fps: float) -> dict:
-    """F4: Time between consecutive steps."""
-    timing = {}
-    for side in ("left", "right"):
-        indices = step_data[f"{side}_indices"]
-        if len(indices) >= 2:
-            diffs = np.diff(indices) / fps
-            timing[side] = diffs
-        else:
-            timing[side] = np.array([])
+def _torso_lean_arr(ts: dict, pass_segments=None) -> np.ndarray:
+    """
+    Per-frame torso lean (deg). Positive = leaning FORWARD in walking direction.
 
-    all_diffs = []
-    for side in ("left", "right"):
-        if len(timing[side]) > 0:
-            all_diffs.extend(timing[side].tolist())
-    timing["mean_step_time"] = float(np.mean(all_diffs)) if all_diffs else 0.0
-    return timing
-
-
-def compute_symmetry(ts: dict) -> float:
-    """F5: Left/right step symmetry (1.0 = perfect)."""
-    l_x = ts["left_ankle"]["x"]
-    r_x = ts["right_ankle"]["x"]
-    L_mean = float(np.nanmean(np.abs(np.diff(l_x))))
-    R_mean = float(np.nanmean(np.abs(np.diff(r_x))))
-    denom = (L_mean + R_mean) / 2.0
-    if denom < 1e-9:
-        return 1.0
-    sym = 1.0 - abs(L_mean - R_mean) / denom
-    return round(float(np.clip(sym, 0.0, 1.0)), 3)
-
-
-def compute_walking_direction(ts: dict) -> str:
-    """F6: Determine walking direction (left→right or right→left)."""
-    hip_x = (ts["left_hip"]["x"] + ts["right_hip"]["x"]) / 2.0
-    n = len(hip_x)
-    seg = max(n // 6, 5)
-    start_med = np.nanmedian(hip_x[:seg])
-    end_med = np.nanmedian(hip_x[-seg:])
-    if end_med > start_med:
-        return "Left → Right"
-    elif end_med < start_med:
-        return "Right → Left"
-    else:
-        return "Stationary / Unknown"
-
-
-def compute_step_length(ts: dict, step_data: dict) -> dict:
-    """F7: Normalized step length using heel separation at strike."""
-    l_heel = ts["left_heel"]["x"]
-    r_heel = ts["right_heel"]["x"]
-    
-    # Calculate approx total body height using vertical (Y axis) shoulder-to-heel distance
+    The raw atan2 gives + when the shoulder is to the right of the hip in image
+    coords. For an L→R walker that's "forward"; for R→L it's "backward". So we
+    flip the sign inside R→L passes when pass_segments is provided.
+    """
+    sh_x = (ts["left_shoulder"]["x"] + ts["right_shoulder"]["x"]) / 2.0
     sh_y = (ts["left_shoulder"]["y"] + ts["right_shoulder"]["y"]) / 2.0
-    hl_y = (ts["left_heel"]["y"] + ts["right_heel"]["y"]) / 2.0
-    
-    # Add ~15% to account for head height
-    heights = np.abs(hl_y - sh_y) * 1.15
-    body_height = np.nanmean(heights)
-    
-    if body_height < 1e-9:
-        body_height = 1.0
+    hp_x = (ts["left_hip"]["x"]      + ts["right_hip"]["x"])      / 2.0
+    hp_y = (ts["left_hip"]["y"]      + ts["right_hip"]["y"])      / 2.0
+    dx = sh_x - hp_x
+    dy = -(sh_y - hp_y)
+    angles = np.degrees(np.arctan2(dx, dy))
 
-    step_lengths = []
-    left_idx = step_data["left_indices"]
-    right_idx = step_data["right_indices"]
-
-    for li in left_idx:
-        if li < len(l_heel) and li < len(r_heel):
-            sl = abs(l_heel[li] - r_heel[li]) / body_height
-            step_lengths.append(sl)
-
-    for ri in right_idx:
-        if ri < len(l_heel) and ri < len(r_heel):
-            sl = abs(l_heel[ri] - r_heel[ri]) / body_height
-            step_lengths.append(sl)
-
-    if not step_lengths:
-        return {"values": np.array([]), "mean": 0.0}
-
-    vals = np.array(step_lengths)
-    return {"values": vals, "mean": float(np.nanmean(vals))}
+    if pass_segments:
+        for p in pass_segments:
+            if p["direction"] < 0:
+                angles[p["start"]:p["end"]] = -angles[p["start"]:p["end"]]
+    return angles
 
 
-def compute_stride_consistency(step_timing: dict) -> float:
-    """F8: Coefficient of Variation of stride times (lower = more consistent)."""
-    all_times = []
+# ══════════════════════════════════════════════
+# STANDALONE — METRIC COMPUTATION OVER A FRAME SUBSET
+# ══════════════════════════════════════════════
+def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
+                    pass_segments=None, strikes=None, knee_full=None,
+                    torso_full=None) -> dict:
+    """
+    Compute the full gait-metric dict over ONLY the given frame_indices.
+
+    Args:
+        ts             : time-series dict from build_time_series().
+        frame_indices  : list/array of integer frame numbers to include
+                         (use np.arange(total_frames) for "Total" mode,
+                          union of pass cores for "Clean" mode).
+        mpp            : meters_per_pixel (None → step length stays in pixels).
+        fps            : video frame rate.
+        pass_segments  : optional; needed for direction-aware torso-lean sign flip.
+        strikes/knee_full/torso_full : optional pre-computed, to avoid
+                         recomputing per-frame arrays for the second call.
+
+    Returns: complete metric dict (same shape consumed by app.py / plots).
+    """
+    n_total = len(ts["left_heel"]["y"])
+
+    mask = np.zeros(n_total, dtype=bool)
+    if frame_indices is not None and len(frame_indices) > 0:
+        idx = np.asarray(frame_indices, dtype=int)
+        idx = idx[(idx >= 0) & (idx < n_total)]
+        mask[idx] = True
+
+    n_mask  = int(mask.sum())
+    dur_sec = n_mask / fps if fps > 0 else 0.0
+
+    # --- per-frame caches (compute once, reuse for Total + Clean) ---
+    if strikes    is None: strikes    = _detect_strikes(ts, fps)
+    if knee_full  is None: knee_full  = _knee_angles_px(ts)
+    if torso_full is None: torso_full = _torso_lean_arr(ts, pass_segments)
+
+    # --- step indices restricted to mask ---
+    def _filter(idx):
+        if len(idx) == 0:
+            return idx
+        return idx[mask[idx]]
+
+    L_idx    = _filter(strikes["left"])
+    R_idx    = _filter(strikes["right"])
+    combined = np.sort(np.concatenate([L_idx, R_idx])) if (len(L_idx) or len(R_idx)) else np.array([], dtype=int)
+
+    # Each detected heel strike = 1 step
+    total_steps = len(combined)
+    step_data = {
+        "total_steps":      total_steps,
+        "left_count":       int(len(L_idx)),
+        "right_count":      int(len(R_idx)),
+        "left_indices":     L_idx,
+        "right_indices":    R_idx,
+        "combined_indices": combined,
+    }
+
+    # --- cadence ---
+    cadence = round((total_steps / dur_sec) * 60.0, 1) if dur_sec > 0 else 0.0
+
+    # --- knee angles (mean / peak / min computed only over masked frames) ---
+    knee_angles = {}
     for side in ("left", "right"):
-        if len(step_timing[side]) > 0:
-            all_times.extend(step_timing[side].tolist())
-    if len(all_times) < 2:
-        return 0.0
-    arr = np.array(all_times)
-    mean = np.mean(arr)
-    if mean < 1e-9:
-        return 0.0
-    cv = float(np.std(arr) / mean)
-    return round(cv, 3)
+        full = knee_full[side]
+        m_arr = full[mask] if n_mask > 0 else np.array([])
+        knee_angles[side]            = full
+        knee_angles[f"{side}_mean"]  = float(np.nanmean(m_arr)) if len(m_arr) else 0.0
+        knee_angles[f"peak_{side}"]  = float(np.nanmax(m_arr))  if len(m_arr) else 0.0
+        knee_angles[f"min_{side}"]   = float(np.nanmin(m_arr))  if len(m_arr) else 0.0
+    knee_angles["overall_mean"] = float(np.nanmean([knee_angles["left_mean"],  knee_angles["right_mean"]]))
+    knee_angles["overall_peak"] = float(max(knee_angles["peak_left"],         knee_angles["peak_right"]))
+    knee_angles["overall_min"]  = float(min(knee_angles["min_left"],          knee_angles["min_right"]))
 
+    # --- step / stride times (per leg = same-leg strike intervals) ---
+    # Important: when multiple passes are involved we compute intervals
+    # WITHIN each pass core only — concatenating strikes across passes would
+    # treat the inter-pass turning gap as a stride and inflate stride-CV.
+    step_timing = {"left": np.array([]), "right": np.array([])}
+    all_st = []
+    if pass_segments and n_mask < n_total:
+        for p in pass_segments:
+            a, b = p["core_start"], p["core_end"]
+            for side in ("left", "right"):
+                in_pass = strikes[side][(strikes[side] >= a) & (strikes[side] < b)]
+                if len(in_pass) >= 2:
+                    ints = np.diff(in_pass) / fps
+                    step_timing[side] = np.concatenate([step_timing[side], ints])
+                    all_st.extend(ints.tolist())
+    else:
+        for side in ("left", "right"):
+            idx = step_data[f"{side}_indices"]
+            if len(idx) >= 2:
+                ints = np.diff(idx) / fps
+                step_timing[side] = ints
+                all_st.extend(ints.tolist())
+    step_timing["mean_step_time"] = float(np.mean(all_st)) if all_st else 0.0
 
-def compute_ankle_trajectory(ts: dict) -> dict:
-    """F9: Ankle X trajectories over time."""
-    return {
-        "left_x": ts["left_ankle"]["x"],
+    # --- symmetry (step-time means) ---
+    L_t, R_t = step_timing["left"], step_timing["right"]
+    if len(L_t) and len(R_t):
+        Lm, Rm = float(np.mean(L_t)), float(np.mean(R_t))
+        denom  = (Lm + Rm) / 2.0
+        sym    = 1.0 - abs(Lm - Rm) / denom if denom > 1e-9 else 1.0
+        sym    = float(np.clip(sym, 0.0, 1.0))
+    else:
+        sym = 1.0
+
+    # --- stride CV (PERCENT) ---
+    if len(all_st) >= 2 and np.mean(all_st) > 1e-9:
+        cv_pct = round(float(np.std(all_st) / np.mean(all_st)) * 100.0, 2)
+    else:
+        cv_pct = 0.0
+
+    # --- step length (heel separation in PIXELS at strike, × mpp) ---
+    l_heel_px = ts["left_heel"]["x_px"]
+    r_heel_px = ts["right_heel"]["x_px"]
+    sep_px = np.array([abs(l_heel_px[i] - r_heel_px[i]) for i in combined], dtype=float)
+    if mpp and mpp > 0:
+        sl_vals, sl_unit = sep_px * mpp, "m"
+    else:
+        sl_vals, sl_unit = sep_px,        "px"
+    step_length = {
+        "values": sl_vals,
+        "mean":   float(np.nanmean(sl_vals)) if len(sl_vals) else 0.0,
+        "std":    float(np.nanstd(sl_vals))  if len(sl_vals) else 0.0,
+        "unit":   sl_unit,
+    }
+
+    # --- torso lean (mean / std over masked frames) ---
+    t_arr = torso_full[mask] if n_mask > 0 else torso_full
+    torso_lean = {
+        "angles": torso_full,
+        "mean":   float(np.nanmean(t_arr)) if len(t_arr) else 0.0,
+        "std":    float(np.nanstd(t_arr))  if len(t_arr) else 0.0,
+    }
+
+    # --- ankle trajectory (full series; for plotting only) ---
+    ankle_traj = {
+        "left_x":  ts["left_ankle"]["x"],
         "right_x": ts["right_ankle"]["x"],
-        "left_y": ts["left_ankle"]["y"],
+        "left_y":  ts["left_ankle"]["y"],
         "right_y": ts["right_ankle"]["y"],
     }
 
-
-def compute_torso_lean(ts: dict) -> dict:
-    """F10: Frame-wise torso lean angle."""
-    sh_x = (ts["left_shoulder"]["x"] + ts["right_shoulder"]["x"]) / 2.0
-    sh_y = (ts["left_shoulder"]["y"] + ts["right_shoulder"]["y"]) / 2.0
-    hp_x = (ts["left_hip"]["x"] + ts["right_hip"]["x"]) / 2.0
-    hp_y = (ts["left_hip"]["y"] + ts["right_hip"]["y"]) / 2.0
-
-    dx = sh_x - hp_x
-    dy = -(sh_y - hp_y)  # invert Y (image coords)
-    angles = np.degrees(np.arctan2(dx, dy))
-
     return {
-        "angles": angles,
-        "mean": float(np.nanmean(angles)),
-        "std": float(np.nanstd(angles)),
-    }
-
-
-# ──────────────────────────────────────────────
-# MASTER COMPUTE FUNCTION
-# ──────────────────────────────────────────────
-def compute_all_features(ts: dict, fps: float, total_frames: int) -> dict:
-    """Run all 10 feature extractions and return a unified dict."""
-    step_data = compute_step_count(ts, fps)
-    cadence = compute_cadence(step_data, total_frames, fps)
-    knee_angles = compute_knee_angles(ts)
-    step_timing = compute_step_timing(step_data, fps)
-    symmetry = compute_symmetry(ts)
-    direction = compute_walking_direction(ts)
-    step_length = compute_step_length(ts, step_data)
-    stride_cv = compute_stride_consistency(step_timing)
-    ankle_traj = compute_ankle_trajectory(ts)
-    torso_lean = compute_torso_lean(ts)
-
-    return {
-        "step_data": step_data,
-        "cadence": cadence,
-        "knee_angles": knee_angles,
-        "step_timing": step_timing,
-        "symmetry": symmetry,
-        "direction": direction,
-        "step_length": step_length,
-        "stride_cv": stride_cv,
+        "step_data":        step_data,
+        "cadence":          cadence,
+        "knee_angles":      knee_angles,
+        "step_timing":      step_timing,
+        "symmetry":         round(sym, 3),
+        "step_length":      step_length,
+        "stride_cv":        cv_pct,
         "ankle_trajectory": ankle_traj,
-        "torso_lean": torso_lean,
-        "fps": fps,
-        "total_frames": total_frames,
-        "duration_sec": total_frames / fps if fps > 0 else 0,
+        "torso_lean":       torso_lean,
+        "duration_sec":     dur_sec,
+        "n_frames":         n_mask,
     }
 
 
-# ──────────────────────────────────────────────
-# STAGE 5 (PART): INSIGHTS & SUGGESTIONS
-# ──────────────────────────────────────────────
+# ══════════════════════════════════════════════
+# DIRECTION SUMMARY STRING
+# ══════════════════════════════════════════════
+def compute_walking_direction(pass_segments) -> str:
+    if not pass_segments:
+        return "Unknown"
+    n_lr = sum(1 for p in pass_segments if p["direction"] > 0)
+    n_rl = sum(1 for p in pass_segments if p["direction"] < 0)
+    if n_rl == 0:
+        return "Left → Right"
+    if n_lr == 0:
+        return "Right → Left"
+    return f"Bidirectional ({n_lr} L→R, {n_rl} R→L)"
+
+
+# ══════════════════════════════════════════════
+# MASTER COMPUTE  (Total + Clean)
+# ══════════════════════════════════════════════
+def compute_all_features(ts: dict, fps: float, total_frames: int,
+                         user_height_cm: float = DEFAULT_HEIGHT_CM) -> dict:
+    """
+    Run the full pipeline: detect passes, calibrate scale, compute
+    Total metrics (whole video, informational) AND Clean metrics
+    (steady-state only, used by the rule engine).
+
+    Top-level keys mirror clean_metrics so existing app.py / gait_plots.py
+    code keeps working without changes.
+    """
+    n = len(ts["left_heel"]["y"])
+
+    # 1. Pass segmentation from hip-midpoint (NOT shoulders/nose, which oscillate).
+    hip_x_px      = (ts["left_hip"]["x_px"] + ts["right_hip"]["x_px"]) / 2.0
+    pass_segments = segment_passes(hip_x_px, fps)
+
+    # 2. Anatomical scale.
+    mpp = compute_meters_per_pixel(ts, user_height_cm, pass_segments=pass_segments)
+
+    # 3. Pre-compute per-frame caches (shared by Total & Clean).
+    strikes    = _detect_strikes(ts, fps)
+    knee_full  = _knee_angles_px(ts)
+    torso_full = _torso_lean_arr(ts, pass_segments)
+
+    # 4. TOTAL metrics — every frame.
+    total_indices = np.arange(n)
+    total_metrics = compute_metrics(
+        ts, total_indices, mpp, fps,
+        pass_segments=pass_segments,
+        strikes=strikes, knee_full=knee_full, torso_full=torso_full,
+    )
+
+    # 5. CLEAN metrics — only frames inside any pass core (steady state).
+    if pass_segments:
+        clean_mask = np.zeros(n, dtype=bool)
+        for p in pass_segments:
+            clean_mask[p["core_start"]:p["core_end"]] = True
+        clean_indices = np.where(clean_mask)[0]
+    else:
+        clean_indices = total_indices       # graceful fallback
+
+    clean_metrics = compute_metrics(
+        ts, clean_indices, mpp, fps,
+        pass_segments=pass_segments,
+        strikes=strikes, knee_full=knee_full, torso_full=torso_full,
+    )
+
+    direction = compute_walking_direction(pass_segments)
+
+    # Top-level = clean (drives plots and inference).
+    return {
+        # ── original top-level keys (= clean) ─────────────
+        **clean_metrics,
+        "direction":              direction,
+        "fps":                    fps,
+        "total_frames":           total_frames,
+        "duration_sec":           total_frames / fps if fps > 0 else 0,
+
+        # ── new dual + audit keys ─────────────────────────
+        "total_metrics":          total_metrics,
+        "clean_metrics":          clean_metrics,
+        "pass_segments":          pass_segments,
+        "num_passes":             len(pass_segments),
+        "frames_used":            clean_metrics["n_frames"],
+        "steady_state_duration_s": clean_metrics["duration_sec"],
+        "meters_per_pixel":       mpp,
+        "user_height_cm":         user_height_cm,
+    }
+
+
+# ══════════════════════════════════════════════
+# RULE-BASED INFERENCE  (consumes ONLY clean_metrics)
+# ══════════════════════════════════════════════
 def interpret(features: dict) -> dict:
-    """
-    Rule-based threshold analysis.
-    Returns: { "observations": [...], "suggestions": [...] }
-    """
-    obs = []
-    sug = []
+    """All thresholds compare against clean_metrics — never total."""
+    clean = features.get("clean_metrics", features)
 
-    cadence = features["cadence"]
-    symmetry = features["symmetry"]
-    knee_mean = features["knee_angles"]["overall_mean"]
-    stride_cv = features["stride_cv"]
-    step_length_mean = features["step_length"]["mean"]
-    torso_mean = features["torso_lean"]["mean"]
-    direction = features["direction"]
-    step_count = features["step_data"]["total_steps"]
-    duration = features["duration_sec"]
+    cadence       = clean["cadence"]
+    symmetry      = clean["symmetry"]
+    knee_peak     = clean["knee_angles"].get("overall_peak", 0.0)
+    knee_min      = clean["knee_angles"].get("overall_min", 0.0)
+    knee_overall  = clean["knee_angles"]["overall_mean"]
+    stride_cv_pct = clean["stride_cv"]
+    step_len_mean = clean["step_length"]["mean"]
+    step_len_unit = clean["step_length"].get("unit", "m")
+    torso_mean    = clean["torso_lean"]["mean"]
+    direction     = features.get("direction", "Unknown")
+    num_passes    = features.get("num_passes", 0)
+    frames_used   = features.get("frames_used", 0)
+    total_dur     = features.get("duration_sec", 0)
+    clean_dur     = features.get("steady_state_duration_s", 0)
+    step_count    = clean["step_data"]["total_steps"]
 
-    # ── Cadence ──────────────────────────────
+    obs, sug = [], []
+
+    # ── Cadence (target 100–120) ─────────────────────────
     if cadence == 0:
-        obs.append(" No steps detected — the subject may not be walking clearly in this video.")
-        sug.append("Ensure a clear lateral (side-view) video showing a full walking cycle.")
-    elif cadence < 80:
-        obs.append(f" Cadence is low ({cadence} steps/min). Normal range is 100–120 steps/min.")
-        sug.append("Focus on increasing walking pace with shorter, quicker steps.")
-    elif cadence > 140:
-        obs.append(f" Cadence is very high ({cadence} steps/min). May indicate running or rapid movement.")
-        sug.append("If walking, ensure video captures a full stride cycle clearly.")
+        obs.append(" No clean walking detected — no validated passes available.")
+        sug.append("Record a longer side-view clip with at least one continuous direction-stable walk of ≥1 s.")
+    elif cadence < 100:
+        obs.append(f" Cadence is low ({cadence} steps/min). Adult normal range is 100–120.")
+        sug.append("Focus on quicker, shorter steps to bring cadence into the normal range.")
+    elif cadence > 120:
+        obs.append(f" Cadence is high ({cadence} steps/min). Normal range is 100–120; may indicate brisk walking or jogging.")
     else:
-        obs.append(f"Cadence is within normal range ({cadence} steps/min).")
+        obs.append(f" Cadence is in the adult normal range ({cadence} steps/min).")
 
-    # ── Symmetry ─────────────────────────────
-    if symmetry < 0.85:
-        obs.append(f"Gait asymmetry detected (score: {symmetry:.2f}). Left/right movement differs significantly.")
-        sug.append("Consult a physical therapist to evaluate potential limb-length discrepancy or muscle imbalance.")
-    elif symmetry < 0.93:
-        obs.append(f" Mild asymmetry detected (score: {symmetry:.2f}). Slight left/right variation.")
-        sug.append("Add single-leg balance exercises to improve bilateral coordination.")
-    else:
-        obs.append(f" Gait symmetry is excellent (score: {symmetry:.2f}).")
+    # ── Step length (target 0.6–0.8 m) ───────────────────
+    if step_len_mean > 0:
+        if step_len_unit == "m":
+            if step_len_mean < 0.55:
+                obs.append(f" Step length is short ({step_len_mean:.2f} m). Adult normal is 0.6–0.8 m.")
+                sug.append("Lengthen stride with hip-extensor strengthening and walking drills.")
+            elif step_len_mean > 0.85:
+                obs.append(f" Step length is long ({step_len_mean:.2f} m). Possible overstriding.")
+                sug.append("Reduce overstride to lower heel-strike impact.")
+            else:
+                obs.append(f" Step length is in adult normal range ({step_len_mean:.2f} m).")
+        else:
+            obs.append(f" Step length: {step_len_mean:.1f} px (real-world scale unavailable).")
 
-    # ── Knee Range of Motion ─────────────────
-    left_knee = features["knee_angles"]["left"]
-    right_knee = features["knee_angles"]["right"]
-    
-    if len(left_knee) > 0 and len(right_knee) > 0:
-        max_flexion = float(np.nanmax([np.nanmax(left_knee), np.nanmax(right_knee)]))
-        min_flexion = float(np.nanmin([np.nanmin(left_knee), np.nanmin(right_knee)]))
+    # ── Symmetry (target > 95%) ──────────────────────────
+    sym_pct = symmetry * 100
+    if sym_pct < 85:
+        obs.append(f" Significant gait asymmetry ({sym_pct:.1f}%). Left and right step rhythm differ markedly.")
+        sug.append("Consult a physical therapist to evaluate possible limb-length discrepancy or muscle imbalance.")
+    elif sym_pct < 95:
+        obs.append(f" Mild gait asymmetry ({sym_pct:.1f}%). Adult target is > 95%.")
+        sug.append("Add single-leg balance work to improve bilateral coordination.")
     else:
-        max_flexion, min_flexion = 0, 0
-    
-    if min_flexion > 12:
-        obs.append(f" Knee lacks full extension (minimum flexion is {min_flexion:.1f}°). Normal is ~0° (straight leg).")
-        sug.append("Focus on hamstring and calf stretching to allow full knee extension during stance.")
-    else:
-        obs.append(f" Good knee extension achieved ({min_flexion:.1f}°).")
-        
-    if max_flexion < 50:
-        obs.append(f" Restricted knee flexion during swing phase (peak is {max_flexion:.1f}°). Normal walking is ~65°.")
-        sug.append("Consider knee mobility exercises or recumbent biking to improve flexion range.")
-    else:
-        obs.append(f" Adequate knee flexion during swing phase ({max_flexion:.1f}°).")
+        obs.append(f" Gait symmetry is excellent ({sym_pct:.1f}%).")
 
-    # ── Stride Consistency ───────────────────
-    if stride_cv > 0.25:
-        obs.append(f" High stride variability (CV: {stride_cv:.2f}). Inconsistent step rhythm detected.")
-        sug.append("Practice metronome-paced walking to improve stride regularity.")
-    elif stride_cv > 0.15:
-        obs.append(f" Moderate stride variability (CV: {stride_cv:.2f}).")
-        sug.append("Focus on rhythmic walking patterns to reduce stride timing variation.")
+    # ── Stride CV (target < 3 %) ─────────────────────────
+    if stride_cv_pct > 6:
+        obs.append(f" High stride-time variability (CV = {stride_cv_pct:.1f} %). Adult target is < 3 %.")
+        sug.append("Practice metronome-paced walking to improve rhythm consistency.")
+    elif stride_cv_pct > 3:
+        obs.append(f" Moderate stride-time variability (CV = {stride_cv_pct:.1f} %).")
+        sug.append("Focus on rhythmic walking to reduce stride-to-stride variation.")
     else:
-        obs.append(f" Stride consistency is good (CV: {stride_cv:.2f}).")
+        obs.append(f" Stride consistency is good (CV = {stride_cv_pct:.1f} %).")
 
-    # ── Torso Lean ───────────────────────────
+    # ── Knee flexion (target peak 60-70°) ────────────────
+    if knee_min > 12:
+        obs.append(f" Knee lacks full extension at stance (min flexion {knee_min:.1f}°). Normal is ~0°.")
+        sug.append("Hamstring and calf stretching to allow full knee extension.")
+    if knee_peak < 50:
+        obs.append(f" Restricted swing-phase knee flexion (peak {knee_peak:.1f}°). Normal is 60–70°.")
+        sug.append("Knee mobility drills or recumbent biking to expand flexion range.")
+    elif knee_peak > 80:
+        obs.append(f" Unusually high knee flexion peak ({knee_peak:.1f}°) — could indicate jogging.")
+    else:
+        obs.append(f" Swing-phase knee flexion peak is in normal range ({knee_peak:.1f}°).")
+
+    # ── Torso lean (target |lean| < 5°) ──────────────────
     abs_lean = abs(torso_mean)
-    if abs_lean > 15:
-        direction_str = "forward" if torso_mean > 0 else "backward"
-        obs.append(f" Significant torso lean {direction_str} ({torso_mean:.1f}°).")
-        sug.append("Practice upright posture walking — engage core and keep gaze forward.")
-    elif abs_lean > 7:
-        obs.append(f" Mild torso lean detected ({torso_mean:.1f}°).")
-        sug.append("Strengthen core muscles (planks, bird-dogs) to improve trunk stability.")
+    if abs_lean > 10:
+        d = "forward" if torso_mean > 0 else "backward"
+        obs.append(f" Significant torso lean {d} ({torso_mean:.1f}°).")
+        sug.append("Practice upright posture walking — engage core, keep gaze forward.")
+    elif abs_lean > 5:
+        obs.append(f" Mild torso lean ({torso_mean:.1f}°).")
+        sug.append("Strengthen core (planks, bird-dogs) to improve trunk stability.")
     else:
         obs.append(f" Torso is well-aligned ({torso_mean:.1f}° lean).")
 
-    # ── Step Length ──────────────────────────
-    if step_length_mean > 0:
-        if step_length_mean < 0.35:
-            obs.append(f" Step length is relatively short ({step_length_mean:.2f} normalized). Ideal is ~0.42 times body height.")
-            sug.append("Focus on lengthening stride with hip extension exercises.")
-        elif step_length_mean > 0.55:
-            obs.append(f" Step length is long ({step_length_mean:.2f} normalized). May indicate overstriding.")
-            sug.append("Reduce overstride to lower heel-strike impact forces.")
-        else:
-            obs.append(f" Step length appears normal ({step_length_mean:.2f} normalized). It matches the typical ~41% of body height.")
-
-    # ── Walking Direction ─────────────────────
-    obs.append(f" Walking direction detected: {direction}.")
-
-    # ── Duration ─────────────────────────────
-    obs.append(f"⏱ Video duration analyzed: {duration:.1f} seconds, {step_count} steps detected.")
+    # ── Coverage / direction ─────────────────────────────
+    obs.append(
+        f" Walking direction: {direction} — "
+        f"{num_passes} clean pass{'es' if num_passes != 1 else ''} "
+        f"({clean_dur:.1f} s steady-state of {total_dur:.1f} s total)."
+    )
+    obs.append(f"⏱ {step_count} clean strikes used for assessment.")
 
     return {"observations": obs, "suggestions": sug}

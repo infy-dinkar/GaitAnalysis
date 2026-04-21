@@ -16,11 +16,14 @@ from gait_plots import build_all_figures
 # PAGE CONFIG
 # ──────────────────────────────────────────────
 st.set_page_config(
-    page_title="GaitVision — AI Gait Analyzer",
+    page_title="AI Gait Analyzer",
     page_icon="",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+# Default adult height — used until the user changes it in the height input on the main page.
+DEFAULT_HEIGHT_CM = 170
 
 # ──────────────────────────────────────────────
 # CUSTOM CSS
@@ -210,41 +213,88 @@ def _metric_card(label: str, value: str, unit: str = "") -> str:
     """
 
 
-def _render_metrics(features: dict) -> None:
-    """Render 8 metric cards in a 4×2 grid."""
-    st.markdown('<div class="section-title">📊 Gait Metrics</div>', unsafe_allow_html=True)
-
-    cadence = features["cadence"]
-    sym = features["symmetry"]
-    knee = features["knee_angles"]["overall_mean"]
-    stride_cv = features["stride_cv"]
-    step_count = features["step_data"]["total_steps"]
-    step_len = features["step_length"]["mean"]
-    torso = features["torso_lean"]["mean"]
-    mean_step_t = features["step_timing"]["mean_step_time"]
-    direction = features["direction"]
+def _render_metric_grid(m: dict) -> None:
+    """Render the 8-card 4×2 metric grid for one metric set (Total or Clean)."""
+    cadence    = m["cadence"]
+    sym        = m["symmetry"]
+    knee_peak  = m["knee_angles"].get("overall_peak", 0.0)
+    stride_cv  = m["stride_cv"]                              # already a percentage
+    step_count = m["step_data"]["total_steps"]
+    step_len   = m["step_length"]["mean"]
+    step_unit  = m["step_length"].get("unit", "m")
+    torso      = m["torso_lean"]["mean"]
+    mean_st    = m["step_timing"]["mean_step_time"]
 
     row1 = st.columns(4)
     row2 = st.columns(4)
-
     cards = [
-        ("Step Count", str(step_count), "steps"),
-        ("Cadence", f"{cadence}", "steps / min"),
-        ("Symmetry", f"{sym:.2%}", "L/R match"),
-        ("Avg Knee Angle", f"{knee:.1f}°", "flexion"),
-        ("Stride CV", f"{stride_cv:.3f}", "consistency"),
-        ("Step Length", f"{step_len:.3f}", "normalized"),
-        ("Torso Lean", f"{torso:.1f}°", "+ fwd / - back"),
-        ("Step Time", f"{mean_step_t:.3f}s" if mean_step_t > 0 else "N/A", "avg interval"),
+        ("Step Count",     str(step_count),                         "strikes"),
+        ("Cadence",        f"{cadence}",                            "steps / min"),
+        ("Symmetry",       f"{sym:.1%}",                            "L/R rhythm"),
+        ("Knee Peak",      f"{knee_peak:.1f}°",                     "swing flexion"),
+        ("Stride CV",      f"{stride_cv:.2f}%",                     "lower = better"),
+        ("Step Length",    f"{step_len:.3f}",                       step_unit),
+        ("Torso Lean",     f"{torso:.1f}°",                         "+ fwd / - back"),
+        ("Step Time",      f"{mean_st:.3f}s" if mean_st > 0 else "N/A", "avg interval"),
     ]
-
     for i, (label, val, unit) in enumerate(cards):
         col = row1[i] if i < 4 else row2[i - 4]
         with col:
             st.markdown(_metric_card(label, val, unit), unsafe_allow_html=True)
 
-    st.markdown(f"<p style='color:#6E7681;font-size:0.82rem;margin-top:0.5rem;'>🧭 Walking direction: <b style='color:#C9D1D9'>{direction}</b></p>",
-                unsafe_allow_html=True)
+
+def _render_metrics(features: dict) -> None:
+    """
+    Render TWO metric sets side-by-side:
+      • Total  — every frame in the video (informational; includes turns/accel/decel).
+      • Clean  — steady-state frames only (drives ALL observations & suggestions).
+    """
+    total = features.get("total_metrics", features)
+    clean = features.get("clean_metrics", features)
+    direction   = features.get("direction", "Unknown")
+    num_passes  = features.get("num_passes", 0)
+    total_dur   = features.get("duration_sec", 0)
+    clean_dur   = features.get("steady_state_duration_s", 0)
+
+    # ── Total ────────────────────────────────────────────
+    st.markdown(
+        '<div class="section-title">📊 Total Metrics '
+        '<span style="font-size:0.75rem;color:#6E7681;font-weight:400;">'
+        '— entire video (informational; includes turns / accel / decel)'
+        '</span></div>',
+        unsafe_allow_html=True,
+    )
+    _render_metric_grid(total)
+    st.markdown(
+        f"<p style='color:#6E7681;font-size:0.78rem;margin-top:0.4rem;'>"
+        f"Window: {total_dur:.1f}s · all frames included</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Clean ────────────────────────────────────────────
+    st.markdown(
+        '<div class="section-title" style="margin-top:1.5rem">'
+        '✨ Clean Metrics '
+        '<span style="font-size:0.75rem;color:#3FB950;font-weight:400;">'
+        '— steady-state only · used for all observations & suggestions'
+        '</span></div>',
+        unsafe_allow_html=True,
+    )
+    _render_metric_grid(clean)
+    st.markdown(
+        f"<p style='color:#6E7681;font-size:0.78rem;margin-top:0.4rem;'>"
+        f"Window: {clean_dur:.1f}s steady-state across "
+        f"<b style='color:#C9D1D9'>{num_passes}</b> validated pass"
+        f"{'es' if num_passes != 1 else ''} "
+        f"({(clean_dur / total_dur * 100) if total_dur > 0 else 0:.0f}% of video)</p>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        f"<p style='color:#6E7681;font-size:0.82rem;margin-top:0.8rem;'>"
+        f"🧭 Walking direction: <b style='color:#C9D1D9'>{direction}</b></p>",
+        unsafe_allow_html=True,
+    )
 
 
 def _render_graphs(features: dict) -> None:
@@ -318,7 +368,21 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────
-# SECTION 2: UPLOAD
+# SECTION 2 — HEIGHT (calibrates pixel → meters for step length)
+# ──────────────────────────────────────────────
+height_col = st.columns([1, 3])[0]
+with height_col:
+    user_height_cm = st.number_input(
+        "📏 Your height (cm) — used for step-length calibration",
+        min_value=100, max_value=220,
+        value=DEFAULT_HEIGHT_CM, step=1,
+        help="2D video has no absolute scale, so step length is calibrated from "
+             "your height via the leg-length ratio (leg ≈ 53% of height). "
+             "Leave at default for an average-adult estimate.",
+    )
+
+# ──────────────────────────────────────────────
+# SECTION 3: UPLOAD
 # ──────────────────────────────────────────────
 uploaded = st.file_uploader(
     "Upload a walking video",
@@ -364,8 +428,9 @@ if uploaded is not None:
         progress_bar.progress(0.88, text=" Computing 10 gait features…")
         status_text.markdown("*Running feature extraction algorithms…*")
 
-        # Stage 3 — Features
-        features = compute_all_features(ts, fps, total_frames)
+        # Stage 3 — Features. Pixel→meter scaling uses an assumed adult height
+        # (true height is unknowable from 2D video without a calibration object).
+        features = compute_all_features(ts, fps, total_frames, user_height_cm=user_height_cm)
         features["_ts"] = ts   # pass time-series for heel plots
 
         progress_bar.progress(0.95, text=" Generating graphs…")
@@ -378,6 +443,26 @@ if uploaded is not None:
         status_text.empty()
 
         st.success(f" Processed **{total_frames}** frames at **{fps:.1f} FPS** — {features['duration_sec']:.1f}s total")
+
+        # ── Audit / sanity-check info (per Section 3 spec) ──
+        mpp = features.get("meters_per_pixel")
+        npasses = features.get("num_passes", 0)
+        frames_used = features.get("frames_used", 0)
+        if mpp:
+            st.caption(
+                f"🔬 Calibration: {mpp*1000:.3f} mm/px  ·  "
+                f"{npasses} valid pass{'es' if npasses != 1 else ''}  ·  "
+                f"{frames_used}/{total_frames} frames used  ·  "
+                f"height = {user_height_cm} cm"
+                + (" (default)" if user_height_cm == DEFAULT_HEIGHT_CM else " (user-set)")
+            )
+        else:
+            st.caption(
+                f"⚠️ Scale calibration failed (no clear stance frames). "
+                f"{npasses} valid pass{'es' if npasses != 1 else ''}  ·  "
+                f"{frames_used}/{total_frames} frames used. "
+                f"Distances will be reported in pixels."
+            )
 
         st.markdown("---")
 
