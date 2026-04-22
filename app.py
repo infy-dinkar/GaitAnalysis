@@ -401,6 +401,19 @@ def _render_graphs(features: dict) -> None:
                 fig = figs.get("cycle")
                 if fig is not None and min(KL, KR) >= 3:
                     st.pyplot(fig, use_container_width=True)
+                    # Heel-strike amplitude-filter rejection counts
+                    sr = features.get("strike_rejection") or {}
+                    L_meta = sr.get("left",  {}) or {}
+                    R_meta = sr.get("right", {}) or {}
+                    L_acc, L_rej = L_meta.get("accepted", 0), L_meta.get("rejected", 0)
+                    R_acc, R_rej = R_meta.get("accepted", 0), R_meta.get("rejected", 0)
+                    if (L_acc + L_rej + R_acc + R_rej) > 0:
+                        st.caption(
+                            f"🦶 Cycle detection: {R_acc} right strides accepted, "
+                            f"{R_rej} rejected due to low heel-clearance amplitude "
+                            f"(likely foot-drag events). "
+                            f"{L_acc} left strides accepted, {L_rej} rejected."
+                        )
                     _render_cycle_explanations()
                 else:
                     st.info(

@@ -495,6 +495,7 @@ ANKLE_NEUTRAL_OFFSET_DEG = -9.5
 
 def _detect_static_baseline(ts: dict, raw_dorsi_left: np.ndarray,
                             raw_dorsi_right: np.ndarray, fps: float,
+                            clean_mask: np.ndarray | None = None,
                             min_static_sec: float = 0.5,
                             vel_thresh_norm: float = 0.002) -> dict | None:
     """
@@ -502,6 +503,14 @@ def _detect_static_baseline(ts: dict, raw_dorsi_left: np.ndarray,
     (|dx/dt| < vel_thresh_norm in normalized x per frame) for at least
     min_static_sec contiguous seconds. Return the median raw ankle angle
     over those frames per side — that's the per-subject neutral baseline.
+
+    `clean_mask` (optional) restricts candidate frames to steady-state pass
+    cores. This is critical for bidirectional walking videos where the hip
+    midpoint velocity passes through zero at TURN POINTS — those frames
+    have low velocity but the ankle is in extreme plantar/dorsiflexion mid-
+    pivot, producing wildly per-leg-asymmetric false baselines. Intersecting
+    with clean_mask excludes turn frames so only true standing-still windows
+    INSIDE a validated pass qualify.
 
     Returns None when no qualifying static window exists OR when the static
     frames don't contain valid (non-NaN) angle samples on both sides.
@@ -511,6 +520,11 @@ def _detect_static_baseline(ts: dict, raw_dorsi_left: np.ndarray,
         return None
     vel = np.abs(np.gradient(hip_x_norm))
     static = vel < vel_thresh_norm
+
+    # Restrict to steady-state frames so turning-point velocity dips
+    # (which are NOT standing still) don't poison the baseline.
+    if clean_mask is not None and len(clean_mask) == len(static):
+        static = static & clean_mask
 
     min_static_frames = max(int(min_static_sec * fps), 3)
     static_idx: list[int] = []
@@ -543,7 +557,8 @@ def _detect_static_baseline(ts: dict, raw_dorsi_left: np.ndarray,
     }
 
 
-def _ankle_angles_px(ts: dict, pass_segments=None, fps: float = 30.0) -> dict:
+def _ankle_angles_px(ts: dict, pass_segments=None, fps: float = 30.0,
+                     clean_mask: np.ndarray | None = None) -> dict:
     """
     Per-frame ankle dorsiflexion (deg) using PIXEL coords.
     0° = neutral standing (after baseline correction).
@@ -610,8 +625,11 @@ def _ankle_angles_px(ts: dict, pass_segments=None, fps: float = 30.0) -> dict:
     # ── Step 2: baseline correction (PER LEG) ─────────────────────
     # Try the static-stance auto-detect first; it gives a clinically clean
     # baseline when the subject pauses anywhere in the video.
+    # clean_mask is forwarded so turning-point velocity dips don't qualify
+    # — only frames inside a steady-state pass core can become baselines.
     baseline = _detect_static_baseline(ts, raw_dorsi["left"],
-                                       raw_dorsi["right"], fps)
+                                       raw_dorsi["right"], fps,
+                                       clean_mask=clean_mask)
     if baseline is not None:
         baseline_L  = baseline["left"]
         baseline_R  = baseline["right"]
@@ -633,9 +651,12 @@ def _ankle_angles_px(ts: dict, pass_segments=None, fps: float = 30.0) -> dict:
         n_baseline = 0
         method     = "running_median_fallback"
 
+    corrected_L = raw_dorsi["left"]  - baseline_L
+    corrected_R = raw_dorsi["right"] - baseline_R
+
     return {
-        "left":              raw_dorsi["left"]  - baseline_L,
-        "right":             raw_dorsi["right"] - baseline_R,
+        "left":              corrected_L,
+        "right":             corrected_R,
         # Metadata (underscore-prefixed → ignored by downstream consumers
         # that iterate ('left', 'right') only).
         "_baseline_method":  method,
@@ -886,10 +907,18 @@ def _compute_gait_cycle_curves(ts: dict, fps: float, n_frames: int,
           'ankle': {...},
         }
     """
-    hs_L = detect_heel_strikes(ts["left_heel"]["y_px"],  fps)
-    hs_R = detect_heel_strikes(ts["right_heel"]["y_px"], fps)
+    hs_L, meta_L = detect_heel_strikes(
+        ts["left_heel"]["y_px"],  fps, return_metadata=True,
+    )
+    hs_R, meta_R = detect_heel_strikes(
+        ts["right_heel"]["y_px"], fps, return_metadata=True,
+    )
 
-    out: dict = {}
+    out: dict = {
+        # underscore-prefixed key so downstream loops over ('hip','knee','ankle')
+        # don't see it.
+        "_strike_rejection": {"left": meta_L, "right": meta_R},
+    }
     for joint, sigL, sigR in (
         ("hip",   hip_full["left"],   hip_full["right"]),
         ("knee",  knee_full["left"],  knee_full["right"]),
@@ -932,11 +961,22 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
     # 2. Anatomical scale.
     mpp = compute_meters_per_pixel(ts, user_height_cm, pass_segments=pass_segments)
 
+    # Build the steady-state clean mask once, here, so the ankle baseline
+    # detector can use it (turning-point velocity dips are NOT standing-still
+    # frames and must be excluded from baseline candidates).
+    if pass_segments:
+        clean_mask = np.zeros(n, dtype=bool)
+        for p in pass_segments:
+            clean_mask[p["core_start"]:p["core_end"]] = True
+    else:
+        clean_mask = None
+
     # 3. Pre-compute per-frame caches (shared by Total & Clean).
     strikes    = _detect_strikes(ts, fps, pass_segments)
     knee_full  = _knee_angles_px(ts)
     hip_full   = _hip_angles_px(ts, pass_segments)
-    ankle_full = _ankle_angles_px(ts, pass_segments, fps=fps)
+    ankle_full = _ankle_angles_px(ts, pass_segments, fps=fps,
+                                  clean_mask=clean_mask)
     torso_full = _torso_lean_arr(ts, pass_segments)
 
     # 4. TOTAL metrics — every frame.
@@ -948,13 +988,11 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
     )
 
     # 5. CLEAN metrics — only frames inside any pass core (steady state).
-    if pass_segments:
-        clean_mask = np.zeros(n, dtype=bool)
-        for p in pass_segments:
-            clean_mask[p["core_start"]:p["core_end"]] = True
-        clean_indices = np.where(clean_mask)[0]
-    else:
-        clean_indices = total_indices       # graceful fallback
+    # clean_mask was built earlier (above the pre-cache step) for the ankle
+    # baseline detector; reuse it here.
+    clean_indices = (np.where(clean_mask)[0]
+                     if clean_mask is not None
+                     else total_indices)
 
     clean_metrics = compute_metrics(
         ts, clean_indices, mpp, fps,
@@ -965,12 +1003,10 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
     direction = compute_walking_direction(pass_segments)
 
     # 6. Cycle-normalized joint-angle curves (mean ± SD over all clean strides)
-    if pass_segments:
-        cycle_clean_mask = np.zeros(n, dtype=bool)
-        for p in pass_segments:
-            cycle_clean_mask[p["core_start"]:p["core_end"]] = True
-    else:
-        cycle_clean_mask = np.ones(n, dtype=bool)
+    # Reuse clean_mask; for the cycle path we need an "all True" fallback when
+    # no passes were detected so the entire signal is treated as one window.
+    cycle_clean_mask = (clean_mask if clean_mask is not None
+                        else np.ones(n, dtype=bool))
     gait_cycle_curves = _compute_gait_cycle_curves(
         ts, fps, n, cycle_clean_mask, hip_full, knee_full, ankle_full,
     )
@@ -1000,6 +1036,11 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
             "offset_deg_right": float(ankle_full.get("_baseline_right", 0.0)),
             "n_frames":         int(ankle_full.get("_baseline_n_frames", 0)),
         },
+        # Heel-strike amplitude-filter rejection counts per leg
+        # (see detect_heel_strikes' min_amp_ratio in gait_cycle.py).
+        "strike_rejection":       gait_cycle_curves.get(
+            "_strike_rejection", {"left": {}, "right": {}}
+        ),
     }
 
 

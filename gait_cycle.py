@@ -22,24 +22,98 @@ from scipy.signal import find_peaks, savgol_filter
 # ──────────────────────────────────────────────
 # 1. HEEL-STRIKE DETECTION
 # ──────────────────────────────────────────────
+def _amplitude_filter(smoothed: np.ndarray, hs: np.ndarray, fps: float,
+                      min_amp_ratio: float) -> tuple[np.ndarray, int]:
+    """
+    Reject strikes whose peak-to-trough amplitude is below
+    `min_amp_ratio × median amplitude` of all detected strikes.
+
+    Self-calibrating per leg: a healthy walker with uniform clearance keeps
+    every strike (all amplitudes near the median, ratio ≈ 1.0). A dragging /
+    shuffling leg with intermittent flat heel-y signals will have a few
+    strikes with much smaller amplitudes — those get dropped.
+
+    For each strike i, amplitude is computed as
+        smoothed[strike_i] − min(smoothed[strike_i − lookback : strike_i])
+    where lookback = int(fps * 0.3) frames.
+    """
+    if hs is None or len(hs) == 0:
+        return hs, 0
+
+    lookback = max(int(fps * 0.3), 3)
+    amps = np.zeros(len(hs), dtype=float)
+    for i, s in enumerate(hs):
+        s = int(s)
+        if s <= 0:
+            amps[i] = np.nan
+            continue
+        lo = max(0, s - lookback)
+        preceding = smoothed[lo:s]
+        if len(preceding) == 0 or np.all(np.isnan(preceding)):
+            amps[i] = np.nan
+            continue
+        trough = float(np.nanmin(preceding))
+        peak   = float(smoothed[s])
+        amps[i] = peak - trough
+
+    valid = amps[~np.isnan(amps)]
+    if len(valid) == 0:
+        return hs, 0
+    median_amp = float(np.median(valid))
+    if median_amp <= 0:
+        return hs, 0
+    keep = amps >= (min_amp_ratio * median_amp)
+    n_rejected = int((~keep).sum())
+    return hs[keep], n_rejected
+
+
 def detect_heel_strikes(heel_y_signal: np.ndarray, fps: float,
-                        expected_cadence_spm: float = 110) -> np.ndarray:
+                        expected_cadence_spm: float = 110,
+                        min_amp_ratio: float = 0.5,
+                        return_metadata: bool = False):
     """
     Detect heel-strike frame indices from a per-frame heel vertical position
     signal (image coordinates: larger y = lower = foot planted).
 
-    Steps (per spec):
+    Pipeline:
       1. Savitzky-Golay smooth (window ≈ fps/3, polyorder=3).
       2. find_peaks with
             distance     = 0.7 × expected_stride_period (frames)
             height       = median(smoothed)         # rejects swing dips
             prominence   = 15                       # rejects jitter (pixels)
+      3. POST-DETECTION AMPLITUDE FILTER (new):
+            Reject strikes whose peak-to-trough amplitude < min_amp_ratio
+            × median amplitude across the leg's strikes. Self-calibrating
+            per leg — drops shuffling/foot-drag events whose heel-y barely
+            rises above the surrounding signal.
 
-    Returns: 1-D int array of frame indices.
+    Args:
+        heel_y_signal:        per-frame heel y (pixel coords, y-down).
+        fps:                  video frame rate.
+        expected_cadence_spm: assumed total cadence; sets min stride distance.
+        min_amp_ratio:        amplitude floor as a ratio of the leg's
+                              median amplitude. 0.5 keeps strikes that
+                              are at least half as crisp as the median.
+        return_metadata:      if True, returns (hs, dict) where dict has
+                              accepted / rejected / initial / min_amp_ratio.
+
+    Returns:
+        np.ndarray of frame indices (default), OR (np.ndarray, dict)
+        when return_metadata=True.
     """
+    def _ret(arr, n_initial=0, n_rejected=0):
+        if not return_metadata:
+            return arr
+        return arr, {
+            "accepted":      int(len(arr)),
+            "rejected":      int(n_rejected),
+            "initial":       int(n_initial),
+            "min_amp_ratio": float(min_amp_ratio),
+        }
+
     n = len(heel_y_signal)
     if n < 5:
-        return np.array([], dtype=int)
+        return _ret(np.array([], dtype=int))
 
     sg_win = int(fps // 3)
     if sg_win % 2 == 0:
@@ -49,7 +123,7 @@ def detect_heel_strikes(heel_y_signal: np.ndarray, fps: float,
     if sg_win > n:
         sg_win = n if n % 2 == 1 else n - 1
     if sg_win < 5:
-        return np.array([], dtype=int)
+        return _ret(np.array([], dtype=int))
 
     smoothed = savgol_filter(heel_y_signal, sg_win, polyorder=3)
 
@@ -66,7 +140,13 @@ def detect_heel_strikes(heel_y_signal: np.ndarray, fps: float,
         height=height_thresh,
         prominence=15,
     )
-    return hs.astype(int)
+    hs = hs.astype(int)
+    n_initial = int(len(hs))
+
+    # NEW: amplitude filter on top of (distance, height, prominence).
+    hs, n_rejected = _amplitude_filter(smoothed, hs, fps, min_amp_ratio)
+
+    return _ret(hs, n_initial=n_initial, n_rejected=n_rejected)
 
 
 # ──────────────────────────────────────────────
