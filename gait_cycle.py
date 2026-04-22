@@ -69,7 +69,7 @@ def _amplitude_filter(smoothed: np.ndarray, hs: np.ndarray, fps: float,
 
 def detect_heel_strikes(heel_y_signal: np.ndarray, fps: float,
                         expected_cadence_spm: float = 110,
-                        min_amp_ratio: float = 0.5,
+                        min_amp_ratio: float = 0.35,
                         return_metadata: bool = False):
     """
     Detect heel-strike frame indices from a per-frame heel vertical position
