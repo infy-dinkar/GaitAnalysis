@@ -6,11 +6,17 @@ Streamlit entry point for the Video-Based Gait Analysis System.
 import os
 import urllib.request
 import tempfile
+import numpy as np
 import streamlit as st
 import mediapipe as mp
 
 from gait_engine import extract_poses, build_time_series, compute_all_features, interpret
-from gait_plots import build_all_figures
+from gait_plots import (
+    build_all_figures,
+    normal_hip_reference,
+    normal_knee_reference,
+    normal_ankle_reference,
+)
 
 # ──────────────────────────────────────────────
 # PAGE CONFIG
@@ -297,6 +303,82 @@ def _render_metrics(features: dict) -> None:
     )
 
 
+_REFERENCE_FUNCS = {
+    "HIP":   normal_hip_reference,
+    "KNEE":  normal_knee_reference,
+    "ANKLE": normal_ankle_reference,
+}
+
+
+def _phase_label(pct: int) -> str:
+    """Map a 0-100 cycle percent to its standard gait-phase name."""
+    if pct < 15:  return "early stance"
+    if pct < 35:  return "mid-stance"
+    if pct < 50:  return "late stance"
+    if pct < 65:  return "pre-swing"
+    if pct < 80:  return "mid-swing"
+    return "late swing"
+
+
+def _render_cycle_observations(features: dict) -> None:
+    """Auto-generated kinematic observations rendered below the cycle figure.
+
+    For each joint with valid mean curves on both legs, computes:
+      - per-leg ROM (max - min of the mean curve)
+      - per-leg peak timing (argmax of the mean curve, with phase label)
+      - per-leg amplitude ratio vs the reference ROM (max - min of the
+        reference mean curve from gait_plots.normal_*_reference())
+
+    Renders one consolidated 'Clinical observations' section with a
+    sub-header per joint. Bullets present both legs together so
+    asymmetry is visible without a separate row.
+    """
+    gc = features.get("gait_cycle_curves") or {}
+    if not gc:
+        return
+
+    blocks = []
+    for joint_label, key in (("HIP", "hip"), ("KNEE", "knee"), ("ANKLE", "ankle")):
+        joint = gc.get(key, {}) or {}
+        L = joint.get("left",  {}) or {}
+        R = joint.get("right", {}) or {}
+        mL = L.get("mean")
+        mR = R.get("mean")
+        if mL is None or mR is None:
+            continue
+
+        ref_mean, _ = _REFERENCE_FUNCS[joint_label]()
+        ref_rom  = float(np.max(ref_mean) - np.min(ref_mean))
+        ref_peak = int(np.argmax(ref_mean))
+
+        L_rom   = float(np.nanmax(mL) - np.nanmin(mL))
+        R_rom   = float(np.nanmax(mR) - np.nanmin(mR))
+        L_peak  = int(np.nanargmax(mL))
+        R_peak  = int(np.nanargmax(mR))
+        L_ratio = (L_rom / ref_rom * 100.0) if ref_rom > 0 else float("nan")
+        R_ratio = (R_rom / ref_rom * 100.0) if ref_rom > 0 else float("nan")
+
+        blocks.append(
+            f"**{joint_label}**\n\n"
+            f"- ROM: L {L_rom:.0f}°, R {R_rom:.0f}° "
+            f"(reference {ref_rom:.0f}°; L {L_ratio:.0f}%, R {R_ratio:.0f}% of normal)\n"
+            f"- Peak timing: L at {L_peak}% ({_phase_label(L_peak)}), "
+            f"R at {R_peak}% ({_phase_label(R_peak)}) "
+            f"— reference peak at {ref_peak}%"
+        )
+
+    if not blocks:
+        return
+
+    st.markdown("---")
+    st.markdown("**Clinical observations**")
+    st.markdown("\n\n".join(blocks))
+    st.caption(
+        "Auto-generated kinematic observations. See expanders below for "
+        "interpretation guidance."
+    )
+
+
 def _render_cycle_explanations() -> None:
     """Caption + three per-joint expandable sections explaining the cycle chart.
     Renders below the gait-cycle figure. Dual-audience copy (clinician + layperson)."""
@@ -437,6 +519,7 @@ def _render_graphs(features: dict) -> None:
                             f"{R_kept} right cycles kept "
                             f"({R_long} rejected as too long, {R_short} as too short)."
                         )
+                    _render_cycle_observations(features)
                     _render_cycle_explanations()
                 else:
                     st.info(
