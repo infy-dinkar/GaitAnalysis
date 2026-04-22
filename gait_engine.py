@@ -914,10 +914,23 @@ def _compute_gait_cycle_curves(ts: dict, fps: float, n_frames: int,
         ts["right_heel"]["y_px"], fps, return_metadata=True,
     )
 
+    # Capture the duration-filter metadata once per leg. The filter depends
+    # only on heel_strikes + clean_mask (not on the joint signal), so it
+    # produces identical kept_mask across hip/knee/ankle.
+    _, dur_meta_L = extract_cycles(
+        hip_full["left"],  hs_L, clean_mask=clean_mask, return_metadata=True,
+    )
+    _, dur_meta_R = extract_cycles(
+        hip_full["right"], hs_R, clean_mask=clean_mask, return_metadata=True,
+    )
+    kept_mask_L = dur_meta_L["kept_mask"]
+    kept_mask_R = dur_meta_R["kept_mask"]
+
     out: dict = {
-        # underscore-prefixed key so downstream loops over ('hip','knee','ankle')
-        # don't see it.
-        "_strike_rejection": {"left": meta_L, "right": meta_R},
+        # underscore-prefixed keys so downstream loops over ('hip','knee','ankle')
+        # don't see them.
+        "_strike_rejection":       {"left": meta_L,     "right": meta_R},
+        "_cycle_duration_filter":  {"left": dur_meta_L, "right": dur_meta_R},
     }
     for joint, sigL, sigR in (
         ("hip",   hip_full["left"],   hip_full["right"]),
@@ -928,6 +941,12 @@ def _compute_gait_cycle_curves(ts: dict, fps: float, n_frames: int,
         cyc_R = extract_cycles(sigR, hs_R, clean_mask=clean_mask)
         sd_L  = stride_durations(hs_L, clean_mask=clean_mask, signal_length=n_frames)
         sd_R  = stride_durations(hs_R, clean_mask=clean_mask, signal_length=n_frames)
+        # Slice durations to match the cycles that survived extract_cycles'
+        # new duration filter, so filter_cycles' MAD step still K-aligns.
+        if len(sd_L) == len(kept_mask_L):
+            sd_L = sd_L[kept_mask_L]
+        if len(sd_R) == len(kept_mask_R):
+            sd_R = sd_R[kept_mask_R]
         cyc_L, _ = filter_cycles(cyc_L, sd_L)
         cyc_R, _ = filter_cycles(cyc_R, sd_R)
         mL, stL, KL = ensemble_statistics(cyc_L)
@@ -1040,6 +1059,11 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
         # (see detect_heel_strikes' min_amp_ratio in gait_cycle.py).
         "strike_rejection":       gait_cycle_curves.get(
             "_strike_rejection", {"left": {}, "right": {}}
+        ),
+        # Cycle duration-filter rejection counts per leg
+        # (extract_cycles' max_dur_ratio / min_dur_ratio in gait_cycle.py).
+        "cycle_duration_filter":  gait_cycle_curves.get(
+            "_cycle_duration_filter", {"left": {}, "right": {}}
         ),
     }
 

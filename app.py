@@ -414,6 +414,23 @@ def _render_graphs(features: dict) -> None:
                             f"(likely foot-drag events). "
                             f"{L_acc} left strides accepted, {L_rej} rejected."
                         )
+                    # Cycle duration-filter rejection counts
+                    cdf = features.get("cycle_duration_filter") or {}
+                    L_cdf = cdf.get("left",  {}) or {}
+                    R_cdf = cdf.get("right", {}) or {}
+                    L_kept  = L_cdf.get("kept", 0)
+                    L_long  = L_cdf.get("rejected_long", 0)
+                    L_short = L_cdf.get("rejected_short", 0)
+                    R_kept  = R_cdf.get("kept", 0)
+                    R_long  = R_cdf.get("rejected_long", 0)
+                    R_short = R_cdf.get("rejected_short", 0)
+                    if (L_kept + L_long + L_short + R_kept + R_long + R_short) > 0:
+                        st.caption(
+                            f"⏱️ Cycle quality: {L_kept} left cycles kept "
+                            f"({L_long} rejected as too long, {L_short} as too short); "
+                            f"{R_kept} right cycles kept "
+                            f"({R_long} rejected as too long, {R_short} as too short)."
+                        )
                     _render_cycle_explanations()
                 else:
                     st.info(

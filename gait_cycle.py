@@ -176,7 +176,10 @@ def _valid_pair_indices(heel_strikes: np.ndarray, n_signal: int,
 # ──────────────────────────────────────────────
 def extract_cycles(signal: np.ndarray, heel_strikes: np.ndarray,
                    n_points: int = 101,
-                   clean_mask: np.ndarray | None = None) -> np.ndarray:
+                   clean_mask: np.ndarray | None = None,
+                   max_dur_ratio: float = 1.5,
+                   min_dur_ratio: float = 0.7,
+                   return_metadata: bool = False):
     """
     For each consecutive heel-strike pair (hs[k], hs[k+1]), slice the signal
     and resample to exactly n_points via linear interpolation.
@@ -185,27 +188,80 @@ def extract_cycles(signal: np.ndarray, heel_strikes: np.ndarray,
       • pairs shorter than 5 frames
       • pairs whose [hs[k], hs[k+1]) range is not fully inside `clean_mask`
         (only applied when clean_mask is provided)
+      • DURATION VALIDATION (additive on top of clean_mask):
+          duration > max_dur_ratio × median(diff(heel_strikes))   → too long
+          duration < min_dur_ratio × median(diff(heel_strikes))   → too short
+        Median is taken across ALL adjacent heel-strike intervals (robust
+        to a few cross-turn-gap outliers). Catches multi-stride spans that
+        slip through clean_mask when intermediate strikes were missed, and
+        catches double-detection events too close together.
 
-    Returns: 2-D np.ndarray of shape (K, n_points) where K = number of valid
-             cycles. Returns an empty (0, n_points) array if no valid pairs.
+    Returns:
+        np.ndarray of shape (K, n_points), or empty (0, n_points).
+
+        If return_metadata=True, returns (cycles, dict) with:
+            total            — number of clean_mask-passing pairs considered
+            kept             — number of cycles in returned array
+            rejected_long    — duration > max_dur_ratio × median
+            rejected_short   — duration < min_dur_ratio × median
+            median_duration  — frames; np.nan if not computable
+            kept_mask        — bool ndarray of shape (total,); True where
+                               the corresponding pair survived. Same K-order
+                               as `stride_durations(...)`, so callers can
+                               slice `sd[kept_mask]` to stay K-aligned.
     """
+    def _ret(arr, total=0, kept=0, long=0, short=0,
+             median_dur=float("nan"), kept_mask=None):
+        if not return_metadata:
+            return arr
+        if kept_mask is None:
+            kept_mask = np.zeros(0, dtype=bool)
+        return arr, {
+            "total":           int(total),
+            "kept":            int(kept),
+            "rejected_long":   int(long),
+            "rejected_short":  int(short),
+            "median_duration": float(median_dur),
+            "kept_mask":       kept_mask,
+        }
+
     if signal is None or len(signal) == 0 or heel_strikes is None or len(heel_strikes) < 2:
-        return np.empty((0, n_points))
+        return _ret(np.empty((0, n_points)))
 
     n_signal = len(signal)
     valid_ks = _valid_pair_indices(heel_strikes, n_signal, clean_mask=clean_mask)
+    total_pairs = len(valid_ks)
     if not valid_ks:
-        return np.empty((0, n_points))
+        return _ret(np.empty((0, n_points)), total=0)
+
+    # Median stride duration across ALL adjacent intervals — robust enough
+    # that a handful of cross-turn-gap outliers won't poison the threshold.
+    diffs = np.diff(np.asarray(heel_strikes, dtype=int))
+    median_dur = float(np.median(diffs)) if len(diffs) > 0 else float("nan")
 
     tau_star = np.linspace(0, 1, n_points)
     cycles: list[np.ndarray] = []
+    kept_mask = np.zeros(total_pairs, dtype=bool)
+    rejected_long = 0
+    rejected_short = 0
 
-    for k in valid_ks:
+    for i, k in enumerate(valid_ks):
         a, b = int(heel_strikes[k]), int(heel_strikes[k + 1])
+        duration = b - a
+
+        if not np.isnan(median_dur) and median_dur > 0:
+            if duration > max_dur_ratio * median_dur:
+                rejected_long += 1
+                continue
+            if duration < min_dur_ratio * median_dur:
+                rejected_short += 1
+                continue
+
         seg = np.asarray(signal[a:b], dtype=float)
         valid = ~np.isnan(seg)
         if valid.sum() < 2:
             cycles.append(np.full(n_points, np.nan))
+            kept_mask[i] = True
             continue
         tau = np.linspace(0, 1, len(seg))
         if valid.all():
@@ -213,8 +269,18 @@ def extract_cycles(signal: np.ndarray, heel_strikes: np.ndarray,
         else:
             # NaN-aware interpolation: skip NaN samples; np.interp clamps at edges.
             cycles.append(np.interp(tau_star, tau[valid], seg[valid]))
+        kept_mask[i] = True
 
-    return np.array(cycles)
+    arr = np.array(cycles) if cycles else np.empty((0, n_points))
+    return _ret(
+        arr,
+        total=total_pairs,
+        kept=len(cycles),
+        long=rejected_long,
+        short=rejected_short,
+        median_dur=median_dur,
+        kept_mask=kept_mask,
+    )
 
 
 # ──────────────────────────────────────────────
