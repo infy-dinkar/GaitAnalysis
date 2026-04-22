@@ -482,23 +482,97 @@ def _hip_angles_px(ts: dict, pass_segments=None) -> dict:
     return out
 
 
-def _ankle_angles_px(ts: dict, pass_segments=None) -> dict:
+# ──────────────────────────────────────────────
+# Anatomical neutral baseline used as fallback when no static-stance frames
+# are detectable. The MediaPipe ankle landmark sits ~30 px above the floor
+# while the foot_index sits at floor level, so the geometric foot-vs-shank
+# angle at "true neutral standing" is ~80°, not 90°. After the sign-fix
+# (`mag - 90`), neutral therefore lands at ~−9.5° instead of 0°. Subtracting
+# this constant brings neutral back to 0 when no static frames are available.
+# ──────────────────────────────────────────────
+ANKLE_NEUTRAL_OFFSET_DEG = -9.5
+
+
+def _detect_static_baseline(ts: dict, raw_dorsi_left: np.ndarray,
+                            raw_dorsi_right: np.ndarray, fps: float,
+                            min_static_sec: float = 0.5,
+                            vel_thresh_norm: float = 0.002) -> dict | None:
+    """
+    Find frames where the hip midpoint is approximately stationary
+    (|dx/dt| < vel_thresh_norm in normalized x per frame) for at least
+    min_static_sec contiguous seconds. Return the median raw ankle angle
+    over those frames per side — that's the per-subject neutral baseline.
+
+    Returns None when no qualifying static window exists OR when the static
+    frames don't contain valid (non-NaN) angle samples on both sides.
+    """
+    hip_x_norm = (ts["left_hip"]["x"] + ts["right_hip"]["x"]) / 2.0
+    if len(hip_x_norm) < 3:
+        return None
+    vel = np.abs(np.gradient(hip_x_norm))
+    static = vel < vel_thresh_norm
+
+    min_static_frames = max(int(min_static_sec * fps), 3)
+    static_idx: list[int] = []
+    i = 0
+    while i < len(static):
+        if not static[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(static) and static[j]:
+            j += 1
+        if j - i >= min_static_frames:
+            static_idx.extend(range(i, j))
+        i = j
+
+    if len(static_idx) < min_static_frames:
+        return None
+
+    idx_arr = np.asarray(static_idx, dtype=int)
+    L_samples = raw_dorsi_left[idx_arr]
+    R_samples = raw_dorsi_right[idx_arr]
+    L_valid = L_samples[~np.isnan(L_samples)]
+    R_valid = R_samples[~np.isnan(R_samples)]
+    if len(L_valid) == 0 or len(R_valid) == 0:
+        return None
+    return {
+        "left":  float(np.median(L_valid)),
+        "right": float(np.median(R_valid)),
+    }
+
+
+def _ankle_angles_px(ts: dict, pass_segments=None, fps: float = 30.0) -> dict:
     """
     Per-frame ankle dorsiflexion (deg) using PIXEL coords.
-    0° = foot perpendicular to shank (neutral standing).
-    Positive = dorsiflexion (toes up), negative = plantarflexion (toes down).
+    0° = neutral standing (after baseline correction).
+    Positive = dorsiflexion (toes up toward shin),
+    Negative = plantarflexion (toes pointed down).
 
-    Magnitude = 90° − (angle between shank vector knee→ankle and
-                       foot vector ankle→foot_index).
-    Sign convention follows user spec:
+    Two-step computation:
+      1. Raw geometric angle: dorsi_raw = (mag - 90), where
+         mag = angle between shank vector (knee→ankle) and
+                                 foot  vector (ankle→foot_index).
+         The 'mag - 90' (NOT '90 - mag') sign convention is required because
+         MediaPipe coordinates are y-DOWN: a dorsiflexed foot (toe lifted
+         toward shin) puts foot_index ABOVE the ankle in image y, which
+         INCREASES the shank-vs-foot angle past 90°. So 'mag - 90' gives
+         positive values for true dorsiflexion.
+
+      2. Baseline correction: subtract the per-subject neutral offset.
+         Auto-detected from frames where the hip midpoint is stationary
+         for ≥ 0.5 s (subject standing still). Falls back to a fixed
+         anatomical constant (ANKLE_NEUTRAL_OFFSET_DEG ≈ -9.5°) when no
+         static window exists in the video.
+
+    Sign rule (sanity-check, evaluates to +1 for any normally-oriented foot):
         sign = sign(walking_direction * (foot_index_x − heel_x))
-    For a normally-oriented foot (toe forward), sign is +1; the dorsiflexion
-    sense is carried by the magnitude (90 − angle).
     """
     n = len(ts["left_ankle"]["x_px"])
     direction = _direction_per_frame(n, pass_segments)
 
-    out = {}
+    # ── Step 1: raw geometric dorsiflexion angle per side ──────────
+    raw_dorsi: dict = {}
     for side in ("left", "right"):
         kx = ts[f"{side}_knee"]["x_px"];       ky = ts[f"{side}_knee"]["y_px"]
         ax = ts[f"{side}_ankle"]["x_px"];      ay = ts[f"{side}_ankle"]["y_px"]
@@ -526,12 +600,23 @@ def _ankle_angles_px(ts: dict, pass_segments=None) -> dict:
             n2 = math.hypot(f1, f2) + 1e-9
             cos_a = max(-1.0, min(1.0, (s1 * f1 + s2 * f2) / (n1 * n2)))
             mag = math.degrees(math.acos(cos_a))
-            dorsi = 90.0 - mag
+            dorsi = mag - 90.0                         # SIGN-CORRECTED
             d = direction[i] if direction[i] != 0 else 1
             sign = 1 if (d * (fx[i] - hx[i])) >= 0 else -1
             ang[i] = sign * dorsi
-        out[side] = ang
-    return out
+        raw_dorsi[side] = ang
+
+    # ── Step 2: baseline correction ───────────────────────────────
+    baseline = _detect_static_baseline(ts, raw_dorsi["left"],
+                                       raw_dorsi["right"], fps)
+    if baseline is None:
+        baseline = {"left":  ANKLE_NEUTRAL_OFFSET_DEG,
+                    "right": ANKLE_NEUTRAL_OFFSET_DEG}
+
+    return {
+        "left":  raw_dorsi["left"]  - baseline["left"],
+        "right": raw_dorsi["right"] - baseline["right"],
+    }
 
 
 def _torso_lean_arr(ts: dict, pass_segments=None) -> np.ndarray:
@@ -825,7 +910,7 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
     strikes    = _detect_strikes(ts, fps, pass_segments)
     knee_full  = _knee_angles_px(ts)
     hip_full   = _hip_angles_px(ts, pass_segments)
-    ankle_full = _ankle_angles_px(ts, pass_segments)
+    ankle_full = _ankle_angles_px(ts, pass_segments, fps=fps)
     torso_full = _torso_lean_arr(ts, pass_segments)
 
     # 4. TOTAL metrics — every frame.
