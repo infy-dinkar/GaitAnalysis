@@ -313,11 +313,13 @@ def _render_cycle_explanations() -> None:
 
 **The blue and red lines = your left and right hip.** Your lines should stay roughly within the grey band and follow its shape — a smooth wave pattern.
 
-**What deviations mean:**
-- **Lines stay flat or have small range (under 25°):** reduced hip mobility. Common with tight hip flexors, sedentary lifestyle, hip arthritis, or Parkinsonian gait.
-- **Minimum doesn't go below 0° (curve stays in positive territory):** the hip is never extending past neutral. This limits stride length and often shows up as shorter steps.
-- **Blue and red curves separated vertically:** one hip has more or less range than the other — often a sign of favoring one side due to pain, weakness, or a previous injury.
-- **Curves offset in time (shifted left or right from the grey band):** unusual timing of hip motion relative to the stride. Can indicate pathological stride patterns.
+**Interpreting your curve:**
+- **Range of motion narrower than ~25°** indicates the hip is moving through a smaller envelope than the reference band.
+- **Curve minimum stays above 0°** indicates the hip does not pass into extension during stance — a kinematic pattern associated with reduced effective stride length.
+- **Vertical separation between blue and red** indicates left and right hips are operating in different parts of the range.
+- **Horizontal shift relative to the reference band** indicates the timing of peak flexion/extension does not align with the typical 0%/50% pattern.
+
+*These observations are descriptive only. Clinical interpretation should be made by a qualified professional considering the full clinical picture, medical history, and other assessments.*
 """)
 
     with st.expander("Understanding the KNEE graph"):
@@ -331,11 +333,13 @@ def _render_cycle_explanations() -> None:
 
 **The blue and red lines = your left and right knee.** You should see two clear humps on each line, matching the shape of the grey band.
 
-**What deviations mean:**
-- **Missing first peak (flat curve during loading, 0–20%):** stiff-knee landing. Common after knee injury, surgery, or with quadriceps weakness. Over time this causes joint pain because impact goes straight into the joint instead of being absorbed.
-- **Low swing peak (second hump under 50°):** foot isn't clearing the ground well — a trip-and-fall risk. Often associated with weakness or neurological conditions.
-- **Very different blue vs red:** you're favoring one leg. Common during recovery from injury or with unilateral pain.
-- **Wider shaded band around your line:** your knee motion varies a lot from step to step. May indicate instability, fatigue, or poor neuromuscular control.
+**Interpreting your curve:**
+- **Absent or reduced loading peak (the small bump at 0–20%)** indicates limited knee flexion during weight acceptance — sometimes described in the literature as a "stiff-knee" loading pattern.
+- **Reduced swing peak (the larger hump near ~70%, below ~50°)** indicates the knee is bending less than typical to lift the foot during the swing phase.
+- **Asymmetry between blue and red** indicates left and right knees are following different flexion profiles across the cycle.
+- **A wider shaded band around a curve** indicates greater stride-to-stride variability in that knee's motion.
+
+*These observations are descriptive only. Clinical interpretation should be made by a qualified professional considering the full clinical picture, medical history, and other assessments.*
 """)
 
     with st.expander("Understanding the ANKLE graph"):
@@ -352,11 +356,13 @@ def _render_cycle_explanations() -> None:
 
 **The blue and red lines = your left and right ankle.**
 
-**What deviations mean:**
-- **Weak push-off (minimum less negative than −10°):** reduced calf strength or Achilles tendon issues. Usually shows up as slower walking speed and shorter strides.
-- **Ankle doesn't return to neutral during swing (stays negative past 70%):** toe drag risk. Can indicate foot drop, often from nerve involvement.
-- **Flat curve with little variation:** generally reduced ankle mobility. Common with stiff ankles, older age, or after ankle injury.
-- **Very different left vs right:** asymmetric push-off, a common compensation for pain or weakness on one side.
+**Interpreting your curve:**
+- **Reduced plantarflexion at push-off (minimum stays above ~−10°)** indicates the ankle is generating less downward pointing during the propulsion phase than the reference.
+- **Ankle does not return to neutral during swing (stays negative past ~70%)** indicates limited dorsiflexion recovery as the foot is brought forward.
+- **Compressed overall range** indicates a smaller-than-typical sweep between dorsiflexion and plantarflexion across the cycle.
+- **Asymmetry between blue and red** indicates left and right ankles are following different profiles across the cycle.
+
+*These observations are descriptive only. Clinical interpretation should be made by a qualified professional considering the full clinical picture, medical history, and other assessments.*
 """)
 
 
