@@ -318,11 +318,119 @@ def plot_ankle_trajectory(features: dict, fps: float):
 
 
 # ══════════════════════════════════════════════
+# PLOT 7 — GAIT-CYCLE-NORMALIZED JOINT ANGLES (CLINICAL OUTPUT)
+# ══════════════════════════════════════════════
+_GAIT_CYCLE_ROWS = (
+    # (title,         ylim)
+    ("HIP ANGLE",    (-20, 40)),
+    ("KNEE ANGLE",   (-5,  85)),
+    ("ANKLE ANGLE",  (-25, 20)),
+)
+
+
+def plot_gait_cycle_curves(
+    hip_L_mean,   hip_L_std,   hip_R_mean,   hip_R_std,   K_hip_L,   K_hip_R,
+    knee_L_mean,  knee_L_std,  knee_R_mean,  knee_R_std,  K_knee_L,  K_knee_R,
+    ankle_L_mean, ankle_L_std, ankle_R_mean, ankle_R_std, K_ankle_L, K_ankle_R,
+):
+    """
+    Three-row figure (hip, knee, ankle) showing mean ± 1 SD curves across
+    the normalized gait cycle (0–100%).
+
+    Styling matches the rest of the dark-theme charts (PALETTE constants).
+    Stance phase 0–60% lightly shaded; toe-off marker at 60%; 0° baseline.
+    Y-axis limits per spec: hip [-20, 40], knee [-5, 85], ankle [-25, 20].
+    """
+    fig, axes = plt.subplots(
+        3, 1, figsize=(12, 10), facecolor=PALETTE["bg"], sharex=True
+    )
+
+    rows_data = [
+        ("HIP ANGLE",   hip_L_mean,   hip_L_std,   K_hip_L,
+                        hip_R_mean,   hip_R_std,   K_hip_R,   (-20, 40)),
+        ("KNEE ANGLE",  knee_L_mean,  knee_L_std,  K_knee_L,
+                        knee_R_mean,  knee_R_std,  K_knee_R,  (-5,  85)),
+        ("ANKLE ANGLE", ankle_L_mean, ankle_L_std, K_ankle_L,
+                        ankle_R_mean, ankle_R_std, K_ankle_R, (-25, 20)),
+    ]
+
+    x = np.linspace(0, 100, 101)
+
+    for ax, (title, mL, sL, KL, mR, sR, KR, ylim) in zip(axes, rows_data):
+        ax.set_facecolor(PALETTE["panel"])
+        for spine in ax.spines.values():
+            spine.set_edgecolor(PALETTE["border"])
+        ax.tick_params(colors=PALETTE["text"], labelsize=9)
+        ax.xaxis.label.set_color(PALETTE["text"])
+        ax.yaxis.label.set_color(PALETTE["text"])
+        ax.grid(color=PALETTE["grid"], linestyle="--", linewidth=0.6, alpha=0.8)
+
+        # Stance phase 0-60%, swing 60-100% (unshaded)
+        ax.axvspan(0, 60, color=PALETTE["normal"], alpha=0.08, label="Stance (0–60%)")
+        ax.axvline(60, color=PALETTE["muted"], linestyle="--", linewidth=1.0, alpha=0.7)
+        ax.axhline(0,  color=PALETTE["muted"], linestyle="-",  linewidth=0.6, alpha=0.5)
+
+        # LEFT leg (blue)
+        if mL is not None and KL > 0 and len(mL) == len(x):
+            ax.plot(x, mL, color=PALETTE["left"], linewidth=2.0,
+                    label=f"Left (K={KL})")
+            if sL is not None:
+                ax.fill_between(x, mL - sL, mL + sL,
+                                color=PALETTE["left"], alpha=0.20, linewidth=0)
+
+        # RIGHT leg (red)
+        if mR is not None and KR > 0 and len(mR) == len(x):
+            ax.plot(x, mR, color=PALETTE["right"], linewidth=2.0,
+                    label=f"Right (K={KR})")
+            if sR is not None:
+                ax.fill_between(x, mR - sR, mR + sR,
+                                color=PALETTE["right"], alpha=0.20, linewidth=0)
+
+        ax.set_ylim(ylim)
+        ax.set_xlim(0, 100)
+        ax.set_ylabel("Angle (°)", fontsize=10, color=PALETTE["text"])
+        ax.set_title(f"{title} — mean ± 1 SD",
+                     color=PALETTE["text"], fontsize=11, pad=8)
+        ax.legend(facecolor=PALETTE["panel"], labelcolor=PALETTE["text"],
+                  fontsize=8, framealpha=0.6, loc="upper right")
+
+    axes[-1].set_xlabel("Gait Cycle (%)", fontsize=10, color=PALETTE["text"])
+    fig.suptitle("Gait-Cycle-Normalized Joint Angles",
+                 color=PALETTE["text"], fontsize=13, fontweight="bold", y=0.995)
+    fig.tight_layout()
+    return fig
+
+
+# ══════════════════════════════════════════════
 # CONVENIENCE BUILDER
 # ══════════════════════════════════════════════
+def _build_cycle_figure_if_ready(features: dict):
+    """Return a gait-cycle figure when at least 3 cycles per knee leg are
+    available; otherwise return None so the calling tab can show an info box."""
+    gc = features.get("gait_cycle_curves")
+    if not gc:
+        return None
+    knee = gc.get("knee", {})
+    KL = knee.get("left", {}).get("K", 0)
+    KR = knee.get("right", {}).get("K", 0)
+    if min(KL, KR) < 3:
+        return None
+    return plot_gait_cycle_curves(
+        gc["hip"]["left"]["mean"],   gc["hip"]["left"]["std"],
+        gc["hip"]["right"]["mean"],  gc["hip"]["right"]["std"],
+        gc["hip"]["left"]["K"],      gc["hip"]["right"]["K"],
+        gc["knee"]["left"]["mean"],  gc["knee"]["left"]["std"],
+        gc["knee"]["right"]["mean"], gc["knee"]["right"]["std"],
+        gc["knee"]["left"]["K"],     gc["knee"]["right"]["K"],
+        gc["ankle"]["left"]["mean"], gc["ankle"]["left"]["std"],
+        gc["ankle"]["right"]["mean"],gc["ankle"]["right"]["std"],
+        gc["ankle"]["left"]["K"],    gc["ankle"]["right"]["K"],
+    )
+
+
 def build_all_figures(features: dict) -> dict:
     fps = features.get("fps", 30.0)
-    return {
+    figs = {
         "knee":   plot_knee_angles(features, fps),
         "heel":   plot_heel_trajectory(features, fps),
         "step":   plot_step_length(features),
@@ -330,3 +438,7 @@ def build_all_figures(features: dict) -> dict:
         "torso":  plot_torso_lean(features, fps),
         "ankle":  plot_ankle_trajectory(features, fps),
     }
+    cycle_fig = _build_cycle_figure_if_ready(features)
+    if cycle_fig is not None:
+        figs["cycle"] = cycle_fig
+    return figs
