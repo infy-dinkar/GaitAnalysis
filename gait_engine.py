@@ -158,6 +158,9 @@ def build_time_series(raw: dict) -> dict:
         frames = raw[name]
         xs = np.array([f[0] if f is not None else np.nan for f in frames], dtype=float)
         ys = np.array([f[1] if f is not None else np.nan for f in frames], dtype=float)
+        # NEW: per-frame visibility (0.0 when landmark was missing in raw extract).
+        # Stored un-smoothed so downstream code can gate angle computation on it.
+        vs = np.array([f[2] if f is not None else 0.0 for f in frames], dtype=float)
 
         xs = _interp_nans(xs); ys = _interp_nans(ys)
         xs = _remove_outliers(xs); ys = _remove_outliers(ys)
@@ -168,6 +171,7 @@ def build_time_series(raw: dict) -> dict:
             "y":    ys,
             "x_px": xs * fw,
             "y_px": ys * fh,
+            "vis":  vs,
         }
     ts["_frame_w"] = fw
     ts["_frame_h"] = fh
@@ -393,6 +397,133 @@ def _knee_angles_px(ts: dict) -> dict:
             ang[i] = 180.0 - interior
         angles[side] = ang
     return angles
+
+
+# ──────────────────────────────────────────────
+# Visibility gate for joint-angle computation.
+# Frames where any required landmark has visibility below this threshold
+# get np.nan, so cycle extraction can drop incomplete cycles cleanly.
+# ──────────────────────────────────────────────
+ANGLE_VIS_GATE = 0.5
+
+
+def _direction_per_frame(n: int, pass_segments) -> np.ndarray:
+    """+1 inside an L→R pass, −1 inside R→L; +1 fallback outside any pass."""
+    d = np.ones(n, dtype=int)
+    if pass_segments:
+        for p in pass_segments:
+            d[p["start"]:p["end"]] = p["direction"]
+    return d
+
+
+def _hip_angles_px(ts: dict, pass_segments=None) -> dict:
+    """
+    Per-frame hip flexion (deg) using PIXEL coords.
+    Sign convention: knee ahead of hip in walking direction → POSITIVE (flexion).
+                     knee behind hip in walking direction → NEGATIVE (extension).
+
+    Magnitude = angle between trunk vector (hip_mid → shoulder_mid, reversed
+    so it points DOWN the body) and the per-leg thigh vector (hip → knee).
+    Trunk midline is more stable than a single shoulder-hip line.
+
+    Frames whose required landmarks have visibility < ANGLE_VIS_GATE return
+    np.nan so cycle extraction can drop them.
+    """
+    n = len(ts["left_hip"]["x_px"])
+    direction = _direction_per_frame(n, pass_segments)
+
+    # trunk vector: hip_mid - shoulder_mid (points down the spine)
+    sh_x = (ts["left_shoulder"]["x_px"] + ts["right_shoulder"]["x_px"]) / 2.0
+    sh_y = (ts["left_shoulder"]["y_px"] + ts["right_shoulder"]["y_px"]) / 2.0
+    hp_x = (ts["left_hip"]["x_px"]      + ts["right_hip"]["x_px"])      / 2.0
+    hp_y = (ts["left_hip"]["y_px"]      + ts["right_hip"]["y_px"])      / 2.0
+    trunk_dx = hp_x - sh_x
+    trunk_dy = hp_y - sh_y
+
+    # visibility used by both sides
+    common_vis = np.minimum.reduce([
+        ts["left_shoulder"]["vis"], ts["right_shoulder"]["vis"],
+        ts["left_hip"]["vis"],      ts["right_hip"]["vis"],
+    ])
+
+    out = {}
+    for side in ("left", "right"):
+        kx = ts[f"{side}_knee"]["x_px"]; ky = ts[f"{side}_knee"]["y_px"]
+        # use side-specific hip for the thigh vector
+        side_hx = ts[f"{side}_hip"]["x_px"]; side_hy = ts[f"{side}_hip"]["y_px"]
+        thigh_dx = kx - side_hx
+        thigh_dy = ky - side_hy
+
+        vis = np.minimum(common_vis, ts[f"{side}_knee"]["vis"])
+
+        ang = np.zeros(n)
+        for i in range(n):
+            if vis[i] < ANGLE_VIS_GATE:
+                ang[i] = np.nan
+                continue
+            t1 = trunk_dx[i]; t2 = trunk_dy[i]
+            f1 = thigh_dx[i]; f2 = thigh_dy[i]
+            n1 = math.hypot(t1, t2) + 1e-9
+            n2 = math.hypot(f1, f2) + 1e-9
+            cos_a = max(-1.0, min(1.0, (t1 * f1 + t2 * f2) / (n1 * n2)))
+            mag = math.degrees(math.acos(cos_a))
+            d = direction[i] if direction[i] != 0 else 1
+            sign = 1 if (d * (kx[i] - side_hx[i])) >= 0 else -1
+            ang[i] = sign * mag
+        out[side] = ang
+    return out
+
+
+def _ankle_angles_px(ts: dict, pass_segments=None) -> dict:
+    """
+    Per-frame ankle dorsiflexion (deg) using PIXEL coords.
+    0° = foot perpendicular to shank (neutral standing).
+    Positive = dorsiflexion (toes up), negative = plantarflexion (toes down).
+
+    Magnitude = 90° − (angle between shank vector knee→ankle and
+                       foot vector ankle→foot_index).
+    Sign convention follows user spec:
+        sign = sign(walking_direction * (foot_index_x − heel_x))
+    For a normally-oriented foot (toe forward), sign is +1; the dorsiflexion
+    sense is carried by the magnitude (90 − angle).
+    """
+    n = len(ts["left_ankle"]["x_px"])
+    direction = _direction_per_frame(n, pass_segments)
+
+    out = {}
+    for side in ("left", "right"):
+        kx = ts[f"{side}_knee"]["x_px"];       ky = ts[f"{side}_knee"]["y_px"]
+        ax = ts[f"{side}_ankle"]["x_px"];      ay = ts[f"{side}_ankle"]["y_px"]
+        fx = ts[f"{side}_foot_index"]["x_px"]; fy = ts[f"{side}_foot_index"]["y_px"]
+        hx = ts[f"{side}_heel"]["x_px"]
+
+        vis = np.minimum.reduce([
+            ts[f"{side}_knee"]["vis"],
+            ts[f"{side}_ankle"]["vis"],
+            ts[f"{side}_foot_index"]["vis"],
+            ts[f"{side}_heel"]["vis"],
+        ])
+
+        shank_dx = ax - kx; shank_dy = ay - ky
+        foot_dx  = fx - ax; foot_dy  = fy - ay
+
+        ang = np.zeros(n)
+        for i in range(n):
+            if vis[i] < ANGLE_VIS_GATE:
+                ang[i] = np.nan
+                continue
+            s1, s2 = shank_dx[i], shank_dy[i]
+            f1, f2 = foot_dx[i],  foot_dy[i]
+            n1 = math.hypot(s1, s2) + 1e-9
+            n2 = math.hypot(f1, f2) + 1e-9
+            cos_a = max(-1.0, min(1.0, (s1 * f1 + s2 * f2) / (n1 * n2)))
+            mag = math.degrees(math.acos(cos_a))
+            dorsi = 90.0 - mag
+            d = direction[i] if direction[i] != 0 else 1
+            sign = 1 if (d * (fx[i] - hx[i])) >= 0 else -1
+            ang[i] = sign * dorsi
+        out[side] = ang
+    return out
 
 
 def _torso_lean_arr(ts: dict, pass_segments=None) -> np.ndarray:
