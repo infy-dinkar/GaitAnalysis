@@ -537,8 +537,9 @@ def _detect_static_baseline(ts: dict, raw_dorsi_left: np.ndarray,
     if len(L_valid) == 0 or len(R_valid) == 0:
         return None
     return {
-        "left":  float(np.median(L_valid)),
-        "right": float(np.median(R_valid)),
+        "left":     float(np.median(L_valid)),
+        "right":    float(np.median(R_valid)),
+        "n_frames": int(len(static_idx)),
     }
 
 
@@ -606,16 +607,41 @@ def _ankle_angles_px(ts: dict, pass_segments=None, fps: float = 30.0) -> dict:
             ang[i] = sign * dorsi
         raw_dorsi[side] = ang
 
-    # ── Step 2: baseline correction ───────────────────────────────
+    # ── Step 2: baseline correction (PER LEG) ─────────────────────
+    # Try the static-stance auto-detect first; it gives a clinically clean
+    # baseline when the subject pauses anywhere in the video.
     baseline = _detect_static_baseline(ts, raw_dorsi["left"],
                                        raw_dorsi["right"], fps)
-    if baseline is None:
-        baseline = {"left":  ANKLE_NEUTRAL_OFFSET_DEG,
-                    "right": ANKLE_NEUTRAL_OFFSET_DEG}
+    if baseline is not None:
+        baseline_L  = baseline["left"]
+        baseline_R  = baseline["right"]
+        n_baseline  = baseline["n_frames"]
+        method      = "static_detected"
+    else:
+        # PER-LEG running-median fallback. The previous implementation applied
+        # a single global constant to BOTH legs, which couldn't compensate for
+        # per-side anatomical/jitter differences (one leg closer to the camera,
+        # different MediaPipe detection noise per side, etc.) and left the two
+        # legs offset from each other by tens of degrees on real video.
+        # nanmedian over the full signal is dominated by stance/swing samples
+        # (which spend most of the cycle near anatomical neutral), giving a
+        # robust per-leg baseline even with no static window in the clip.
+        L_arr = raw_dorsi["left"]
+        R_arr = raw_dorsi["right"]
+        baseline_L = float(np.nanmedian(L_arr)) if not np.all(np.isnan(L_arr)) else 0.0
+        baseline_R = float(np.nanmedian(R_arr)) if not np.all(np.isnan(R_arr)) else 0.0
+        n_baseline = 0
+        method     = "running_median_fallback"
 
     return {
-        "left":  raw_dorsi["left"]  - baseline["left"],
-        "right": raw_dorsi["right"] - baseline["right"],
+        "left":              raw_dorsi["left"]  - baseline_L,
+        "right":             raw_dorsi["right"] - baseline_R,
+        # Metadata (underscore-prefixed → ignored by downstream consumers
+        # that iterate ('left', 'right') only).
+        "_baseline_method":  method,
+        "_baseline_left":    baseline_L,
+        "_baseline_right":   baseline_R,
+        "_baseline_n_frames": n_baseline,
     }
 
 
@@ -968,6 +994,12 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
         "meters_per_pixel":       mpp,
         "user_height_cm":         user_height_cm,
         "gait_cycle_curves":      gait_cycle_curves,
+        "ankle_baseline":         {
+            "method":           ankle_full.get("_baseline_method", "unknown"),
+            "offset_deg_left":  float(ankle_full.get("_baseline_left",  0.0)),
+            "offset_deg_right": float(ankle_full.get("_baseline_right", 0.0)),
+            "n_frames":         int(ankle_full.get("_baseline_n_frames", 0)),
+        },
     }
 
 

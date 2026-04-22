@@ -546,6 +546,21 @@ if uploaded is not None:
                 f"Distances will be reported in pixels."
             )
 
+        # Ankle baseline diagnostic — surfaces per-leg correction so it's
+        # auditable. Static-detected = subject paused somewhere; running-median
+        # = no static frames found, so we used each leg's own median over the
+        # full clip as the per-side neutral.
+        ab = features.get("ankle_baseline") or {}
+        if ab:
+            st.caption(
+                f"🦶 Ankle baseline correction: "
+                f"L = {ab['offset_deg_left']:+.1f}°, "
+                f"R = {ab['offset_deg_right']:+.1f}°  "
+                f"({ab['method']}"
+                + (f", n = {ab['n_frames']} frames" if ab["n_frames"] > 0 else "")
+                + ")"
+            )
+
         st.markdown("---")
 
         # ── Section 3: Metrics ─────────────────
