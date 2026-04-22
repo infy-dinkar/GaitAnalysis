@@ -11,6 +11,8 @@ After the engine rewrite:
   • Normal-range bands match adult-gait literature targets supplied by the user.
 """
 
+import math
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -465,7 +467,30 @@ def plot_gait_cycle_curves(
             ax.plot(x, mR, color=PALETTE["right"], linewidth=2.0,
                     label=f"Right (K={KR})", zorder=3)
 
-        ax.set_ylim(ylim)
+        # Dynamic y-axis range so neither subject curves nor normal band
+        # ever clip — fits the union of (subject mean ± std) and
+        # (normal mean ± sd), padded by 5° and snapped to 5° gridlines.
+        all_vals: list[float] = []
+        all_vals.extend((ref_mean - ref_sd).tolist())
+        all_vals.extend((ref_mean + ref_sd).tolist())
+        for m, s, K in ((mL, sL, KL), (mR, sR, KR)):
+            if m is None or K <= 0 or len(m) != len(x):
+                continue
+            if s is not None:
+                all_vals.extend((m - s).tolist())
+                all_vals.extend((m + s).tolist())
+            else:
+                all_vals.extend(m.tolist())
+        all_vals_arr = np.asarray(
+            [v for v in all_vals if not np.isnan(v) and np.isfinite(v)]
+        )
+        if all_vals_arr.size > 0:
+            ymin = math.floor(all_vals_arr.min() / 5.0) * 5 - 5
+            ymax = math.ceil( all_vals_arr.max() / 5.0) * 5 + 5
+        else:
+            ymin, ymax = ylim                         # spec defaults as fallback
+
+        ax.set_ylim(ymin, ymax)
         ax.set_xlim(0, 100)
         ax.set_ylabel("Angle (°)", fontsize=10, color=PALETTE["text"])
         ax.set_title(f"{title} — mean ± 1 SD",
