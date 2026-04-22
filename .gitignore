@@ -25,6 +25,6 @@ Thumbs.db
 
 # Local diagnostic / smoke-test scripts and their output PNGs
 # (these are kept locally for re-running tests but never committed)
-_diag_*.py
+*_diag*.py
 _smoke_*.py
 _*.png
