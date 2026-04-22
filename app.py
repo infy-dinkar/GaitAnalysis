@@ -275,7 +275,7 @@ def _render_metrics(features: dict) -> None:
 
     # ── Total ────────────────────────────────────────────
     st.markdown(
-        '<div class="section-title">📊 Total Metrics '
+        '<div class="section-title">Total Metrics '
         '<span style="font-size:0.75rem;color:#6E7681;font-weight:400;">'
         '— entire video (informational; includes turns / accel / decel)'
         '</span></div>',
@@ -309,7 +309,7 @@ def _render_metrics(features: dict) -> None:
 
     st.markdown(
         f"<p style='color:#6E7681;font-size:0.82rem;margin-top:0.8rem;'>"
-        f"🧭 Walking direction: <b style='color:#C9D1D9'>{direction}</b></p>",
+        f" Walking direction: <b style='color:#C9D1D9'>{direction}</b></p>",
         unsafe_allow_html=True,
     )
 
@@ -461,7 +461,7 @@ def _render_cycle_explanations() -> None:
 
 def _render_graphs(features: dict) -> None:
     """Render plot tabs (6 existing + 1 new gait-cycle tab)."""
-    st.markdown('<div class="section-title">📈 Analysis Graphs</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title"> Analysis Graphs</div>', unsafe_allow_html=True)
 
     figs = build_all_figures(features)
 
@@ -508,7 +508,7 @@ def _render_graphs(features: dict) -> None:
                     R_acc, R_rej = R_meta.get("accepted", 0), R_meta.get("rejected", 0)
                     if (L_acc + L_rej + R_acc + R_rej) > 0:
                         st.caption(
-                            f"🦶 Cycle detection: {R_acc} right strides accepted, "
+                            f" Cycle detection: {R_acc} right strides accepted, "
                             f"{R_rej} rejected due to low heel-clearance amplitude "
                             f"(likely foot-drag events). "
                             f"{L_acc} left strides accepted, {L_rej} rejected."
@@ -525,7 +525,7 @@ def _render_graphs(features: dict) -> None:
                     R_short = R_cdf.get("rejected_short", 0)
                     if (L_kept + L_long + L_short + R_kept + R_long + R_short) > 0:
                         st.caption(
-                            f"⏱️ Cycle quality: {L_kept} left cycles kept "
+                            f" Cycle quality: {L_kept} left cycles kept "
                             f"({L_long} rejected as too long, {L_short} as too short); "
                             f"{R_kept} right cycles kept "
                             f"({R_long} rejected as too long, {R_short} as too short)."
@@ -585,7 +585,7 @@ st.markdown("""
 height_col = st.columns([1, 3])[0]
 with height_col:
     user_height_cm = st.number_input(
-        "📏 Your height (cm) — used for step-length calibration",
+        " Your height (cm) — used for step-length calibration",
         min_value=100, max_value=220,
         value=DEFAULT_HEIGHT_CM, step=1,
         help="2D video has no absolute scale, so step length is calibrated from "
@@ -631,7 +631,7 @@ if uploaded is not None:
         # Stage 1 — Extract
         raw, fps, total_frames = extract_poses(tmp_path, pose_options, _progress_cb)
 
-        progress_bar.progress(0.82, text="🔧 Preprocessing time series…")
+        progress_bar.progress(0.82, text=" Preprocessing time series…")
         status_text.markdown("*Smoothing & interpolating landmark trajectories…*")
 
         # Stage 2 — Preprocess
@@ -662,7 +662,7 @@ if uploaded is not None:
         frames_used = features.get("frames_used", 0)
         if mpp:
             st.caption(
-                f"🔬 Calibration: {mpp*1000:.3f} mm/px  ·  "
+                f" Calibration: {mpp*1000:.3f} mm/px  ·  "
                 f"{npasses} valid pass{'es' if npasses != 1 else ''}  ·  "
                 f"{frames_used}/{total_frames} frames used  ·  "
                 f"height = {user_height_cm} cm"
@@ -670,7 +670,7 @@ if uploaded is not None:
             )
         else:
             st.caption(
-                f"⚠️ Scale calibration failed (no clear stance frames). "
+                f" Scale calibration failed (no clear stance frames). "
                 f"{npasses} valid pass{'es' if npasses != 1 else ''}  ·  "
                 f"{frames_used}/{total_frames} frames used. "
                 f"Distances will be reported in pixels."
@@ -683,7 +683,7 @@ if uploaded is not None:
         ab = features.get("ankle_baseline") or {}
         if ab:
             st.caption(
-                f"🦶 Ankle baseline correction: "
+                f" Ankle baseline correction: "
                 f"L = {ab['offset_deg_left']:+.1f}°, "
                 f"R = {ab['offset_deg_right']:+.1f}°  "
                 f"({ab['method']}"
