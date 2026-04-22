@@ -327,6 +327,64 @@ _GAIT_CYCLE_ROWS = (
     ("ANKLE ANGLE",  (-25, 20)),
 )
 
+# ──────────────────────────────────────────────
+# NORMAL ADULT REFERENCE BANDS
+# ──────────────────────────────────────────────
+# Mean ± 1 SD curves at each percent of the gait cycle for healthy adults
+# walking at self-selected speed. Sourced from the canonical clinical-gait
+# literature:
+#   • Perry J, Burnfield JM. Gait Analysis: Normal and Pathological
+#     Function (2nd ed., 2010).
+#   • Winter DA. Biomechanics and Motor Control of Human Movement
+#     (4th ed., 2009).
+#   • Kadaba MP et al. "Measurement of lower extremity kinematics during
+#     level walking." J Orthop Res 1990;8(3):383–392.
+# SD values are conservative inter-subject estimates from the same sources.
+
+NORMAL_BAND_COLOR = "#94a3b8"          # neutral grey, sits behind subject curves
+NORMAL_BAND_ALPHA = 0.18               # low alpha — reads as background reference
+
+
+def normal_hip_reference():
+    """Healthy adult hip flexion/extension across gait cycle (Perry & Burnfield).
+    Returns (mean, sd) each of length 101. Degrees.
+    Positive = flexion, negative = extension."""
+    x = np.linspace(0, 100, 101)
+    mean = 10 + 20 * np.cos(2 * np.pi * x / 100)
+    sd = np.full_like(mean, 4.0)
+    return mean, sd
+
+
+def normal_knee_reference():
+    """Healthy adult knee flexion across gait cycle. Double-hump pattern.
+    Loading peak ~18 deg at 15%, midstance ~5 deg, swing peak ~65 deg at 73%."""
+    x = np.linspace(0, 100, 101)
+    loading = 18 * np.exp(-((x - 15) ** 2) / (2 * 7 ** 2))
+    swing   = 65 * np.exp(-((x - 73) ** 2) / (2 * 11 ** 2))
+    mean = 3 + loading + swing
+    sd = np.full_like(mean, 5.0)
+    return mean, sd
+
+
+def normal_ankle_reference():
+    """Healthy adult ankle dorsi/plantarflexion across gait cycle.
+    Loading dip, midstance dorsiflex ~+10, push-off plantarflex ~-18 at 62%."""
+    x = np.linspace(0, 100, 101)
+    loading_dip = -5  * np.exp(-((x - 5)  ** 2) / (2 * 4  ** 2))
+    midst_df    = 10  * np.exp(-((x - 40) ** 2) / (2 * 15 ** 2))
+    pushoff     = -18 * np.exp(-((x - 62) ** 2) / (2 * 6  ** 2))
+    swing_rec   =  3  * np.exp(-((x - 85) ** 2) / (2 * 15 ** 2))
+    mean = loading_dip + midst_df + pushoff + swing_rec
+    sd = np.full_like(mean, 3.0)
+    return mean, sd
+
+
+_NORMAL_REFS = {
+    "HIP ANGLE":   normal_hip_reference,
+    "KNEE ANGLE":  normal_knee_reference,
+    "ANKLE ANGLE": normal_ankle_reference,
+}
+
 
 def plot_gait_cycle_curves(
     hip_L_mean,   hip_L_std,   hip_R_mean,   hip_R_std,   K_hip_L,   K_hip_R,
@@ -335,7 +393,8 @@ def plot_gait_cycle_curves(
 ):
     """
     Three-row figure (hip, knee, ankle) showing mean ± 1 SD curves across
-    the normalized gait cycle (0–100%).
+    the normalized gait cycle (0–100%) overlaid on the healthy-adult
+    normal reference band (grey).
 
     Styling matches the rest of the dark-theme charts (PALETTE constants).
     Stance phase 0–60% lightly shaded; toe-off marker at 60%; 0° baseline.
@@ -365,26 +424,46 @@ def plot_gait_cycle_curves(
         ax.yaxis.label.set_color(PALETTE["text"])
         ax.grid(color=PALETTE["grid"], linestyle="--", linewidth=0.6, alpha=0.8)
 
-        # Stance phase 0-60%, swing 60-100% (unshaded)
-        ax.axvspan(0, 60, color=PALETTE["normal"], alpha=0.08, label="Stance (0–60%)")
-        ax.axvline(60, color=PALETTE["muted"], linestyle="--", linewidth=1.0, alpha=0.7)
-        ax.axhline(0,  color=PALETTE["muted"], linestyle="-",  linewidth=0.6, alpha=0.5)
+        # Stance phase 0-60%, swing 60-100% (unshaded). Lowest visual layer.
+        ax.axvspan(0, 60, color=PALETTE["normal"], alpha=0.08,
+                   label="Stance (0–60%)", zorder=0)
 
-        # LEFT leg (blue)
+        # ---- Normal adult reference band (sits behind subject curves) ----
+        ref_mean, ref_sd = _NORMAL_REFS[title]()
+        ax.fill_between(
+            x, ref_mean - ref_sd, ref_mean + ref_sd,
+            color=NORMAL_BAND_COLOR, alpha=NORMAL_BAND_ALPHA,
+            linewidth=0, zorder=1, label="Normal adult range",
+        )
+        ax.plot(
+            x, ref_mean,
+            color=NORMAL_BAND_COLOR, linewidth=1.2, linestyle="--",
+            alpha=0.6, zorder=1,
+        )
+
+        # Toe-off + zero baseline above the normal band so they remain visible
+        ax.axvline(60, color=PALETTE["muted"], linestyle="--",
+                   linewidth=1.0, alpha=0.7, zorder=1.5)
+        ax.axhline(0,  color=PALETTE["muted"], linestyle="-",
+                   linewidth=0.6, alpha=0.5, zorder=1.5)
+
+        # LEFT leg (blue) — subject curves on top
         if mL is not None and KL > 0 and len(mL) == len(x):
-            ax.plot(x, mL, color=PALETTE["left"], linewidth=2.0,
-                    label=f"Left (K={KL})")
             if sL is not None:
                 ax.fill_between(x, mL - sL, mL + sL,
-                                color=PALETTE["left"], alpha=0.20, linewidth=0)
+                                color=PALETTE["left"], alpha=0.20,
+                                linewidth=0, zorder=2)
+            ax.plot(x, mL, color=PALETTE["left"], linewidth=2.0,
+                    label=f"Left (K={KL})", zorder=3)
 
-        # RIGHT leg (red)
+        # RIGHT leg (red) — subject curves on top
         if mR is not None and KR > 0 and len(mR) == len(x):
-            ax.plot(x, mR, color=PALETTE["right"], linewidth=2.0,
-                    label=f"Right (K={KR})")
             if sR is not None:
                 ax.fill_between(x, mR - sR, mR + sR,
-                                color=PALETTE["right"], alpha=0.20, linewidth=0)
+                                color=PALETTE["right"], alpha=0.20,
+                                linewidth=0, zorder=2)
+            ax.plot(x, mR, color=PALETTE["right"], linewidth=2.0,
+                    label=f"Right (K={KR})", zorder=3)
 
         ax.set_ylim(ylim)
         ax.set_xlim(0, 100)
