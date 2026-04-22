@@ -142,21 +142,32 @@ st.markdown("""
     margin-top: 2rem;
   }
 
-  /* Tabs */
-  .stTabs [data-baseweb="tab-list"] {
-    background-color: #161B22;
+  /* Streamlit tab styling - give tabs visible spacing and button look */
+  div[role="tablist"] {
+    gap: 12px;
+  }
+  div[role="tablist"] button[role="tab"] {
+    background-color: rgba(148, 163, 184, 0.08);
+    border: 1px solid rgba(148, 163, 184, 0.25);
     border-radius: 8px;
-    padding: 4px;
-    gap: 4px;
-  }
-  .stTabs [data-baseweb="tab"] {
-    border-radius: 6px;
-    color: #6E7681;
+    padding: 8px 16px;
+    color: #cbd5e1;
     font-weight: 500;
+    transition: all 0.15s ease;
   }
-  .stTabs [aria-selected="true"] {
-    background-color: #21262D !important;
-    color: #58A6FF !important;
+  div[role="tablist"] button[role="tab"]:hover {
+    background-color: rgba(148, 163, 184, 0.18);
+    border-color: rgba(148, 163, 184, 0.45);
+    color: #f1f5f9;
+  }
+  div[role="tablist"] button[role="tab"][aria-selected="true"] {
+    background-color: rgba(96, 165, 250, 0.15);
+    border-color: #60a5fa;
+    color: #60a5fa;
+  }
+  /* Hide the default red underline indicator since we use background instead */
+  div[role="tablist"] div[data-baseweb="tab-highlight"] {
+    display: none;
   }
 
   /* Upload area */
