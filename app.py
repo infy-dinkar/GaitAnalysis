@@ -297,6 +297,69 @@ def _render_metrics(features: dict) -> None:
     )
 
 
+def _render_cycle_explanations() -> None:
+    """Caption + three per-joint expandable sections explaining the cycle chart.
+    Renders below the gait-cycle figure. Dual-audience copy (clinician + layperson)."""
+    st.caption(
+        "The grey band shows the normal healthy-adult range at each point of the "
+        "step. Your measurements are the blue (left leg) and red (right leg) lines."
+    )
+
+    with st.expander("Understanding the HIP graph"):
+        st.markdown("""
+**What you're looking at:** How your thigh swings forward and backward during one complete step, starting the moment your heel hits the ground.
+
+**The grey band = normal range.** A healthy adult's hip moves through about 40° of motion each step — swung forward (about +30°) when the heel lands, swinging backward (about −10°) as the body rolls over the planted foot, then forward again to set up the next step.
+
+**The blue and red lines = your left and right hip.** Your lines should stay roughly within the grey band and follow its shape — a smooth wave pattern.
+
+**What deviations mean:**
+- **Lines stay flat or have small range (under 25°):** reduced hip mobility. Common with tight hip flexors, sedentary lifestyle, hip arthritis, or Parkinsonian gait.
+- **Minimum doesn't go below 0° (curve stays in positive territory):** the hip is never extending past neutral. This limits stride length and often shows up as shorter steps.
+- **Blue and red curves separated vertically:** one hip has more or less range than the other — often a sign of favoring one side due to pain, weakness, or a previous injury.
+- **Curves offset in time (shifted left or right from the grey band):** unusual timing of hip motion relative to the stride. Can indicate pathological stride patterns.
+""")
+
+    with st.expander("Understanding the KNEE graph"):
+        st.markdown("""
+**What you're looking at:** How much your knee bends during one complete step. 0° means a perfectly straight leg; higher numbers mean more bending.
+
+**The grey band = normal range.** A healthy knee shows two distinct peaks per step:
+
+1. **First peak (~18°) right after heel strike:** the knee bends slightly to absorb landing impact, like a shock absorber.
+2. **Second, larger peak (~65°) during mid-swing:** the knee bends sharply to lift your foot off the ground so your toes don't drag as the leg swings forward.
+
+**The blue and red lines = your left and right knee.** You should see two clear humps on each line, matching the shape of the grey band.
+
+**What deviations mean:**
+- **Missing first peak (flat curve during loading, 0–20%):** stiff-knee landing. Common after knee injury, surgery, or with quadriceps weakness. Over time this causes joint pain because impact goes straight into the joint instead of being absorbed.
+- **Low swing peak (second hump under 50°):** foot isn't clearing the ground well — a trip-and-fall risk. Often associated with weakness or neurological conditions.
+- **Very different blue vs red:** you're favoring one leg. Common during recovery from injury or with unilateral pain.
+- **Wider shaded band around your line:** your knee motion varies a lot from step to step. May indicate instability, fatigue, or poor neuromuscular control.
+""")
+
+    with st.expander("Understanding the ANKLE graph"):
+        st.markdown("""
+**What you're looking at:** How your ankle rotates up and down during one complete step.
+- **Positive values (dorsiflexion):** your toes are pulled toward your shin — this happens when your foot is flat on the ground and your body rolls forward over it.
+- **Negative values (plantarflexion):** your toes are pointed down — this happens when you push off the ground to propel yourself forward.
+
+**The grey band = normal range.** A healthy ankle shows:
+- A small negative dip (~−5°) right after heel strike as the forefoot slaps down.
+- A gradual rise to about +10° as you roll forward over the planted foot.
+- A sharp plunge to about −18° at push-off (around 60% of the step) — this is where most of your walking power comes from.
+- A return to near 0° during swing so your toes clear the ground.
+
+**The blue and red lines = your left and right ankle.**
+
+**What deviations mean:**
+- **Weak push-off (minimum less negative than −10°):** reduced calf strength or Achilles tendon issues. Usually shows up as slower walking speed and shorter strides.
+- **Ankle doesn't return to neutral during swing (stays negative past 70%):** toe drag risk. Can indicate foot drop, often from nerve involvement.
+- **Flat curve with little variation:** generally reduced ankle mobility. Common with stiff ankles, older age, or after ankle injury.
+- **Very different left vs right:** asymmetric push-off, a common compensation for pain or weakness on one side.
+""")
+
+
 def _render_graphs(features: dict) -> None:
     """Render plot tabs (6 existing + 1 new gait-cycle tab)."""
     st.markdown('<div class="section-title">📈 Analysis Graphs</div>', unsafe_allow_html=True)
@@ -316,6 +379,8 @@ def _render_graphs(features: dict) -> None:
 
     tab_keys = ["knee", "heel", "step", "timing", "torso", "ankle", "cycle"]
 
+    # Single-line info captions for the six pre-existing tabs.
+    # The gait-cycle tab uses _render_cycle_explanations() instead.
     descriptions = {
         "knee": "**Understanding this graph:** This graph tracks the flexion (bending) angle of your knees over time. 0° represents full extension (a straight leg), while higher values indicate knee bending. The grey shaded band represents the typical range of motion for normal walking (0° to 65°). If your leg cannot reach ~0°, it may indicate a limp or extension deficit.",
         "heel": "**Understanding this graph:** This plots the raw horizontal forward progression of your heels. The grey dotted line represents an idealized smoothed envelope of your overall motion to help highlight any sudden jitter, dragging, or instability.",
@@ -323,7 +388,6 @@ def _render_graphs(features: dict) -> None:
         "timing": "**Understanding this graph:** This chart displays the elapsed time between consecutive steps. Consistent timing is a key indicator of gait balance. The grey band highlights an acceptable variation margin (±10%) around your personal average. Spikes outside this box suggest irregular pacing or limping.",
         "torso": "**Understanding this graph:** The torso lean angle is measured against a perfect vertical axis (0°). The grey shaded zone (±7°) highlights an acceptable physiological comfort zone for upright walking. Consistent numbers outside this layer highlight a tendency to lean heavily forward (+ values) or backward (- values).",
         "ankle": "**Understanding this graph:** This shows the ankles crossing each other as you walk. (Note: position is normalized to screen width from 0 to 1). The dotted grey curve is an idealized harmonic sine wave model, representing the expected smooth, pendulum-like motion of a perfect walking swing phase. Sharp deviations imply jerky movements.",
-        "cycle": "**Reading the curves:** HIP should be sinusoidal (~+30° at heel strike to ~−10° at toe-off). KNEE shows two humps (loading ~18°, swing ~65°). ANKLE dips at push-off (~−18° near 60%). Stance phase 0–60% is shaded; toe-off marker at 60%. Wider SD bands = more variable / pathological gait."
     }
 
     for tab, key in zip(tabs, tab_keys):
@@ -337,7 +401,7 @@ def _render_graphs(features: dict) -> None:
                 fig = figs.get("cycle")
                 if fig is not None and min(KL, KR) >= 3:
                     st.pyplot(fig, use_container_width=True)
-                    st.info(descriptions["cycle"], icon="ℹ️")
+                    _render_cycle_explanations()
                 else:
                     st.info(
                         "Not enough valid gait cycles detected to generate "
