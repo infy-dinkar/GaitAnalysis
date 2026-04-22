@@ -330,54 +330,70 @@ _GAIT_CYCLE_ROWS = (
 )
 
 # ──────────────────────────────────────────────
-# NORMAL ADULT REFERENCE BANDS
+# 2D-MEDIAPIPE-EQUIVALENT REFERENCE BANDS
 # ──────────────────────────────────────────────
-# Mean ± 1 SD curves at each percent of the gait cycle for healthy adults
-# walking at self-selected speed. Sourced from the canonical clinical-gait
-# literature:
+# Mean ± 1 SD curves at each percent of the gait cycle for healthy adults,
+# scaled down from the canonical 3D-mocap clinical literature to match what
+# single-camera 2D pose estimation (MediaPipe Pose) actually produces on
+# healthy walkers.
+#
+# Original 3D-mocap sources (curve shapes preserved):
 #   • Perry J, Burnfield JM. Gait Analysis: Normal and Pathological
 #     Function (2nd ed., 2010).
 #   • Winter DA. Biomechanics and Motor Control of Human Movement
 #     (4th ed., 2009).
 #   • Kadaba MP et al. "Measurement of lower extremity kinematics during
 #     level walking." J Orthop Res 1990;8(3):383–392.
-# SD values are conservative inter-subject estimates from the same sources.
+#
+# 2D-correction factors are empirical, anchored to a healthy reference
+# subject analyzed by this exact pipeline. They reflect projection loss
+# (motion outside the camera plane is invisible), MediaPipe joint-center
+# noise, and ensemble-averaging smoothing. Refine these bands as more
+# healthy reference videos become available.
+#
+# Per-joint amplitude scale:  HIP × 0.70   KNEE × 0.51   ANKLE × 0.67
+# SDs widened to absorb inter-subject + 2D-noise variability.
 
 NORMAL_BAND_COLOR = "#94a3b8"          # neutral grey, sits behind subject curves
 NORMAL_BAND_ALPHA = 0.18               # low alpha — reads as background reference
 
 
 def normal_hip_reference():
-    """Healthy adult hip flexion/extension across gait cycle (Perry & Burnfield).
-    Returns (mean, sd) each of length 101. Degrees.
-    Positive = flexion, negative = extension."""
+    """2D-MediaPipe-equivalent hip flexion range for healthy adults.
+    Returns (mean, sd), each of length 101. Degrees.
+    Positive = flexion, negative = extension. Cosine peaking at HS,
+    amplitude scaled ×0.70 from 3D-mocap reference (Perry & Burnfield)."""
     x = np.linspace(0, 100, 101)
-    mean = 10 + 20 * np.cos(2 * np.pi * x / 100)
-    sd = np.full_like(mean, 4.0)
+    mean = 7 + 14 * np.cos(2 * np.pi * x / 100)
+    sd = np.full_like(mean, 7.0)
     return mean, sd
 
 
 def normal_knee_reference():
-    """Healthy adult knee flexion across gait cycle. Double-hump pattern.
-    Loading peak ~18 deg at 15%, midstance ~5 deg, swing peak ~65 deg at 73%."""
+    """2D-MediaPipe-equivalent knee flexion range for healthy adults.
+    Double-hump pattern: loading peak ~9° at 15%, swing peak ~33° at 73%.
+    Amplitude scaled ×0.51 from 3D-mocap reference — knee is the most
+    underestimated joint in 2D pose estimation."""
     x = np.linspace(0, 100, 101)
-    loading = 18 * np.exp(-((x - 15) ** 2) / (2 * 7 ** 2))
-    swing   = 65 * np.exp(-((x - 73) ** 2) / (2 * 11 ** 2))
-    mean = 3 + loading + swing
-    sd = np.full_like(mean, 5.0)
+    loading = 9  * np.exp(-((x - 15) ** 2) / (2 * 7 ** 2))
+    swing   = 33 * np.exp(-((x - 73) ** 2) / (2 * 11 ** 2))
+    mean = 1.5 + loading + swing
+    sd = np.full_like(mean, 8.0)
     return mean, sd
 
 
 def normal_ankle_reference():
-    """Healthy adult ankle dorsi/plantarflexion across gait cycle.
-    Loading dip, midstance dorsiflex ~+10, push-off plantarflex ~-18 at 62%."""
+    """2D-MediaPipe-equivalent ankle dorsi/plantarflexion range for
+    healthy adults. Loading dip ~-3°, midstance dorsi ~+7°,
+    push-off plantar ~-12° at 62°. Amplitude scaled ×0.67 from
+    3D-mocap reference."""
     x = np.linspace(0, 100, 101)
-    loading_dip = -5  * np.exp(-((x - 5)  ** 2) / (2 * 4  ** 2))
-    midst_df    = 10  * np.exp(-((x - 40) ** 2) / (2 * 15 ** 2))
-    pushoff     = -18 * np.exp(-((x - 62) ** 2) / (2 * 6  ** 2))
-    swing_rec   =  3  * np.exp(-((x - 85) ** 2) / (2 * 15 ** 2))
+    loading_dip = -3.4 * np.exp(-((x - 5)  ** 2) / (2 * 4  ** 2))
+    midst_df    =  6.7 * np.exp(-((x - 40) ** 2) / (2 * 15 ** 2))
+    pushoff     = -12  * np.exp(-((x - 62) ** 2) / (2 * 6  ** 2))
+    swing_rec   =  2   * np.exp(-((x - 85) ** 2) / (2 * 15 ** 2))
     mean = loading_dip + midst_df + pushoff + swing_rec
-    sd = np.full_like(mean, 3.0)
+    sd = np.full_like(mean, 4.0)
     return mean, sd
 
 

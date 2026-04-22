@@ -331,12 +331,46 @@ def _phase_label(pct: int) -> str:
     return "late swing"
 
 
+def _plateau_center(curve: np.ndarray, threshold_frac: float = 0.05) -> int:
+    """Return the cycle-percent at the center of a curve's peak plateau.
+
+    Defined as the circular mean of all sample indices where the curve
+    sits within `threshold_frac × ROM` of its maximum. More stable than
+    `np.nanargmax` for broad peaks where a single noisy sample can shift
+    the argmax by 10%+ of the cycle. The circular mean correctly handles
+    plateaus that wrap across the 0/100 boundary (typical for hip).
+
+    Falls back to nanargmax if the curve is empty or flat.
+    """
+    valid = ~np.isnan(curve)
+    if not valid.any():
+        return 0
+    max_val = float(np.nanmax(curve))
+    min_val = float(np.nanmin(curve))
+    rng = max_val - min_val
+    if rng <= 0:
+        return int(np.nanargmax(curve))
+
+    threshold = max_val - threshold_frac * rng
+    plateau_idx = np.where((curve >= threshold) & valid)[0]
+    if len(plateau_idx) == 0:
+        return int(np.nanargmax(curve))
+
+    # Circular mean over [0, 100]: index 100 == index 0 (same cycle event,
+    # both at heel strike), so map index → angle as i * 2π / 100.
+    angles = plateau_idx * 2.0 * np.pi / 100.0
+    mean_angle = np.arctan2(np.sin(angles).mean(), np.cos(angles).mean())
+    if mean_angle < 0:
+        mean_angle += 2.0 * np.pi
+    return int(round(mean_angle * 100.0 / (2.0 * np.pi))) % 100
+
+
 def _render_cycle_observations(features: dict) -> None:
     """Auto-generated kinematic observations rendered below the cycle figure.
 
     For each joint with valid mean curves on both legs, computes:
       - per-leg ROM (max - min of the mean curve)
-      - per-leg peak timing (argmax of the mean curve, with phase label)
+      - per-leg peak timing (plateau center, with phase label)
       - per-leg amplitude ratio vs the reference ROM (max - min of the
         reference mean curve from gait_plots.normal_*_reference())
 
@@ -360,12 +394,12 @@ def _render_cycle_observations(features: dict) -> None:
 
         ref_mean, _ = _REFERENCE_FUNCS[joint_label]()
         ref_rom  = float(np.max(ref_mean) - np.min(ref_mean))
-        ref_peak = int(np.argmax(ref_mean))
+        ref_peak = _plateau_center(ref_mean)
 
         L_rom   = float(np.nanmax(mL) - np.nanmin(mL))
         R_rom   = float(np.nanmax(mR) - np.nanmin(mR))
-        L_peak  = int(np.nanargmax(mL))
-        R_peak  = int(np.nanargmax(mR))
+        L_peak  = _plateau_center(mL)
+        R_peak  = _plateau_center(mR)
         L_ratio = (L_rom / ref_rom * 100.0) if ref_rom > 0 else float("nan")
         R_ratio = (R_rom / ref_rom * 100.0) if ref_rom > 0 else float("nan")
 
@@ -394,20 +428,21 @@ def _render_cycle_explanations() -> None:
     """Caption + three per-joint expandable sections explaining the cycle chart.
     Renders below the gait-cycle figure. Dual-audience copy (clinician + layperson)."""
     st.caption(
-        "The grey band shows the normal healthy-adult range at each point of the "
-        "step. Your measurements are the blue (left leg) and red (right leg) lines."
+        "The grey band shows the typical healthy-walker range AS MEASURED BY "
+        "THIS PIPELINE — not the 3D motion-capture clinical norm. Your "
+        "measurements are the blue (left leg) and red (right leg) lines."
     )
 
     with st.expander("Understanding the HIP graph"):
         st.markdown("""
 **What you're looking at:** How your thigh swings forward and backward during one complete step, starting the moment your heel hits the ground.
 
-**The grey band = normal range.** A healthy adult's hip moves through about 40° of motion each step — swung forward (about +30°) when the heel lands, swinging backward (about −10°) as the body rolls over the planted foot, then forward again to set up the next step.
+**The grey band = healthy-walker range, measured by this 2D-video pipeline.** A healthy adult's hip typically shows about 28° of measurable motion in this view — swung forward (around +21°) when the heel lands, swinging backward (around −7°) as the body rolls over the planted foot, then forward again to set up the next step. The true 3D range is ~40°; the smaller measured value reflects projection loss inherent to single-camera 2D pose estimation.
 
 **The blue and red lines = your left and right hip.** Your lines should stay roughly within the grey band and follow its shape — a smooth wave pattern.
 
 **Interpreting your curve:**
-- **Range of motion narrower than ~25°** indicates the hip is moving through a smaller envelope than the reference band.
+- **Range of motion narrower than ~17°** indicates the hip is moving through a smaller envelope than the typical healthy-walker range for this pipeline.
 - **Curve minimum stays above 0°** indicates the hip does not pass into extension during stance — a kinematic pattern associated with reduced effective stride length.
 - **Vertical separation between blue and red** indicates left and right hips are operating in different parts of the range.
 - **Horizontal shift relative to the reference band** indicates the timing of peak flexion/extension does not align with the typical 0%/50% pattern.
@@ -419,16 +454,18 @@ def _render_cycle_explanations() -> None:
         st.markdown("""
 **What you're looking at:** How much your knee bends during one complete step. 0° means a perfectly straight leg; higher numbers mean more bending.
 
-**The grey band = normal range.** A healthy knee shows two distinct peaks per step:
+**The grey band = healthy-walker range, measured by this 2D-video pipeline.** A healthy knee shows two distinct peaks per step:
 
-1. **First peak (~18°) right after heel strike:** the knee bends slightly to absorb landing impact, like a shock absorber.
-2. **Second, larger peak (~65°) during mid-swing:** the knee bends sharply to lift your foot off the ground so your toes don't drag as the leg swings forward.
+1. **First peak (~9° measured here, ~18° in 3D mocap) right after heel strike:** the knee bends slightly to absorb landing impact, like a shock absorber.
+2. **Second, larger peak (~33° measured here, ~65° in 3D mocap) during mid-swing:** the knee bends to lift your foot off the ground so your toes don't drag as the leg swings forward.
+
+The measured peaks are smaller than the true 3D values because 2D side-view captures only the projected component of knee motion — knee is the most underestimated joint in single-camera pose estimation.
 
 **The blue and red lines = your left and right knee.** You should see two clear humps on each line, matching the shape of the grey band.
 
 **Interpreting your curve:**
 - **Absent or reduced loading peak (the small bump at 0–20%)** indicates limited knee flexion during weight acceptance — sometimes described in the literature as a "stiff-knee" loading pattern.
-- **Reduced swing peak (the larger hump near ~70%, below ~50°)** indicates the knee is bending less than typical to lift the foot during the swing phase.
+- **Reduced swing peak (the larger hump near ~70%, below ~25°)** indicates the knee is bending less than typical to lift the foot during the swing phase.
 - **Asymmetry between blue and red** indicates left and right knees are following different flexion profiles across the cycle.
 - **A wider shaded band around a curve** indicates greater stride-to-stride variability in that knee's motion.
 
@@ -441,16 +478,18 @@ def _render_cycle_explanations() -> None:
 - **Positive values (dorsiflexion):** your toes are pulled toward your shin — this happens when your foot is flat on the ground and your body rolls forward over it.
 - **Negative values (plantarflexion):** your toes are pointed down — this happens when you push off the ground to propel yourself forward.
 
-**The grey band = normal range.** A healthy ankle shows:
-- A small negative dip (~−5°) right after heel strike as the forefoot slaps down.
-- A gradual rise to about +10° as you roll forward over the planted foot.
-- A sharp plunge to about −18° at push-off (around 60% of the step) — this is where most of your walking power comes from.
+**The grey band = healthy-walker range, measured by this 2D-video pipeline.** A healthy ankle typically shows (in this view):
+- A small negative dip (~−3°) right after heel strike as the forefoot slaps down.
+- A gradual rise to about +7° as you roll forward over the planted foot.
+- A sharp plunge to about −12° at push-off (around 60% of the step) — this is where most of your walking power comes from.
 - A return to near 0° during swing so your toes clear the ground.
+
+True 3D push-off plantarflexion is closer to −18°; the measured value is smaller because of 2D projection loss.
 
 **The blue and red lines = your left and right ankle.**
 
 **Interpreting your curve:**
-- **Reduced plantarflexion at push-off (minimum stays above ~−10°)** indicates the ankle is generating less downward pointing during the propulsion phase than the reference.
+- **Reduced plantarflexion at push-off (minimum stays above ~−7°)** indicates the ankle is generating less downward pointing during the propulsion phase than the typical healthy-walker range for this pipeline.
 - **Ankle does not return to neutral during swing (stays negative past ~70%)** indicates limited dorsiflexion recovery as the foot is brought forward.
 - **Compressed overall range** indicates a smaller-than-typical sweep between dorsiflexion and plantarflexion across the cycle.
 - **Asymmetry between blue and red** indicates left and right ankles are following different profiles across the cycle.
@@ -481,7 +520,7 @@ def _render_graphs(features: dict) -> None:
     # Single-line info captions for the six pre-existing tabs.
     # The gait-cycle tab uses _render_cycle_explanations() instead.
     descriptions = {
-        "knee": "**Understanding this graph:** This graph tracks the flexion (bending) angle of your knees over time. 0° represents full extension (a straight leg), while higher values indicate knee bending. The grey shaded band represents the typical range of motion for normal walking (0° to 65°). If your leg cannot reach ~0°, it may indicate a limp or extension deficit.",
+        "knee": "**Understanding this graph:** This graph tracks the flexion (bending) angle of your knees over time. 0° represents full extension (a straight leg), while higher values indicate knee bending. The grey shaded band represents the typical range of motion for normal walking as captured by this 2D-video pipeline (0° to ~35°; the true 3D range is 0° to ~65°, but single-camera 2D pose estimation underestimates knee flexion). If your leg cannot reach ~0°, it may indicate a limp or extension deficit.",
         "heel": "**Understanding this graph:** This plots the raw horizontal forward progression of your heels. The grey dotted line represents an idealized smoothed envelope of your overall motion to help highlight any sudden jitter, dragging, or instability.",
         "step": "**Understanding this graph:** Step length is normalized by dividing the physical ground distance of a step by your estimated body height (shoulder to heel mapping). This scaling prevents taller subjects from artificially looking like they overstride. A normal healthy step length is roughly 41.5% of height. The grey band (0.35 – 0.55) represents a standard healthy ratio. Values dropping below indicate short, shuffling steps; values above suggest over-striding.",
         "timing": "**Understanding this graph:** This chart displays the elapsed time between consecutive steps. Consistent timing is a key indicator of gait balance. The grey band highlights an acceptable variation margin (±10%) around your personal average. Spikes outside this box suggest irregular pacing or limping.",

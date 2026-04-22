@@ -1140,17 +1140,21 @@ def interpret(features: dict) -> dict:
     else:
         obs.append(f" Stride consistency is good (CV = {stride_cv_pct:.1f} %).")
 
-    # ── Knee flexion (target peak 60-70°) ────────────────
+    # ── Knee flexion (2D-MediaPipe-equivalent peak 30–40°) ───
+    # Per-frame max of _knee_angles_px. Thresholds are the 2D-pipeline
+    # equivalent of the 3D-mocap 60–70° normal range — the underlying
+    # signal is the same one that drives the cycle-normalized chart, so
+    # the interpret() thresholds mirror the rescaled reference bands.
     if knee_min > 12:
-        obs.append(f" Knee lacks full extension at stance (min flexion {knee_min:.1f}°). Normal is ~0°.")
+        obs.append(f" Knee lacks full extension at stance (min flexion {knee_min:.1f}°). Normal (this pipeline) is ~0°.")
         sug.append("Hamstring and calf stretching to allow full knee extension.")
-    if knee_peak < 50:
-        obs.append(f" Restricted swing-phase knee flexion (peak {knee_peak:.1f}°). Normal is 60–70°.")
+    if knee_peak < 25:
+        obs.append(f" Restricted swing-phase knee flexion (peak {knee_peak:.1f}°). Normal (this pipeline) is 30–40°.")
         sug.append("Knee mobility drills or recumbent biking to expand flexion range.")
-    elif knee_peak > 80:
+    elif knee_peak > 45:
         obs.append(f" Unusually high knee flexion peak ({knee_peak:.1f}°) — could indicate jogging.")
     else:
-        obs.append(f" Swing-phase knee flexion peak is in normal range ({knee_peak:.1f}°).")
+        obs.append(f" Swing-phase knee flexion peak is in normal range ({knee_peak:.1f}°, pipeline-adjusted).")
 
     # ── Torso lean (target |lean| < 5°) ──────────────────
     abs_lean = abs(torso_mean)
