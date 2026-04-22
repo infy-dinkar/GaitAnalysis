@@ -298,7 +298,7 @@ def _render_metrics(features: dict) -> None:
 
 
 def _render_graphs(features: dict) -> None:
-    """Render 6 plot tabs."""
+    """Render plot tabs (6 existing + 1 new gait-cycle tab)."""
     st.markdown('<div class="section-title">📈 Analysis Graphs</div>', unsafe_allow_html=True)
 
     figs = build_all_figures(features)
@@ -310,26 +310,44 @@ def _render_graphs(features: dict) -> None:
         "Timing",
         "Torso Lean",
         "Ankle Trajectory",
+        "Gait Cycle",
     ]
     tabs = st.tabs(tab_labels)
 
-    tab_keys = ["knee", "heel", "step", "timing", "torso", "ankle"]
-    
+    tab_keys = ["knee", "heel", "step", "timing", "torso", "ankle", "cycle"]
+
     descriptions = {
         "knee": "**Understanding this graph:** This graph tracks the flexion (bending) angle of your knees over time. 0° represents full extension (a straight leg), while higher values indicate knee bending. The grey shaded band represents the typical range of motion for normal walking (0° to 65°). If your leg cannot reach ~0°, it may indicate a limp or extension deficit.",
         "heel": "**Understanding this graph:** This plots the raw horizontal forward progression of your heels. The grey dotted line represents an idealized smoothed envelope of your overall motion to help highlight any sudden jitter, dragging, or instability.",
         "step": "**Understanding this graph:** Step length is normalized by dividing the physical ground distance of a step by your estimated body height (shoulder to heel mapping). This scaling prevents taller subjects from artificially looking like they overstride. A normal healthy step length is roughly 41.5% of height. The grey band (0.35 – 0.55) represents a standard healthy ratio. Values dropping below indicate short, shuffling steps; values above suggest over-striding.",
         "timing": "**Understanding this graph:** This chart displays the elapsed time between consecutive steps. Consistent timing is a key indicator of gait balance. The grey band highlights an acceptable variation margin (±10%) around your personal average. Spikes outside this box suggest irregular pacing or limping.",
         "torso": "**Understanding this graph:** The torso lean angle is measured against a perfect vertical axis (0°). The grey shaded zone (±7°) highlights an acceptable physiological comfort zone for upright walking. Consistent numbers outside this layer highlight a tendency to lean heavily forward (+ values) or backward (- values).",
-        "ankle": "**Understanding this graph:** This shows the ankles crossing each other as you walk. (Note: position is normalized to screen width from 0 to 1). The dotted grey curve is an idealized harmonic sine wave model, representing the expected smooth, pendulum-like motion of a perfect walking swing phase. Sharp deviations imply jerky movements."
+        "ankle": "**Understanding this graph:** This shows the ankles crossing each other as you walk. (Note: position is normalized to screen width from 0 to 1). The dotted grey curve is an idealized harmonic sine wave model, representing the expected smooth, pendulum-like motion of a perfect walking swing phase. Sharp deviations imply jerky movements.",
+        "cycle": "**Reading the curves:** HIP should be sinusoidal (~+30° at heel strike to ~−10° at toe-off). KNEE shows two humps (loading ~18°, swing ~65°). ANKLE dips at push-off (~−18° near 60%). Stance phase 0–60% is shaded; toe-off marker at 60%. Wider SD bands = more variable / pathological gait."
     }
 
     for tab, key in zip(tabs, tab_keys):
         with tab:
-            fig = figs.get(key)
-            if fig:
-                st.pyplot(fig, use_container_width=True)
-                st.info(descriptions[key], icon="ℹ️")
+            if key == "cycle":
+                # K<3-on-either-knee-leg fallback per spec
+                gc = features.get("gait_cycle_curves") or {}
+                knee_data = gc.get("knee", {})
+                KL = knee_data.get("left",  {}).get("K", 0)
+                KR = knee_data.get("right", {}).get("K", 0)
+                fig = figs.get("cycle")
+                if fig is not None and min(KL, KR) >= 3:
+                    st.pyplot(fig, use_container_width=True)
+                    st.info(descriptions["cycle"], icon="ℹ️")
+                else:
+                    st.info(
+                        "Not enough valid gait cycles detected to generate "
+                        "cycle-normalized curves. Need at least 3 clean strides per leg."
+                    )
+            else:
+                fig = figs.get(key)
+                if fig:
+                    st.pyplot(fig, use_container_width=True)
+                    st.info(descriptions[key], icon="ℹ️")
 
 
 def _render_insights(insights: dict) -> None:

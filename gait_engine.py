@@ -40,6 +40,14 @@ import numpy as np
 import mediapipe as mp
 from scipy.signal import savgol_filter, find_peaks
 
+from gait_cycle import (
+    detect_heel_strikes,
+    extract_cycles,
+    stride_durations,
+    filter_cycles,
+    ensemble_statistics,
+)
+
 warnings.filterwarnings("ignore")
 
 # ──────────────────────────────────────────────
@@ -747,6 +755,51 @@ def compute_walking_direction(pass_segments) -> str:
 
 
 # ══════════════════════════════════════════════
+# CYCLE-NORMALIZED CURVES (mean ± SD across clean strides per joint)
+# ══════════════════════════════════════════════
+def _compute_gait_cycle_curves(ts: dict, fps: float, n_frames: int,
+                               clean_mask: np.ndarray,
+                               hip_full: dict, knee_full: dict, ankle_full: dict) -> dict:
+    """
+    Per-leg gait-cycle extraction for hip / knee / ankle.
+
+    Strikes are detected on the FULL heel-y signal, then filtered cycle-by-
+    cycle so any pair (hs_k, hs_k+1) that crosses a non-clean (turn / accel /
+    decel) frame is dropped. MAD filter then drops duration outliers.
+
+    Returns:
+        {
+          'hip':   {'left':  {'mean': arr|None, 'std': arr|None, 'K': int},
+                    'right': {...}},
+          'knee':  {...},
+          'ankle': {...},
+        }
+    """
+    hs_L = detect_heel_strikes(ts["left_heel"]["y_px"],  fps)
+    hs_R = detect_heel_strikes(ts["right_heel"]["y_px"], fps)
+
+    out: dict = {}
+    for joint, sigL, sigR in (
+        ("hip",   hip_full["left"],   hip_full["right"]),
+        ("knee",  knee_full["left"],  knee_full["right"]),
+        ("ankle", ankle_full["left"], ankle_full["right"]),
+    ):
+        cyc_L = extract_cycles(sigL, hs_L, clean_mask=clean_mask)
+        cyc_R = extract_cycles(sigR, hs_R, clean_mask=clean_mask)
+        sd_L  = stride_durations(hs_L, clean_mask=clean_mask, signal_length=n_frames)
+        sd_R  = stride_durations(hs_R, clean_mask=clean_mask, signal_length=n_frames)
+        cyc_L, _ = filter_cycles(cyc_L, sd_L)
+        cyc_R, _ = filter_cycles(cyc_R, sd_R)
+        mL, stL, KL = ensemble_statistics(cyc_L)
+        mR, stR, KR = ensemble_statistics(cyc_R)
+        out[joint] = {
+            "left":  {"mean": mL, "std": stL, "K": int(KL)},
+            "right": {"mean": mR, "std": stR, "K": int(KR)},
+        }
+    return out
+
+
+# ══════════════════════════════════════════════
 # MASTER COMPUTE  (Total + Clean)
 # ══════════════════════════════════════════════
 def compute_all_features(ts: dict, fps: float, total_frames: int,
@@ -771,6 +824,8 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
     # 3. Pre-compute per-frame caches (shared by Total & Clean).
     strikes    = _detect_strikes(ts, fps, pass_segments)
     knee_full  = _knee_angles_px(ts)
+    hip_full   = _hip_angles_px(ts, pass_segments)
+    ankle_full = _ankle_angles_px(ts, pass_segments)
     torso_full = _torso_lean_arr(ts, pass_segments)
 
     # 4. TOTAL metrics — every frame.
@@ -798,6 +853,17 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
 
     direction = compute_walking_direction(pass_segments)
 
+    # 6. Cycle-normalized joint-angle curves (mean ± SD over all clean strides)
+    if pass_segments:
+        cycle_clean_mask = np.zeros(n, dtype=bool)
+        for p in pass_segments:
+            cycle_clean_mask[p["core_start"]:p["core_end"]] = True
+    else:
+        cycle_clean_mask = np.ones(n, dtype=bool)
+    gait_cycle_curves = _compute_gait_cycle_curves(
+        ts, fps, n, cycle_clean_mask, hip_full, knee_full, ankle_full,
+    )
+
     # Top-level = clean (drives plots and inference).
     return {
         # ── original top-level keys (= clean) ─────────────
@@ -816,6 +882,7 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
         "steady_state_duration_s": clean_metrics["duration_sec"],
         "meters_per_pixel":       mpp,
         "user_height_cm":         user_height_cm,
+        "gait_cycle_curves":      gait_cycle_curves,
     }
 
 
