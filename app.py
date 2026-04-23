@@ -859,7 +859,10 @@ def _render_graphs(features: dict) -> None:
     tab_keys = ["knee", "heel", "step", "timing", "torso", "ankle", "cycle"]
 
     # Single-line info captions for the six pre-existing tabs.
-    # The gait-cycle tab uses _render_cycle_explanations() instead.
+    # The gait-cycle tab shows the matplotlib figure + cycle-quality
+    # captions only; clinical observations and the HIP/KNEE/ANKLE
+    # expanders are rendered later by _render_step_4_legacy_dashboard
+    # so both chart sections stay back-to-back.
     descriptions = {
         "knee": "**Understanding this graph:** This graph tracks the flexion (bending) angle of your knees over time. 0° represents full extension (a straight leg), while higher values indicate knee bending. The grey shaded band represents the typical range of motion for normal walking as captured by this 2D-video pipeline (0° to ~35°; the true 3D range is 0° to ~65°, but single-camera 2D pose estimation underestimates knee flexion). If your leg cannot reach ~0°, it may indicate a limp or extension deficit.",
         "heel": "**Understanding this graph:** This plots the raw horizontal forward progression of your heels. The grey dotted line represents an idealized smoothed envelope of your overall motion to help highlight any sudden jitter, dragging, or instability.",
@@ -910,8 +913,13 @@ def _render_graphs(features: dict) -> None:
                             f"{R_kept} right cycles kept "
                             f"({R_long} rejected as too long, {R_short} as too short)."
                         )
-                    _render_cycle_observations(features)
-                    _render_cycle_explanations()
+                    # NOTE: clinical-observations panel and HIP/KNEE/ANKLE
+                    # expanders used to render here. They were moved out so
+                    # both chart sections (this matplotlib figure + the
+                    # interactive plotly tabs below) appear back-to-back
+                    # before any interpretation text. They now render in
+                    # _render_step_4_legacy_dashboard after the interactive
+                    # tabs section.
                 else:
                     st.info(
                         "Not enough valid gait cycles detected to generate "
@@ -1621,6 +1629,20 @@ def _render_step_4_legacy_dashboard() -> None:
 
     st.markdown("---")
     _render_interactive_joint_tabs(features)
+
+    # Clinical observations + HIP/KNEE/ANKLE expanders moved here from
+    # inside the Gait Cycle tab so the page reads charts-then-text:
+    # matplotlib figure → interactive plotly tabs → interpretation block.
+    # Gated on the same K>=3 check the Gait Cycle tab uses, so we don't
+    # render explanations of curves that weren't computable.
+    _gc = features.get("gait_cycle_curves") or {}
+    _knee = _gc.get("knee", {}) or {}
+    _KL = (_knee.get("left",  {}) or {}).get("K", 0)
+    _KR = (_knee.get("right", {}) or {}).get("K", 0)
+    if min(_KL, _KR) >= 3:
+        st.markdown("---")
+        _render_cycle_observations(features)
+        _render_cycle_explanations()
 
     st.markdown("---")
     _render_insights(insights)
