@@ -34,44 +34,44 @@ st.set_page_config(
 DEFAULT_HEIGHT_CM = 170
 
 # ──────────────────────────────────────────────
-# CUSTOM CSS — single light/white medical-tool theme, applied app-wide.
-# Replaced the prior dark-theme + wizard-light-overlay setup; everything
-# now renders against a white page.
+# CUSTOM CSS — single dark slate / blue medical-tool theme, app-wide.
+# Replaces the prior light theme with a deep-slate + bright-blue palette
+# per the manager-brief design spec.
 # ──────────────────────────────────────────────
 st.markdown("""
 <style>
-  /* ===== Global background + typography ===== */
-  .stApp { background: #FFFFFF; }
+  .stApp { background: #0F172A; }
   .block-container {
     padding-top: 2rem;
     padding-bottom: 3rem;
     max-width: 1200px;
   }
   html, body, [class*="st-"] {
-    font-family: -apple-system, "Segoe UI", Roboto, Inter, sans-serif;
-    color: #374151;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    color: #CBD5E1;
   }
-  h1, h2, h3, h4, h5, h6 { color: #1A1A1A !important; font-weight: 500; }
+  h1, h2, h3, h4, h5, h6 {
+    color: #F1F5F9 !important;
+    font-weight: 500;
+  }
+  p, span, div { color: inherit; }
 
-  /* ===== Sidebar (stepper container) ===== */
+  /* ===== Sidebar ===== */
   [data-testid="stSidebar"] {
-    background: #FFFFFF;
-    border-right: 1px solid #E5E7EB;
+    background: #1E293B;
+    border-right: 1px solid #334155;
   }
   [data-testid="stSidebar"] > div { padding-top: 2rem; }
-  [data-testid="stSidebar"] * { color: #1A1A1A; }
+  [data-testid="stSidebar"] * { color: #CBD5E1; }
   [data-testid="stSidebar"] h1 {
-    color: #1976D2;
-    font-size: 22px;
-    font-weight: 700;
+    color: #3B82F6;
+    font-size: 22px; font-weight: 700;
     letter-spacing: 0.5px;
     margin: 12px 0 4px 0;
   }
   [data-testid="stSidebar"] .sidebar-tagline {
-    font-size: 12px;
-    color: #6B7280;
-    margin-bottom: 24px;
-    letter-spacing: 0.4px;
+    font-size: 12px; color: #94A3B8;
+    margin-bottom: 24px; letter-spacing: 0.4px;
   }
 
   /* ===== Sidebar stepper ===== */
@@ -90,224 +90,229 @@ st.markdown("""
     font-size: 14px; font-weight: 600; flex-shrink: 0;
   }
   .stepper-name { font-size: 14px; line-height: 1.2; }
-  .stepper-active   .stepper-circle { background: #1976D2; color: #FFFFFF; }
-  .stepper-active   .stepper-name   { color: #1A1A1A; font-weight: 600; }
+  .stepper-active   .stepper-circle { background: #3B82F6; color: #FFFFFF; }
+  .stepper-active   .stepper-name   { color: #F1F5F9; font-weight: 600; }
   .stepper-done     .stepper-circle { background: #10B981; color: #FFFFFF; }
-  .stepper-done     .stepper-name   { color: #1A1A1A; font-weight: 400; }
+  .stepper-done     .stepper-name   { color: #F1F5F9; font-weight: 400; }
   .stepper-upcoming .stepper-circle {
-    background: #FFFFFF;
-    border: 1.5px solid #D1D5DB;
-    color: #9CA3AF;
+    background: transparent;
+    border: 1.5px solid #334155;
+    color: #64748B;
   }
-  .stepper-upcoming .stepper-name   { color: #9CA3AF; }
+  .stepper-upcoming .stepper-name   { color: #64748B; }
 
   /* ===== Form inputs ===== */
   .stTextInput input, .stNumberInput input,
   .stDateInput input, .stTextArea textarea {
-    background: #FFFFFF !important;
-    color: #1A1A1A !important;
-    border: 1px solid #D1D5DB !important;
+    background: #0F172A !important;
+    color: #F1F5F9 !important;
+    border: 1px solid #334155 !important;
     border-radius: 8px !important;
     padding: 10px 14px !important;
     font-size: 14px !important;
   }
   .stTextInput input:focus, .stNumberInput input:focus,
   .stDateInput input:focus, .stTextArea textarea:focus {
-    border-color: #1976D2 !important;
-    box-shadow: 0 0 0 3px rgba(25,118,210,0.12) !important;
+    border-color: #3B82F6 !important;
+    box-shadow: 0 0 0 3px rgba(59,130,246,0.30) !important;
     outline: none !important;
   }
+  .stTextInput input::placeholder,
+  .stTextArea textarea::placeholder {
+    color: #64748B !important;
+  }
   .stSelectbox > div > div {
-    background: #FFFFFF !important;
-    border: 1px solid #D1D5DB !important;
+    background: #0F172A !important;
+    border: 1px solid #334155 !important;
     border-radius: 8px !important;
   }
-  .stSelectbox > div > div > div { color: #1A1A1A !important; }
+  .stSelectbox > div > div > div { color: #F1F5F9 !important; }
+
+  /* CRITICAL: number input +/- buttons MUST NOT render black */
+  .stNumberInput button {
+    background: #334155 !important;
+    color: #CBD5E1 !important;
+    border: 1px solid #475569 !important;
+    border-radius: 6px !important;
+  }
+  .stNumberInput button:hover { background: #475569 !important; }
+  .stNumberInput button:disabled {
+    background: #1E293B !important;
+    color: #475569 !important;
+  }
+
+  /* CRITICAL: selectbox dropdown popover must be dark */
+  [data-baseweb="popover"] {
+    background: #1E293B !important;
+  }
+  [data-baseweb="menu"] {
+    background: #1E293B !important;
+  }
+  [data-baseweb="menu"] li {
+    color: #CBD5E1 !important;
+    background: #1E293B !important;
+  }
+  [data-baseweb="menu"] li:hover {
+    background: #334155 !important;
+  }
+
+  /* ===== Field labels ===== */
   label,
   .stTextInput label, .stNumberInput label, .stSelectbox label,
   .stDateInput label, .stTextArea label, .stFileUploader label {
-    color: #374151 !important;
+    color: #CBD5E1 !important;
     font-weight: 500 !important;
     font-size: 14px !important;
   }
 
   /* ===== Wizard cards (Steps 1-3) ===== */
   .wizard-card {
-    background: #FFFFFF;
-    border: 1px solid #E5E7EB;
+    background: #1E293B;
+    border: 1px solid #334155;
     border-radius: 12px;
-    padding: 32px;
+    padding: 24px;
     margin: 16px auto;
-    max-width: 800px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
-    color: #1A1A1A;
+    max-width: 900px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.30);
+    color: #CBD5E1;
   }
   .wizard-title {
     font-size: 22px; font-weight: 600;
-    color: #1A1A1A;
+    color: #F1F5F9;
     margin-bottom: 20px; text-align: center;
   }
   .wizard-info-strip {
-    background: #F9FAFB;
-    border: 1px solid #E5E7EB;
+    background: #0F172A;
+    border: 1px solid #334155;
     border-radius: 8px;
     padding: 12px 16px;
-    font-size: 13px;
-    color: #374151;
+    font-size: 13px; color: #CBD5E1;
     margin: 12px 0 20px 0;
   }
   .wizard-file-info {
-    background: #E8F4FD;
+    background: #0F172A;
+    border: 1px solid #334155;
+    border-left: 3px solid #3B82F6;
     border-radius: 8px;
     padding: 10px 14px;
-    font-size: 13px;
-    color: #1565C0;
+    font-size: 13px; color: #CBD5E1;
     margin: 8px 0 12px 0;
   }
   .wizard-section-heading {
     font-size: 15px; font-weight: 600;
-    color: #1A1A1A;
+    color: #F1F5F9;
     margin: 18px 0 8px 0;
   }
   .wizard-check-row {
-    color: #374151;
+    color: #CBD5E1;
     padding: 6px 0;
     font-size: 14px; line-height: 1.5;
   }
   .wizard-check-row::before {
     content: "✓ ";
     color: #10B981;
-    font-weight: bold;
-    margin-right: 4px;
+    font-weight: bold; margin-right: 4px;
   }
 
   /* ===== Generic app card ===== */
   .app-card {
-    background: #FFFFFF;
-    border: 1px solid #E5E7EB;
+    background: #1E293B;
+    border: 1px solid #334155;
     border-radius: 12px;
     padding: 24px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.30);
     margin-bottom: 20px;
+    color: #CBD5E1;
   }
 
-  /* ===== Section title (used by legacy Step 4 dashboard) ===== */
+  /* ===== Section title (legacy Step 4 dashboard) ===== */
   .section-title {
     text-align: center;
     font-size: 18px; font-weight: 500;
-    color: #1A1A1A;
+    color: #F1F5F9;
     padding: 14px;
-    background: #FFFFFF;
-    border: 1px solid #E5E7EB;
+    background: #1E293B;
+    border: 1px solid #334155;
     border-radius: 12px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.30);
     margin: 24px 0 16px 0;
   }
 
   /* ===== Hero (legacy Step 4 dashboard) ===== */
   .hero-title {
     font-size: 2.4rem; font-weight: 600;
-    color: #1A1A1A !important;
+    color: #F1F5F9 !important;
     line-height: 1.2; margin-bottom: 0.2rem;
   }
   .hero-sub {
-    font-size: 1.0rem; color: #6B7280;
+    font-size: 1.0rem; color: #94A3B8;
     margin-bottom: 1.5rem;
   }
 
-  /* ===== Metric tiles (NEW amber/orange dual-block — Phase 3 onward) ===== */
-  .metric-tile {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    margin-bottom: 12px;
-    border-radius: 12px;
-    overflow: hidden;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
-  }
-  .metric-tile .metric-label {
-    background: #F5B027;
-    padding: 20px 16px;
-    text-align: center;
-    font-size: 14px; color: #1A1A1A;
-    display: flex; align-items: center; justify-content: center;
-  }
-  .metric-tile .metric-value {
-    background: #F57C1F;
-    padding: 20px 16px;
-    text-align: center;
-    font-size: 20px; font-weight: 600; color: #1A1A1A;
-    display: flex; align-items: center; justify-content: center;
-  }
-  .full-width-tile .metric-label,
-  .full-width-tile .metric-value { padding: 26px 20px; font-size: 16px; }
-  .full-width-tile .metric-value { font-size: 22px; }
-
-  /* ===== Legacy metric cards (Step 4 dashboard, vertical-stack form) ===== */
-  /* Migrated to light theme so the existing _render_metric_grid still
-     reads cleanly. Phase 3 will replace these with .metric-tile. */
+  /* ===== Legacy metric cards (Step 4 dashboard) ===== */
   .metric-card {
-    background: #FFFFFF;
-    border: 1px solid #E5E7EB;
+    background: #1E293B;
+    border: 1px solid #334155;
     border-radius: 12px;
     padding: 18px 20px;
     text-align: center;
     height: 110px;
     display: flex; flex-direction: column; justify-content: center;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.30);
     transition: transform 0.2s, box-shadow 0.2s;
   }
   .metric-card:hover {
     transform: translateY(-2px);
-    box-shadow: 0 4px 14px rgba(25,118,210,0.10);
+    box-shadow: 0 4px 14px rgba(59,130,246,0.20);
   }
   .metric-card .metric-label {
     font-size: 0.72rem; font-weight: 600;
-    color: #6B7280;
+    color: #94A3B8;
     text-transform: uppercase; letter-spacing: 0.08em;
     margin-bottom: 6px;
     background: transparent; padding: 0; display: block;
   }
   .metric-card .metric-value {
     font-size: 1.85rem; font-weight: 700;
-    color: #1976D2;
+    color: #3B82F6;
     line-height: 1;
     background: transparent; padding: 0; display: block;
   }
   .metric-card .metric-unit {
-    font-size: 0.75rem; color: #6B7280; margin-top: 4px;
+    font-size: 0.75rem; color: #94A3B8; margin-top: 4px;
   }
 
-  /* ===== Insight cards (legacy Step 4 dashboard) ===== */
+  /* ===== Insight cards ===== */
   .obs-card {
-    background: #F9FAFB;
-    border: 1px solid #E5E7EB;
+    background: #0F172A;
+    border: 1px solid #334155;
     border-left: 3px solid #10B981;
     border-radius: 8px;
     padding: 12px 16px;
     margin-bottom: 8px;
     font-size: 0.92rem; line-height: 1.5;
-    color: #374151;
+    color: #CBD5E1;
   }
   .sug-card {
-    background: #F9FAFB;
-    border: 1px solid #E5E7EB;
+    background: #0F172A;
+    border: 1px solid #334155;
     border-left: 3px solid #F59E0B;
     border-radius: 8px;
     padding: 12px 16px;
     margin-bottom: 8px;
     font-size: 0.92rem; line-height: 1.5;
-    color: #374151;
+    color: #CBD5E1;
   }
 
   /* ===== Tabs ===== */
   .stTabs [data-baseweb="tab-list"] {
     gap: 24px;
-    border-bottom: 1px solid #E5E7EB;
+    border-bottom: 1px solid #334155;
     background: transparent;
   }
   .stTabs [data-baseweb="tab"] {
     background: transparent;
-    color: #9CA3AF;
+    color: #64748B;
     font-size: 13px; font-weight: 500;
     letter-spacing: 0.5px;
     text-transform: uppercase;
@@ -315,8 +320,8 @@ st.markdown("""
     border-bottom: 2px solid transparent;
   }
   .stTabs [aria-selected="true"] {
-    color: #1976D2 !important;
-    border-bottom-color: #1976D2 !important;
+    color: #3B82F6 !important;
+    border-bottom-color: #3B82F6 !important;
   }
 
   /* ===== Buttons ===== */
@@ -324,35 +329,83 @@ st.markdown("""
     border-radius: 8px;
     font-weight: 500;
     padding: 10px 20px;
+    transition: background 0.15s ease;
   }
   .stButton button[kind="primary"] {
-    background: #1976D2;
+    background: #3B82F6;
     color: #FFFFFF;
     border: none;
   }
-  .stButton button[kind="primary"]:hover { background: #1565C0; }
+  .stButton button[kind="primary"]:hover { background: #2563EB; }
   .stButton button[kind="secondary"] {
-    background: #FFFFFF;
-    color: #1A1A1A;
-    border: 1px solid #D1D5DB;
+    background: transparent;
+    color: #CBD5E1;
+    border: 1px solid #334155;
   }
-  .stButton button[kind="secondary"]:hover { background: #F3F4F6; }
+  .stButton button[kind="secondary"]:hover { background: #334155; }
+  .stButton button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .stDownloadButton button {
+    background: #3B82F6 !important;
+    color: #FFFFFF !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-weight: 500 !important;
+    padding: 10px 20px !important;
+  }
+  .stDownloadButton button:hover { background: #2563EB !important; }
 
-  /* ===== Plotly chart container (Phase 4-5 readiness) ===== */
+  /* ===== File uploader ===== */
+  [data-testid="stFileUploader"] section {
+    background: #0F172A !important;
+    border: 1px dashed #334155 !important;
+    border-radius: 12px !important;
+  }
+  [data-testid="stFileUploader"] section button {
+    background: #334155 !important;
+    color: #CBD5E1 !important;
+    border: 1px solid #475569 !important;
+  }
+
+  /* ===== Plotly chart container (kept ready for any future plotly use) ===== */
   [data-testid="stPlotlyChart"] {
-    background: #FFFFFF;
-    border: 1px solid #E5E7EB;
+    background: #1E293B;
+    border: 1px solid #334155;
     border-radius: 12px;
     padding: 16px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.30);
   }
 
   /* ===== Expanders ===== */
   .streamlit-expanderHeader {
-    background: #F9FAFB !important;
-    color: #1A1A1A !important;
-    border: 1px solid #E5E7EB !important;
+    background: #0F172A !important;
+    color: #F1F5F9 !important;
+    border: 1px solid #334155 !important;
     border-radius: 8px !important;
+  }
+  [data-testid="stExpander"] details {
+    background: #1E293B !important;
+    border: 1px solid #334155 !important;
+    border-radius: 12px !important;
+  }
+  [data-testid="stExpander"] summary {
+    color: #F1F5F9 !important;
+  }
+
+  /* ===== Status / Alert boxes ===== */
+  [data-testid="stAlert"] {
+    background: #1E293B !important;
+    border: 1px solid #334155 !important;
+    border-radius: 8px !important;
+    color: #CBD5E1 !important;
+  }
+  [data-testid="stStatus"] {
+    background: #1E293B !important;
+    border: 1px solid #334155 !important;
+    border-radius: 8px !important;
+    color: #CBD5E1 !important;
   }
 
   /* ===== Streamlit chrome hiding ===== */
@@ -368,22 +421,20 @@ def _init_session_state():
     """Initialise wizard state on first render. Idempotent across reruns.
 
     Keys:
-      step                  — int, 1..4. Active wizard step.
-      patient               — dict, holds form values from Step 1
-                              (name, patient_id, age, gender, height_cm,
-                              weight_kg, assessment_date, clinician, notes).
-      uploaded_file_bytes   — bytes | None. Raw video bytes from Step 3.
-      uploaded_file_name    — str | None.
-      features              — dict | None. Output of compute_all_features.
-      insights              — dict | None. Output of interpret().
-      fps                   — float | None. Captured at extract_poses time.
-      total_frames          — int | None. Captured at extract_poses time.
+      step          — int, 1..4. Active wizard step.
+      patient       — dict, holds form values from Step 1
+                      (name, patient_id, age, gender, height_cm,
+                      weight_kg, assessment_date, clinician, notes).
+      video_file    — Streamlit UploadedFile | None. Set in Step 3.
+      features      — dict | None. Output of compute_all_features.
+      insights      — dict | None. Output of interpret().
+      fps           — float | None. Captured at extract_poses time.
+      total_frames  — int | None. Captured at extract_poses time.
     """
     defaults = {
         "step": 1,
         "patient": {},
-        "uploaded_file_bytes": None,
-        "uploaded_file_name": None,
+        "video_file": None,
         "features": None,
         "insights": None,
         "fps": None,
@@ -1007,8 +1058,12 @@ def _run_analysis() -> bool:
     """Run the full pipeline on the uploaded file and store results in
     session state. Returns True on success, False on failure (the calling
     site uses this to decide whether to advance to Step 4)."""
-    file_bytes = st.session_state["uploaded_file_bytes"]
-    file_name  = st.session_state["uploaded_file_name"] or "video.mp4"
+    video = st.session_state["video_file"]
+    if video is None:
+        st.error("No video file in session. Re-upload and try again.")
+        return False
+    file_bytes = video.getvalue()
+    file_name  = video.name or "video.mp4"
     user_height_cm = st.session_state["patient"].get("height_cm", DEFAULT_HEIGHT_CM)
 
     suffix = os.path.splitext(file_name)[1] or ".mp4"
@@ -1093,15 +1148,14 @@ def _render_step_3() -> None:
             f'</div>',
             unsafe_allow_html=True,
         )
-        st.session_state["uploaded_file_bytes"] = uploaded.getvalue()
-        st.session_state["uploaded_file_name"]  = uploaded.name
+        st.session_state["video_file"] = uploaded
 
         with st.expander("Preview", expanded=False):
             st.video(uploaded)
 
     st.markdown('</div>', unsafe_allow_html=True)
 
-    file_ready = st.session_state.get("uploaded_file_bytes") is not None
+    file_ready = st.session_state.get("video_file") is not None
     if st.button(
         "Analyze Gait",
         disabled=not file_ready,
@@ -1117,6 +1171,85 @@ def _render_step_3() -> None:
         if st.button("← Back", use_container_width=True):
             st.session_state["step"] = 2
             st.rerun()
+
+
+# ──────────────────────────────────────────────
+# PDF REPORT BUILDER  (used by the Download PDF button in Step 4)
+# ──────────────────────────────────────────────
+def _build_pdf_bytes(features: dict, patient: dict) -> bytes:
+    """Return a 2-page PDF: cover page with patient details + the
+    gait-cycle figure on the next page. Uses matplotlib's PdfPages so
+    no extra dependency is required.
+
+    The cover page is rendered on a white background so it prints
+    cleanly; the gait-cycle figure inherits its on-screen styling.
+    """
+    from io import BytesIO
+    from matplotlib.backends.backend_pdf import PdfPages
+    import matplotlib.pyplot as plt
+
+    buf = BytesIO()
+    with PdfPages(buf) as pdf:
+        # ── Page 1: cover ──────────────────────────────────────────
+        cover, ax = plt.subplots(figsize=(8.5, 11), facecolor="white")
+        ax.set_facecolor("white")
+        ax.axis("off")
+        ax.text(0.5, 0.94, "Gait Analysis Report",
+                ha="center", fontsize=26, fontweight="bold", color="#1A1A1A")
+        ax.text(0.5, 0.89, "Generated by GaitVision",
+                ha="center", fontsize=12, color="#6B7280")
+
+        rows = [
+            ("Name",            patient.get("name", "—")),
+            ("Patient ID",      patient.get("patient_id", "—")),
+            ("Age",             str(patient.get("age", "—"))),
+            ("Gender",          patient.get("gender", "—")),
+            ("Height",          f"{patient.get('height_cm', '—')} cm"),
+            ("Weight",          f"{patient.get('weight_kg', '—')} kg"),
+            ("Assessment Date", str(patient.get("assessment_date", "—"))),
+            ("Clinician",       patient.get("clinician", "—") or "—"),
+        ]
+        y = 0.78
+        for label, value in rows:
+            ax.text(0.18, y, f"{label}:",
+                    fontsize=12, fontweight="bold", color="#374151")
+            ax.text(0.42, y, str(value),
+                    fontsize=12, color="#1A1A1A")
+            y -= 0.045
+
+        notes = (patient.get("notes", "") or "").strip()
+        if notes:
+            ax.text(0.18, y - 0.04, "Clinical Notes",
+                    fontsize=12, fontweight="bold", color="#374151")
+            wrapped = notes if len(notes) <= 600 else notes[:600] + "…"
+            ax.text(0.18, y - 0.08, wrapped,
+                    fontsize=10, color="#1A1A1A", wrap=True,
+                    verticalalignment="top")
+
+        ax.text(0.5, 0.05,
+                "Descriptive output from a 2D pose-estimation pipeline. "
+                "Clinical interpretation belongs to a qualified professional.",
+                ha="center", fontsize=8, color="#6B7280", style="italic",
+                wrap=True)
+
+        pdf.savefig(cover, bbox_inches="tight")
+        plt.close(cover)
+
+        # ── Page 2: gait-cycle figure (only if K is sufficient) ────
+        gc = features.get("gait_cycle_curves") or {}
+        knee = gc.get("knee", {})
+        KL = knee.get("left",  {}).get("K", 0)
+        KR = knee.get("right", {}).get("K", 0)
+        if min(KL, KR) >= 3:
+            from gait_plots import build_all_figures
+            figs = build_all_figures(features)
+            cycle_fig = figs.get("cycle")
+            if cycle_fig is not None:
+                pdf.savefig(cycle_fig, bbox_inches="tight",
+                            facecolor=cycle_fig.get_facecolor())
+                plt.close(cycle_fig)
+
+    return buf.getvalue()
 
 
 # ──────────────────────────────────────────────
@@ -1195,17 +1328,31 @@ def _render_step_4_legacy_dashboard() -> None:
     _render_insights(insights)
 
     st.markdown("---")
-    col_re, _ = st.columns([1, 5])
+    col_pdf, col_re = st.columns([1, 1])
+    with col_pdf:
+        try:
+            pdf_bytes = _build_pdf_bytes(features, st.session_state["patient"])
+            patient_id = st.session_state["patient"].get("patient_id", "report")
+            st.download_button(
+                label="📄 Download PDF Report",
+                data=pdf_bytes,
+                file_name=f"GaitReport_{patient_id}.pdf",
+                mime="application/pdf",
+                type="primary",
+                use_container_width=True,
+            )
+        except Exception as exc:
+            st.error(f"PDF build failed: {exc}")
     with col_re:
-        if st.button("← Re-analyze"):
+        if st.button("← Re-analyze with different video",
+                     use_container_width=True):
             # Clear file + analysis only; keep patient data.
-            st.session_state["uploaded_file_bytes"] = None
-            st.session_state["uploaded_file_name"]  = None
-            st.session_state["features"]            = None
-            st.session_state["insights"]            = None
-            st.session_state["fps"]                 = None
-            st.session_state["total_frames"]        = None
-            st.session_state["step"]                = 3
+            st.session_state["video_file"]   = None
+            st.session_state["features"]     = None
+            st.session_state["insights"]     = None
+            st.session_state["fps"]          = None
+            st.session_state["total_frames"] = None
+            st.session_state["step"]         = 3
             st.rerun()
 
 

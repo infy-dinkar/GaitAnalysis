@@ -21,21 +21,21 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # ──────────────────────────────────────────────
-# DESIGN TOKENS  (light theme — matches app.py white medical-tool theme)
+# DESIGN TOKENS  (dark slate theme — matches app.py dark medical-tool theme)
 # ──────────────────────────────────────────────
 PALETTE = {
-    "bg":     "#FFFFFF",   # figure canvas
-    "panel":  "#FFFFFF",   # axes face
-    "border": "#E5E7EB",   # axis spines
-    "left":   "#1976D2",   # left-leg trace (material blue)
-    "right":  "#DC2626",   # right-leg trace (material red)
+    "bg":     "#1E293B",   # figure canvas (matches card bg)
+    "panel":  "#1E293B",   # axes face
+    "border": "#334155",   # axis spines
+    "left":   "#3B82F6",   # left-leg trace (bright blue per spec)
+    "right":  "#EF4444",   # right-leg trace (red, reads on dark)
     "accent": "#10B981",   # success / positive markers
     "warn":   "#F59E0B",   # warning markers
-    "text":   "#374151",   # tick + axis labels
-    "muted":  "#6B7280",   # captions, secondary
-    "grid":   "#F3F4F6",   # gridlines
-    "normal": "#94a3b8",   # neutral grey for reference band
-    "pass":   "#1976D2",   # tint for pass shading
+    "text":   "#CBD5E1",   # tick + axis labels
+    "muted":  "#94A3B8",   # captions, secondary
+    "grid":   "#334155",   # gridlines
+    "normal": "#94A3B8",   # neutral grey for reference band
+    "pass":   "#3B82F6",   # tint for pass shading
 }
 
 
