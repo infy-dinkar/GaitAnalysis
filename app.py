@@ -40,6 +40,27 @@ DEFAULT_HEIGHT_CM = 170
 # ──────────────────────────────────────────────
 st.markdown("""
 <style>
+  /* (C) Pre-load Material Symbols + Material Icons fonts so Streamlit's
+     internal icons (file uploader, expander chevron, sidebar toggle, etc.)
+     always have their ligature font available — Streamlit Cloud sometimes
+     loses the race between its own font CSS and our overrides below. */
+  @import url('https://fonts.googleapis.com/icon?family=Material+Icons');
+  @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200');
+
+  /* (B) Defensive: explicitly hold the icon font on any element Streamlit
+     uses for Material symbols, so the global font-family rule below cannot
+     override it via cascade specificity. The literal-text bug ("upload",
+     "arrow_right", etc.) on Streamlit Cloud was caused exactly by this
+     override race. */
+  .material-icons, .material-symbols-outlined,
+  .material-symbols-rounded, .material-symbols-sharp,
+  span[class*="material-symbols"], span[class*="material-icons"] {
+    font-family: 'Material Symbols Outlined', 'Material Symbols Rounded',
+                 'Material Symbols Sharp', 'Material Icons',
+                 'Material Icons Outlined' !important;
+    font-feature-settings: 'liga';
+  }
+
   .stApp {
     background:
       radial-gradient(circle at 8% 0%,    rgba(59,130,246,0.12), transparent 45%),
@@ -53,7 +74,11 @@ st.markdown("""
     padding-bottom: 3rem;
     max-width: 1200px;
   }
-  html, body, [class*="st-"] {
+  /* (A) Narrowed from `html, body, [class*="st-"]` so the rule no longer
+     matches every Streamlit-rendered element. The old selector forced
+     -apple-system onto Streamlit's icon spans, which broke Material Symbols
+     ligature substitution on Cloud and made literal text leak through. */
+  html, body {
     font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
     color: #CBD5E1;
   }
