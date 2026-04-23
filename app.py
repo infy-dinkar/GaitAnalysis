@@ -42,8 +42,10 @@ st.markdown("""
 <style>
   .stApp {
     background:
-      radial-gradient(circle at 12% 0%, rgba(59,130,246,0.10), transparent 45%),
-      radial-gradient(circle at 92% 8%, rgba(16,185,129,0.06), transparent 40%),
+      radial-gradient(circle at 8% 0%,    rgba(59,130,246,0.12), transparent 45%),
+      radial-gradient(circle at 92% 4%,   rgba(6,182,212,0.08),  transparent 42%),
+      radial-gradient(circle at 88% 92%,  rgba(168,85,247,0.10), transparent 45%),
+      radial-gradient(circle at 4% 96%,   rgba(236,72,153,0.06), transparent 40%),
       #0F172A;
   }
   .block-container {
@@ -116,6 +118,24 @@ st.markdown("""
     color: #64748B;
   }
   .stepper-upcoming .stepper-name   { color: #64748B; }
+
+  /* Per-step color accents on the active circle (overrides the base
+     active gradient + glow above when the matching nth-child is active). */
+  .stepper-item:nth-child(2).stepper-active .stepper-circle {
+    background: linear-gradient(135deg, #06B6D4, #0891B2);
+    box-shadow: 0 0 0 4px rgba(6,182,212,0.18),
+                0 0 18px rgba(6,182,212,0.45);
+  }
+  .stepper-item:nth-child(3).stepper-active .stepper-circle {
+    background: linear-gradient(135deg, #A855F7, #7E22CE);
+    box-shadow: 0 0 0 4px rgba(168,85,247,0.18),
+                0 0 18px rgba(168,85,247,0.45);
+  }
+  .stepper-item:nth-child(4).stepper-active .stepper-circle {
+    background: linear-gradient(135deg, #EC4899, #BE185D);
+    box-shadow: 0 0 0 4px rgba(236,72,153,0.18),
+                0 0 18px rgba(236,72,153,0.45);
+  }
 
   /* ===== Form inputs ===== */
   .stTextInput input, .stNumberInput input,
@@ -251,13 +271,13 @@ st.markdown("""
     position: absolute;
     left: 0; top: 0; bottom: 0;
     width: 4px;
-    background: linear-gradient(180deg, #3B82F6, #06B6D4);
+    background: linear-gradient(180deg, #3B82F6 0%, #A855F7 50%, #EC4899 100%);
   }
 
   /* ===== Hero (legacy Step 4 dashboard) ===== */
   .hero-title {
     font-size: 2.6rem; font-weight: 700;
-    background: linear-gradient(135deg, #3B82F6 0%, #06B6D4 50%, #10B981 100%);
+    background: linear-gradient(135deg, #3B82F6 0%, #A855F7 50%, #EC4899 100%);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
@@ -295,7 +315,7 @@ st.markdown("""
     position: absolute;
     top: 0; left: 0; right: 0;
     height: 2px;
-    background: linear-gradient(90deg, transparent, #3B82F6, transparent);
+    background: linear-gradient(90deg, transparent, #3B82F6, #A855F7, #EC4899, transparent);
     opacity: 0;
     transition: opacity 0.25s ease;
   }
@@ -315,9 +335,13 @@ st.markdown("""
   }
   .metric-card .metric-value {
     font-size: 1.85rem; font-weight: 700;
-    color: #3B82F6;
+    background: linear-gradient(135deg, #3B82F6, #A855F7);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    color: transparent;
     line-height: 1;
-    background: transparent; padding: 0; display: block;
+    padding: 0; display: block;
   }
   .metric-card .metric-unit {
     font-size: 0.75rem; color: #94A3B8; margin-top: 4px;
