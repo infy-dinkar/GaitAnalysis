@@ -410,9 +410,10 @@ def plot_gait_cycle_curves(
     ankle_L_mean, ankle_L_std, ankle_R_mean, ankle_R_std, K_ankle_L, K_ankle_R,
 ):
     """
-    Three-row figure (hip, knee, ankle) showing the cycle-normalized mean
-    curves for each leg (0-100%) overlaid on the healthy-walker reference
-    band (grey).
+    Three-row figure (hip, knee, ankle) showing each leg's mean ± 1 SD
+    curves across the gait cycle (0-100%) overlaid on the healthy-walker
+    reference band (grey). The SD bands convey honest stride-to-stride
+    variability around each leg's mean.
 
     Styling matches the rest of the dark-theme charts (PALETTE constants).
     Stance phase 0-60% lightly shaded; toe-off marker at 60%; 0° baseline.
@@ -472,26 +473,39 @@ def plot_gait_cycle_curves(
         ax.axhline(0,  color=PALETTE["muted"], linestyle="-",
                    linewidth=0.6, alpha=0.5, zorder=1.5)
 
-        # LEFT leg (blue) — solid mean line only, no SD shading
+        # LEFT leg (blue) — SD shading first (zorder=2), then solid mean on top.
+        # SD band shows stride-to-stride variability; solid line shows the mean.
         if mL is not None and KL > 0 and len(mL) == len(x):
+            if sL is not None:
+                ax.fill_between(x, mL - sL, mL + sL,
+                                color=PALETTE["left"], alpha=0.20,
+                                linewidth=0, zorder=2)
             ax.plot(x, mL, color=PALETTE["left"], linewidth=2.0,
                     label=f"Left (K={KL})", zorder=3)
 
-        # RIGHT leg (red) — solid mean line only, no SD shading
+        # RIGHT leg (red) — SD shading first (zorder=2), then solid mean on top.
         if mR is not None and KR > 0 and len(mR) == len(x):
+            if sR is not None:
+                ax.fill_between(x, mR - sR, mR + sR,
+                                color=PALETTE["right"], alpha=0.20,
+                                linewidth=0, zorder=2)
             ax.plot(x, mR, color=PALETTE["right"], linewidth=2.0,
                     label=f"Right (K={KR})", zorder=3)
 
-        # Dynamic y-axis range so neither the subject mean lines nor the
+        # Dynamic y-axis range so neither the subject (mean ± SD) nor the
         # widened reference band ever clip. Padded by 5° and snapped to
         # 5° gridlines.
         all_vals: list[float] = []
         all_vals.extend((ref_mean - ref_sd_vis).tolist())
         all_vals.extend((ref_mean + ref_sd_vis).tolist())
-        for m, K in ((mL, KL), (mR, KR)):
+        for m, s, K in ((mL, sL, KL), (mR, sR, KR)):
             if m is None or K <= 0 or len(m) != len(x):
                 continue
-            all_vals.extend(m.tolist())
+            if s is not None:
+                all_vals.extend((m - s).tolist())
+                all_vals.extend((m + s).tolist())
+            else:
+                all_vals.extend(m.tolist())
         all_vals_arr = np.asarray(
             [v for v in all_vals if not np.isnan(v) and np.isfinite(v)]
         )
@@ -504,7 +518,7 @@ def plot_gait_cycle_curves(
         ax.set_ylim(ymin, ymax)
         ax.set_xlim(0, 100)
         ax.set_ylabel("Angle (°)", fontsize=10, color=PALETTE["text"])
-        ax.set_title(title,
+        ax.set_title(f"{title} — mean ± 1 SD",
                      color=PALETTE["text"], fontsize=11, pad=8)
         ax.legend(facecolor=PALETTE["panel"], labelcolor=PALETTE["text"],
                   fontsize=8, framealpha=0.6, loc="upper right")
