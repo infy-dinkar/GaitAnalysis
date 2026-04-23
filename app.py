@@ -1333,6 +1333,220 @@ def _build_pdf_bytes(features: dict, patient: dict) -> bytes:
     return buf.getvalue()
 
 
+# ══════════════════════════════════════════════════════════════════
+# INTERACTIVE PER-JOINT TIME-SERIES (plotly, dark-theme styled)
+# ══════════════════════════════════════════════════════════════════
+def build_joint_timeseries(time_s, left, right, joint_name,
+                           left_color, right_color, y_label,
+                           height=450):
+    """Plotly scatter+line chart of one joint angle over time, two legs.
+
+    Styled for the slate-dark UI: card background, slate gridlines,
+    light text. Trace colors come from the caller (per the spec's
+    per-joint color codes).
+    """
+    import plotly.graph_objects as go
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=time_s, y=left,
+        mode="lines+markers",
+        name=f"Left {joint_name}",
+        line=dict(color=left_color, width=1.2),
+        marker=dict(size=4, color=left_color,
+                    line=dict(width=0.5, color="#1E293B")),
+        hovertemplate=("Time: %{x:.2f}s<br>"
+                       f"Left {joint_name}: %{{y:.2f}}°"
+                       "<extra></extra>"),
+    ))
+    fig.add_trace(go.Scatter(
+        x=time_s, y=right,
+        mode="lines+markers",
+        name=f"Right {joint_name}",
+        line=dict(color=right_color, width=1.2),
+        marker=dict(size=4, color=right_color,
+                    line=dict(width=0.5, color="#1E293B")),
+        hovertemplate=("Time: %{x:.2f}s<br>"
+                       f"Right {joint_name}: %{{y:.2f}}°"
+                       "<extra></extra>"),
+    ))
+    fig.update_layout(
+        xaxis=dict(
+            title=dict(text="Time (seconds)", font=dict(color="#CBD5E1")),
+            gridcolor="#334155",
+            showline=True, linecolor="#475569",
+            zeroline=False,
+            tickfont=dict(color="#94A3B8"),
+        ),
+        yaxis=dict(
+            title=dict(text=y_label, font=dict(color="#CBD5E1")),
+            gridcolor="#334155",
+            showline=True, linecolor="#475569",
+            zeroline=False,
+            tickfont=dict(color="#94A3B8"),
+        ),
+        plot_bgcolor="#1E293B",
+        paper_bgcolor="#1E293B",
+        hovermode="closest",
+        legend=dict(orientation="h", y=1.08, x=0.5,
+                    xanchor="center",
+                    bgcolor="rgba(0,0,0,0)",
+                    borderwidth=0,
+                    font=dict(color="#CBD5E1")),
+        margin=dict(l=50, r=30, t=40, b=50),
+        height=height,
+        font=dict(color="#CBD5E1"),
+    )
+    return fig
+
+
+# Per-joint config: (tab_label, detail_title, card_title, joint_name,
+#                    left_color, right_color, y_label, features_key)
+_JOINT_TABS = [
+    ("LEG ANGLES (NORM)",
+     "Detailed Normalized Leg Angle Analysis",
+     "Leg Angle Analysis (Normalized)",
+     "Leg",   "#9C27B0", "#FF6D00", "Leg Angle (degrees)",
+     "leg_angles"),
+    ("KNEE FLEXION (NORM)",
+     "Detailed Normalized Knee Flexion Analysis",
+     "Knee Flexion Analysis (Normalized)",
+     "Knee",  "#1976D2", "#FF6D00", "Knee Flexion (degrees)",
+     "knee_angles"),
+    ("HIP FLEXION (NORM)",
+     "Detailed Normalized Hip Flexion Analysis",
+     "Hip Flexion Analysis (Normalized)",
+     "Hip",   "#388E3C", "#D32F2F", "Hip Flexion (degrees)",
+     "hip_angles"),
+    ("ANKLE DEFLECTION (NORM)",
+     "Detailed Normalized Ankle Deflection Analysis",
+     "Ankle Deflection Analysis (Normalized)",
+     "Ankle", "#78909C", "#8D6E63", "Ankle Deflection (degrees)",
+     "ankle_angles"),
+]
+
+_INTERACTIVE_HINT = (
+    '<div style="color:#94A3B8; font-size:12px; margin-top:8px; '
+    'font-style:italic;">'
+    '💡 <b>Interactive Features:</b> Mouse wheel to zoom · Drag to pan · '
+    'Hover for detailed values · Click legend items to toggle visibility · '
+    'Use the toolbar (top right) for zoom in/out/reset'
+    '</div>'
+)
+
+
+def _render_interactive_joint_tabs(features: dict) -> None:
+    """Five-tab section: Overview (2x2 grid) + per-joint detail tabs.
+
+    Reads per-frame angle arrays from features (added in compute_all_features
+    as hip_angles / knee_angles / ankle_angles / leg_angles + time_s).
+    """
+    if not features.get("knee_angles"):
+        return
+
+    st.markdown(
+        '<div class="section-title">Interactive Joint Angle Analysis</div>',
+        unsafe_allow_html=True,
+    )
+
+    time_s = features.get("time_s")
+    if time_s is None:
+        n = len(features["knee_angles"]["left"])
+        fps = features.get("fps", 30.0) or 30.0
+        time_s = np.arange(n) / fps
+
+    tab_labels = ["OVERVIEW"] + [cfg[0] for cfg in _JOINT_TABS]
+    tabs = st.tabs(tab_labels)
+
+    # ---- OVERVIEW: 2x2 grid of small charts, no modebar ----
+    with tabs[0]:
+        st.markdown(
+            '<h3 style="text-align:center; margin:16px 0; color:#F1F5F9;">'
+            'Normalized Gait Analysis Overview</h3>',
+            unsafe_allow_html=True,
+        )
+        # First row: leg + knee
+        col1, col2 = st.columns(2)
+        for col, cfg in zip((col1, col2), _JOINT_TABS[:2]):
+            (_label, _detail_title, card_title, joint, lcol, rcol,
+             y_label, key) = cfg
+            data = features.get(key, {}) or {}
+            left, right = data.get("left"), data.get("right")
+            if left is None or right is None:
+                continue
+            with col:
+                st.markdown(
+                    f'<div style="font-size:14px; font-weight:500; '
+                    f'color:#CBD5E1; margin-bottom:6px;">{card_title}</div>',
+                    unsafe_allow_html=True,
+                )
+                fig = build_joint_timeseries(
+                    time_s, left, right, joint, lcol, rcol, y_label,
+                    height=340,
+                )
+                st.plotly_chart(fig, use_container_width=True,
+                                config={"displayModeBar": False})
+        # Second row: hip + ankle
+        col3, col4 = st.columns(2)
+        for col, cfg in zip((col3, col4), _JOINT_TABS[2:]):
+            (_label, _detail_title, card_title, joint, lcol, rcol,
+             y_label, key) = cfg
+            data = features.get(key, {}) or {}
+            left, right = data.get("left"), data.get("right")
+            if left is None or right is None:
+                continue
+            with col:
+                st.markdown(
+                    f'<div style="font-size:14px; font-weight:500; '
+                    f'color:#CBD5E1; margin-bottom:6px;">{card_title}</div>',
+                    unsafe_allow_html=True,
+                )
+                fig = build_joint_timeseries(
+                    time_s, left, right, joint, lcol, rcol, y_label,
+                    height=340,
+                )
+                st.plotly_chart(fig, use_container_width=True,
+                                config={"displayModeBar": False})
+
+    # ---- Detail tabs: one big chart each, with modebar + hint ----
+    for tab, cfg in zip(tabs[1:], _JOINT_TABS):
+        (_label, detail_title, card_title, joint, lcol, rcol,
+         y_label, key) = cfg
+        data = features.get(key, {}) or {}
+        left, right = data.get("left"), data.get("right")
+        with tab:
+            st.markdown(
+                f'<h3 style="text-align:center; margin:16px 0; '
+                f'color:#F1F5F9;">{detail_title}</h3>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<div style="font-size:16px; font-weight:500; '
+                f'color:#F1F5F9; margin-bottom:8px;">{card_title}</div>',
+                unsafe_allow_html=True,
+            )
+            if left is None or right is None:
+                st.info(
+                    f"{joint} angle series not available for this video."
+                )
+                continue
+            fig = build_joint_timeseries(
+                time_s, left, right, joint, lcol, rcol, y_label,
+                height=500,
+            )
+            st.plotly_chart(
+                fig, use_container_width=True,
+                config={
+                    "displayModeBar": True,
+                    "displaylogo": False,
+                    "modeBarButtonsToRemove": [
+                        "lasso2d", "select2d", "toggleSpikelines",
+                    ],
+                },
+            )
+            st.markdown(_INTERACTIVE_HINT, unsafe_allow_html=True)
+
+
 # ──────────────────────────────────────────────
 # STEP 4 — RESULTS  (legacy dashboard wrapped, until Phase 5 carves it up)
 # ──────────────────────────────────────────────
@@ -1404,6 +1618,9 @@ def _render_step_4_legacy_dashboard() -> None:
 
     st.markdown("---")
     _render_graphs(features)
+
+    st.markdown("---")
+    _render_interactive_joint_tabs(features)
 
     st.markdown("---")
     _render_insights(insights)

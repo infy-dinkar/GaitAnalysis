@@ -1030,6 +1030,15 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
         ts, fps, n, cycle_clean_mask, hip_full, knee_full, ankle_full,
     )
 
+    # 6b. Per-frame leg angle (whole-leg sweep relative to vertical), used
+    # by the interactive time-series UI. Math is purely additive: angle of
+    # the hip→ankle vector measured from the +y (down-the-image) axis.
+    leg_angles = {}
+    for side in ("left", "right"):
+        hip_x = ts[f"{side}_hip"]["x_px"];   hip_y = ts[f"{side}_hip"]["y_px"]
+        ank_x = ts[f"{side}_ankle"]["x_px"]; ank_y = ts[f"{side}_ankle"]["y_px"]
+        leg_angles[side] = np.degrees(np.arctan2(ank_x - hip_x, ank_y - hip_y))
+
     # Top-level = clean (drives plots and inference).
     return {
         # ── original top-level keys (= clean) ─────────────
@@ -1065,6 +1074,16 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
         "cycle_duration_filter":  gait_cycle_curves.get(
             "_cycle_duration_filter", {"left": {}, "right": {}}
         ),
+        # Per-frame joint-angle arrays — exposed for the interactive
+        # time-series UI. knee_angles is already present via **clean_metrics
+        # (with summary stats interpret() reads); hip_angles, ankle_angles
+        # and leg_angles are new top-level keys. No math change — these are
+        # the SAME arrays already computed for the cycle-normalised plots,
+        # just kept around for plotting raw time series.
+        "hip_angles":             {"left": hip_full["left"],   "right": hip_full["right"]},
+        "ankle_angles":           {"left": ankle_full["left"], "right": ankle_full["right"]},
+        "leg_angles":             leg_angles,
+        "time_s":                 (np.arange(n) / fps) if fps > 0 else np.arange(n, dtype=float),
     }
 
 
