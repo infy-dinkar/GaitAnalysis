@@ -1372,55 +1372,47 @@ def _render_interactive_joint_tabs(features: dict) -> None:
     tab_labels = ["OVERVIEW"] + [cfg[0] for cfg in _JOINT_TABS]
     tabs = st.tabs(tab_labels)
 
-    # ---- OVERVIEW: 2x2 grid of small charts, no modebar ----
+    # ---- OVERVIEW: stacked full-width charts, no modebar ----
+    # Vertical stack instead of 2x2 grid — each chart gets the full
+    # card width so dense scatter+line traces are actually readable.
+    # For zoom / pan / hover, users switch to the dedicated detail tabs.
     with tabs[0]:
         st.markdown(
             '<h3 style="text-align:center; margin:16px 0; color:#F1F5F9;">'
             'Normalized Gait Analysis Overview</h3>',
             unsafe_allow_html=True,
         )
-        # First row: leg + knee
-        col1, col2 = st.columns(2)
-        for col, cfg in zip((col1, col2), _JOINT_TABS[:2]):
+        st.markdown(
+            '<div style="color:#94A3B8; font-size:13px; '
+            'text-align:center; margin-bottom:24px; font-style:italic;">'
+            'Scroll through each joint below. For deeper inspection with '
+            'zoom and pan controls, switch to the individual joint tabs '
+            'above.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        for i, cfg in enumerate(_JOINT_TABS):
             (_label, _detail_title, card_title, joint, lcol, rcol,
              y_label, key) = cfg
             data = features.get(key, {}) or {}
             left, right = data.get("left"), data.get("right")
             if left is None or right is None:
                 continue
-            with col:
-                st.markdown(
-                    f'<div style="font-size:14px; font-weight:500; '
-                    f'color:#CBD5E1; margin-bottom:6px;">{card_title}</div>',
-                    unsafe_allow_html=True,
-                )
-                fig = build_joint_timeseries(
-                    time_s, left, right, joint, lcol, rcol, y_label,
-                    height=340,
-                )
-                st.plotly_chart(fig, use_container_width=True,
-                                config={"displayModeBar": False})
-        # Second row: hip + ankle
-        col3, col4 = st.columns(2)
-        for col, cfg in zip((col3, col4), _JOINT_TABS[2:]):
-            (_label, _detail_title, card_title, joint, lcol, rcol,
-             y_label, key) = cfg
-            data = features.get(key, {}) or {}
-            left, right = data.get("left"), data.get("right")
-            if left is None or right is None:
-                continue
-            with col:
-                st.markdown(
-                    f'<div style="font-size:14px; font-weight:500; '
-                    f'color:#CBD5E1; margin-bottom:6px;">{card_title}</div>',
-                    unsafe_allow_html=True,
-                )
-                fig = build_joint_timeseries(
-                    time_s, left, right, joint, lcol, rcol, y_label,
-                    height=340,
-                )
-                st.plotly_chart(fig, use_container_width=True,
-                                config={"displayModeBar": False})
+            st.markdown(
+                f'<div style="font-size:16px; font-weight:500; '
+                f'color:#F1F5F9; margin:16px 0 8px 0;">{card_title}</div>',
+                unsafe_allow_html=True,
+            )
+            fig = build_joint_timeseries(
+                time_s, left, right, joint, lcol, rcol, y_label,
+                height=380,
+            )
+            st.plotly_chart(fig, use_container_width=True,
+                            config={"displayModeBar": False})
+            # 32px breathing room between joints (skip after the last)
+            if i < len(_JOINT_TABS) - 1:
+                st.markdown('<div style="height:32px;"></div>',
+                            unsafe_allow_html=True)
 
     # ---- Detail tabs: one big chart each, with modebar + hint ----
     for tab, cfg in zip(tabs[1:], _JOINT_TABS):
