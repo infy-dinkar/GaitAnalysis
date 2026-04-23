@@ -165,17 +165,7 @@ st.markdown("""
     font-size: 14px !important;
   }
 
-  /* ===== Wizard cards (Steps 1-3) ===== */
-  .wizard-card {
-    background: #1E293B;
-    border: 1px solid #334155;
-    border-radius: 12px;
-    padding: 24px;
-    margin: 16px auto;
-    max-width: 900px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.30);
-    color: #CBD5E1;
-  }
+  /* ===== Wizard step components ===== */
   .wizard-title {
     font-size: 22px; font-weight: 600;
     color: #F1F5F9;
@@ -902,7 +892,6 @@ def _render_step_1() -> None:
     until all required fields (Name, Age, Gender, Height) are valid."""
     p = st.session_state["patient"]
 
-    st.markdown('<div class="wizard-card">', unsafe_allow_html=True)
     st.markdown(
         '<div class="wizard-title">Patient Information</div>',
         unsafe_allow_html=True,
@@ -962,8 +951,6 @@ def _render_step_1() -> None:
         height=100,
     )
 
-    st.markdown('</div>', unsafe_allow_html=True)
-
     # Disabled-only validation
     required_ok = (
         bool(name.strip())
@@ -1021,7 +1008,6 @@ INSTRUCTION_BLOCKS = [
 
 def _render_step_2() -> None:
     """Read-only checklist screen. Back / Next navigation only."""
-    st.markdown('<div class="wizard-card">', unsafe_allow_html=True)
     st.markdown(
         '<div class="wizard-title">Before You Record</div>',
         unsafe_allow_html=True,
@@ -1037,8 +1023,6 @@ def _render_step_2() -> None:
                 f'<div class="wizard-check-row">{item}</div>',
                 unsafe_allow_html=True,
             )
-
-    st.markdown('</div>', unsafe_allow_html=True)
 
     col_back, _, col_next = st.columns([1, 4, 1])
     with col_back:
@@ -1119,7 +1103,6 @@ def _render_step_3() -> None:
     """File upload, preview, and analyze trigger."""
     p = st.session_state["patient"]
 
-    st.markdown('<div class="wizard-card">', unsafe_allow_html=True)
     st.markdown(
         '<div class="wizard-title">Upload Walking Video</div>',
         unsafe_allow_html=True,
@@ -1152,8 +1135,6 @@ def _render_step_3() -> None:
 
         with st.expander("Preview", expanded=False):
             st.video(uploaded)
-
-    st.markdown('</div>', unsafe_allow_html=True)
 
     file_ready = st.session_state.get("video_file") is not None
     if st.button(
