@@ -40,7 +40,12 @@ DEFAULT_HEIGHT_CM = 170
 # ──────────────────────────────────────────────
 st.markdown("""
 <style>
-  .stApp { background: #0F172A; }
+  .stApp {
+    background:
+      radial-gradient(circle at 12% 0%, rgba(59,130,246,0.10), transparent 45%),
+      radial-gradient(circle at 92% 8%, rgba(16,185,129,0.06), transparent 40%),
+      #0F172A;
+  }
   .block-container {
     padding-top: 2rem;
     padding-bottom: 3rem;
@@ -82,17 +87,28 @@ st.markdown("""
   .stepper-item {
     display: flex; align-items: center;
     gap: 12px; padding: 8px 4px;
+    transition: transform 0.2s ease;
   }
   .stepper-circle {
     width: 32px; height: 32px;
     border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
     font-size: 14px; font-weight: 600; flex-shrink: 0;
+    transition: all 0.25s ease;
   }
   .stepper-name { font-size: 14px; line-height: 1.2; }
-  .stepper-active   .stepper-circle { background: #3B82F6; color: #FFFFFF; }
+  .stepper-active   .stepper-circle {
+    background: linear-gradient(135deg, #3B82F6, #2563EB);
+    color: #FFFFFF;
+    box-shadow: 0 0 0 4px rgba(59,130,246,0.18),
+                0 0 18px rgba(59,130,246,0.45);
+  }
   .stepper-active   .stepper-name   { color: #F1F5F9; font-weight: 600; }
-  .stepper-done     .stepper-circle { background: #10B981; color: #FFFFFF; }
+  .stepper-done     .stepper-circle {
+    background: linear-gradient(135deg, #10B981, #059669);
+    color: #FFFFFF;
+    box-shadow: 0 0 0 3px rgba(16,185,129,0.15);
+  }
   .stepper-done     .stepper-name   { color: #F1F5F9; font-weight: 400; }
   .stepper-upcoming .stepper-circle {
     background: transparent;
@@ -206,55 +222,90 @@ st.markdown("""
 
   /* ===== Generic app card ===== */
   .app-card {
-    background: #1E293B;
+    background: linear-gradient(180deg, #1E293B, #1A2336);
     border: 1px solid #334155;
     border-radius: 12px;
     padding: 24px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.30);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.35),
+                0 0 0 1px rgba(59,130,246,0.06);
     margin-bottom: 20px;
     color: #CBD5E1;
   }
 
   /* ===== Section title (legacy Step 4 dashboard) ===== */
   .section-title {
+    position: relative;
     text-align: center;
     font-size: 18px; font-weight: 500;
     color: #F1F5F9;
     padding: 14px;
-    background: #1E293B;
+    background: linear-gradient(180deg, #1E293B, #1A2336);
     border: 1px solid #334155;
     border-radius: 12px;
     box-shadow: 0 2px 8px rgba(0,0,0,0.30);
     margin: 24px 0 16px 0;
+    overflow: hidden;
+  }
+  .section-title::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 4px;
+    background: linear-gradient(180deg, #3B82F6, #06B6D4);
   }
 
   /* ===== Hero (legacy Step 4 dashboard) ===== */
   .hero-title {
-    font-size: 2.4rem; font-weight: 600;
-    color: #F1F5F9 !important;
+    font-size: 2.6rem; font-weight: 700;
+    background: linear-gradient(135deg, #3B82F6 0%, #06B6D4 50%, #10B981 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    color: transparent !important;
     line-height: 1.2; margin-bottom: 0.2rem;
+    letter-spacing: -0.5px;
   }
   .hero-sub {
     font-size: 1.0rem; color: #94A3B8;
     margin-bottom: 1.5rem;
   }
+  .wizard-title {
+    background: linear-gradient(135deg, #F1F5F9 0%, #94A3B8 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
 
   /* ===== Legacy metric cards (Step 4 dashboard) ===== */
   .metric-card {
-    background: #1E293B;
+    background: linear-gradient(180deg, #1E293B, #1A2336);
     border: 1px solid #334155;
     border-radius: 12px;
     padding: 18px 20px;
     text-align: center;
     height: 110px;
     display: flex; flex-direction: column; justify-content: center;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.30);
-    transition: transform 0.2s, box-shadow 0.2s;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+    transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+    position: relative;
+    overflow: hidden;
+  }
+  .metric-card::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, #3B82F6, transparent);
+    opacity: 0;
+    transition: opacity 0.25s ease;
   }
   .metric-card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 14px rgba(59,130,246,0.20);
+    transform: translateY(-3px);
+    box-shadow: 0 8px 24px rgba(59,130,246,0.25),
+                0 0 0 1px rgba(59,130,246,0.30);
+    border-color: rgba(59,130,246,0.30);
   }
+  .metric-card:hover::before { opacity: 1; }
   .metric-card .metric-label {
     font-size: 0.72rem; font-weight: 600;
     color: #94A3B8;
@@ -274,24 +325,28 @@ st.markdown("""
 
   /* ===== Insight cards ===== */
   .obs-card {
-    background: #0F172A;
+    background: linear-gradient(180deg, #1E293B, #1A2336);
     border: 1px solid #334155;
-    border-left: 3px solid #10B981;
+    border-left: 4px solid #10B981;
     border-radius: 8px;
     padding: 12px 16px;
     margin-bottom: 8px;
     font-size: 0.92rem; line-height: 1.5;
     color: #CBD5E1;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.20),
+                inset 4px 0 0 0 rgba(16,185,129,0.18);
   }
   .sug-card {
-    background: #0F172A;
+    background: linear-gradient(180deg, #1E293B, #1A2336);
     border: 1px solid #334155;
-    border-left: 3px solid #F59E0B;
+    border-left: 4px solid #F59E0B;
     border-radius: 8px;
     padding: 12px 16px;
     margin-bottom: 8px;
     font-size: 0.92rem; line-height: 1.5;
     color: #CBD5E1;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.20),
+                inset 4px 0 0 0 rgba(245,158,11,0.18);
   }
 
   /* ===== Tabs ===== */
@@ -307,11 +362,16 @@ st.markdown("""
     letter-spacing: 0.5px;
     text-transform: uppercase;
     padding: 12px 4px;
-    border-bottom: 2px solid transparent;
+    border-bottom: 3px solid transparent;
+    transition: color 0.2s ease, border-color 0.2s ease;
+  }
+  .stTabs [data-baseweb="tab"]:hover {
+    color: #CBD5E1;
   }
   .stTabs [aria-selected="true"] {
     color: #3B82F6 !important;
     border-bottom-color: #3B82F6 !important;
+    box-shadow: 0 4px 8px -4px rgba(59,130,246,0.50);
   }
 
   /* ===== Buttons ===== */
@@ -319,33 +379,49 @@ st.markdown("""
     border-radius: 8px;
     font-weight: 500;
     padding: 10px 20px;
-    transition: background 0.15s ease;
+    transition: all 0.2s ease;
   }
   .stButton button[kind="primary"] {
-    background: #3B82F6;
+    background: linear-gradient(135deg, #3B82F6, #2563EB);
     color: #FFFFFF;
     border: none;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.20);
   }
-  .stButton button[kind="primary"]:hover { background: #2563EB; }
+  .stButton button[kind="primary"]:hover {
+    background: linear-gradient(135deg, #2563EB, #1D4ED8);
+    box-shadow: 0 4px 14px rgba(59,130,246,0.40),
+                0 0 0 1px rgba(59,130,246,0.20);
+    transform: translateY(-1px);
+  }
   .stButton button[kind="secondary"] {
     background: transparent;
     color: #CBD5E1;
     border: 1px solid #334155;
   }
-  .stButton button[kind="secondary"]:hover { background: #334155; }
+  .stButton button[kind="secondary"]:hover {
+    background: #334155;
+    border-color: #475569;
+  }
   .stButton button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+    transform: none;
   }
   .stDownloadButton button {
-    background: #3B82F6 !important;
+    background: linear-gradient(135deg, #3B82F6, #2563EB) !important;
     color: #FFFFFF !important;
     border: none !important;
     border-radius: 8px !important;
     font-weight: 500 !important;
     padding: 10px 20px !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.20) !important;
+    transition: all 0.2s ease !important;
   }
-  .stDownloadButton button:hover { background: #2563EB !important; }
+  .stDownloadButton button:hover {
+    background: linear-gradient(135deg, #2563EB, #1D4ED8) !important;
+    box-shadow: 0 4px 14px rgba(59,130,246,0.40) !important;
+    transform: translateY(-1px);
+  }
 
   /* ===== File uploader ===== */
   [data-testid="stFileUploader"] section {
