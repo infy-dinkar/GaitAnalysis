@@ -6,6 +6,8 @@ Streamlit entry point for the Video-Based Gait Analysis System.
 import os
 import urllib.request
 import tempfile
+import uuid
+from datetime import date
 import numpy as np
 import streamlit as st
 import mediapipe as mp
@@ -22,10 +24,10 @@ from gait_plots import (
 # PAGE CONFIG
 # ──────────────────────────────────────────────
 st.set_page_config(
-    page_title="AI Gait Analyzer",
+    page_title="GaitVision",
     page_icon="",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 # Default adult height — used until the user changes it in the height input on the main page.
@@ -186,15 +188,208 @@ st.markdown("""
   }
 
   /* Streamlit default overrides */
-  .stFileUploader { 
-    border-radius: 10px; 
+  .stFileUploader {
+    border-radius: 10px;
   }
-  div[data-testid="stMetricValue"] { 
-    color: #58A6FF !important; 
+  div[data-testid="stMetricValue"] {
+    color: #58A6FF !important;
   }
   .reportview-container .main footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ──────────────────────────────────────────────
+# CUSTOM CSS — BLOCK 2 (wizard light theme, sidebar stepper)
+# Scoped to .wizard-* classes; the dark-theme block above still drives
+# the legacy dashboard rendered inside Step 4.
+# ──────────────────────────────────────────────
+st.markdown("""
+<style>
+  /* ---- Sidebar stepper ---- */
+  [data-testid="stSidebar"] {
+    background-color: #f3f4f6;
+  }
+  [data-testid="stSidebar"] * {
+    color: #1A1A1A;
+  }
+  [data-testid="stSidebar"] h1 {
+    color: #1976D2;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    margin: 12px 0 4px 0;
+  }
+  [data-testid="stSidebar"] .sidebar-tagline {
+    font-size: 12px;
+    color: #666;
+    margin-bottom: 24px;
+    letter-spacing: 0.4px;
+  }
+  .stepper {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 8px;
+  }
+  .stepper-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 4px;
+  }
+  .stepper-circle {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+  .stepper-name {
+    font-size: 14px;
+    line-height: 1.2;
+  }
+  .stepper-active .stepper-circle  { background: #1976D2; color: white; }
+  .stepper-active .stepper-name    { color: #1A1A1A; font-weight: 600; }
+  .stepper-done   .stepper-circle  { background: #2ECC71; color: white; }
+  .stepper-done   .stepper-name    { color: #1A1A1A; font-weight: 400; }
+  .stepper-upcoming .stepper-circle{
+    background: transparent;
+    border: 2px solid #BDBDBD;
+    color: #9E9E9E;
+  }
+  .stepper-upcoming .stepper-name  { color: #9E9E9E; }
+
+  /* ---- Wizard cards (Steps 1-3) ---- */
+  .wizard-card {
+    background: white;
+    border-radius: 12px;
+    padding: 32px;
+    margin: 16px auto;
+    max-width: 800px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    color: #1A1A1A;
+  }
+  .wizard-title {
+    font-size: 22px;
+    font-weight: 600;
+    color: #1A1A1A;
+    margin-bottom: 20px;
+    text-align: center;
+  }
+  .wizard-info-strip {
+    background: #f3f4f6;
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 13px;
+    color: #555;
+    margin: 12px 0 20px 0;
+  }
+  .wizard-file-info {
+    background: #e8f4fd;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 13px;
+    color: #1565c0;
+    margin: 8px 0 12px 0;
+  }
+  .wizard-section-heading {
+    font-size: 15px;
+    font-weight: 600;
+    color: #1A1A1A;
+    margin: 18px 0 8px 0;
+  }
+  .wizard-check-row {
+    color: #1A1A1A;
+    padding: 6px 0;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .wizard-check-row::before {
+    content: "✓ ";
+    color: #2ECC71;
+    font-weight: bold;
+    margin-right: 4px;
+  }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ──────────────────────────────────────────────
+# Conditional page-background flip for wizard steps 1-3.
+# Step 4 keeps the dark dashboard look unchanged.
+# ──────────────────────────────────────────────
+def _maybe_inject_wizard_background():
+    if st.session_state.get("step", 1) in (1, 2, 3):
+        st.markdown("""
+        <style>
+          [data-testid="stAppViewContainer"] {
+            background-color: #f7f8fa;
+          }
+          [data-testid="stHeader"] {
+            background: transparent;
+          }
+          [data-testid="stMain"] [data-testid="stMarkdownContainer"] {
+            color: #1A1A1A;
+          }
+          [data-testid="stMain"] label,
+          [data-testid="stMain"] .stTextInput input,
+          [data-testid="stMain"] .stNumberInput input,
+          [data-testid="stMain"] .stTextArea textarea,
+          [data-testid="stMain"] .stDateInput input {
+            color: #1A1A1A;
+          }
+          [data-testid="stMain"] .stTextInput input,
+          [data-testid="stMain"] .stNumberInput input,
+          [data-testid="stMain"] .stTextArea textarea,
+          [data-testid="stMain"] .stDateInput input,
+          [data-testid="stMain"] [data-baseweb="select"] > div {
+            background-color: white !important;
+            border: 1px solid #E0E0E0 !important;
+          }
+        </style>
+        """, unsafe_allow_html=True)
+
+
+# ──────────────────────────────────────────────
+# SESSION STATE
+# ──────────────────────────────────────────────
+def _init_session_state():
+    """Initialise wizard state on first render. Idempotent across reruns.
+
+    Keys:
+      step                  — int, 1..4. Active wizard step.
+      patient               — dict, holds form values from Step 1
+                              (name, patient_id, age, gender, height_cm,
+                              weight_kg, assessment_date, clinician, notes).
+      uploaded_file_bytes   — bytes | None. Raw video bytes from Step 3.
+      uploaded_file_name    — str | None.
+      features              — dict | None. Output of compute_all_features.
+      insights              — dict | None. Output of interpret().
+      fps                   — float | None. Captured at extract_poses time.
+      total_frames          — int | None. Captured at extract_poses time.
+    """
+    defaults = {
+        "step": 1,
+        "patient": {},
+        "uploaded_file_bytes": None,
+        "uploaded_file_name": None,
+        "features": None,
+        "insights": None,
+        "fps": None,
+        "total_frames": None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+_init_session_state()
+_maybe_inject_wizard_background()
 
 
 # ──────────────────────────────────────────────
@@ -600,177 +795,431 @@ def _render_insights(insights: dict) -> None:
             st.markdown(f'<div class="sug-card">{sug}</div>', unsafe_allow_html=True)
 
 
-# ──────────────────────────────────────────────
-# SECTION 1: HEADER
-# ──────────────────────────────────────────────
-st.markdown('<h1 class="hero-title">GaitVision</h1>', unsafe_allow_html=True)
-st.markdown('<p class="hero-sub">AI-powered video gait analysis — pose estimation · metrics · insights</p>',
-            unsafe_allow_html=True)
+# ══════════════════════════════════════════════════════════════════
+# WIZARD — sidebar stepper + four step renderers + legacy-step-4 wrap
+# ══════════════════════════════════════════════════════════════════
+WIZARD_STEPS = [
+    (1, "Patient Details"),
+    (2, "Instructions"),
+    (3, "Upload & Analyze"),
+    (4, "Results"),
+]
 
-st.markdown("""
-<div style="background:#161B22;border:1px solid #30363D;border-radius:10px;padding:14px 18px;margin-bottom:1.5rem;">
-    <b style="color:#E6EDF3;"> Instructions</b><br>
-    <span style="font-size:0.88rem;color:#8B949E;">
-    1. Upload a walking video in <b>side (lateral) view</b> with the <b>full body visible</b>.<br>
-    2. Supported format: <code>.mp4</code> · Keep video under <b>60 seconds</b> for best performance.<br>
-    3. The system will extract pose landmarks, compute 10 gait features, and generate insights automatically.
-    </span>
-</div>
-""", unsafe_allow_html=True)
+
+def _render_sidebar_stepper() -> None:
+    """Vertical step indicator in the sidebar; reflects st.session_state['step']."""
+    with st.sidebar:
+        st.markdown("# GaitVision")
+        st.markdown(
+            '<div class="sidebar-tagline">CLINICAL GAIT ANALYSIS</div>',
+            unsafe_allow_html=True,
+        )
+        current = st.session_state["step"]
+        items = []
+        for num, name in WIZARD_STEPS:
+            if num < current:
+                cls, marker = "stepper-done", "✓"
+            elif num == current:
+                cls, marker = "stepper-active", str(num)
+            else:
+                cls, marker = "stepper-upcoming", str(num)
+            items.append(
+                f'<div class="stepper-item {cls}">'
+                f'<div class="stepper-circle">{marker}</div>'
+                f'<div class="stepper-name">{name}</div>'
+                f'</div>'
+            )
+        st.markdown(
+            f'<div class="stepper">{"".join(items)}</div>',
+            unsafe_allow_html=True,
+        )
+
 
 # ──────────────────────────────────────────────
-# SECTION 2 — HEIGHT (calibrates pixel → meters for step length)
+# STEP 1 — PATIENT DETAILS
 # ──────────────────────────────────────────────
-height_col = st.columns([1, 3])[0]
-with height_col:
-    user_height_cm = st.number_input(
-        " Your height (cm) — used for step-length calibration",
-        min_value=100, max_value=220,
-        value=DEFAULT_HEIGHT_CM, step=1,
-        help="2D video has no absolute scale, so step length is calibrated from "
-             "your height via the leg-length ratio (leg ≈ 53% of height). "
-             "Leave at default for an average-adult estimate.",
+GENDER_OPTIONS = ["", "Female", "Male", "Other", "Prefer not to say"]
+
+
+def _render_step_1() -> None:
+    """Patient information form. Disabled-only validation: Next greys out
+    until all required fields (Name, Age, Gender, Height) are valid."""
+    p = st.session_state["patient"]
+
+    st.markdown('<div class="wizard-card">', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="wizard-title">Patient Information</div>',
+        unsafe_allow_html=True,
     )
 
+    col1, col2 = st.columns(2)
+    with col1:
+        name = st.text_input(
+            "Full Name *",
+            value=p.get("name", ""),
+            placeholder="Jane Doe",
+        )
+        age = st.number_input(
+            "Age *",
+            min_value=1, max_value=120, step=1,
+            value=int(p.get("age") or 30),
+        )
+        height_cm = st.number_input(
+            "Height (cm) *",
+            min_value=50, max_value=250, step=1,
+            value=int(p.get("height_cm") or DEFAULT_HEIGHT_CM),
+            help="Used for pixel-to-meter calibration of step length.",
+        )
+        assess_date = st.date_input(
+            "Assessment Date",
+            value=p.get("assessment_date") or date.today(),
+        )
+    with col2:
+        patient_id = st.text_input(
+            "Patient ID (optional)",
+            value=p.get("patient_id", ""),
+            placeholder="auto-generated if blank",
+        )
+        gender_default_idx = (
+            GENDER_OPTIONS.index(p["gender"])
+            if p.get("gender") in GENDER_OPTIONS
+            else 0
+        )
+        gender = st.selectbox(
+            "Gender *",
+            GENDER_OPTIONS,
+            index=gender_default_idx,
+        )
+        weight_kg = st.number_input(
+            "Weight (kg)",
+            min_value=10.0, max_value=300.0, step=0.1,
+            value=float(p.get("weight_kg") or 70.0),
+        )
+        clinician = st.text_input(
+            "Referring Clinician",
+            value=p.get("clinician", ""),
+        )
+
+    notes = st.text_area(
+        "Clinical Notes (optional)",
+        value=p.get("notes", ""),
+        height=100,
+    )
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Disabled-only validation
+    required_ok = (
+        bool(name.strip())
+        and bool(gender)
+        and 1 <= int(age) <= 120
+        and 50 <= int(height_cm) <= 250
+    )
+
+    _, col_btn = st.columns([5, 1])
+    with col_btn:
+        if st.button("Next →", disabled=not required_ok, type="primary",
+                     use_container_width=True):
+            new_id = patient_id.strip() or (
+                f"GV-{date.today().strftime('%Y%m%d')}-"
+                f"{uuid.uuid4().hex[:6].upper()}"
+            )
+            st.session_state["patient"] = {
+                "name": name.strip(),
+                "patient_id": new_id,
+                "age": int(age),
+                "gender": gender,
+                "height_cm": int(height_cm),
+                "weight_kg": float(weight_kg),
+                "assessment_date": assess_date,
+                "clinician": clinician.strip(),
+                "notes": notes.strip(),
+            }
+            st.session_state["step"] = 2
+            st.rerun()
+
+
 # ──────────────────────────────────────────────
-# SECTION 3: UPLOAD
+# STEP 2 — INSTRUCTIONS
 # ──────────────────────────────────────────────
-uploaded = st.file_uploader(
-    "Upload a walking video",
-    type=["mp4", "mov", "avi", "mkv"],
-    help="Side-view full-body walking video recommended",
-    label_visibility="collapsed",
-)
+INSTRUCTION_BLOCKS = [
+    ("Recording setup", [
+        "Camera perpendicular to walking direction (true side view)",
+        "Walking path at least 4 to 5 meters, straight, unobstructed",
+        "Full body visible for entire walk",
+        "Good even lighting — no backlighting or harsh shadows",
+        "Subject wears fitted clothing (loose clothing hides joints)",
+    ]),
+    ("Video requirements", [
+        "30 fps or higher",
+        "720p minimum resolution",
+        "3 to 5 back-and-forth passes recommended for stride averaging",
+    ]),
+    ("For accurate analysis", [
+        "Keep camera steady — use a tripod if possible",
+        "Subject walks at their natural self-selected pace",
+        "No carrying objects or using a phone during recording",
+    ]),
+]
 
-if uploaded is not None:
-    # Preview
-    st.video(uploaded)
 
-    # ──────────────────────────────────────────
-    # PROCESSING
-    # ──────────────────────────────────────────
-    st.markdown('<div class="section-title"> Processing</div>', unsafe_allow_html=True)
-    progress_bar = st.progress(0, text="Initializing pose model…")
-    status_text = st.empty()
+def _render_step_2() -> None:
+    """Read-only checklist screen. Back / Next navigation only."""
+    st.markdown('<div class="wizard-card">', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="wizard-title">Before You Record</div>',
+        unsafe_allow_html=True,
+    )
 
-    # Save uploaded file to temp location
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
-        tmp.write(uploaded.read())
+    for heading, items in INSTRUCTION_BLOCKS:
+        st.markdown(
+            f'<div class="wizard-section-heading">{heading}</div>',
+            unsafe_allow_html=True,
+        )
+        for item in items:
+            st.markdown(
+                f'<div class="wizard-check-row">{item}</div>',
+                unsafe_allow_html=True,
+            )
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    col_back, _, col_next = st.columns([1, 4, 1])
+    with col_back:
+        if st.button("← Back", use_container_width=True):
+            st.session_state["step"] = 1
+            st.rerun()
+    with col_next:
+        if st.button("Next →", type="primary", use_container_width=True):
+            st.session_state["step"] = 3
+            st.rerun()
+
+
+# ──────────────────────────────────────────────
+# STEP 3 — UPLOAD & ANALYZE
+# ──────────────────────────────────────────────
+def _run_analysis() -> bool:
+    """Run the full pipeline on the uploaded file and store results in
+    session state. Returns True on success, False on failure (the calling
+    site uses this to decide whether to advance to Step 4)."""
+    file_bytes = st.session_state["uploaded_file_bytes"]
+    file_name  = st.session_state["uploaded_file_name"] or "video.mp4"
+    user_height_cm = st.session_state["patient"].get("height_cm", DEFAULT_HEIGHT_CM)
+
+    suffix = os.path.splitext(file_name)[1] or ".mp4"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(file_bytes)
         tmp_path = tmp.name
 
     try:
-        # Load model
-        pose_options = load_pose_model_options()
-        progress_bar.progress(0.02, text=" Extracting poses frame-by-frame…")
+        with st.status("Analyzing gait …", expanded=True) as status:
+            st.write("Loading pose model …")
+            pose_options = load_pose_model_options()
 
-        def _progress_cb(frac: float):
-            pct = min(int(frac * 80), 80)           # 0-80% for extraction
-            progress_bar.progress(pct / 100, text=f" Extracting poses… {pct}%")
+            st.write("Extracting poses from video …")
+            raw, fps, total_frames = extract_poses(tmp_path, pose_options)
 
-        # Stage 1 — Extract
-        raw, fps, total_frames = extract_poses(tmp_path, pose_options, _progress_cb)
+            st.write("Detecting walking passes …")
+            ts = build_time_series(raw)
 
-        progress_bar.progress(0.82, text=" Preprocessing time series…")
-        status_text.markdown("*Smoothing & interpolating landmark trajectories…*")
-
-        # Stage 2 — Preprocess
-        ts = build_time_series(raw)
-
-        progress_bar.progress(0.88, text=" Computing 10 gait features…")
-        status_text.markdown("*Running feature extraction algorithms…*")
-
-        # Stage 3 — Features. Pixel→meter scaling uses an assumed adult height
-        # (true height is unknowable from 2D video without a calibration object).
-        features = compute_all_features(ts, fps, total_frames, user_height_cm=user_height_cm)
-        features["_ts"] = ts   # pass time-series for heel plots
-
-        progress_bar.progress(0.95, text=" Generating graphs…")
-        status_text.markdown("*Building visualizations…*")
-
-        # Stage 4 — Insights
-        insights = interpret(features)
-
-        progress_bar.progress(1.0, text=" Analysis complete!")
-        status_text.empty()
-
-        st.success(f" Processed **{total_frames}** frames at **{fps:.1f} FPS** — {features['duration_sec']:.1f}s total")
-
-        # ── Audit / sanity-check info (per Section 3 spec) ──
-        mpp = features.get("meters_per_pixel")
-        npasses = features.get("num_passes", 0)
-        frames_used = features.get("frames_used", 0)
-        if mpp:
-            st.caption(
-                f" Calibration: {mpp*1000:.3f} mm/px  ·  "
-                f"{npasses} valid pass{'es' if npasses != 1 else ''}  ·  "
-                f"{frames_used}/{total_frames} frames used  ·  "
-                f"height = {user_height_cm} cm"
-                + (" (default)" if user_height_cm == DEFAULT_HEIGHT_CM else " (user-set)")
-            )
-        else:
-            st.caption(
-                f" Scale calibration failed (no clear stance frames). "
-                f"{npasses} valid pass{'es' if npasses != 1 else ''}  ·  "
-                f"{frames_used}/{total_frames} frames used. "
-                f"Distances will be reported in pixels."
+            st.write(
+                "Filtering turning and acceleration phases · "
+                "detecting heel-strike events · "
+                "computing joint angles …"
             )
 
-        # Ankle baseline diagnostic — surfaces per-leg correction so it's
-        # auditable. Static-detected = subject paused somewhere; running-median
-        # = no static frames found, so we used each leg's own median over the
-        # full clip as the per-side neutral.
-        ab = features.get("ankle_baseline") or {}
-        if ab:
-            st.caption(
-                f" Ankle baseline correction: "
-                f"L = {ab['offset_deg_left']:+.1f}°, "
-                f"R = {ab['offset_deg_right']:+.1f}°  "
-                f"({ab['method']}"
-                + (f", n = {ab['n_frames']} frames" if ab["n_frames"] > 0 else "")
-                + ")"
+            st.write("Building gait-cycle curves and metrics …")
+            features = compute_all_features(
+                ts, fps, total_frames, user_height_cm=user_height_cm,
             )
+            features["_ts"] = ts
 
-        st.markdown("---")
+            st.write("Generating insights …")
+            insights = interpret(features)
 
-        # ── Section 3: Metrics ─────────────────
-        _render_metrics(features)
+            st.session_state["features"]    = features
+            st.session_state["insights"]    = insights
+            st.session_state["fps"]         = fps
+            st.session_state["total_frames"] = total_frames
 
-        st.markdown("---")
-
-        # ── Section 4: Graphs ─────────────────
-        _render_graphs(features)
-
-        st.markdown("---")
-
-        # ── Section 5: Insights ───────────────
-        _render_insights(insights)
-
-    except Exception as e:
-        progress_bar.empty()
-        status_text.empty()
-        st.error(f" Processing failed: {e}")
-        st.exception(e)
-
+            status.update(label="Analysis complete.", state="complete")
+        return True
+    except Exception as exc:
+        st.error(f"Analysis failed: {exc}")
+        st.exception(exc)
+        return False
     finally:
-        # Cleanup temp file
         try:
             os.unlink(tmp_path)
         except Exception:
             pass
 
+
+def _render_step_3() -> None:
+    """File upload, preview, and analyze trigger."""
+    p = st.session_state["patient"]
+
+    st.markdown('<div class="wizard-card">', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="wizard-title">Upload Walking Video</div>',
+        unsafe_allow_html=True,
+    )
+
+    info_strip = (
+        f"Subject: {p.get('name', '—')}  ·  "
+        f"Age: {p.get('age', '—')}  ·  "
+        f"Height: {p.get('height_cm', '—')} cm"
+    )
+    st.markdown(
+        f'<div class="wizard-info-strip">{info_strip}</div>',
+        unsafe_allow_html=True,
+    )
+
+    uploaded = st.file_uploader(
+        "Drag and drop a walking video, or click to browse",
+        type=["mp4", "mov", "avi", "mkv"],
+    )
+
+    if uploaded is not None:
+        size_mb = len(uploaded.getvalue()) / (1024 * 1024)
+        st.markdown(
+            f'<div class="wizard-file-info">'
+            f'📁 <b>{uploaded.name}</b>  ·  {size_mb:.2f} MB'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        st.session_state["uploaded_file_bytes"] = uploaded.getvalue()
+        st.session_state["uploaded_file_name"]  = uploaded.name
+
+        with st.expander("Preview", expanded=False):
+            st.video(uploaded)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    file_ready = st.session_state.get("uploaded_file_bytes") is not None
+    if st.button(
+        "Analyze Gait",
+        disabled=not file_ready,
+        type="primary",
+        use_container_width=True,
+    ):
+        if _run_analysis():
+            st.session_state["step"] = 4
+            st.rerun()
+
+    col_back, _ = st.columns([1, 5])
+    with col_back:
+        if st.button("← Back", use_container_width=True):
+            st.session_state["step"] = 2
+            st.rerun()
+
+
+# ──────────────────────────────────────────────
+# STEP 4 — RESULTS  (legacy dashboard wrapped, until Phase 5 carves it up)
+# ──────────────────────────────────────────────
+def _render_step_4_legacy_dashboard() -> None:
+    """Renders the existing dashboard from session-state results.
+
+    This is the same metric/graphs/insights flow that used to live at the
+    bottom of app.py — now invoked only after Step 3 has populated
+    `features` / `insights` / `fps` / `total_frames`. Phases 3-5 of the
+    UI overhaul will replace each section here with the new design.
+    """
+    features      = st.session_state["features"]
+    insights      = st.session_state["insights"]
+    fps           = st.session_state["fps"]
+    total_frames  = st.session_state["total_frames"]
+    user_height_cm = st.session_state["patient"].get("height_cm", DEFAULT_HEIGHT_CM)
+
+    if features is None or insights is None:
+        st.warning(
+            "No analysis results yet. Go back to Step 3 and upload a video."
+        )
+        if st.button("← Back to Upload"):
+            st.session_state["step"] = 3
+            st.rerun()
+        return
+
+    st.markdown('<h1 class="hero-title">GaitVision</h1>', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="hero-sub">Analysis Results</p>',
+        unsafe_allow_html=True,
+    )
+
+    st.success(
+        f" Processed **{total_frames}** frames at "
+        f"**{fps:.1f} FPS** — {features['duration_sec']:.1f}s total"
+    )
+
+    mpp         = features.get("meters_per_pixel")
+    npasses     = features.get("num_passes", 0)
+    frames_used = features.get("frames_used", 0)
+    if mpp:
+        st.caption(
+            f" Calibration: {mpp * 1000:.3f} mm/px  ·  "
+            f"{npasses} valid pass{'es' if npasses != 1 else ''}  ·  "
+            f"{frames_used}/{total_frames} frames used  ·  "
+            f"height = {user_height_cm} cm"
+        )
+    else:
+        st.caption(
+            f" Scale calibration failed (no clear stance frames). "
+            f"{npasses} valid pass{'es' if npasses != 1 else ''}  ·  "
+            f"{frames_used}/{total_frames} frames used. "
+            f"Distances will be reported in pixels."
+        )
+
+    ab = features.get("ankle_baseline") or {}
+    if ab:
+        st.caption(
+            f" Ankle baseline correction: "
+            f"L = {ab['offset_deg_left']:+.1f}°, "
+            f"R = {ab['offset_deg_right']:+.1f}°  "
+            f"({ab['method']}"
+            + (f", n = {ab['n_frames']} frames" if ab["n_frames"] > 0 else "")
+            + ")"
+        )
+
+    st.markdown("---")
+    _render_metrics(features)
+
+    st.markdown("---")
+    _render_graphs(features)
+
+    st.markdown("---")
+    _render_insights(insights)
+
+    st.markdown("---")
+    col_re, _ = st.columns([1, 5])
+    with col_re:
+        if st.button("← Re-analyze"):
+            # Clear file + analysis only; keep patient data.
+            st.session_state["uploaded_file_bytes"] = None
+            st.session_state["uploaded_file_name"]  = None
+            st.session_state["features"]            = None
+            st.session_state["insights"]            = None
+            st.session_state["fps"]                 = None
+            st.session_state["total_frames"]        = None
+            st.session_state["step"]                = 3
+            st.rerun()
+
+
+# ──────────────────────────────────────────────
+# WIZARD DISPATCH (replaces the old single-page flow)
+# ──────────────────────────────────────────────
+_render_sidebar_stepper()
+
+_step = st.session_state.get("step", 1)
+if _step == 1:
+    _render_step_1()
+elif _step == 2:
+    _render_step_2()
+elif _step == 3:
+    _render_step_3()
+elif _step == 4:
+    _render_step_4_legacy_dashboard()
 else:
-    # Hero placeholder
-    st.markdown("""
-    <div style="background:linear-gradient(135deg,#161B22,#0D1117);border:2px dashed #30363D;
-                border-radius:16px;padding:3rem;text-align:center;margin-top:1rem;">
-        <div style="font-size:3.5rem;margin-bottom:1rem"></div>
-        <div style="font-size:1.15rem;color:#8B949E;font-weight:500;">
-            Upload a side-view walking video to begin gait analysis
-        </div>
-        <div style="font-size:0.85rem;color:#6E7681;margin-top:0.8rem;">
-            Supports MP4 · MOV · AVI · MKV
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.error(f"Unknown wizard step: {_step}")
+    st.session_state["step"] = 1
 
 
