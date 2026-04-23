@@ -21,21 +21,21 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # ──────────────────────────────────────────────
-# DESIGN TOKENS  (dark theme — preserved)
+# DESIGN TOKENS  (light theme — matches app.py white medical-tool theme)
 # ──────────────────────────────────────────────
 PALETTE = {
-    "bg":     "#0D1117",
-    "panel":  "#161B22",
-    "border": "#30363D",
-    "left":   "#58A6FF",
-    "right":  "#FF7B72",
-    "accent": "#3FB950",
-    "warn":   "#E3B341",
-    "text":   "#C9D1D9",
-    "muted":  "#6E7681",
-    "grid":   "#21262D",
-    "normal": "#8b949e",
-    "pass":   "#58A6FF",   # tint for pass shading
+    "bg":     "#FFFFFF",   # figure canvas
+    "panel":  "#FFFFFF",   # axes face
+    "border": "#E5E7EB",   # axis spines
+    "left":   "#1976D2",   # left-leg trace (material blue)
+    "right":  "#DC2626",   # right-leg trace (material red)
+    "accent": "#10B981",   # success / positive markers
+    "warn":   "#F59E0B",   # warning markers
+    "text":   "#374151",   # tick + axis labels
+    "muted":  "#6B7280",   # captions, secondary
+    "grid":   "#F3F4F6",   # gridlines
+    "normal": "#94a3b8",   # neutral grey for reference band
+    "pass":   "#1976D2",   # tint for pass shading
 }
 
 

@@ -34,185 +34,32 @@ st.set_page_config(
 DEFAULT_HEIGHT_CM = 170
 
 # ──────────────────────────────────────────────
-# CUSTOM CSS
+# CUSTOM CSS — single light/white medical-tool theme, applied app-wide.
+# Replaced the prior dark-theme + wizard-light-overlay setup; everything
+# now renders against a white page.
 # ──────────────────────────────────────────────
 st.markdown("""
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+  /* ===== Global background + typography ===== */
+  .stApp { background: #FFFFFF; }
+  .block-container {
+    padding-top: 2rem;
+    padding-bottom: 3rem;
+    max-width: 1200px;
+  }
+  html, body, [class*="st-"] {
+    font-family: -apple-system, "Segoe UI", Roboto, Inter, sans-serif;
+    color: #374151;
+  }
+  h1, h2, h3, h4, h5, h6 { color: #1A1A1A !important; font-weight: 500; }
 
-  html, body, [class*="css"] {
-    font-family: 'Inter', sans-serif;
-    background-color: #0D1117;
-    color: #C9D1D9;
-  }
-
-  /* Header */
-  .hero-title {
-    font-size: 2.8rem;
-    font-weight: 700;
-    background: linear-gradient(135deg, #58A6FF, #3FB950, #FF7B72);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    line-height: 1.2;
-    margin-bottom: 0.2rem;
-  }
-  .hero-sub {
-    font-size: 1.1rem;
-    color: #6E7681;
-    margin-bottom: 1.5rem;
-  }
-
-  /* Metric cards */
-  .metric-card {
-    background: linear-gradient(145deg, #161B22, #0D1117);
-    border: 1px solid #30363D;
-    border-radius: 12px;
-    padding: 18px 20px;
-    text-align: center;
-    transition: transform 0.2s, box-shadow 0.2s;
-    height: 110px;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-  }
-  .metric-card:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 6px 24px rgba(88,166,255,0.18);
-  }
-  .metric-label {
-    font-size: 0.72rem;
-    font-weight: 600;
-    color: #6E7681;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    margin-bottom: 6px;
-  }
-  .metric-value {
-    font-size: 1.85rem;
-    font-weight: 700;
-    color: #58A6FF;
-    line-height: 1;
-  }
-  .metric-unit {
-    font-size: 0.75rem;
-    color: #6E7681;
-    margin-top: 4px;
-  }
-
-  /* Section headings */
-  .section-title {
-    font-size: 1.3rem;
-    font-weight: 600;
-    color: #E6EDF3;
-    border-left: 4px solid #58A6FF;
-    padding-left: 12px;
-    margin: 1.5rem 0 1rem 0;
-  }
-
-  /* Insight cards */
-  .obs-card {
-    background: #161B22;
-    border: 1px solid #21262D;
-    border-left: 3px solid #3FB950;
-    border-radius: 8px;
-    padding: 12px 16px;
-    margin-bottom: 8px;
-    font-size: 0.92rem;
-    line-height: 1.5;
-  }
-  .sug-card {
-    background: #161B22;
-    border: 1px solid #21262D;
-    border-left: 3px solid #F78166;
-    border-radius: 8px;
-    padding: 12px 16px;
-    margin-bottom: 8px;
-    font-size: 0.92rem;
-    line-height: 1.5;
-  }
-
-  /* Disclaimer */
-  .disclaimer {
-    background: #161B22;
-    border: 1px solid #30363D;
-    border-radius: 8px;
-    padding: 14px 18px;
-    font-size: 0.8rem;
-    color: #6E7681;
-    text-align: center;
-    margin-top: 2rem;
-  }
-
-  /* Streamlit tab styling - give tabs visible spacing and button look */
-  div[role="tablist"] {
-    gap: 12px;
-  }
-  div[role="tablist"] button[role="tab"] {
-    background-color: rgba(148, 163, 184, 0.08);
-    border: 1px solid rgba(148, 163, 184, 0.25);
-    border-radius: 8px;
-    padding: 8px 16px;
-    color: #cbd5e1;
-    font-weight: 500;
-    transition: all 0.15s ease;
-  }
-  div[role="tablist"] button[role="tab"]:hover {
-    background-color: rgba(148, 163, 184, 0.18);
-    border-color: rgba(148, 163, 184, 0.45);
-    color: #f1f5f9;
-  }
-  div[role="tablist"] button[role="tab"][aria-selected="true"] {
-    background-color: rgba(96, 165, 250, 0.15);
-    border-color: #60a5fa;
-    color: #60a5fa;
-  }
-  /* Hide the default red underline indicator since we use background instead */
-  div[role="tablist"] div[data-baseweb="tab-highlight"] {
-    display: none;
-  }
-
-  /* Upload area */
-  .upload-zone {
-    background: #161B22;
-    border: 2px dashed #30363D;
-    border-radius: 12px;
-    padding: 2rem;
-    text-align: center;
-    transition: border-color 0.2s;
-  }
-
-  /* Progress bar */
-  .stProgress > div > div {
-    background: linear-gradient(90deg, #58A6FF, #3FB950) !important;
-  }
-
-  /* Streamlit default overrides */
-  .stFileUploader {
-    border-radius: 10px;
-  }
-  div[data-testid="stMetricValue"] {
-    color: #58A6FF !important;
-  }
-  .reportview-container .main footer { visibility: hidden; }
-</style>
-""", unsafe_allow_html=True)
-
-
-# ──────────────────────────────────────────────
-# CUSTOM CSS — BLOCK 2 (wizard light theme, sidebar stepper)
-# Scoped to .wizard-* classes; the dark-theme block above still drives
-# the legacy dashboard rendered inside Step 4.
-# ──────────────────────────────────────────────
-st.markdown("""
-<style>
-  /* ---- Sidebar stepper ---- */
+  /* ===== Sidebar (stepper container) ===== */
   [data-testid="stSidebar"] {
-    background-color: #f3f4f6;
+    background: #FFFFFF;
+    border-right: 1px solid #E5E7EB;
   }
-  [data-testid="stSidebar"] * {
-    color: #1A1A1A;
-  }
+  [data-testid="stSidebar"] > div { padding-top: 2rem; }
+  [data-testid="stSidebar"] * { color: #1A1A1A; }
   [data-testid="stSidebar"] h1 {
     color: #1976D2;
     font-size: 22px;
@@ -222,137 +69,296 @@ st.markdown("""
   }
   [data-testid="stSidebar"] .sidebar-tagline {
     font-size: 12px;
-    color: #666;
+    color: #6B7280;
     margin-bottom: 24px;
     letter-spacing: 0.4px;
   }
+
+  /* ===== Sidebar stepper ===== */
   .stepper {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    margin-top: 8px;
+    display: flex; flex-direction: column;
+    gap: 12px; margin-top: 8px;
   }
   .stepper-item {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 8px 4px;
+    display: flex; align-items: center;
+    gap: 12px; padding: 8px 4px;
   }
   .stepper-circle {
-    width: 32px;
-    height: 32px;
+    width: 32px; height: 32px;
     border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 14px;
-    font-weight: 600;
-    flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 600; flex-shrink: 0;
   }
-  .stepper-name {
-    font-size: 14px;
-    line-height: 1.2;
+  .stepper-name { font-size: 14px; line-height: 1.2; }
+  .stepper-active   .stepper-circle { background: #1976D2; color: #FFFFFF; }
+  .stepper-active   .stepper-name   { color: #1A1A1A; font-weight: 600; }
+  .stepper-done     .stepper-circle { background: #10B981; color: #FFFFFF; }
+  .stepper-done     .stepper-name   { color: #1A1A1A; font-weight: 400; }
+  .stepper-upcoming .stepper-circle {
+    background: #FFFFFF;
+    border: 1.5px solid #D1D5DB;
+    color: #9CA3AF;
   }
-  .stepper-active .stepper-circle  { background: #1976D2; color: white; }
-  .stepper-active .stepper-name    { color: #1A1A1A; font-weight: 600; }
-  .stepper-done   .stepper-circle  { background: #2ECC71; color: white; }
-  .stepper-done   .stepper-name    { color: #1A1A1A; font-weight: 400; }
-  .stepper-upcoming .stepper-circle{
-    background: transparent;
-    border: 2px solid #BDBDBD;
-    color: #9E9E9E;
-  }
-  .stepper-upcoming .stepper-name  { color: #9E9E9E; }
+  .stepper-upcoming .stepper-name   { color: #9CA3AF; }
 
-  /* ---- Wizard cards (Steps 1-3) ---- */
+  /* ===== Form inputs ===== */
+  .stTextInput input, .stNumberInput input,
+  .stDateInput input, .stTextArea textarea {
+    background: #FFFFFF !important;
+    color: #1A1A1A !important;
+    border: 1px solid #D1D5DB !important;
+    border-radius: 8px !important;
+    padding: 10px 14px !important;
+    font-size: 14px !important;
+  }
+  .stTextInput input:focus, .stNumberInput input:focus,
+  .stDateInput input:focus, .stTextArea textarea:focus {
+    border-color: #1976D2 !important;
+    box-shadow: 0 0 0 3px rgba(25,118,210,0.12) !important;
+    outline: none !important;
+  }
+  .stSelectbox > div > div {
+    background: #FFFFFF !important;
+    border: 1px solid #D1D5DB !important;
+    border-radius: 8px !important;
+  }
+  .stSelectbox > div > div > div { color: #1A1A1A !important; }
+  label,
+  .stTextInput label, .stNumberInput label, .stSelectbox label,
+  .stDateInput label, .stTextArea label, .stFileUploader label {
+    color: #374151 !important;
+    font-weight: 500 !important;
+    font-size: 14px !important;
+  }
+
+  /* ===== Wizard cards (Steps 1-3) ===== */
   .wizard-card {
-    background: white;
+    background: #FFFFFF;
+    border: 1px solid #E5E7EB;
     border-radius: 12px;
     padding: 32px;
     margin: 16px auto;
     max-width: 800px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
     color: #1A1A1A;
   }
   .wizard-title {
-    font-size: 22px;
-    font-weight: 600;
+    font-size: 22px; font-weight: 600;
     color: #1A1A1A;
-    margin-bottom: 20px;
-    text-align: center;
+    margin-bottom: 20px; text-align: center;
   }
   .wizard-info-strip {
-    background: #f3f4f6;
+    background: #F9FAFB;
+    border: 1px solid #E5E7EB;
     border-radius: 8px;
     padding: 12px 16px;
     font-size: 13px;
-    color: #555;
+    color: #374151;
     margin: 12px 0 20px 0;
   }
   .wizard-file-info {
-    background: #e8f4fd;
+    background: #E8F4FD;
     border-radius: 8px;
     padding: 10px 14px;
     font-size: 13px;
-    color: #1565c0;
+    color: #1565C0;
     margin: 8px 0 12px 0;
   }
   .wizard-section-heading {
-    font-size: 15px;
-    font-weight: 600;
+    font-size: 15px; font-weight: 600;
     color: #1A1A1A;
     margin: 18px 0 8px 0;
   }
   .wizard-check-row {
-    color: #1A1A1A;
+    color: #374151;
     padding: 6px 0;
-    font-size: 14px;
-    line-height: 1.5;
+    font-size: 14px; line-height: 1.5;
   }
   .wizard-check-row::before {
     content: "✓ ";
-    color: #2ECC71;
+    color: #10B981;
     font-weight: bold;
     margin-right: 4px;
   }
+
+  /* ===== Generic app card ===== */
+  .app-card {
+    background: #FFFFFF;
+    border: 1px solid #E5E7EB;
+    border-radius: 12px;
+    padding: 24px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    margin-bottom: 20px;
+  }
+
+  /* ===== Section title (used by legacy Step 4 dashboard) ===== */
+  .section-title {
+    text-align: center;
+    font-size: 18px; font-weight: 500;
+    color: #1A1A1A;
+    padding: 14px;
+    background: #FFFFFF;
+    border: 1px solid #E5E7EB;
+    border-radius: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    margin: 24px 0 16px 0;
+  }
+
+  /* ===== Hero (legacy Step 4 dashboard) ===== */
+  .hero-title {
+    font-size: 2.4rem; font-weight: 600;
+    color: #1A1A1A !important;
+    line-height: 1.2; margin-bottom: 0.2rem;
+  }
+  .hero-sub {
+    font-size: 1.0rem; color: #6B7280;
+    margin-bottom: 1.5rem;
+  }
+
+  /* ===== Metric tiles (NEW amber/orange dual-block — Phase 3 onward) ===== */
+  .metric-tile {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    margin-bottom: 12px;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .metric-tile .metric-label {
+    background: #F5B027;
+    padding: 20px 16px;
+    text-align: center;
+    font-size: 14px; color: #1A1A1A;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .metric-tile .metric-value {
+    background: #F57C1F;
+    padding: 20px 16px;
+    text-align: center;
+    font-size: 20px; font-weight: 600; color: #1A1A1A;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .full-width-tile .metric-label,
+  .full-width-tile .metric-value { padding: 26px 20px; font-size: 16px; }
+  .full-width-tile .metric-value { font-size: 22px; }
+
+  /* ===== Legacy metric cards (Step 4 dashboard, vertical-stack form) ===== */
+  /* Migrated to light theme so the existing _render_metric_grid still
+     reads cleanly. Phase 3 will replace these with .metric-tile. */
+  .metric-card {
+    background: #FFFFFF;
+    border: 1px solid #E5E7EB;
+    border-radius: 12px;
+    padding: 18px 20px;
+    text-align: center;
+    height: 110px;
+    display: flex; flex-direction: column; justify-content: center;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    transition: transform 0.2s, box-shadow 0.2s;
+  }
+  .metric-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 14px rgba(25,118,210,0.10);
+  }
+  .metric-card .metric-label {
+    font-size: 0.72rem; font-weight: 600;
+    color: #6B7280;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    margin-bottom: 6px;
+    background: transparent; padding: 0; display: block;
+  }
+  .metric-card .metric-value {
+    font-size: 1.85rem; font-weight: 700;
+    color: #1976D2;
+    line-height: 1;
+    background: transparent; padding: 0; display: block;
+  }
+  .metric-card .metric-unit {
+    font-size: 0.75rem; color: #6B7280; margin-top: 4px;
+  }
+
+  /* ===== Insight cards (legacy Step 4 dashboard) ===== */
+  .obs-card {
+    background: #F9FAFB;
+    border: 1px solid #E5E7EB;
+    border-left: 3px solid #10B981;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 8px;
+    font-size: 0.92rem; line-height: 1.5;
+    color: #374151;
+  }
+  .sug-card {
+    background: #F9FAFB;
+    border: 1px solid #E5E7EB;
+    border-left: 3px solid #F59E0B;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 8px;
+    font-size: 0.92rem; line-height: 1.5;
+    color: #374151;
+  }
+
+  /* ===== Tabs ===== */
+  .stTabs [data-baseweb="tab-list"] {
+    gap: 24px;
+    border-bottom: 1px solid #E5E7EB;
+    background: transparent;
+  }
+  .stTabs [data-baseweb="tab"] {
+    background: transparent;
+    color: #9CA3AF;
+    font-size: 13px; font-weight: 500;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    padding: 12px 4px;
+    border-bottom: 2px solid transparent;
+  }
+  .stTabs [aria-selected="true"] {
+    color: #1976D2 !important;
+    border-bottom-color: #1976D2 !important;
+  }
+
+  /* ===== Buttons ===== */
+  .stButton button {
+    border-radius: 8px;
+    font-weight: 500;
+    padding: 10px 20px;
+  }
+  .stButton button[kind="primary"] {
+    background: #1976D2;
+    color: #FFFFFF;
+    border: none;
+  }
+  .stButton button[kind="primary"]:hover { background: #1565C0; }
+  .stButton button[kind="secondary"] {
+    background: #FFFFFF;
+    color: #1A1A1A;
+    border: 1px solid #D1D5DB;
+  }
+  .stButton button[kind="secondary"]:hover { background: #F3F4F6; }
+
+  /* ===== Plotly chart container (Phase 4-5 readiness) ===== */
+  [data-testid="stPlotlyChart"] {
+    background: #FFFFFF;
+    border: 1px solid #E5E7EB;
+    border-radius: 12px;
+    padding: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+
+  /* ===== Expanders ===== */
+  .streamlit-expanderHeader {
+    background: #F9FAFB !important;
+    color: #1A1A1A !important;
+    border: 1px solid #E5E7EB !important;
+    border-radius: 8px !important;
+  }
+
+  /* ===== Streamlit chrome hiding ===== */
+  #MainMenu, footer, header { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
-
-
-# ──────────────────────────────────────────────
-# Conditional page-background flip for wizard steps 1-3.
-# Step 4 keeps the dark dashboard look unchanged.
-# ──────────────────────────────────────────────
-def _maybe_inject_wizard_background():
-    if st.session_state.get("step", 1) in (1, 2, 3):
-        st.markdown("""
-        <style>
-          [data-testid="stAppViewContainer"] {
-            background-color: #f7f8fa;
-          }
-          [data-testid="stHeader"] {
-            background: transparent;
-          }
-          [data-testid="stMain"] [data-testid="stMarkdownContainer"] {
-            color: #1A1A1A;
-          }
-          [data-testid="stMain"] label,
-          [data-testid="stMain"] .stTextInput input,
-          [data-testid="stMain"] .stNumberInput input,
-          [data-testid="stMain"] .stTextArea textarea,
-          [data-testid="stMain"] .stDateInput input {
-            color: #1A1A1A;
-          }
-          [data-testid="stMain"] .stTextInput input,
-          [data-testid="stMain"] .stNumberInput input,
-          [data-testid="stMain"] .stTextArea textarea,
-          [data-testid="stMain"] .stDateInput input,
-          [data-testid="stMain"] [data-baseweb="select"] > div {
-            background-color: white !important;
-            border: 1px solid #E0E0E0 !important;
-          }
-        </style>
-        """, unsafe_allow_html=True)
 
 
 # ──────────────────────────────────────────────
@@ -389,7 +395,6 @@ def _init_session_state():
 
 
 _init_session_state()
-_maybe_inject_wizard_background()
 
 
 # ──────────────────────────────────────────────
