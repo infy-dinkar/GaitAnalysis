@@ -19,6 +19,7 @@ from gait_plots import (
     normal_knee_reference,
     normal_ankle_reference,
 )
+from biomech_flow import render_biomech_flow
 
 # ──────────────────────────────────────────────
 # PAGE CONFIG
@@ -508,6 +509,77 @@ st.markdown("""
     color: #CBD5E1 !important;
   }
 
+  /* ===== Mode chooser (landing screen with two big cards) ===== */
+  .mode-chooser-title {
+    text-align: center;
+    font-size: 2.6rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, #3B82F6 0%, #A855F7 50%, #EC4899 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    color: transparent;
+    margin-top: 36px;
+    margin-bottom: 8px;
+    letter-spacing: -0.5px;
+  }
+  .mode-chooser-sub {
+    text-align: center;
+    color: #94A3B8;
+    font-size: 1.05rem;
+    margin-bottom: 40px;
+  }
+  .mode-card {
+    background: linear-gradient(180deg, #1E293B, #1A2336);
+    border: 1px solid #334155;
+    border-radius: 16px;
+    padding: 32px 28px;
+    text-align: center;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+    transition: all 0.25s ease;
+    position: relative;
+    overflow: hidden;
+    min-height: 260px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+  .mode-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 10px 28px rgba(59,130,246,0.30),
+                0 0 0 1px rgba(59,130,246,0.35);
+    border-color: rgba(59,130,246,0.40);
+  }
+  .mode-card-icon {
+    font-size: 3.0rem;
+    line-height: 1;
+    margin-bottom: 8px;
+  }
+  .mode-card-title {
+    font-size: 1.45rem;
+    font-weight: 600;
+    color: #F1F5F9;
+    margin-bottom: 8px;
+  }
+  .mode-card-desc {
+    color: #CBD5E1;
+    font-size: 0.94rem;
+    line-height: 1.5;
+    margin-bottom: 20px;
+  }
+
+  /* Sidebar 'Back to Main Menu' link */
+  .sidebar-main-menu-link {
+    display: inline-block;
+    color: #94A3B8;
+    font-size: 13px;
+    text-decoration: none;
+    margin-bottom: 16px;
+    padding: 6px 0;
+    cursor: pointer;
+  }
+  .sidebar-main-menu-link:hover { color: #F1F5F9; }
+
   /* ===== Streamlit chrome hiding ===== */
   #MainMenu, footer, header { visibility: hidden; }
 </style>
@@ -520,7 +592,10 @@ st.markdown("""
 def _init_session_state():
     """Initialise wizard state on first render. Idempotent across reruns.
 
-    Keys:
+    Top-level mode router:
+      app_mode      — None | "gait" | "biomech". None = mode-chooser screen.
+
+    Gait wizard keys (active when app_mode == "gait"):
       step          — int, 1..4. Active wizard step.
       patient       — dict, holds form values from Step 1
                       (name, patient_id, age, gender, height_cm,
@@ -530,8 +605,25 @@ def _init_session_state():
       insights      — dict | None. Output of interpret().
       fps           — float | None. Captured at extract_poses time.
       total_frames  — int | None. Captured at extract_poses time.
+
+    Biomech keys (active when app_mode == "biomech"):
+      biomech_step             — "patient" | "body_part" | "movement"
+                                 | "mode" | "capture" | "report".
+      biomech_patient          — dict, same shape as gait `patient`.
+      biomech_body_part        — None | "shoulder" | "neck".
+      biomech_movement         — None | movement-key string.
+      biomech_full_assessment  — bool. True when "Run all" was selected.
+      biomech_side             — "Left" | "Right" | "Both".
+      biomech_capture_mode     — None | "live" | "upload".
+      biomech_video_file       — UploadedFile | None.
+      biomech_recordings       — dict[movement_key, dict[side, dict]]
+                                 holding the peak angle + metadata per
+                                 (movement, side) pair.
     """
     defaults = {
+        # Mode router
+        "app_mode": None,
+        # Gait wizard state
         "step": 1,
         "patient": {},
         "video_file": None,
@@ -539,10 +631,42 @@ def _init_session_state():
         "insights": None,
         "fps": None,
         "total_frames": None,
+        # Biomech state
+        "biomech_step": "patient",
+        "biomech_patient": {},
+        "biomech_body_part": None,
+        "biomech_movement": None,
+        "biomech_full_assessment": False,
+        "biomech_side": "Right",
+        "biomech_capture_mode": None,
+        "biomech_video_file": None,
+        "biomech_recordings": {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
+
+def _reset_biomech_state(keep_patient: bool = False) -> None:
+    """Wipe biomech recordings + selections. Used by 'Assess Again' (keeps
+    patient) and by 'Main Menu' (full reset)."""
+    st.session_state["biomech_step"]            = "body_part" if keep_patient else "patient"
+    st.session_state["biomech_body_part"]       = None
+    st.session_state["biomech_movement"]        = None
+    st.session_state["biomech_full_assessment"] = False
+    st.session_state["biomech_side"]            = "Right"
+    st.session_state["biomech_capture_mode"]    = None
+    st.session_state["biomech_video_file"]      = None
+    st.session_state["biomech_recordings"]      = {}
+    if not keep_patient:
+        st.session_state["biomech_patient"] = {}
+
+
+def _go_to_main_menu() -> None:
+    """Reset back to the mode chooser. Wipes both flows' transient state
+    but leaves form values that the user might want to reuse alone — they
+    re-enter via app_mode selection."""
+    st.session_state["app_mode"] = None
 
 
 _init_session_state()
@@ -970,23 +1094,58 @@ WIZARD_STEPS = [
 ]
 
 
-def _render_sidebar_stepper() -> None:
-    """Vertical step indicator in the sidebar; reflects st.session_state['step']."""
+_BIOMECH_STEPS = [
+    ("patient",   "Patient Details"),
+    ("body_part", "Body Part"),
+    ("movement",  "Movement"),
+    ("mode",      "Capture Mode"),
+    ("capture",   "Capture"),
+    ("report",    "Report"),
+]
+
+
+def _render_sidebar() -> None:
+    """Sidebar — branches on app_mode:
+      None       → just the title (mode chooser is the main area)
+      'gait'     → '← Main Menu' link + gait wizard stepper
+      'biomech'  → '← Main Menu' link + biomech sub-step stepper
+    """
+    mode = st.session_state.get("app_mode")
     with st.sidebar:
         st.markdown("# GaitVision")
         st.markdown(
-            '<div class="sidebar-tagline">CLINICAL GAIT ANALYSIS</div>',
+            '<div class="sidebar-tagline">CLINICAL ASSESSMENT TOOLS</div>',
             unsafe_allow_html=True,
         )
-        current = st.session_state["step"]
+        if mode is None:
+            return  # mode chooser carries no stepper
+
+        # Main-menu link — always visible inside either flow.
+        if st.button("← Main Menu",
+                     key="sidebar_main_menu",
+                     use_container_width=True):
+            _go_to_main_menu()
+            st.rerun()
+
+        if mode == "gait":
+            current = st.session_state.get("step", 1)
+            steps = [(num, name) for num, name in WIZARD_STEPS]
+            active_id = current
+        else:  # biomech
+            current_key = st.session_state.get("biomech_step", "patient")
+            steps = list(_BIOMECH_STEPS)
+            order_map = {key: i for i, (key, _) in enumerate(steps)}
+            active_id = order_map.get(current_key, 0)
+            steps = [(i, name) for i, (_, name) in enumerate(steps)]
+
         items = []
-        for num, name in WIZARD_STEPS:
-            if num < current:
+        for num, name in steps:
+            if num < active_id:
                 cls, marker = "stepper-done", "✓"
-            elif num == current:
-                cls, marker = "stepper-active", str(num)
+            elif num == active_id:
+                cls, marker = "stepper-active", str(num + 1 if mode == "biomech" else num)
             else:
-                cls, marker = "stepper-upcoming", str(num)
+                cls, marker = "stepper-upcoming", str(num + 1 if mode == "biomech" else num)
             items.append(
                 f'<div class="stepper-item {cls}">'
                 f'<div class="stepper-circle">{marker}</div>'
@@ -997,6 +1156,65 @@ def _render_sidebar_stepper() -> None:
             f'<div class="stepper">{"".join(items)}</div>',
             unsafe_allow_html=True,
         )
+
+
+# ──────────────────────────────────────────────
+# MODE CHOOSER (landing screen — app_mode is None)
+# ──────────────────────────────────────────────
+def _render_mode_chooser() -> None:
+    """Two big cards: Gait Analysis | Biomechanical Analysis. Click sets
+    app_mode in session state and reruns into the chosen flow."""
+    st.markdown(
+        '<h1 class="mode-chooser-title">GaitVision</h1>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="mode-chooser-sub">'
+        'Choose an assessment to begin.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    col_a, col_b = st.columns(2, gap="large")
+    with col_a:
+        st.markdown(
+            '<div class="mode-card">'
+            '<div>'
+            '<div class="mode-card-icon">🚶</div>'
+            '<div class="mode-card-title">Gait Analysis</div>'
+            '<div class="mode-card-desc">'
+            'Cycle-normalized hip, knee, and ankle kinematics from a '
+            'side-view walking video. Cadence, symmetry, stride '
+            'variability, and per-joint range of motion.'
+            '</div>'
+            '</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        if st.button("Start →", key="mode_select_gait",
+                     type="primary", use_container_width=True):
+            st.session_state["app_mode"] = "gait"
+            st.rerun()
+
+    with col_b:
+        st.markdown(
+            '<div class="mode-card">'
+            '<div>'
+            '<div class="mode-card-icon">💪</div>'
+            '<div class="mode-card-title">Biomechanical Analysis</div>'
+            '<div class="mode-card-desc">'
+            'Range-of-motion assessment for the shoulder and neck. '
+            'Per-movement angle measurement compared to clinical '
+            'normal ranges. Live camera or recorded video.'
+            '</div>'
+            '</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        if st.button("Start →", key="mode_select_biomech",
+                     type="primary", use_container_width=True):
+            st.session_state["app_mode"] = "biomech"
+            st.rerun()
 
 
 # ──────────────────────────────────────────────
@@ -1585,22 +1803,36 @@ def _render_step_4_legacy_dashboard() -> None:
             st.rerun()
 
 
-# ──────────────────────────────────────────────
-# WIZARD DISPATCH (replaces the old single-page flow)
-# ──────────────────────────────────────────────
-_render_sidebar_stepper()
+# ══════════════════════════════════════════════════════════════════
+# TOP-LEVEL DISPATCHER
+#   None     → mode chooser (landing)
+#   "gait"   → existing 4-step gait wizard
+#   "biomech"→ biomech sub-flow (in biomech_flow.py)
+# Sidebar is rendered first; in mode-chooser state it shows only the
+# title, in either flow it shows '← Main Menu' + the relevant stepper.
+# ══════════════════════════════════════════════════════════════════
+_render_sidebar()
 
-_step = st.session_state.get("step", 1)
-if _step == 1:
-    _render_step_1()
-elif _step == 2:
-    _render_step_2()
-elif _step == 3:
-    _render_step_3()
-elif _step == 4:
-    _render_step_4_legacy_dashboard()
+_mode = st.session_state.get("app_mode")
+if _mode is None:
+    _render_mode_chooser()
+elif _mode == "gait":
+    _step = st.session_state.get("step", 1)
+    if _step == 1:
+        _render_step_1()
+    elif _step == 2:
+        _render_step_2()
+    elif _step == 3:
+        _render_step_3()
+    elif _step == 4:
+        _render_step_4_legacy_dashboard()
+    else:
+        st.error(f"Unknown gait wizard step: {_step}")
+        st.session_state["step"] = 1
+elif _mode == "biomech":
+    render_biomech_flow()
 else:
-    st.error(f"Unknown wizard step: {_step}")
-    st.session_state["step"] = 1
+    st.error(f"Unknown app mode: {_mode!r}")
+    st.session_state["app_mode"] = None
 
 
