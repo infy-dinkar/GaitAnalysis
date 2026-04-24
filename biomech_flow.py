@@ -163,18 +163,66 @@ MOVEMENT_INSTRUCTIONS = {
 
 
 # ──────────────────────────────────────────────
-# Frame-by-frame analyzer (video upload mode)
+# MediaPipe Pose — uses the modern `mp.tasks.vision.PoseLandmarker`
+# API (NOT the legacy `mp.solutions.pose.Pose`, which has been
+# removed from recent MediaPipe builds and was crashing on
+# Streamlit Cloud with `AttributeError`). Same model + API the gait
+# pipeline already uses, so deployment compatibility is identical.
 # ──────────────────────────────────────────────
+def _ensure_pose_model_file() -> str:
+    """Download the pose-landmarker .task file if it's not already in
+    the working directory. Returns the local path."""
+    import os
+    import urllib.request
+
+    model_path = "pose_landmarker_lite.task"
+    if not os.path.exists(model_path):
+        url = ("https://storage.googleapis.com/mediapipe-models/"
+               "pose_landmarker/pose_landmarker_lite/float16/1/"
+               "pose_landmarker_lite.task")
+        urllib.request.urlretrieve(url, model_path)
+    return model_path
+
+
+class _LandmarkAdapter:
+    """Thin wrapper around a task-API NormalizedLandmark so the engine
+    helpers (which assume `.x .y .visibility` are always-present floats)
+    keep working unchanged. Task-API visibility is Optional[float]; we
+    coerce None → 0.0 so the < threshold check doesn't TypeError."""
+    __slots__ = ("x", "y", "visibility")
+
+    def __init__(self, lm) -> None:
+        self.x = lm.x
+        self.y = lm.y
+        self.visibility = (lm.visibility
+                           if lm.visibility is not None else 0.0)
+
+
+def _wrap_landmarks(task_pose_landmarks) -> list:
+    """Convert one task-API pose (a list of 33 NormalizedLandmark) into
+    a flat list of _LandmarkAdapter instances."""
+    return [_LandmarkAdapter(lm) for lm in task_pose_landmarks]
+
+
 @st.cache_resource(show_spinner=False)
-def _get_pose_estimator():
-    """Cached MediaPipe Pose instance for biomech (uses the older
-    `mp.solutions.pose.Pose` API — simpler than the task API and self-
-    contained, no .task model file needed). Cached across reruns."""
+def _get_video_pose_landmarker():
+    """Cached PoseLandmarker for video-FILE analysis (VIDEO running
+    mode = supports detect_for_video with a monotonic timestamp).
+
+    NOT shared with the live-camera processor — that needs its own
+    instance because (a) it runs on a worker thread and (b) it uses
+    IMAGE running mode, not VIDEO."""
     import mediapipe as mp
-    return mp.solutions.pose.Pose(
-        model_complexity=1,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
+    from mediapipe.tasks.python import BaseOptions
+    from mediapipe.tasks.python.vision import (
+        PoseLandmarker, PoseLandmarkerOptions, RunningMode,
+    )
+    model_path = _ensure_pose_model_file()
+    return PoseLandmarker.create_from_options(
+        PoseLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path=model_path),
+            running_mode=RunningMode.VIDEO,
+        )
     )
 
 
@@ -193,8 +241,9 @@ def _run_biomech_upload_analysis(video_path: str,
       fps               — video fps
     """
     import cv2
+    import mediapipe as mp
 
-    pose = _get_pose_estimator()
+    landmarker = _get_video_pose_landmarker()
 
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -209,12 +258,14 @@ def _run_biomech_upload_analysis(video_path: str,
         if not ok:
             break
         total_frames += 1
+        timestamp_ms = int((total_frames - 1) * 1000.0 / fps)
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        result = pose.process(frame_rgb)
-        if result.pose_landmarks is None:
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+        result = landmarker.detect_for_video(mp_image, timestamp_ms)
+        if not result.pose_landmarks:
             continue
 
-        landmarks = result.pose_landmarks.landmark
+        landmarks = _wrap_landmarks(result.pose_landmarks[0])
         if body_part == "shoulder":
             angle = compute_shoulder_angle(landmarks, side.lower(), movement)
         else:
@@ -264,17 +315,26 @@ class BiomechVideoProcessor:
     def __init__(self):
         import cv2
         import mediapipe as mp
+        from mediapipe.tasks.python import BaseOptions
+        from mediapipe.tasks.python.vision import (
+            PoseLandmarker, PoseLandmarkerOptions, RunningMode,
+        )
 
         self._lock = threading.Lock()
         self._cv2  = cv2
-        self._pose = mp.solutions.pose.Pose(
-            model_complexity=1,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
+        self._mp   = mp  # need mp.Image / mp.ImageFormat in recv()
+
+        # IMAGE running mode = synchronous detect() per frame, no
+        # temporal continuity needed (we just want the per-frame peak).
+        # Each processor instance gets its own landmarker — these are
+        # not safe to share across worker threads.
+        model_path = _ensure_pose_model_file()
+        self._landmarker = PoseLandmarker.create_from_options(
+            PoseLandmarkerOptions(
+                base_options=BaseOptions(model_asset_path=model_path),
+                running_mode=RunningMode.IMAGE,
+            )
         )
-        self._draw_utils       = mp.solutions.drawing_utils
-        self._drawing_spec     = mp.solutions.drawing_utils.DrawingSpec
-        self._pose_connections = mp.solutions.pose.POSE_CONNECTIONS
 
         # Configurable from main thread
         self.body_part: str | None = None
@@ -333,7 +393,10 @@ class BiomechVideoProcessor:
         import av
         img = frame.to_ndarray(format="bgr24")
         rgb = self._cv2.cvtColor(img, self._cv2.COLOR_BGR2RGB)
-        result = self._pose.process(rgb)
+        mp_image = self._mp.Image(
+            image_format=self._mp.ImageFormat.SRGB, data=rgb,
+        )
+        result = self._landmarker.detect(mp_image)
 
         with self._lock:
             body_part = self.body_part
@@ -341,26 +404,31 @@ class BiomechVideoProcessor:
             side      = self.side
             self.total_frames += 1
 
-            if result.pose_landmarks is None:
+            if not result.pose_landmarks:
                 self.posture_status = "no_landmarks"
                 self.current_angle  = None
             else:
-                # Skeleton overlay on the outgoing frame
-                self._draw_utils.draw_landmarks(
-                    img, result.pose_landmarks, self._pose_connections,
-                    landmark_drawing_spec=self._drawing_spec(
-                        color=(255, 255, 255), thickness=2, circle_radius=2),
-                    connection_drawing_spec=self._drawing_spec(
-                        color=(180, 180, 180), thickness=1),
-                )
+                raw_landmarks = result.pose_landmarks[0]
+                landmarks     = _wrap_landmarks(raw_landmarks)
+
+                # Lightweight per-landmark dot overlay (replaces the
+                # legacy mp.solutions.drawing_utils call which was the
+                # source of the Cloud crash). Only draws landmarks that
+                # are visible, so the user sees green dots where the
+                # subject is being tracked.
+                h, w = img.shape[:2]
+                for lm in landmarks:
+                    if lm.visibility >= 0.5:
+                        cx = int(lm.x * w)
+                        cy = int(lm.y * h)
+                        self._cv2.circle(img, (cx, cy), 3,
+                                          (0, 255, 0), -1)
 
                 angle = None
                 if body_part == "shoulder" and movement:
-                    angle = compute_shoulder_angle(
-                        result.pose_landmarks.landmark, side, movement)
+                    angle = compute_shoulder_angle(landmarks, side, movement)
                 elif body_part == "neck" and movement:
-                    angle = compute_neck_angle(
-                        result.pose_landmarks.landmark, movement)
+                    angle = compute_neck_angle(landmarks, movement)
 
                 if angle is None:
                     self.posture_status = "low_visibility"
@@ -949,7 +1017,7 @@ def _run_capture_and_store() -> bool:
     try:
         with st.status("Analyzing video …", expanded=True) as status:
             st.write("Loading pose model …")
-            _ = _get_pose_estimator()  # warm cache
+            _ = _get_video_pose_landmarker()  # warm cache + ensure model file
             st.write("Extracting poses + computing angles …")
             result = _run_biomech_upload_analysis(
                 tmp_path, body_part, movement, side,
