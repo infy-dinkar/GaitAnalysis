@@ -204,15 +204,20 @@ def _wrap_landmarks(task_pose_landmarks) -> list:
     return [_LandmarkAdapter(lm) for lm in task_pose_landmarks]
 
 
-@st.cache_resource(show_spinner=False)
-def _get_video_pose_landmarker():
-    """Cached PoseLandmarker for video-FILE analysis (VIDEO running
-    mode = supports detect_for_video with a monotonic timestamp).
+def _create_image_pose_landmarker():
+    """Create a fresh PoseLandmarker in IMAGE running mode. Each upload
+    gets its own instance — explicitly NOT cached.
 
-    NOT shared with the live-camera processor — that needs its own
-    instance because (a) it runs on a worker thread and (b) it uses
-    IMAGE running mode, not VIDEO."""
-    import mediapipe as mp
+    Why IMAGE mode for batch upload-file analysis:
+      detect_for_video() requires monotonically increasing timestamps
+      across the lifetime of a single landmarker. A cached landmarker
+      that processed video #1 (timestamps 0-30s) would then refuse to
+      process video #2 starting at timestamp 0 again, raising
+      'Input timestamp must be monotonically increasing'. IMAGE mode's
+      detect() has no timestamp state at all — every call is
+      independent. For peak-finding (what we do) the per-frame
+      independence is identical to VIDEO mode anyway."""
+    import mediapipe as mp  # noqa: F401  (used for typing of return)
     from mediapipe.tasks.python import BaseOptions
     from mediapipe.tasks.python.vision import (
         PoseLandmarker, PoseLandmarkerOptions, RunningMode,
@@ -221,7 +226,7 @@ def _get_video_pose_landmarker():
     return PoseLandmarker.create_from_options(
         PoseLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=model_path),
-            running_mode=RunningMode.VIDEO,
+            running_mode=RunningMode.IMAGE,
         )
     )
 
@@ -243,7 +248,7 @@ def _run_biomech_upload_analysis(video_path: str,
     import cv2
     import mediapipe as mp
 
-    landmarker = _get_video_pose_landmarker()
+    landmarker = _create_image_pose_landmarker()
 
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -253,32 +258,38 @@ def _run_biomech_upload_analysis(video_path: str,
     valid_frames = 0
     total_frames = 0
 
-    while True:
-        ok, frame_bgr = cap.read()
-        if not ok:
-            break
-        total_frames += 1
-        timestamp_ms = int((total_frames - 1) * 1000.0 / fps)
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-        result = landmarker.detect_for_video(mp_image, timestamp_ms)
-        if not result.pose_landmarks:
-            continue
+    try:
+        while True:
+            ok, frame_bgr = cap.read()
+            if not ok:
+                break
+            total_frames += 1
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB,
+                                 data=frame_rgb)
+            # IMAGE mode: per-frame independent detect, no timestamp.
+            result = landmarker.detect(mp_image)
+            if not result.pose_landmarks:
+                continue
 
-        landmarks = _wrap_landmarks(result.pose_landmarks[0])
-        if body_part == "shoulder":
-            angle = compute_shoulder_angle(landmarks, side.lower(), movement)
-        else:
-            angle = compute_neck_angle(landmarks, movement)
-        if angle is None:
-            continue
+            landmarks = _wrap_landmarks(result.pose_landmarks[0])
+            if body_part == "shoulder":
+                angle = compute_shoulder_angle(landmarks, side.lower(), movement)
+            else:
+                angle = compute_neck_angle(landmarks, movement)
+            if angle is None:
+                continue
 
-        valid_frames += 1
-        if abs(angle) > peak_magnitude:
-            peak_magnitude = abs(angle)
-            peak_angle = angle
-
-    cap.release()
+            valid_frames += 1
+            if abs(angle) > peak_magnitude:
+                peak_magnitude = abs(angle)
+                peak_angle = angle
+    finally:
+        cap.release()
+        try:
+            landmarker.close()
+        except Exception:
+            pass
 
     return {
         "peak_angle":     peak_angle,
@@ -1017,7 +1028,7 @@ def _run_capture_and_store() -> bool:
     try:
         with st.status("Analyzing video …", expanded=True) as status:
             st.write("Loading pose model …")
-            _ = _get_video_pose_landmarker()  # warm cache + ensure model file
+            _ = _ensure_pose_model_file()  # downloads .task on first use
             st.write("Extracting poses + computing angles …")
             result = _run_biomech_upload_analysis(
                 tmp_path, body_part, movement, side,
