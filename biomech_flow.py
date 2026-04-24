@@ -1126,7 +1126,9 @@ def _render_report() -> None:
                 _set_step("mode")
         return
 
-    # ── Results table (rendered as Streamlit table with color spans) ──
+    # ── Results table — simplified to Movement | Side | Measured | Normal.
+    # Status badge + % of Normal columns removed; the same information
+    # still shows up in the Clinical-interpretation prose below.
     st.markdown(
         '<div class="wizard-section-heading">Results</div>',
         unsafe_allow_html=True,
@@ -1138,15 +1140,10 @@ def _render_report() -> None:
                    if rng[0] != rng[1] else f"{rng[0]:.0f}°")
         table_rows_html.append(
             f"<tr>"
-            f"<td>{r['title']}</td>"
-            f"<td style='text-align:center;'>{r['side']}</td>"
-            f"<td style='text-align:right;'>{r['measured']:.1f}°</td>"
-            f"<td style='text-align:right;'>{rng_str}</td>"
-            f"<td style='text-align:right;'>{r['pct']:.0f}%</td>"
-            f"<td style='text-align:center;'>"
-            f"<span style='background:{r['color']}; color:white; "
-            f"padding:3px 10px; border-radius:6px; font-size:12px; "
-            f"font-weight:600;'>{r['status']}</span></td>"
+            f"<td style='padding:8px;'>{r['title']}</td>"
+            f"<td style='padding:8px; text-align:center;'>{r['side']}</td>"
+            f"<td style='padding:8px; text-align:right;'>{r['measured']:.1f}°</td>"
+            f"<td style='padding:8px; text-align:right;'>{rng_str}</td>"
             f"</tr>"
         )
     st.markdown(
@@ -1154,25 +1151,21 @@ def _render_report() -> None:
         '<table style="width:100%; border-collapse:collapse; '
         'color:#CBD5E1; font-size:14px;">'
         '<thead><tr style="border-bottom:1px solid #334155;">'
-        '<th style="text-align:left; padding:8px;">Movement</th>'
+        '<th style="text-align:left;   padding:8px;">Movement</th>'
         '<th style="text-align:center; padding:8px;">Side</th>'
-        '<th style="text-align:right; padding:8px;">Measured</th>'
-        '<th style="text-align:right; padding:8px;">Normal</th>'
-        '<th style="text-align:right; padding:8px;">% of Normal</th>'
-        '<th style="text-align:center; padding:8px;">Status</th>'
+        '<th style="text-align:right;  padding:8px;">Measured</th>'
+        '<th style="text-align:right;  padding:8px;">Normal</th>'
         '</tr></thead>'
-        '<tbody>' + "".join(
-            row.replace("<td>", "<td style='padding:8px;'>")
-               .replace("<td style='text-align:center;'>",
-                        "<td style='padding:8px; text-align:center;'>")
-               .replace("<td style='text-align:right;'>",
-                        "<td style='padding:8px; text-align:right;'>")
-            for row in table_rows_html
-        ) + '</tbody></table></div>',
+        '<tbody>' + "".join(table_rows_html) + '</tbody></table></div>',
         unsafe_allow_html=True,
     )
 
-    # ── Bar chart (plotly horizontal) ─────────────────────────────────
+    # ── Bar chart — normal-range BAND + measured bar at offset y. ────
+    # The normal range is rendered as a translucent green span from
+    # range_low to range_high (using `base` to start the bar past zero),
+    # so the user can see at a glance whether the measured value sits
+    # inside, above, or below the acceptable range. The measured value
+    # is a solid cyan bar at an offset y position via barmode="group".
     st.markdown(
         '<div class="wizard-section-heading" style="margin-top:24px;">'
         'Measured vs Normal</div>',
@@ -1184,21 +1177,45 @@ def _render_report() -> None:
         for r in rows
     ]
     measured = [r["measured"] for r in rows]
-    target   = [r["target"]   for r in rows]
-    colors   = [r["color"]    for r in rows]
+
+    # Build the normal-range band (start + length per row). Collapsed
+    # ranges (e.g. shoulder flexion 180,180) are rendered as a thin 2°
+    # band centred on the value so they stay visible.
+    band_starts:  list[float] = []
+    band_lengths: list[float] = []
+    band_texts:   list[str]   = []
+    for r in rows:
+        low, high = r["range"]
+        if low == high:
+            band_starts.append(max(0.0, low - 1.0))
+            band_lengths.append(2.0)
+            band_texts.append(f"target {low:.0f}°")
+        else:
+            band_starts.append(low)
+            band_lengths.append(high - low)
+            band_texts.append(f"{low:.0f}°–{high:.0f}°")
+
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        y=labels, x=measured, orientation="h", name="Measured",
-        marker=dict(color=colors),
-        text=[f"{m:.1f}°" for m in measured], textposition="outside",
-        hovertemplate="<b>%{y}</b><br>Measured: %{x:.1f}°<extra></extra>",
+        y=labels, x=band_lengths, base=band_starts,
+        orientation="h", name="Normal range",
+        marker=dict(color="rgba(16,185,129,0.35)",
+                    line=dict(color="#10B981", width=1.5)),
+        text=band_texts, textposition="inside",
+        textfont=dict(color="#F1F5F9", size=12),
+        hovertemplate="<b>%{y}</b><br>Normal: %{text}<extra></extra>",
     ))
     fig.add_trace(go.Bar(
-        y=labels, x=target, orientation="h", name="Target (normal)",
-        marker=dict(color="#94A3B8", opacity=0.55),
-        hovertemplate="<b>%{y}</b><br>Target: %{x:.1f}°<extra></extra>",
+        y=labels, x=measured, orientation="h", name="Measured",
+        marker=dict(color="#06B6D4"),
+        text=[f"{m:.1f}°" for m in measured], textposition="outside",
+        textfont=dict(color="#F1F5F9", size=12),
+        hovertemplate="<b>%{y}</b><br>Measured: %{x:.1f}°<extra></extra>",
     ))
-    max_x = max(max(measured + target), 1.0) * 1.15
+
+    band_ends = [s + l for s, l in zip(band_starts, band_lengths)]
+    max_x = max(max(measured), max(band_ends), 1.0) * 1.15
+
     fig.update_layout(
         barmode="group",
         plot_bgcolor="#1E293B", paper_bgcolor="#1E293B",
@@ -1210,8 +1227,8 @@ def _render_report() -> None:
         legend=dict(orientation="h", y=-0.18, x=0.5, xanchor="center",
                     bgcolor="rgba(0,0,0,0)", borderwidth=0,
                     font=dict(color="#CBD5E1")),
-        margin=dict(l=120, r=30, t=20, b=70),
-        height=max(280, 60 * len(rows) + 100),
+        margin=dict(l=140, r=40, t=20, b=70),
+        height=max(280, 70 * len(rows) + 100),
     )
     st.plotly_chart(fig, use_container_width=True,
                     config={"displayModeBar": False})
