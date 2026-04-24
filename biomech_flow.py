@@ -1220,15 +1220,21 @@ def _render_report() -> None:
         barmode="group",
         plot_bgcolor="#1E293B", paper_bgcolor="#1E293B",
         font=dict(color="#CBD5E1"),
-        xaxis=dict(title="Angle (°)", range=[0, max_x],
-                   gridcolor="#334155", showline=True, linecolor="#475569"),
+        xaxis=dict(
+            title=dict(text="Angle (°)", standoff=12),
+            range=[0, max_x],
+            gridcolor="#334155", showline=True, linecolor="#475569",
+        ),
         yaxis=dict(title="", autorange="reversed",
                    gridcolor="#334155", showline=True, linecolor="#475569"),
-        legend=dict(orientation="h", y=-0.18, x=0.5, xanchor="center",
+        # Legend sits ABOVE the chart so it can't collide with the
+        # x-axis title underneath.
+        legend=dict(orientation="h", y=1.10, x=0.5, xanchor="center",
+                    yanchor="bottom",
                     bgcolor="rgba(0,0,0,0)", borderwidth=0,
                     font=dict(color="#CBD5E1")),
-        margin=dict(l=140, r=40, t=20, b=70),
-        height=max(280, 70 * len(rows) + 100),
+        margin=dict(l=140, r=40, t=60, b=60),
+        height=max(280, 70 * len(rows) + 120),
     )
     st.plotly_chart(fig, use_container_width=True,
                     config={"displayModeBar": False})
