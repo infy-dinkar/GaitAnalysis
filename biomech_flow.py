@@ -778,8 +778,12 @@ def _render_mode() -> None:
         st.session_state["biomech_side"] = side
         st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
 
-    col_a, col_b = st.columns(2, gap="large")
-    with col_a:
+    # ── Capture-method cards ────────────────────────────────────────
+    # Full Assessment: Live Camera only — Upload is a single-movement
+    # workflow and doesn't fit the chained Full Assessment UX, so the
+    # card is hidden entirely instead of rendered-but-disabled.
+    # Single movement: both cards (Live | Upload) side by side.
+    def _render_live_card() -> None:
         st.markdown(
             '<div class="mode-card">'
             '<div>'
@@ -788,7 +792,7 @@ def _render_mode() -> None:
             '<div class="mode-card-desc">'
             'Continuous real-time tracking with on-screen pose overlay '
             'and live angle / peak readout. Click Show Analysis when '
-            'you reach the peak. Required for Full Assessment.'
+            'you reach the peak.'
             '</div>'
             '</div>'
             '</div>',
@@ -802,16 +806,9 @@ def _render_mode() -> None:
             st.session_state["biomech_chain_idx"] = 0
             _set_step("capture")
 
-    with col_b:
-        upload_disabled = full
-        card_style    = ' style="opacity:0.55;"' if upload_disabled else ""
-        disabled_note = (
-            '<div style="color:#94A3B8; font-size:12px; '
-            'font-style:italic;">Single movement only</div>'
-            if upload_disabled else ""
-        )
+    def _render_upload_card() -> None:
         st.markdown(
-            f'<div class="mode-card"{card_style}>'
+            '<div class="mode-card">'
             '<div>'
             '<div class="mode-card-icon">📁</div>'
             '<div class="mode-card-title">Video Upload</div>'
@@ -820,25 +817,25 @@ def _render_mode() -> None:
             'analysis extracts the peak angle.'
             '</div>'
             '</div>'
-            f'{disabled_note}'
             '</div>',
             unsafe_allow_html=True,
         )
-        if upload_disabled:
-            st.button("Upload (single only)", disabled=True,
-                      use_container_width=True,
-                      key="bio_pick_upload_disabled")
-        else:
-            if st.button("Upload Video →", key="bio_pick_upload",
-                         use_container_width=True):
-                st.session_state["biomech_capture_mode"] = "upload"
-                _set_step("capture")
+        if st.button("Upload Video →", key="bio_pick_upload",
+                     use_container_width=True):
+            st.session_state["biomech_capture_mode"] = "upload"
+            _set_step("capture")
 
     if full:
-        st.caption(
-            "💡 Video Upload only handles one movement at a time. "
-            "For multi-movement Full Assessment, use Live Camera."
-        )
+        # Centered single card (left + right padding columns)
+        _, col_mid, _ = st.columns([1, 2, 1])
+        with col_mid:
+            _render_live_card()
+    else:
+        col_a, col_b = st.columns(2, gap="large")
+        with col_a:
+            _render_live_card()
+        with col_b:
+            _render_upload_card()
 
     col_back, _ = st.columns([1, 5])
     with col_back:
