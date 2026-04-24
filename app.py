@@ -641,6 +641,9 @@ def _init_session_state():
         "biomech_capture_mode": None,
         "biomech_video_file": None,
         "biomech_recordings": {},
+        # Live-capture chain (multi-movement sequencing)
+        "biomech_chain":     [],   # list of movement keys to assess in order
+        "biomech_chain_idx": 0,    # current position in the chain
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -658,6 +661,8 @@ def _reset_biomech_state(keep_patient: bool = False) -> None:
     st.session_state["biomech_capture_mode"]    = None
     st.session_state["biomech_video_file"]      = None
     st.session_state["biomech_recordings"]      = {}
+    st.session_state["biomech_chain"]           = []
+    st.session_state["biomech_chain_idx"]       = 0
     if not keep_patient:
         st.session_state["biomech_patient"] = {}
 

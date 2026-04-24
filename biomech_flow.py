@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
+import time
 import uuid
 from datetime import date
 
@@ -242,6 +244,248 @@ def _is_rotation_movement(body_part: str, movement: str | None) -> bool:
     if body_part == "neck":
         return movement == "rotation"
     return False
+
+
+# ══════════════════════════════════════════════════════════════════
+# LIVE CAMERA — WebRTC video processor (runs on a worker thread)
+# ══════════════════════════════════════════════════════════════════
+class BiomechVideoProcessor:
+    """streamlit-webrtc VideoProcessor: per-frame Pose extraction +
+    angle computation + skeleton overlay drawing.
+
+    Runs on a separate thread from the Streamlit main script. State
+    shared with the main thread (current_angle, peak, recording flag,
+    timer) is guarded by a single lock. The main script reads via
+    `get_state()`, configures via `configure()`, and toggles recording
+    via `start_recording()` / `stop_recording()`.
+    """
+
+    RECORDING_DURATION_S = 10.0   # auto-stop window length
+
+    def __init__(self):
+        import cv2
+        import mediapipe as mp
+
+        self._lock = threading.Lock()
+        self._cv2  = cv2
+        self._pose = mp.solutions.pose.Pose(
+            model_complexity=1,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        self._draw_utils       = mp.solutions.drawing_utils
+        self._drawing_spec     = mp.solutions.drawing_utils.DrawingSpec
+        self._pose_connections = mp.solutions.pose.POSE_CONNECTIONS
+
+        # Configurable from main thread
+        self.body_part: str | None = None
+        self.movement:  str | None = None
+        self.side:      str        = "right"
+
+        # Recording state
+        self.recording          = False
+        self.recording_start    = 0.0
+        self.peak_angle:     float | None = None
+        self.peak_magnitude: float        = 0.0
+        self.current_angle:  float | None = None
+        self.posture_status: str          = "idle"
+        self.valid_frames           = 0
+        self.total_recorded_frames  = 0
+
+    # ---- Main-thread API --------------------------------------------
+    def configure(self, body_part: str, movement: str, side: str) -> None:
+        with self._lock:
+            self.body_part = body_part
+            self.movement  = movement
+            self.side      = side.lower()
+
+    def start_recording(self) -> None:
+        with self._lock:
+            self.recording             = True
+            self.recording_start       = time.time()
+            self.peak_angle            = None
+            self.peak_magnitude        = 0.0
+            self.valid_frames          = 0
+            self.total_recorded_frames = 0
+
+    def stop_recording(self) -> None:
+        with self._lock:
+            self.recording = False
+
+    def reset_peak(self) -> None:
+        """Wipe peak data without starting a new recording."""
+        with self._lock:
+            self.recording             = False
+            self.peak_angle            = None
+            self.peak_magnitude        = 0.0
+            self.valid_frames          = 0
+            self.total_recorded_frames = 0
+
+    def get_state(self) -> dict:
+        with self._lock:
+            elapsed = (time.time() - self.recording_start) if self.recording else 0.0
+            remaining = max(0.0, self.RECORDING_DURATION_S - elapsed)
+            return {
+                "recording":             self.recording,
+                "elapsed_s":             elapsed,
+                "remaining_s":           remaining,
+                "auto_stop":             self.recording and elapsed >= self.RECORDING_DURATION_S,
+                "current_angle":         self.current_angle,
+                "peak_angle":            self.peak_angle,
+                "peak_magnitude":        self.peak_magnitude,
+                "valid_frames":          self.valid_frames,
+                "total_recorded_frames": self.total_recorded_frames,
+                "posture_status":        self.posture_status,
+            }
+
+    # ---- Worker-thread frame callback --------------------------------
+    def recv(self, frame):
+        import av
+        img = frame.to_ndarray(format="bgr24")
+        rgb = self._cv2.cvtColor(img, self._cv2.COLOR_BGR2RGB)
+        result = self._pose.process(rgb)
+
+        with self._lock:
+            body_part = self.body_part
+            movement  = self.movement
+            side      = self.side
+            recording = self.recording
+            elapsed   = (time.time() - self.recording_start) if recording else 0.0
+
+            if recording and elapsed >= self.RECORDING_DURATION_S:
+                # Auto-stop at the 10-second mark
+                self.recording = False
+                recording = False
+
+            if result.pose_landmarks is None:
+                self.posture_status = "no_landmarks"
+                self.current_angle  = None
+            else:
+                # Skeleton overlay on the outgoing frame
+                self._draw_utils.draw_landmarks(
+                    img, result.pose_landmarks, self._pose_connections,
+                    landmark_drawing_spec=self._drawing_spec(
+                        color=(255, 255, 255), thickness=2, circle_radius=2),
+                    connection_drawing_spec=self._drawing_spec(
+                        color=(180, 180, 180), thickness=1),
+                )
+
+                angle = None
+                if body_part == "shoulder" and movement:
+                    angle = compute_shoulder_angle(
+                        result.pose_landmarks.landmark, side, movement)
+                elif body_part == "neck" and movement:
+                    angle = compute_neck_angle(
+                        result.pose_landmarks.landmark, movement)
+
+                if angle is None:
+                    self.posture_status = "low_visibility"
+                    self.current_angle  = None
+                else:
+                    self.posture_status = "good"
+                    self.current_angle  = angle
+                    if recording:
+                        self.valid_frames += 1
+                        if abs(angle) > self.peak_magnitude:
+                            self.peak_magnitude = abs(angle)
+                            self.peak_angle     = angle
+
+            if recording:
+                self.total_recorded_frames += 1
+
+            # On-frame text overlays
+            if self.current_angle is not None:
+                txt = f"{self.current_angle:+.1f} deg"
+                colour = (0, 255, 255)  # cyan
+            else:
+                txt = "-- no angle --"
+                colour = (100, 100, 255)
+            self._cv2.putText(img, txt, (10, 50),
+                              self._cv2.FONT_HERSHEY_SIMPLEX, 1.0,
+                              colour, 2)
+            if self.peak_magnitude > 0:
+                self._cv2.putText(img,
+                                  f"peak: {self.peak_magnitude:.1f} deg",
+                                  (10, 90),
+                                  self._cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                                  (50, 200, 50), 2)
+            if recording:
+                rem = max(0.0, self.RECORDING_DURATION_S - elapsed)
+                self._cv2.putText(img, f"REC {rem:0.1f}s",
+                                  (10, 130),
+                                  self._cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                                  (50, 50, 255), 2)
+                # Red border around the frame while recording
+                h, w = img.shape[:2]
+                self._cv2.rectangle(img, (2, 2), (w - 3, h - 3),
+                                    (50, 50, 255), 4)
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+
+# ──────────────────────────────────────────────
+# Multi-movement chain helpers (used by Live capture)
+# ──────────────────────────────────────────────
+def _ensure_chain() -> None:
+    """Initialise biomech_chain on first entry to live capture, based
+    on whether the user picked Full Assessment or a single movement."""
+    chain = st.session_state.get("biomech_chain")
+    if chain:
+        return
+    body_part = st.session_state.get("biomech_body_part")
+    full      = st.session_state.get("biomech_full_assessment", False)
+    if full:
+        movements_table = (SHOULDER_MOVEMENTS if body_part == "shoulder"
+                           else NECK_MOVEMENTS)
+        chain = [m[0] for m in movements_table]
+    else:
+        chosen = st.session_state.get("biomech_movement")
+        chain = [chosen] if chosen else []
+    st.session_state["biomech_chain"]     = chain
+    st.session_state["biomech_chain_idx"] = 0
+
+
+def _current_chain_movement() -> str | None:
+    chain = st.session_state.get("biomech_chain") or []
+    idx   = st.session_state.get("biomech_chain_idx", 0)
+    if idx >= len(chain):
+        return None
+    return chain[idx]
+
+
+def _advance_chain_or_finish() -> None:
+    """Advance to the next movement in the chain. If the chain is
+    exhausted, jump to the report screen."""
+    st.session_state["biomech_chain_idx"] += 1
+    if st.session_state["biomech_chain_idx"] >= len(st.session_state["biomech_chain"]):
+        st.session_state["biomech_chain"]     = []
+        st.session_state["biomech_chain_idx"] = 0
+        _set_step("report")
+    else:
+        st.rerun()
+
+
+def _save_peak_to_recordings(state: dict, body_part: str,
+                              movement: str, side: str) -> None:
+    """Persist a captured peak from the live processor into
+    biomech_recordings, then trigger chain advance."""
+    if state["peak_magnitude"] <= 0:
+        # Nothing captured — treat as skip
+        _advance_chain_or_finish()
+        return
+    recordings = st.session_state["biomech_recordings"]
+    side_key = side if body_part == "shoulder" else "—"
+    recordings.setdefault(movement, {})[side_key] = {
+        "peak_angle":     state["peak_angle"],
+        "peak_magnitude": state["peak_magnitude"],
+        "valid_frames":   state["valid_frames"],
+        "total_frames":   state["total_recorded_frames"],
+        "fps":            0.0,  # not measured for live mode
+        "body_part":      body_part,
+        "side":           side_key,
+    }
+    st.session_state["biomech_recordings"] = recordings
+    _advance_chain_or_finish()
 
 
 # ──────────────────────────────────────────────
@@ -505,11 +749,16 @@ def _movement_label(body_part: str, movement: str) -> str:
 
 
 def _render_mode() -> None:
-    """Capture Mode chooser. Two cards (Live Camera disabled, Video
-    Upload enabled), preceded by a Side toggle when the movement has
-    laterality (all shoulder movements). Full-assessment is gracefully
-    blocked — it requires live-camera multi-movement chaining which is
-    deferred."""
+    """Capture Mode chooser. Two cards: Live Camera (real-time WebRTC
+    via streamlit-webrtc) | Video Upload (frame-by-frame analyzer).
+
+    For Full Assessment, only Live Camera is offered — Upload requires
+    one video per movement which doesn't fit the chained UX. (Users can
+    still run individual movements via Upload after Full → Single.)
+
+    Side selector (Right | Left) appears for shoulder movements; neck
+    has no per-side laterality at this level.
+    """
     body_part = st.session_state.get("biomech_body_part")
     movement  = st.session_state.get("biomech_movement")
     full      = st.session_state.get("biomech_full_assessment", False)
@@ -525,32 +774,18 @@ def _render_mode() -> None:
     )
 
     if full:
-        st.warning(
-            f"**Full {body_part.capitalize()} Assessment** chains multiple "
-            "movements in sequence. This requires live camera mode, which is "
-            "coming in a follow-up release. For now, please pick a single "
-            "movement and run it via video upload."
-        )
-        col_back, _ = st.columns([1, 5])
-        with col_back:
-            if st.button("← Pick a single movement",
-                         key="bio_back_mode_full",
-                         use_container_width=True):
-                st.session_state["biomech_full_assessment"] = False
-                _set_step("movement")
-        return
-
-    # Single-movement path
+        title_str = f"Full {body_part.capitalize()} Assessment"
+    else:
+        title_str = (f"{body_part.capitalize()} — "
+                     f"{_movement_label(body_part, movement)}")
     st.markdown(
         f'<div style="text-align:center; color:#94A3B8; font-size:14px; '
         f'margin-bottom:18px;">'
-        f'Movement: <b style="color:#F1F5F9;">'
-        f'{body_part.capitalize()} — {_movement_label(body_part, movement)}'
-        f'</b></div>',
+        f'Selected: <b style="color:#F1F5F9;">{title_str}</b></div>',
         unsafe_allow_html=True,
     )
 
-    # Side selector (shoulder only — neck has no laterality at this level).
+    # Side selector (shoulder only)
     if body_part == "shoulder":
         st.markdown(
             '<div style="font-size:14px; font-weight:500; color:#CBD5E1; '
@@ -571,25 +806,36 @@ def _render_mode() -> None:
     col_a, col_b = st.columns(2, gap="large")
     with col_a:
         st.markdown(
-            '<div class="mode-card" style="opacity:0.55;">'
+            '<div class="mode-card">'
             '<div>'
             '<div class="mode-card-icon">📹</div>'
             '<div class="mode-card-title">Live Camera</div>'
             '<div class="mode-card-desc">'
             'Real-time guided assessment with on-screen pose overlay '
-            'and live angle readout.'
+            'and live angle readout. Required for Full Assessment.'
             '</div>'
             '</div>'
-            '<div style="color:#94A3B8; font-size:12px; '
-            'font-style:italic;">Coming soon</div>'
             '</div>',
             unsafe_allow_html=True,
         )
-        st.button("Coming soon", key="bio_pick_live",
-                  disabled=True, use_container_width=True)
+        if st.button("Start Live Capture →", key="bio_pick_live",
+                     type="primary", use_container_width=True):
+            st.session_state["biomech_capture_mode"] = "live"
+            # Reset chain so _ensure_chain rebuilds it for this run
+            st.session_state["biomech_chain"]     = []
+            st.session_state["biomech_chain_idx"] = 0
+            _set_step("capture")
+
     with col_b:
+        upload_disabled = full
+        card_style    = ' style="opacity:0.55;"' if upload_disabled else ""
+        disabled_note = (
+            '<div style="color:#94A3B8; font-size:12px; '
+            'font-style:italic;">Single movement only</div>'
+            if upload_disabled else ""
+        )
         st.markdown(
-            '<div class="mode-card">'
+            f'<div class="mode-card"{card_style}>'
             '<div>'
             '<div class="mode-card-icon">📁</div>'
             '<div class="mode-card-title">Video Upload</div>'
@@ -598,13 +844,25 @@ def _render_mode() -> None:
             'analysis extracts the peak angle.'
             '</div>'
             '</div>'
+            f'{disabled_note}'
             '</div>',
             unsafe_allow_html=True,
         )
-        if st.button("Upload Video →", key="bio_pick_upload",
-                     type="primary", use_container_width=True):
-            st.session_state["biomech_capture_mode"] = "upload"
-            _set_step("capture")
+        if upload_disabled:
+            st.button("Upload (single only)", disabled=True,
+                      use_container_width=True,
+                      key="bio_pick_upload_disabled")
+        else:
+            if st.button("Upload Video →", key="bio_pick_upload",
+                         use_container_width=True):
+                st.session_state["biomech_capture_mode"] = "upload"
+                _set_step("capture")
+
+    if full:
+        st.caption(
+            "💡 Video Upload only handles one movement at a time. "
+            "For multi-movement Full Assessment, use Live Camera."
+        )
 
     col_back, _ = st.columns([1, 5])
     with col_back:
@@ -614,21 +872,24 @@ def _render_mode() -> None:
 
 
 def _render_capture() -> None:
-    """Upload + analyze. Live-camera mode is gated behind a 'coming
-    soon' notice."""
+    """Dispatch to the upload or live capture screen."""
     capture_mode = st.session_state.get("biomech_capture_mode")
-    body_part    = st.session_state.get("biomech_body_part")
-    movement     = st.session_state.get("biomech_movement")
-    side         = st.session_state.get("biomech_side", "Right")
-
-    if capture_mode != "upload":
-        st.warning(
-            "Live camera mode lands in a later release. Please go back "
-            "and pick Video Upload."
-        )
-        if st.button("← Back to Mode", key="bio_back_capture_mode_only"):
-            _set_step("mode")
+    if capture_mode == "live":
+        _render_capture_live()
         return
+    if capture_mode == "upload":
+        _render_capture_upload()
+        return
+    st.warning("No capture mode selected. Going back.")
+    if st.button("← Back to Mode", key="bio_back_capture_no_mode"):
+        _set_step("mode")
+
+
+def _render_capture_upload() -> None:
+    """Upload + analyze (video file → frame-by-frame → peak)."""
+    body_part = st.session_state.get("biomech_body_part")
+    movement  = st.session_state.get("biomech_movement")
+    side      = st.session_state.get("biomech_side", "Right")
 
     movement_title = _movement_label(body_part, movement)
     side_str = f" — {side} side" if body_part == "shoulder" else ""
@@ -1194,6 +1455,254 @@ def _render_report() -> None:
         '</div>',
         unsafe_allow_html=True,
     )
+
+
+# ══════════════════════════════════════════════════════════════════
+# LIVE CAMERA CAPTURE SCREEN  (split-screen: instructions | webcam)
+# ══════════════════════════════════════════════════════════════════
+def _render_capture_live() -> None:
+    """Two-column live capture screen.
+
+    Right: streamlit-webrtc webcam stream with skeleton overlay +
+    on-frame angle / recording indicators.
+    Left:  movement instructions, posture-status badge, live angle
+    readout, recording state machine + action buttons.
+
+    Multi-movement chaining is handled via st.session_state[
+    "biomech_chain"]: the chain is a list of movement keys to assess,
+    chain_idx tracks position. Single-movement assessments are a chain
+    of length 1 — same code path."""
+    from streamlit_webrtc import webrtc_streamer, WebRtcMode
+
+    body_part = st.session_state.get("biomech_body_part")
+    side      = st.session_state.get("biomech_side", "Right")
+
+    if body_part not in ("shoulder", "neck"):
+        st.warning("No body part selected. Going back.")
+        _set_step("body_part")
+        return
+
+    _ensure_chain()
+    movement = _current_chain_movement()
+    if movement is None:
+        # Chain exhausted (or empty) — go to report
+        _set_step("report")
+        return
+
+    chain_pos = st.session_state["biomech_chain_idx"] + 1
+    chain_len = len(st.session_state["biomech_chain"])
+
+    side_str = f" — {side} side" if body_part == "shoulder" else ""
+    progress_str = (f' <span style="color:#94A3B8; font-size:0.8em;">'
+                    f'(Movement {chain_pos} of {chain_len})</span>'
+                    if chain_len > 1 else "")
+    st.markdown(
+        f'<div class="wizard-title">Live Capture — '
+        f'{body_part.capitalize()} {_movement_label(body_part, movement)}'
+        f'{side_str}{progress_str}</div>',
+        unsafe_allow_html=True,
+    )
+
+    col_l, col_r = st.columns([1, 1], gap="medium")
+
+    # ─── Right column: WebRTC streamer ─────────────────────────────
+    with col_r:
+        # Per-movement key forces the streamer to reinitialise between
+        # chained movements, which gives the processor a fresh state.
+        ctx = webrtc_streamer(
+            key=f"biomech_live_{movement}_{chain_pos}",
+            mode=WebRtcMode.SENDRECV,
+            video_processor_factory=BiomechVideoProcessor,
+            rtc_configuration={
+                "iceServers": [
+                    {"urls": ["stun:stun.l.google.com:19302"]},
+                ],
+            },
+            media_stream_constraints={"video": True, "audio": False},
+            async_processing=True,
+        )
+        if not ctx.state.playing:
+            st.info(
+                "Click **START** above to enable the webcam. If the "
+                "camera doesn't connect within ~10 seconds, your network "
+                "may block WebRTC — switch to Video Upload mode."
+            )
+
+    # Configure the processor each rerun (safe — guarded by a lock)
+    if ctx.video_processor is not None:
+        ctx.video_processor.configure(body_part, movement, side)
+        state = ctx.video_processor.get_state()
+    else:
+        state = None
+
+    # ─── Left column: instructions + status + buttons ───────────────
+    with col_l:
+        # Instructions
+        instructions = MOVEMENT_INSTRUCTIONS.get((body_part, movement), [])
+        if instructions:
+            items_html = "".join(
+                f'<div style="margin:4px 0;">'
+                f'<b style="color:#3B82F6;">{i + 1}.</b> {step}</div>'
+                for i, step in enumerate(instructions)
+            )
+            st.markdown(
+                f'<div class="wizard-info-strip">'
+                f'<div style="font-weight:600; color:#F1F5F9; margin-bottom:8px;">'
+                f'Movement instructions</div>{items_html}</div>',
+                unsafe_allow_html=True,
+            )
+
+        # Rotation disclaimer
+        if _is_rotation_movement(body_part, movement):
+            st.warning(
+                "⚠️ Rotation measurements from 2D video are approximate. "
+                "For precise clinical measurements, use a goniometer."
+            )
+
+        # Live status (only when the camera is active)
+        if state is not None:
+            st.markdown(
+                '<div class="wizard-section-heading">Live status</div>',
+                unsafe_allow_html=True,
+            )
+
+            posture = state["posture_status"]
+            badges = {
+                "good":           ("#10B981", "✓ Subject visible"),
+                "low_visibility": ("#F59E0B", "⚠ Required landmarks below visibility threshold"),
+                "no_landmarks":   ("#EF4444", "✗ No subject detected — check position / lighting"),
+                "idle":           ("#64748B", "— waiting for camera"),
+            }
+            colour, text = badges.get(posture, badges["idle"])
+            st.markdown(
+                f'<div style="display:inline-block; background:{colour}; '
+                f'color:white; padding:5px 12px; border-radius:6px; '
+                f'font-size:13px; font-weight:500;">{text}</div>',
+                unsafe_allow_html=True,
+            )
+
+            # Live angle + peak readouts
+            cur = state["current_angle"]
+            peak = state["peak_magnitude"]
+            cur_str  = f"{cur:+.1f}°" if cur is not None else "—"
+            peak_str = f"{peak:.1f}°" if peak > 0 else "—"
+            st.markdown(
+                f'<div style="display:flex; gap:32px; margin-top:14px;">'
+                f'  <div>'
+                f'    <div style="font-size:12px; color:#94A3B8; '
+                f'      text-transform:uppercase; letter-spacing:0.5px;">'
+                f'      Current angle</div>'
+                f'    <div style="font-size:30px; font-weight:600; '
+                f'      color:#F1F5F9;">{cur_str}</div>'
+                f'  </div>'
+                f'  <div>'
+                f'    <div style="font-size:12px; color:#94A3B8; '
+                f'      text-transform:uppercase; letter-spacing:0.5px;">'
+                f'      Peak (this take)</div>'
+                f'    <div style="font-size:30px; font-weight:600; '
+                f'      color:#3B82F6;">{peak_str}</div>'
+                f'  </div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+            # Recording state strip
+            if state["recording"]:
+                st.markdown(
+                    f'<div style="margin-top:12px; padding:10px 14px; '
+                    f'background:#7F1D1D; border-radius:6px; color:white; '
+                    f'font-weight:500;">'
+                    f'🔴 Recording — {state["remaining_s"]:.1f}s remaining'
+                    f' · {state["valid_frames"]} valid frames captured'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            elif state["peak_magnitude"] > 0:
+                st.markdown(
+                    f'<div style="margin-top:12px; padding:10px 14px; '
+                    f'background:#064E3B; border-radius:6px; color:white; '
+                    f'font-weight:500;">'
+                    f'✓ Take complete — peak {state["peak_magnitude"]:.1f}°'
+                    f' from {state["valid_frames"]} valid frames'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+        # Action buttons
+        st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
+
+        if ctx.video_processor is None:
+            st.info("Start the webcam (in the right panel) to enable recording.")
+        else:
+            recording = state["recording"]
+            has_peak = state["peak_magnitude"] > 0
+
+            if recording:
+                # Recording in progress — single Stop button.
+                if st.button("⏹ Stop & Save Peak",
+                             type="primary",
+                             use_container_width=True,
+                             key=f"bio_live_stop_{movement}_{chain_pos}"):
+                    ctx.video_processor.stop_recording()
+                    state2 = ctx.video_processor.get_state()
+                    _save_peak_to_recordings(state2, body_part, movement, side)
+                    return
+            elif has_peak:
+                # Take complete — Save & Next | Redo | Skip
+                next_label = ("Save & Next →"
+                              if chain_pos < chain_len
+                              else "Save & Finish →")
+                col_save, col_redo, col_skip = st.columns(3)
+                with col_save:
+                    if st.button(next_label, type="primary",
+                                 use_container_width=True,
+                                 key=f"bio_live_save_{movement}_{chain_pos}"):
+                        _save_peak_to_recordings(state, body_part, movement, side)
+                        return
+                with col_redo:
+                    if st.button("↻ Redo", use_container_width=True,
+                                 key=f"bio_live_redo_{movement}_{chain_pos}"):
+                        ctx.video_processor.start_recording()
+                        st.rerun()
+                with col_skip:
+                    if st.button("Skip ⤏", use_container_width=True,
+                                 key=f"bio_live_skip_{movement}_{chain_pos}"):
+                        ctx.video_processor.reset_peak()
+                        _advance_chain_or_finish()
+                        return
+            else:
+                # Idle — Start | Skip
+                col_start, col_skip = st.columns(2)
+                with col_start:
+                    if st.button("▶ Start Recording (10s)",
+                                 type="primary",
+                                 use_container_width=True,
+                                 key=f"bio_live_start_{movement}_{chain_pos}"):
+                        ctx.video_processor.start_recording()
+                        st.rerun()
+                with col_skip:
+                    if st.button("Skip ⤏",
+                                 use_container_width=True,
+                                 key=f"bio_live_skip_idle_{movement}_{chain_pos}"):
+                        ctx.video_processor.reset_peak()
+                        _advance_chain_or_finish()
+                        return
+
+        # Auto-poll the UI while recording so the timer + live readouts
+        # tick. 0.5s cadence is gentle on Cloud reruns.
+        if state is not None and state["recording"]:
+            time.sleep(0.5)
+            st.rerun()
+
+    # Bottom Cancel link — wipes the chain and returns to Mode chooser.
+    col_back, _ = st.columns([1, 5])
+    with col_back:
+        if st.button("← Cancel & Back",
+                     key=f"bio_live_back_{movement}_{chain_pos}",
+                     use_container_width=True):
+            st.session_state["biomech_chain"]     = []
+            st.session_state["biomech_chain_idx"] = 0
+            _set_step("mode")
 
 
 # ──────────────────────────────────────────────
