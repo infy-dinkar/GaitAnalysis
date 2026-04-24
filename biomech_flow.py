@@ -761,10 +761,429 @@ def _run_capture_and_store() -> bool:
             pass
 
 
-def _render_report_placeholder() -> None:
-    st.warning("Report screen not implemented yet — commit 6.")
-    if st.button("← Back to Body Part", key="bio_back_report"):
-        _set_step("body_part")
+# ──────────────────────────────────────────────
+# Report screen + helpers
+# ──────────────────────────────────────────────
+_STATUS_GOOD    = ("Good",    "#10B981")
+_STATUS_FAIR    = ("Fair",    "#F59E0B")
+_STATUS_LIMITED = ("Limited", "#EF4444")
+
+
+def _normal_for(body_part: str, movement: str) -> dict | None:
+    table = (SHOULDER_NORMAL_RANGES if body_part == "shoulder"
+             else NECK_NORMAL_RANGES)
+    return table.get(movement)
+
+
+def _classify(measured: float, target: float) -> tuple[str, str, float]:
+    """Return (status_label, color_hex, pct_of_normal)."""
+    if target <= 0:
+        return ("—", "#94A3B8", 0.0)
+    pct = (measured / target) * 100.0
+    if pct >= 90.0:
+        label, color = _STATUS_GOOD
+    elif pct >= 75.0:
+        label, color = _STATUS_FAIR
+    else:
+        label, color = _STATUS_LIMITED
+    return (label, color, pct)
+
+
+def _flatten_recordings() -> list[dict]:
+    """Turn the nested biomech_recordings dict into a flat list of rows
+    suitable for the table + bar chart."""
+    rows = []
+    for movement, by_side in (st.session_state.get("biomech_recordings") or {}).items():
+        for side, data in by_side.items():
+            body_part = data.get("body_part", "shoulder")
+            normal = _normal_for(body_part, movement) or {}
+            target = float(normal.get("target", 0.0))
+            rng = normal.get("range", (0.0, 0.0))
+            measured = float(data.get("peak_magnitude", 0.0))
+            label, color, pct = _classify(measured, target)
+            rows.append({
+                "body_part": body_part,
+                "movement":  movement,
+                "title":     _movement_label(body_part, movement),
+                "side":      side,
+                "measured":  measured,
+                "target":    target,
+                "range":     rng,
+                "pct":       pct,
+                "status":    label,
+                "color":     color,
+                "valid_frames": data.get("valid_frames", 0),
+                "total_frames": data.get("total_frames", 0),
+            })
+    return rows
+
+
+_SHOULDER_EDU = (
+    "The shoulder is a ball-and-socket joint with the greatest range of "
+    "motion of any joint in the body. Reduced range of motion in shoulder "
+    "movements can indicate rotator cuff issues, adhesive capsulitis "
+    "('frozen shoulder'), impingement syndromes, or post-injury stiffness. "
+    "Bilateral asymmetry — significantly different ROM on left vs right — "
+    "is often more clinically informative than absolute values, since "
+    "individual baselines vary widely."
+)
+
+_NECK_EDU = (
+    "The cervical spine allows the head to move in all directions. "
+    "Reduced cervical range of motion is commonly associated with muscle "
+    "strain, cervical spondylosis, disc herniation, or whiplash injury. "
+    "Approximately 50% of cervical rotation occurs at the atlanto-axial "
+    "(C1–C2) joint; reductions in rotation specifically may point to "
+    "upper-cervical involvement, while flexion/extension deficits more "
+    "often reflect lower-cervical pathology."
+)
+
+
+def _build_interpretation(rows: list[dict]) -> str:
+    """Auto-generate a short summary sentence per row."""
+    if not rows:
+        return ""
+    sentences = []
+    for r in rows:
+        side_str = f" ({r['side']})" if r["side"] not in ("—", "") else ""
+        rng = r["range"]
+        rng_str = (f"{rng[0]:.0f}°–{rng[1]:.0f}°"
+                   if rng[0] != rng[1]
+                   else f"{rng[0]:.0f}°")
+        sentences.append(
+            f"{r['title']}{side_str} measured {r['measured']:.1f}°, which is "
+            f"{r['pct']:.0f}% of the {rng_str} normal range — {r['status'].lower()}."
+        )
+    return " ".join(sentences)
+
+
+def _build_report_pdf(patient: dict, rows: list[dict],
+                       body_part: str) -> bytes:
+    """Single-page A4 PDF with patient header + results table + bar chart.
+    Uses matplotlib PdfPages so no extra dependency."""
+    from io import BytesIO
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    buf = BytesIO()
+    with PdfPages(buf) as pdf:
+        # Single landscape page with three regions: header, table, chart.
+        fig = plt.figure(figsize=(11, 8.5), facecolor="white")
+        gs = fig.add_gridspec(3, 1, height_ratios=[1.6, 2.2, 3.5],
+                              hspace=0.4)
+
+        # ── Header ────────────────────────────────────────────────
+        ax_h = fig.add_subplot(gs[0]); ax_h.axis("off")
+        ax_h.text(0.5, 0.92, "Biomechanical Assessment Report",
+                  ha="center", fontsize=22, fontweight="bold",
+                  color="#1A1A1A")
+        ax_h.text(0.5, 0.78, f"Body part assessed: {body_part.capitalize()}",
+                  ha="center", fontsize=13, color="#6B7280")
+        info_pairs = [
+            ("Name",     patient.get("name", "—")),
+            ("ID",       patient.get("patient_id", "—")),
+            ("Age",      str(patient.get("age", "—"))),
+            ("Gender",   patient.get("gender", "—")),
+            ("Date",     str(patient.get("assessment_date", "—"))),
+            ("Clinician", patient.get("clinician", "") or "—"),
+        ]
+        x_step = 1.0 / (len(info_pairs))
+        for i, (label, value) in enumerate(info_pairs):
+            x = x_step / 2 + i * x_step
+            ax_h.text(x, 0.50, label, ha="center", fontsize=9,
+                      color="#6B7280")
+            ax_h.text(x, 0.32, str(value), ha="center", fontsize=11,
+                      fontweight="bold", color="#1A1A1A")
+
+        # ── Results table ─────────────────────────────────────────
+        ax_t = fig.add_subplot(gs[1]); ax_t.axis("off")
+        if rows:
+            cell_text = []
+            cell_colors = []
+            header = ["Movement", "Side", "Measured",
+                      "Normal", "% of Normal", "Status"]
+            for r in rows:
+                rng = r["range"]
+                rng_str = (f"{rng[0]:.0f}°–{rng[1]:.0f}°"
+                           if rng[0] != rng[1] else f"{rng[0]:.0f}°")
+                row_cells = [
+                    r["title"],
+                    r["side"],
+                    f"{r['measured']:.1f}°",
+                    rng_str,
+                    f"{r['pct']:.0f}%",
+                    r["status"],
+                ]
+                cell_text.append(row_cells)
+                cell_colors.append(["white"] * 5 + [r["color"]])
+            table = ax_t.table(
+                cellText=cell_text,
+                colLabels=header,
+                cellLoc="center", loc="center",
+                colColours=["#F3F4F6"] * len(header),
+                cellColours=cell_colors,
+            )
+            table.auto_set_font_size(False)
+            table.set_fontsize(10)
+            table.scale(1, 1.4)
+            # Color the status text white for contrast
+            for i in range(1, len(cell_text) + 1):
+                table[i, 5].get_text().set_color("white")
+                table[i, 5].get_text().set_fontweight("bold")
+        else:
+            ax_t.text(0.5, 0.5, "No measurements recorded.",
+                      ha="center", fontsize=12, color="#6B7280")
+
+        # ── Bar chart ─────────────────────────────────────────────
+        ax_c = fig.add_subplot(gs[2])
+        if rows:
+            labels = [
+                f"{r['title']}" + (f" ({r['side']})" if r["side"] not in ("—", "") else "")
+                for r in rows
+            ]
+            measured = [r["measured"] for r in rows]
+            target   = [r["target"]   for r in rows]
+            colors   = [r["color"]    for r in rows]
+            y_pos = list(range(len(rows)))
+            bar_height = 0.36
+            ax_c.barh([y - bar_height / 2 for y in y_pos], measured,
+                      height=bar_height, color=colors, label="Measured")
+            ax_c.barh([y + bar_height / 2 for y in y_pos], target,
+                      height=bar_height, color="#94A3B8",
+                      alpha=0.55, label="Target (normal)")
+            ax_c.set_yticks(y_pos)
+            ax_c.set_yticklabels(labels, fontsize=9)
+            ax_c.invert_yaxis()
+            ax_c.set_xlabel("Angle (°)", color="#374151", fontsize=10)
+            ax_c.tick_params(colors="#374151")
+            for sp in ax_c.spines.values():
+                sp.set_color("#E5E7EB")
+            ax_c.spines["top"].set_visible(False)
+            ax_c.spines["right"].set_visible(False)
+            ax_c.grid(True, axis="x", color="#E5E7EB", linewidth=0.6)
+            ax_c.legend(loc="lower right", fontsize=9, frameon=False)
+        else:
+            ax_c.axis("off")
+
+        fig.suptitle("",  y=0.99)  # placeholder; header carries the title
+        # Disclaimer footer
+        fig.text(0.5, 0.02,
+                 "Descriptive output from a 2D pose-estimation pipeline. "
+                 "Rotation measurements are inherently approximate. "
+                 "Clinical interpretation belongs to a qualified professional.",
+                 ha="center", fontsize=8, color="#6B7280", style="italic")
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
+
+    return buf.getvalue()
+
+
+def _render_report() -> None:
+    """Patient header + results table + bar chart + interpretation +
+    educational block + Download PDF + action buttons + disclaimer."""
+    body_part = st.session_state.get("biomech_body_part") or "—"
+    patient   = st.session_state.get("biomech_patient", {}) or {}
+    rows      = _flatten_recordings()
+
+    st.markdown(
+        '<div class="wizard-title">Assessment Report</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Header strip
+    header = (
+        f"<b style='color:#F1F5F9;'>{patient.get('name', '—')}</b>"
+        f"  ·  ID: {patient.get('patient_id', '—')}"
+        f"  ·  Date: {patient.get('assessment_date', '—')}"
+        f"  ·  Body part: <b style='color:#F1F5F9;'>{body_part.capitalize()}</b>"
+    )
+    st.markdown(
+        f'<div class="wizard-info-strip">{header}</div>',
+        unsafe_allow_html=True,
+    )
+
+    if not rows:
+        st.warning(
+            "No measurements recorded yet. Go back and run at least one "
+            "movement assessment."
+        )
+        col_back, _ = st.columns([1, 5])
+        with col_back:
+            if st.button("← Back", key="bio_report_back_no_data"):
+                _set_step("mode")
+        return
+
+    # ── Results table (rendered as Streamlit table with color spans) ──
+    st.markdown(
+        '<div class="wizard-section-heading">Results</div>',
+        unsafe_allow_html=True,
+    )
+    table_rows_html = []
+    for r in rows:
+        rng = r["range"]
+        rng_str = (f"{rng[0]:.0f}°–{rng[1]:.0f}°"
+                   if rng[0] != rng[1] else f"{rng[0]:.0f}°")
+        table_rows_html.append(
+            f"<tr>"
+            f"<td>{r['title']}</td>"
+            f"<td style='text-align:center;'>{r['side']}</td>"
+            f"<td style='text-align:right;'>{r['measured']:.1f}°</td>"
+            f"<td style='text-align:right;'>{rng_str}</td>"
+            f"<td style='text-align:right;'>{r['pct']:.0f}%</td>"
+            f"<td style='text-align:center;'>"
+            f"<span style='background:{r['color']}; color:white; "
+            f"padding:3px 10px; border-radius:6px; font-size:12px; "
+            f"font-weight:600;'>{r['status']}</span></td>"
+            f"</tr>"
+        )
+    st.markdown(
+        '<div style="overflow-x:auto;">'
+        '<table style="width:100%; border-collapse:collapse; '
+        'color:#CBD5E1; font-size:14px;">'
+        '<thead><tr style="border-bottom:1px solid #334155;">'
+        '<th style="text-align:left; padding:8px;">Movement</th>'
+        '<th style="text-align:center; padding:8px;">Side</th>'
+        '<th style="text-align:right; padding:8px;">Measured</th>'
+        '<th style="text-align:right; padding:8px;">Normal</th>'
+        '<th style="text-align:right; padding:8px;">% of Normal</th>'
+        '<th style="text-align:center; padding:8px;">Status</th>'
+        '</tr></thead>'
+        '<tbody>' + "".join(
+            row.replace("<td>", "<td style='padding:8px;'>")
+               .replace("<td style='text-align:center;'>",
+                        "<td style='padding:8px; text-align:center;'>")
+               .replace("<td style='text-align:right;'>",
+                        "<td style='padding:8px; text-align:right;'>")
+            for row in table_rows_html
+        ) + '</tbody></table></div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Bar chart (plotly horizontal) ─────────────────────────────────
+    st.markdown(
+        '<div class="wizard-section-heading" style="margin-top:24px;">'
+        'Measured vs Normal</div>',
+        unsafe_allow_html=True,
+    )
+    import plotly.graph_objects as go
+    labels = [
+        r["title"] + (f" ({r['side']})" if r["side"] not in ("—", "") else "")
+        for r in rows
+    ]
+    measured = [r["measured"] for r in rows]
+    target   = [r["target"]   for r in rows]
+    colors   = [r["color"]    for r in rows]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        y=labels, x=measured, orientation="h", name="Measured",
+        marker=dict(color=colors),
+        text=[f"{m:.1f}°" for m in measured], textposition="outside",
+        hovertemplate="<b>%{y}</b><br>Measured: %{x:.1f}°<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        y=labels, x=target, orientation="h", name="Target (normal)",
+        marker=dict(color="#94A3B8", opacity=0.55),
+        hovertemplate="<b>%{y}</b><br>Target: %{x:.1f}°<extra></extra>",
+    ))
+    max_x = max(max(measured + target), 1.0) * 1.15
+    fig.update_layout(
+        barmode="group",
+        plot_bgcolor="#1E293B", paper_bgcolor="#1E293B",
+        font=dict(color="#CBD5E1"),
+        xaxis=dict(title="Angle (°)", range=[0, max_x],
+                   gridcolor="#334155", showline=True, linecolor="#475569"),
+        yaxis=dict(title="", autorange="reversed",
+                   gridcolor="#334155", showline=True, linecolor="#475569"),
+        legend=dict(orientation="h", y=-0.18, x=0.5, xanchor="center",
+                    bgcolor="rgba(0,0,0,0)", borderwidth=0,
+                    font=dict(color="#CBD5E1")),
+        margin=dict(l=120, r=30, t=20, b=70),
+        height=max(280, 60 * len(rows) + 100),
+    )
+    st.plotly_chart(fig, use_container_width=True,
+                    config={"displayModeBar": False})
+
+    # ── Clinical interpretation ──────────────────────────────────────
+    st.markdown(
+        '<div class="wizard-section-heading" style="margin-top:24px;">'
+        'Clinical interpretation</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<div class="obs-card" style="margin-top:8px;">'
+        f'{_build_interpretation(rows)}</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Educational block about this body part ──────────────────────
+    edu = _SHOULDER_EDU if body_part == "shoulder" else _NECK_EDU
+    st.markdown(
+        '<div class="wizard-section-heading" style="margin-top:24px;">'
+        f'About {body_part} biomechanics</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<div class="sug-card" style="margin-top:8px;">{edu}</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Rotation disclaimer if any rotation row is present
+    has_rotation = any(_is_rotation_movement(r["body_part"], r["movement"])
+                       for r in rows)
+    if has_rotation:
+        st.warning(
+            "⚠️ Rotation measurements from 2D video are approximate. "
+            "For precise clinical measurements, use a goniometer."
+        )
+
+    # ── Action buttons ───────────────────────────────────────────────
+    st.markdown("---")
+    col_pdf, col_again, col_main = st.columns(3)
+    try:
+        pdf_bytes = _build_report_pdf(patient, rows, body_part)
+        with col_pdf:
+            st.download_button(
+                label="📄 Download PDF Report",
+                data=pdf_bytes,
+                file_name=(
+                    f"BiomechReport_{patient.get('patient_id', 'report')}"
+                    f"_{patient.get('assessment_date', 'date')}.pdf"
+                ),
+                mime="application/pdf",
+                type="primary",
+                use_container_width=True,
+                key="bio_dl_pdf",
+            )
+    except Exception as exc:
+        with col_pdf:
+            st.error(f"PDF build failed: {exc}")
+    with col_again:
+        if st.button("Assess Again", key="bio_assess_again",
+                     use_container_width=True):
+            # Keep patient, drop everything else.
+            from app import _reset_biomech_state  # late import to avoid cycle
+            _reset_biomech_state(keep_patient=True)
+            st.rerun()
+    with col_main:
+        if st.button("← Back to Main Menu", key="bio_main_menu",
+                     use_container_width=True):
+            from app import _reset_biomech_state, _go_to_main_menu
+            _reset_biomech_state(keep_patient=False)
+            _go_to_main_menu()
+            st.rerun()
+
+    # ── Footer disclaimer ────────────────────────────────────────────
+    st.markdown(
+        '<div class="disclaimer" style="margin-top:24px;">'
+        'These measurements are derived from 2D pose estimation and are '
+        'approximate. Rotation measurements are especially sensitive to '
+        'camera angle and should be considered indicative only. Clinical '
+        'interpretation requires a qualified professional\'s assessment.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ──────────────────────────────────────────────
@@ -776,7 +1195,7 @@ _RENDERERS = {
     "movement":  _render_movement,
     "mode":      _render_mode,
     "capture":   _render_capture,
-    "report":    _render_report_placeholder,
+    "report":    _render_report,
 }
 
 
