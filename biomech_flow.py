@@ -1094,132 +1094,9 @@ def _build_interpretation(rows: list[dict]) -> str:
     return " ".join(sentences)
 
 
-def _build_report_pdf(patient: dict, rows: list[dict],
-                       body_part: str) -> bytes:
-    """Single-page A4 PDF with patient header + results table + bar chart.
-    Uses matplotlib PdfPages so no extra dependency."""
-    from io import BytesIO
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.backends.backend_pdf import PdfPages
-
-    buf = BytesIO()
-    with PdfPages(buf) as pdf:
-        # Single landscape page with three regions: header, table, chart.
-        fig = plt.figure(figsize=(11, 8.5), facecolor="white")
-        gs = fig.add_gridspec(3, 1, height_ratios=[1.6, 2.2, 3.5],
-                              hspace=0.4)
-
-        # ── Header ────────────────────────────────────────────────
-        ax_h = fig.add_subplot(gs[0]); ax_h.axis("off")
-        ax_h.text(0.5, 0.92, "Biomechanical Assessment Report",
-                  ha="center", fontsize=22, fontweight="bold",
-                  color="#1A1A1A")
-        ax_h.text(0.5, 0.78, f"Body part assessed: {body_part.capitalize()}",
-                  ha="center", fontsize=13, color="#6B7280")
-        info_pairs = [
-            ("Name",     patient.get("name", "—")),
-            ("ID",       patient.get("patient_id", "—")),
-            ("Age",      str(patient.get("age", "—"))),
-            ("Gender",   patient.get("gender", "—")),
-            ("Date",     str(patient.get("assessment_date", "—"))),
-            ("Clinician", patient.get("clinician", "") or "—"),
-        ]
-        x_step = 1.0 / (len(info_pairs))
-        for i, (label, value) in enumerate(info_pairs):
-            x = x_step / 2 + i * x_step
-            ax_h.text(x, 0.50, label, ha="center", fontsize=9,
-                      color="#6B7280")
-            ax_h.text(x, 0.32, str(value), ha="center", fontsize=11,
-                      fontweight="bold", color="#1A1A1A")
-
-        # ── Results table ─────────────────────────────────────────
-        ax_t = fig.add_subplot(gs[1]); ax_t.axis("off")
-        if rows:
-            cell_text = []
-            cell_colors = []
-            header = ["Movement", "Side", "Measured",
-                      "Normal", "% of Normal", "Status"]
-            for r in rows:
-                rng = r["range"]
-                rng_str = (f"{rng[0]:.0f}°–{rng[1]:.0f}°"
-                           if rng[0] != rng[1] else f"{rng[0]:.0f}°")
-                row_cells = [
-                    r["title"],
-                    r["side"],
-                    f"{r['measured']:.1f}°",
-                    rng_str,
-                    f"{r['pct']:.0f}%",
-                    r["status"],
-                ]
-                cell_text.append(row_cells)
-                cell_colors.append(["white"] * 5 + [r["color"]])
-            table = ax_t.table(
-                cellText=cell_text,
-                colLabels=header,
-                cellLoc="center", loc="center",
-                colColours=["#F3F4F6"] * len(header),
-                cellColours=cell_colors,
-            )
-            table.auto_set_font_size(False)
-            table.set_fontsize(10)
-            table.scale(1, 1.4)
-            # Color the status text white for contrast
-            for i in range(1, len(cell_text) + 1):
-                table[i, 5].get_text().set_color("white")
-                table[i, 5].get_text().set_fontweight("bold")
-        else:
-            ax_t.text(0.5, 0.5, "No measurements recorded.",
-                      ha="center", fontsize=12, color="#6B7280")
-
-        # ── Bar chart ─────────────────────────────────────────────
-        ax_c = fig.add_subplot(gs[2])
-        if rows:
-            labels = [
-                f"{r['title']}" + (f" ({r['side']})" if r["side"] not in ("—", "") else "")
-                for r in rows
-            ]
-            measured = [r["measured"] for r in rows]
-            target   = [r["target"]   for r in rows]
-            colors   = [r["color"]    for r in rows]
-            y_pos = list(range(len(rows)))
-            bar_height = 0.36
-            ax_c.barh([y - bar_height / 2 for y in y_pos], measured,
-                      height=bar_height, color=colors, label="Measured")
-            ax_c.barh([y + bar_height / 2 for y in y_pos], target,
-                      height=bar_height, color="#94A3B8",
-                      alpha=0.55, label="Target (normal)")
-            ax_c.set_yticks(y_pos)
-            ax_c.set_yticklabels(labels, fontsize=9)
-            ax_c.invert_yaxis()
-            ax_c.set_xlabel("Angle (°)", color="#374151", fontsize=10)
-            ax_c.tick_params(colors="#374151")
-            for sp in ax_c.spines.values():
-                sp.set_color("#E5E7EB")
-            ax_c.spines["top"].set_visible(False)
-            ax_c.spines["right"].set_visible(False)
-            ax_c.grid(True, axis="x", color="#E5E7EB", linewidth=0.6)
-            ax_c.legend(loc="lower right", fontsize=9, frameon=False)
-        else:
-            ax_c.axis("off")
-
-        fig.suptitle("",  y=0.99)  # placeholder; header carries the title
-        # Disclaimer footer
-        fig.text(0.5, 0.02,
-                 "Descriptive output from a 2D pose-estimation pipeline. "
-                 "Rotation measurements are inherently approximate. "
-                 "Clinical interpretation belongs to a qualified professional.",
-                 ha="center", fontsize=8, color="#6B7280", style="italic")
-        pdf.savefig(fig, bbox_inches="tight")
-        plt.close(fig)
-
-    return buf.getvalue()
-
-
 def _render_report() -> None:
     """Patient header + results table + bar chart + interpretation +
-    educational block + Download PDF + action buttons + disclaimer."""
+    educational block + Back-to-Main-Menu action + disclaimer."""
     body_part = st.session_state.get("biomech_body_part") or "—"
     patient   = st.session_state.get("biomech_patient", {}) or {}
     rows      = _flatten_recordings()
@@ -1381,28 +1258,11 @@ def _render_report() -> None:
     # the module body (including st.set_page_config) to execute a second
     # time and crash. State resets are performed inline via session_state.
     st.markdown("---")
-    col_pdf, col_main = st.columns(2)
-    try:
-        pdf_bytes = _build_report_pdf(patient, rows, body_part)
-        with col_pdf:
-            st.download_button(
-                label="📄 Download PDF Report",
-                data=pdf_bytes,
-                file_name=(
-                    f"BiomechReport_{patient.get('patient_id', 'report')}"
-                    f"_{patient.get('assessment_date', 'date')}.pdf"
-                ),
-                mime="application/pdf",
-                type="primary",
-                use_container_width=True,
-                key="bio_dl_pdf",
-            )
-    except Exception as exc:
-        with col_pdf:
-            st.error(f"PDF build failed: {exc}")
+    col_main, _ = st.columns([1, 1])
     with col_main:
         if st.button("← Back to Main Menu", key="bio_main_menu",
-                     use_container_width=True):
+                     use_container_width=True,
+                     type="primary"):
             # Reset biomech state inline + clear app_mode. Equivalent to
             # _reset_biomech_state(keep_patient=False) + _go_to_main_menu()
             # but without re-importing app.py.
