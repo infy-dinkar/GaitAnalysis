@@ -1,6 +1,6 @@
-#  GaitVision — AI Gait Analyzer
+# MotionLens — AI Movement Assessment
 
-GaitVision is an end-to-end, lightweight, rule-based system for gait analysis. It takes a side-view walking video, extracts biomechanical metrics, plots cycle-normalized joint kinematics against healthy-adult reference bands, and surfaces plain-language observations.
+MotionLens is an end-to-end, lightweight, rule-based system for clinical movement assessment. It takes a side-view walking video, extracts biomechanical metrics, plots cycle-normalized joint kinematics against healthy-adult reference bands, and surfaces plain-language observations.
 
 ##  Features
 
@@ -76,4 +76,4 @@ Upload a side-profile walking video that shows the full body. Enter the subject'
 
 Python 3.11 is recommended — see `.python-version`. For Streamlit Cloud deployment, system packages are declared in `packages.txt`.
 
-> ** Disclaimer**: GaitVision is a educational prototype. All outputs are derived from 2D pose estimation and do not replace professional 3D clinical gait laboratories or medical diagnosis. Auto-generated observations are descriptive only — clinical interpretation belongs to a qualified professional considering the full clinical picture, medical history, and other assessments.
+> ** Disclaimer**: MotionLens is an educational prototype. All outputs are derived from 2D pose estimation and do not replace professional 3D clinical gait laboratories or medical diagnosis. Auto-generated observations are descriptive only — clinical interpretation belongs to a qualified professional considering the full clinical picture, medical history, and other assessments.

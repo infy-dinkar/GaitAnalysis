@@ -1,6 +1,6 @@
 """
 biomech_flow.py
-Biomechanical Analysis flow for GaitVision (shoulder + neck range-of-motion).
+Biomechanical Analysis flow for MotionLens (shoulder + neck range-of-motion).
 
 Sub-flow tracked by st.session_state["biomech_step"]:
     patient   → body_part → movement → mode → capture → report

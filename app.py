@@ -25,7 +25,7 @@ from biomech_flow import render_biomech_flow
 # PAGE CONFIG
 # ──────────────────────────────────────────────
 st.set_page_config(
-    page_title="GaitVision",
+    page_title="MotionLens",
     page_icon="",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -1133,7 +1133,7 @@ def _render_sidebar() -> None:
         return
 
     with st.sidebar:
-        st.markdown("# GaitVision")
+        st.markdown("# MotionLens")
         st.markdown(
             '<div class="sidebar-tagline">CLINICAL ASSESSMENT TOOLS</div>',
             unsafe_allow_html=True,
@@ -1184,7 +1184,7 @@ def _render_mode_chooser() -> None:
     """Two big cards: Gait Analysis | Biomechanical Analysis. Click sets
     app_mode in session state and reruns into the chosen flow."""
     st.markdown(
-        '<h1 class="mode-chooser-title">GaitVision</h1>',
+        '<h1 class="mode-chooser-title">MotionLens</h1>',
         unsafe_allow_html=True,
     )
     st.markdown(
@@ -1741,7 +1741,7 @@ def _render_step_4_legacy_dashboard() -> None:
             st.rerun()
         return
 
-    st.markdown('<h1 class="hero-title">GaitVision</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="hero-title">MotionLens</h1>', unsafe_allow_html=True)
     st.markdown(
         '<p class="hero-sub">Analysis Results</p>',
         unsafe_allow_html=True,
