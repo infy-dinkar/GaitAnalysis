@@ -1111,19 +1111,33 @@ _BIOMECH_STEPS = [
 
 def _render_sidebar() -> None:
     """Sidebar — branches on app_mode:
-      None       → just the title (mode chooser is the main area)
+      None       → sidebar HIDDEN entirely (mode chooser is a clean
+                   centred landing screen)
       'gait'     → '← Main Menu' link + gait wizard stepper
       'biomech'  → '← Main Menu' link + biomech sub-step stepper
     """
     mode = st.session_state.get("app_mode")
+
+    if mode is None:
+        # Hide the sidebar + its collapse-toggle entirely on the
+        # landing screen so the mode chooser fills the whole viewport.
+        st.markdown(
+            """
+            <style>
+              [data-testid="stSidebar"] { display: none !important; }
+              [data-testid="collapsedControl"] { display: none !important; }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
     with st.sidebar:
         st.markdown("# GaitVision")
         st.markdown(
             '<div class="sidebar-tagline">CLINICAL ASSESSMENT TOOLS</div>',
             unsafe_allow_html=True,
         )
-        if mode is None:
-            return  # mode chooser carries no stepper
 
         # Main-menu link — always visible inside either flow.
         if st.button("← Main Menu",
