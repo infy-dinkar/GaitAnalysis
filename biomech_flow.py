@@ -1139,8 +1139,12 @@ def _render_report() -> None:
         )
 
     # ── Action buttons ───────────────────────────────────────────────
+    # Note: do NOT do `from app import ...` here. Streamlit runs the main
+    # script as `__main__`; importing it under the name `app` would cause
+    # the module body (including st.set_page_config) to execute a second
+    # time and crash. State resets are performed inline via session_state.
     st.markdown("---")
-    col_pdf, col_again, col_main = st.columns(3)
+    col_pdf, col_main = st.columns(2)
     try:
         pdf_bytes = _build_report_pdf(patient, rows, body_part)
         with col_pdf:
@@ -1159,19 +1163,25 @@ def _render_report() -> None:
     except Exception as exc:
         with col_pdf:
             st.error(f"PDF build failed: {exc}")
-    with col_again:
-        if st.button("Assess Again", key="bio_assess_again",
-                     use_container_width=True):
-            # Keep patient, drop everything else.
-            from app import _reset_biomech_state  # late import to avoid cycle
-            _reset_biomech_state(keep_patient=True)
-            st.rerun()
     with col_main:
         if st.button("← Back to Main Menu", key="bio_main_menu",
                      use_container_width=True):
-            from app import _reset_biomech_state, _go_to_main_menu
-            _reset_biomech_state(keep_patient=False)
-            _go_to_main_menu()
+            # Reset biomech state inline + clear app_mode. Equivalent to
+            # _reset_biomech_state(keep_patient=False) + _go_to_main_menu()
+            # but without re-importing app.py.
+            for k, v in {
+                "biomech_step":            "patient",
+                "biomech_patient":         {},
+                "biomech_body_part":       None,
+                "biomech_movement":        None,
+                "biomech_full_assessment": False,
+                "biomech_side":            "Right",
+                "biomech_capture_mode":    None,
+                "biomech_video_file":      None,
+                "biomech_recordings":      {},
+                "app_mode":                None,
+            }.items():
+                st.session_state[k] = v
             st.rerun()
 
     # ── Footer disclaimer ────────────────────────────────────────────
