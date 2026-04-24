@@ -10,19 +10,27 @@ The render entry-point is `render_biomech_flow()`, called from app.py's
 top-level dispatcher.
 
 Status:
-  Commit 3 (this commit) — patient form + body-part chooser + movement
-                           chooser implemented. Capture (mode + screen)
-                           and report still placeholder.
+  Commit 4 (this commit) — capture-mode chooser + video-upload analyzer.
+  Live camera ("Coming soon" tag) and the report screen are still
+  placeholder; report lands in commit 6.
 """
 from __future__ import annotations
 
+import os
+import tempfile
 import uuid
 from datetime import date
 
 import streamlit as st
 
-from shoulder_engine import SHOULDER_NORMAL_RANGES
-from neck_engine     import NECK_NORMAL_RANGES
+from shoulder_engine import (
+    SHOULDER_NORMAL_RANGES,
+    compute_shoulder_angle,
+)
+from neck_engine import (
+    NECK_NORMAL_RANGES,
+    compute_neck_angle,
+)
 
 
 # ──────────────────────────────────────────────
@@ -74,6 +82,166 @@ NECK_MOVEMENTS = [
      "Turn the head to look left and right.",
      "70–90° each side"),
 ]
+
+
+# Per-movement recording instructions. Surfaced on the upload-capture
+# screen as a numbered checklist. Source: AAOS / APTA standard ROM
+# positioning guidance.
+MOVEMENT_INSTRUCTIONS = {
+    ("shoulder", "flexion"): [
+        "Stand 6 feet from the camera, facing sideways (true side view).",
+        "Keep the arm being assessed straight, hanging at your side.",
+        "Slowly raise the arm forward and upward as high as you can.",
+        "Hold at the peak position for 2 seconds.",
+        "Slowly lower the arm back to the starting position.",
+    ],
+    ("shoulder", "extension"): [
+        "Stand 6 feet from the camera, facing sideways (true side view).",
+        "Keep the arm straight at your side as the starting position.",
+        "Slowly reach the arm backward, behind your body, as far as comfortable.",
+        "Hold at the peak position for 2 seconds.",
+        "Return slowly to the starting position.",
+    ],
+    ("shoulder", "abduction"): [
+        "Stand 6 feet from the camera, facing the camera (front view).",
+        "Keep the arm straight at your side, palm facing your body.",
+        "Slowly raise the arm out to the side, palm down, as high as you can.",
+        "Hold at the peak position for 2 seconds.",
+        "Slowly lower back to the starting position.",
+    ],
+    ("shoulder", "adduction"): [
+        "Stand 6 feet from the camera, facing the camera (front view).",
+        "Start with the arm raised slightly out to the side.",
+        "Slowly bring the arm across the front of the body toward the opposite shoulder.",
+        "Hold at the peak position for 2 seconds.",
+        "Return slowly to the starting position.",
+    ],
+    ("shoulder", "external_rotation"): [
+        "Stand 6 feet from the camera, facing the camera (front view).",
+        "Bend the elbow to 90°, with the upper arm at your side, "
+        "forearm pointing forward.",
+        "Without moving the elbow, slowly rotate the forearm outward "
+        "(away from your body).",
+        "Hold at the peak position for 2 seconds.",
+        "Return slowly to the starting position.",
+    ],
+    ("shoulder", "internal_rotation"): [
+        "Stand 6 feet from the camera, facing the camera (front view).",
+        "Bend the elbow to 90°, with the upper arm at your side, "
+        "forearm pointing forward.",
+        "Without moving the elbow, slowly rotate the forearm inward "
+        "(across your stomach).",
+        "Hold at the peak position for 2 seconds.",
+        "Return slowly to the starting position.",
+    ],
+
+    ("neck", "flexion"): [
+        "Sit upright facing sideways to the camera (true side view).",
+        "Keep your shoulders relaxed and still.",
+        "Slowly bring your chin toward your chest as far as comfortable.",
+        "Hold for 2 seconds, then return to neutral upright posture.",
+        "Then slowly tilt your head backward (look up at the ceiling) "
+        "as far as comfortable, hold 2 seconds, return to neutral.",
+    ],
+    ("neck", "lateral_flexion"): [
+        "Sit upright facing the camera (front view).",
+        "Keep your shoulders level and relaxed — do not raise the shoulder "
+        "toward the ear.",
+        "Slowly tilt your head so your ear moves toward your shoulder "
+        "(do not turn the head — keep nose facing forward).",
+        "Hold for 2 seconds, return to upright, then repeat to the other side.",
+    ],
+    ("neck", "rotation"): [
+        "Sit upright facing the camera (front view).",
+        "Keep your shoulders level and still.",
+        "Slowly turn your head to one side as far as comfortable, keeping the chin level.",
+        "Hold for 2 seconds, return to centre, then repeat to the other side.",
+    ],
+}
+
+
+# ──────────────────────────────────────────────
+# Frame-by-frame analyzer (video upload mode)
+# ──────────────────────────────────────────────
+@st.cache_resource(show_spinner=False)
+def _get_pose_estimator():
+    """Cached MediaPipe Pose instance for biomech (uses the older
+    `mp.solutions.pose.Pose` API — simpler than the task API and self-
+    contained, no .task model file needed). Cached across reruns."""
+    import mediapipe as mp
+    return mp.solutions.pose.Pose(
+        model_complexity=1,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
+
+
+def _run_biomech_upload_analysis(video_path: str,
+                                  body_part: str,
+                                  movement: str,
+                                  side: str) -> dict:
+    """Process the uploaded video frame by frame, computing the chosen
+    movement's angle each frame and tracking the peak magnitude.
+
+    Returns a dict with keys:
+      peak_angle        — signed peak angle (degrees) or None
+      peak_magnitude    — abs(peak_angle); 0.0 when no valid frames
+      valid_frames      — frames where the angle could be computed
+      total_frames      — total frames processed
+      fps               — video fps
+    """
+    import cv2
+
+    pose = _get_pose_estimator()
+
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+
+    peak_magnitude = 0.0
+    peak_angle: float | None = None
+    valid_frames = 0
+    total_frames = 0
+
+    while True:
+        ok, frame_bgr = cap.read()
+        if not ok:
+            break
+        total_frames += 1
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        result = pose.process(frame_rgb)
+        if result.pose_landmarks is None:
+            continue
+
+        landmarks = result.pose_landmarks.landmark
+        if body_part == "shoulder":
+            angle = compute_shoulder_angle(landmarks, side.lower(), movement)
+        else:
+            angle = compute_neck_angle(landmarks, movement)
+        if angle is None:
+            continue
+
+        valid_frames += 1
+        if abs(angle) > peak_magnitude:
+            peak_magnitude = abs(angle)
+            peak_angle = angle
+
+    cap.release()
+
+    return {
+        "peak_angle":     peak_angle,
+        "peak_magnitude": peak_magnitude,
+        "valid_frames":   valid_frames,
+        "total_frames":   total_frames,
+        "fps":            float(fps),
+    }
+
+
+def _is_rotation_movement(body_part: str, movement: str | None) -> bool:
+    if body_part == "shoulder":
+        return movement in ("external_rotation", "internal_rotation")
+    if body_part == "neck":
+        return movement == "rotation"
+    return False
 
 
 # ──────────────────────────────────────────────
@@ -326,23 +494,118 @@ def _render_movement() -> None:
             _set_step("body_part")
 
 
-def _render_mode_placeholder() -> None:
-    """Placeholder — Capture Mode chooser lands in commit 4 (with the
-    upload flow) and commit 5 (live camera, deferred)."""
-    body_part = st.session_state.get("biomech_body_part") or "—"
-    full = st.session_state.get("biomech_full_assessment", False)
-    movement = st.session_state.get("biomech_movement")
-    chosen = (f"Full {body_part.capitalize()} Assessment"
-              if full else f"{body_part.capitalize()} {movement}")
+def _movement_label(body_part: str, movement: str) -> str:
+    """Display name for a movement key, e.g. 'external_rotation' →
+    'External Rotation'. Falls back to title-case if unknown."""
+    table = SHOULDER_MOVEMENTS if body_part == "shoulder" else NECK_MOVEMENTS
+    for key, title, _, _ in table:
+        if key == movement:
+            return title
+    return movement.replace("_", " ").title()
+
+
+def _render_mode() -> None:
+    """Capture Mode chooser. Two cards (Live Camera disabled, Video
+    Upload enabled), preceded by a Side toggle when the movement has
+    laterality (all shoulder movements). Full-assessment is gracefully
+    blocked — it requires live-camera multi-movement chaining which is
+    deferred."""
+    body_part = st.session_state.get("biomech_body_part")
+    movement  = st.session_state.get("biomech_movement")
+    full      = st.session_state.get("biomech_full_assessment", False)
+
+    if body_part not in ("shoulder", "neck"):
+        st.warning("No body part selected. Going back.")
+        _set_step("body_part")
+        return
+
     st.markdown(
         '<div class="wizard-title">Capture Mode</div>',
         unsafe_allow_html=True,
     )
-    st.info(
-        f"Selected: **{chosen}**\n\n"
-        "Capture mode + analysis screens land in commit 4 of this "
-        "feature (video upload). Live camera lands in commit 5 (deferred)."
+
+    if full:
+        st.warning(
+            f"**Full {body_part.capitalize()} Assessment** chains multiple "
+            "movements in sequence. This requires live camera mode, which is "
+            "coming in a follow-up release. For now, please pick a single "
+            "movement and run it via video upload."
+        )
+        col_back, _ = st.columns([1, 5])
+        with col_back:
+            if st.button("← Pick a single movement",
+                         key="bio_back_mode_full",
+                         use_container_width=True):
+                st.session_state["biomech_full_assessment"] = False
+                _set_step("movement")
+        return
+
+    # Single-movement path
+    st.markdown(
+        f'<div style="text-align:center; color:#94A3B8; font-size:14px; '
+        f'margin-bottom:18px;">'
+        f'Movement: <b style="color:#F1F5F9;">'
+        f'{body_part.capitalize()} — {_movement_label(body_part, movement)}'
+        f'</b></div>',
+        unsafe_allow_html=True,
     )
+
+    # Side selector (shoulder only — neck has no laterality at this level).
+    if body_part == "shoulder":
+        st.markdown(
+            '<div style="font-size:14px; font-weight:500; color:#CBD5E1; '
+            'margin-bottom:6px;">Side to assess</div>',
+            unsafe_allow_html=True,
+        )
+        current_side = st.session_state.get("biomech_side", "Right")
+        side = st.radio(
+            "Side", ["Right", "Left"],
+            index=0 if current_side != "Left" else 1,
+            horizontal=True,
+            label_visibility="collapsed",
+            key="bio_side_radio",
+        )
+        st.session_state["biomech_side"] = side
+        st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
+
+    col_a, col_b = st.columns(2, gap="large")
+    with col_a:
+        st.markdown(
+            '<div class="mode-card" style="opacity:0.55;">'
+            '<div>'
+            '<div class="mode-card-icon">📹</div>'
+            '<div class="mode-card-title">Live Camera</div>'
+            '<div class="mode-card-desc">'
+            'Real-time guided assessment with on-screen pose overlay '
+            'and live angle readout.'
+            '</div>'
+            '</div>'
+            '<div style="color:#94A3B8; font-size:12px; '
+            'font-style:italic;">Coming soon</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        st.button("Coming soon", key="bio_pick_live",
+                  disabled=True, use_container_width=True)
+    with col_b:
+        st.markdown(
+            '<div class="mode-card">'
+            '<div>'
+            '<div class="mode-card-icon">📁</div>'
+            '<div class="mode-card-title">Video Upload</div>'
+            '<div class="mode-card-desc">'
+            'Upload a recorded video of the movement. Frame-by-frame '
+            'analysis extracts the peak angle.'
+            '</div>'
+            '</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        if st.button("Upload Video →", key="bio_pick_upload",
+                     type="primary", use_container_width=True):
+            st.session_state["biomech_capture_mode"] = "upload"
+            _set_step("capture")
+
     col_back, _ = st.columns([1, 5])
     with col_back:
         if st.button("← Back", key="bio_back_mode",
@@ -350,10 +613,152 @@ def _render_mode_placeholder() -> None:
             _set_step("movement")
 
 
-def _render_capture_placeholder() -> None:
-    st.warning("Capture screen not implemented yet — commit 4 / 5.")
-    if st.button("← Back", key="bio_back_capture"):
-        _set_step("mode")
+def _render_capture() -> None:
+    """Upload + analyze. Live-camera mode is gated behind a 'coming
+    soon' notice."""
+    capture_mode = st.session_state.get("biomech_capture_mode")
+    body_part    = st.session_state.get("biomech_body_part")
+    movement     = st.session_state.get("biomech_movement")
+    side         = st.session_state.get("biomech_side", "Right")
+
+    if capture_mode != "upload":
+        st.warning(
+            "Live camera mode lands in a later release. Please go back "
+            "and pick Video Upload."
+        )
+        if st.button("← Back to Mode", key="bio_back_capture_mode_only"):
+            _set_step("mode")
+        return
+
+    movement_title = _movement_label(body_part, movement)
+    side_str = f" — {side} side" if body_part == "shoulder" else ""
+    st.markdown(
+        f'<div class="wizard-title">Upload Video — '
+        f'{body_part.capitalize()} {movement_title}{side_str}</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Movement-specific instructions
+    instructions = MOVEMENT_INSTRUCTIONS.get((body_part, movement), [])
+    if instructions:
+        items_html = "".join(
+            f'<div style="margin:4px 0;">'
+            f'<b style="color:#3B82F6;">{i + 1}.</b> {step}</div>'
+            for i, step in enumerate(instructions)
+        )
+        st.markdown(
+            f'<div class="wizard-info-strip">'
+            f'<div style="font-weight:600; color:#F1F5F9; margin-bottom:8px;">'
+            f'Recording instructions</div>{items_html}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # Rotation-specific disclaimer
+    if _is_rotation_movement(body_part, movement):
+        st.warning(
+            "⚠️ Rotation measurements from 2D video are approximate. "
+            "For precise clinical measurements, use a goniometer."
+        )
+
+    # File uploader
+    uploaded = st.file_uploader(
+        "Upload video (MP4 / MOV / AVI)",
+        type=["mp4", "mov", "avi", "mkv"],
+        key="bio_uploader",
+    )
+    if uploaded is not None:
+        size_mb = len(uploaded.getvalue()) / (1024 * 1024)
+        st.markdown(
+            f'<div class="wizard-file-info">'
+            f'📁 <b>{uploaded.name}</b>  ·  {size_mb:.2f} MB'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        st.session_state["biomech_video_file"] = uploaded
+        with st.expander("Preview", expanded=False):
+            st.video(uploaded)
+
+    file_ready = st.session_state.get("biomech_video_file") is not None
+    if st.button("Analyze →",
+                 type="primary",
+                 disabled=not file_ready,
+                 use_container_width=True,
+                 key="bio_analyze"):
+        if _run_capture_and_store():
+            _set_step("report")
+
+    col_back, _ = st.columns([1, 5])
+    with col_back:
+        if st.button("← Back", key="bio_back_capture",
+                     use_container_width=True):
+            _set_step("mode")
+
+
+def _run_capture_and_store() -> bool:
+    """Save uploaded video to a temp file, analyze, store the result
+    in `biomech_recordings`. Returns True on success."""
+    video     = st.session_state.get("biomech_video_file")
+    body_part = st.session_state.get("biomech_body_part")
+    movement  = st.session_state.get("biomech_movement")
+    side      = st.session_state.get("biomech_side", "Right")
+    if video is None or movement is None or body_part is None:
+        st.error("Missing video, movement, or body part — cannot analyze.")
+        return False
+
+    file_bytes = video.getvalue()
+    file_name  = video.name or "video.mp4"
+    suffix = os.path.splitext(file_name)[1] or ".mp4"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
+
+    try:
+        with st.status("Analyzing video …", expanded=True) as status:
+            st.write("Loading pose model …")
+            _ = _get_pose_estimator()  # warm cache
+            st.write("Extracting poses + computing angles …")
+            result = _run_biomech_upload_analysis(
+                tmp_path, body_part, movement, side,
+            )
+            if result["valid_frames"] == 0:
+                status.update(label="Analysis failed.", state="error")
+                st.error(
+                    "No frames had high-confidence pose landmarks. "
+                    "Re-record with better lighting or position."
+                )
+                return False
+
+            # Store keyed by movement → side → result. Side is uniform
+            # 'neck' for cervical movements (no laterality at this level).
+            recordings = st.session_state["biomech_recordings"]
+            side_key = side if body_part == "shoulder" else "—"
+            recordings.setdefault(movement, {})[side_key] = {
+                **result,
+                "body_part": body_part,
+                "side":      side_key,
+            }
+            st.session_state["biomech_recordings"] = recordings
+
+            status.update(
+                label=(
+                    f"Done. Peak {body_part} {_movement_label(body_part, movement)}"
+                    f"{' (' + side + ')' if body_part == 'shoulder' else ''}: "
+                    f"{result['peak_magnitude']:.1f}°  "
+                    f"({result['valid_frames']} valid / "
+                    f"{result['total_frames']} total frames)"
+                ),
+                state="complete",
+            )
+        return True
+    except Exception as exc:
+        st.error(f"Analysis failed: {exc}")
+        st.exception(exc)
+        return False
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
 
 
 def _render_report_placeholder() -> None:
@@ -369,8 +774,8 @@ _RENDERERS = {
     "patient":   _render_patient,
     "body_part": _render_body_part,
     "movement":  _render_movement,
-    "mode":      _render_mode_placeholder,
-    "capture":   _render_capture_placeholder,
+    "mode":      _render_mode,
+    "capture":   _render_capture,
     "report":    _render_report_placeholder,
 }
 
