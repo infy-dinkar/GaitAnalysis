@@ -454,7 +454,7 @@ def _save_peak_to_recordings(state: dict, body_part: str,
         "peak_angle":     state["peak_angle"],
         "peak_magnitude": state["peak_magnitude"],
         "valid_frames":   state["valid_frames"],
-        "total_frames":   state["total_recorded_frames"],
+        "total_frames":   state["total_frames"],
         "fps":            0.0,  # not measured for live mode
         "body_part":      body_part,
         "side":           side_key,
