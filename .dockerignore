@@ -1,0 +1,43 @@
+# Frontend (separate deploy)
+motionlens-web/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+Gait/
+.conda/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Sample / test media
+*.mp4
+*.mov
+*.avi
+*.mkv
+*_diag*.py
+_smoke_*.py
+_*.png
+
+# Git
+.git/
+.github/
+.gitignore

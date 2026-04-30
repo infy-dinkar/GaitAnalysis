@@ -771,7 +771,7 @@ def _render_metrics(features: dict) -> None:
     # ── Clean ────────────────────────────────────────────
     st.markdown(
         '<div class="section-title" style="margin-top:1.5rem">'
-        '✨ Clean Metrics '
+        ' Clean Metrics '
         '<span style="font-size:0.75rem;color:#3FB950;font-weight:400;">'
         '— steady-state only · used for all observations & suggestions'
         '</span></div>',
