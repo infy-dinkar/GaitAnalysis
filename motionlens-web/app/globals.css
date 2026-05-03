@@ -1,0 +1,124 @@
+@import "tailwindcss";
+
+/* ============================================================
+   MotionLens design tokens — clinical-tech, light theme, green accent
+   ============================================================ */
+@theme {
+  /* surfaces */
+  --color-background: #FFFFFF;
+  --color-surface: #F8FAFC;
+  --color-elevated: #FFFFFF;
+  --color-border: #E2E8F0;
+
+  /* foreground / text */
+  --color-foreground: #0F172A;
+  --color-muted: #475569;
+  --color-subtle: #94A3B8;
+
+  /* brand accent — warm orange, pops on white */
+  --color-accent: #EA580C;
+  --color-accent-hover: #C2410C;
+
+  /* state */
+  --color-success: #EA580C;
+  --color-warning: #F59E0B;
+  --color-error: #DC2626;
+
+  /* data series (charts) — kept distinct so multiple series don't collapse */
+  --color-data-1: #EA580C;
+  --color-data-2: #2563EB;
+  --color-data-3: #F59E0B;
+  --color-data-4: #DC2626;
+
+  /* hero display font scale */
+  --text-hero: clamp(2.5rem, 6vw, 5rem);
+  --text-hero--line-height: 1.05;
+  --text-hero--letter-spacing: -0.02em;
+  --text-hero--font-weight: 600;
+
+  /* semantic radii */
+  --radius-card: 1rem;       /* 16px — cards */
+  --radius-hero: 1.5rem;     /* 24px — hero panels */
+
+  /* shadows — soft elevation on white (replaces the dark-theme accent glow) */
+  --shadow-glow: 0 4px 18px rgba(15, 23, 42, 0.08), 0 1px 3px rgba(15, 23, 42, 0.04);
+  --shadow-glow-sm: 0 2px 8px rgba(15, 23, 42, 0.06);
+}
+
+/* font: variable comes from next/font on the <html> element */
+@theme inline {
+  --font-sans: var(--font-inter), system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+/* ============================================================
+   Base styles
+   ============================================================ */
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+}
+
+/* Pages render <Nav /><main>...</main><Footer />. main grows to fill the
+   space between Nav and Footer so the footer hugs the bottom of the
+   viewport when content is short — no awkward gap below it. */
+main {
+  flex: 1 1 auto;
+}
+
+h1, h2, h3, h4 {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+::selection {
+  background: var(--color-accent);
+  color: #FFFFFF;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* ============================================================
+   Custom utilities
+   ============================================================ */
+
+/* tabular figures for stats / metric numbers */
+@utility tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" on;
+}
+
+/* eyebrow micro-label (uppercase, accent, wide tracking) */
+@utility eyebrow {
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.15em;
+  font-weight: 600;
+  color: var(--color-accent);
+}
+
+/* subtle grid pattern background (~4% opacity, dark on light) */
+@utility bg-grid {
+  background-image:
+    linear-gradient(to right, rgba(15, 23, 42, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(15, 23, 42, 0.04) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+/* subtle dot pattern background (~6% opacity, dark on light) */
+@utility bg-dots {
+  background-image: radial-gradient(circle, rgba(15, 23, 42, 0.06) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
