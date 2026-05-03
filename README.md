@@ -11,12 +11,18 @@ short_description: Markerless gait + biomech ROM API (FastAPI + MediaPipe)
 
 # MotionLens
 
-> **AI-powered movement assessment platform** — markerless gait analysis and biomechanical range-of-motion measurement from a single video, accessible through a Streamlit clinical tool or a modern Next.js web app.
+> **AI-powered movement assessment platform** — markerless gait analysis, multi-joint biomechanical range-of-motion measurement, and static posture screening from a single video or photo, accessible through a Streamlit clinical tool or a modern Next.js web app with browser-side pose detection.
+
+🌐 **Live demo:** [https://gait-analysis123.vercel.app/](https://gait-analysis123.vercel.app/)
+🔧 **Backend API:** [https://thakurdinkar-motionlens-api.hf.space/api/health](https://thakurdinkar-motionlens-api.hf.space/api/health)
 
 [![Python](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org/)
-[![MediaPipe](https://img.shields.io/badge/MediaPipe-Pose-orange.svg)](https://developers.google.com/mediapipe)
+[![TensorFlow.js](https://img.shields.io/badge/TF.js-MoveNet-FF6F00.svg)](https://www.tensorflow.org/js)
+[![MediaPipe](https://img.shields.io/badge/MediaPipe-BlazePose-orange.svg)](https://developers.google.com/mediapipe)
+[![Vercel](https://img.shields.io/badge/Vercel-Frontend-black.svg)](https://gait-analysis123.vercel.app/)
+[![HF Spaces](https://img.shields.io/badge/HF%20Spaces-Backend-yellow.svg)](https://thakurdinkar-motionlens-api.hf.space/api/health)
 [![License](https://img.shields.io/badge/license-Educational%20Prototype-lightgrey.svg)](#disclaimer)
 
 ---
@@ -42,14 +48,33 @@ short_description: Markerless gait + biomech ROM API (FastAPI + MediaPipe)
 
 ## Overview
 
-MotionLens takes a side-view walking video and extracts **clinical-grade biomechanics** — cadence, stride symmetry, joint kinematics, gait-cycle curves — without markers, motion-capture suits, or specialised hardware. It also supports **upper-body range-of-motion assessment** for shoulder (6 movements per side) and neck (4 movements), in both video-upload and live-camera modes.
+MotionLens is a **three-module movement assessment platform**:
 
-The platform ships with two interchangeable front-ends backed by the same Python engines:
+1. **Gait analysis** — clinical-grade biomechanics (cadence, stride symmetry, joint kinematics, gait-cycle curves) from a single side-view walking video.
+2. **Biomechanics** — range-of-motion assessment across **5 joints** (shoulder, neck, knee, hip, ankle) covering **18 movements** in both live-camera and video-upload modes.
+3. **Posture** — static posture screening from front + side photos (head/shoulder/hip tilt, plumb-line shifts, knee alignment).
+
+All without markers, motion-capture suits, or specialised hardware.
+
+### Hybrid ML architecture
+
+The Next.js production stack runs ML in **two places**, optimising each path for what it needs most:
+
+| Mode | Where ML runs | Model | Why |
+|---|---|---|---|
+| Live biomech (5 joints) | **Browser** (TF.js + WebGL) | MoveNet Lightning (17 kp) | Sub-20 ms per frame, 50+ FPS, zero network |
+| Biomech video upload | **Browser** (TF.js + WebGL) | MoveNet Lightning | Privacy — video never leaves device |
+| Posture (front + side photo) | **Browser** (TF.js + WebGL) | MoveNet Lightning | Same |
+| **Gait video upload** | **Server** (FastAPI + MediaPipe) | BlazePose (33 kp) | Needs heel + toe-index for stride detection |
+
+The Streamlit front-end keeps the legacy server-side flow for everything (single-process clinical tool).
+
+### Front-ends
 
 - **Streamlit** — single-process clinical tool, dark-themed, suitable for lab use.
 - **Next.js + FastAPI** — modern product UX, deployable as a SaaS (Vercel + Hugging Face Spaces).
 
-Both UIs call the **identical** engine modules. No duplicated math; no drift between platforms.
+Both UIs call the **identical** Python engine modules. The Next.js frontend additionally has TypeScript ports of the shoulder/neck/knee/hip/ankle math so live mode and biomech upload can run entirely in the browser without a network round-trip.
 
 ---
 
@@ -80,18 +105,30 @@ Both UIs call the **identical** engine modules. No duplicated math; no drift bet
 - **Cycle duration filter** — rejects spans outside 0.7×–1.5× the leg's median stride duration
 - Static-stance detection restricted to clean walking windows (prevents turning-point poisoning of the baseline)
 
-### Biomechanics — shoulder & neck range-of-motion
+### Biomechanics — 5-joint range-of-motion (18 movements)
 
-| Joint | Movements |
-|---|---|
-| **Shoulder** (per side) | Flexion · Extension · Abduction · Adduction · External Rotation · Internal Rotation |
-| **Neck** | Flexion · Extension · Lateral Flexion · Rotation |
+| Joint | Movements | Per-side |
+|---|---|---|
+| **Shoulder** | Flexion · Extension · Abduction · Adduction · External Rotation · Internal Rotation | ✓ |
+| **Neck** | Flexion · Extension · Lateral Flexion · Rotation | — |
+| **Knee** | Flexion · Extension | ✓ |
+| **Hip** | Flexion · Extension · Internal Rotation · External Rotation | ✓ |
+| **Ankle** | Dorsiflexion · Plantarflexion | ✓ |
 
-- **Live mode** — continuous-capture webcam tracking, on-frame skeleton overlay, current/peak/frame counters, configurable side selector (shoulder), clinical "Show Analysis" workflow
-- **Upload mode** — drag-and-drop a recorded clip, frame-by-frame analysis, peak angle + status
+- **Live mode** — continuous-capture webcam tracking via TF.js MoveNet (browser GPU), on-canvas skeleton overlay with EMA-smoothed keypoints, current/peak/frame counters, **PiP camera preview** (toggleable), configurable side selector
+- **Upload mode** — drag-and-drop a recorded clip, **fully client-side** frame-by-frame analysis using `requestVideoFrameCallback` at 4× playback speed (~5-10 sec for a 10-sec video), peak angle + status
 - Reference ranges from AAOS / APTA — `good` ≥ 90 %, `fair` ≥ 75 %, `poor` < 75 % of normal target
-- **Per-movement recording instructions** — 5-step numbered checklists with AAOS/APTA positioning guidance
-- Auto-generated **Assessment Report** with patient header, results table, Plotly bar chart (measured vs normal range), clinical interpretation, and educational block
+- **Plain-language per-movement instructions** — 5-step numbered guides written for non-clinical users
+- Auto-generated **Assessment Report** with patient header, results table, Plotly bar chart (measured vs normal range), clinical interpretation, educational block, and subtle disclaimer footer
+
+### Posture — static screening from photos
+
+- **Two-photo workflow** — patient uploads front + side view (both required)
+- **Frontal-plane measurements** — head tilt, shoulder tilt, hip tilt, knee Q-angle (left + right)
+- **Sagittal-plane measurements** — forward head shift, shoulder shift, hip shift, knee shift (all as % body height), trunk lean
+- **Annotated images** — keypoint dots, reference plumb line, horizontal bands, badge labels rendered on canvas
+- **Severity-graded findings** — OK / Mild / Notable color-coded per measurement with detail text
+- 100 % browser-side — photos never leave the user's device
 
 ### UX layer
 
@@ -99,7 +136,10 @@ Both UIs call the **identical** engine modules. No duplicated math; no drift bet
 |---|---|---|
 | Audience | Clinicians, lab use, validation | Modern product UX, frontend-as-a-service |
 | Deploy | Streamlit Cloud (`packages.txt`) | Vercel + Hugging Face Spaces (Dockerfile) |
-| Live mode | streamlit-webrtc (WebRTC) | HTTP frame streaming at ~6 fps |
+| Live biomech | streamlit-webrtc (WebRTC) | **TF.js MoveNet in browser, 50+ FPS** |
+| Biomech upload | Server-side MediaPipe | **TF.js MoveNet in browser, no upload** |
+| Gait upload | Server-side MediaPipe | Server-side MediaPipe (unchanged) |
+| Posture | — | TF.js MoveNet, two-photo flow |
 | Charts | Matplotlib + Plotly | Plotly.js |
 | Theme | Dark slate medical | Dark with lime accent (clinical-tech) |
 
@@ -108,34 +148,48 @@ Both UIs call the **identical** engine modules. No duplicated math; no drift bet
 ## Architecture
 
 ```
-                ┌──────────────────────────────┐
-                │  Python engines (no UI)      │
-                │  • gait_engine.py            │
-                │  • gait_cycle.py             │
-                │  • gait_plots.py             │
-                │  • shoulder_engine.py        │
-                │  • neck_engine.py            │
-                │  • biomech_flow.py           │
-                └──────────────┬───────────────┘
-                               │ called by
-            ┌──────────────────┴──────────────────┐
-            │                                     │
-   ┌────────▼─────────┐                ┌──────────▼──────────┐
-   │  Streamlit UI    │                │  FastAPI            │
-   │  app.py          │                │  api.py             │
-   │  port 8501       │                │  port 8000          │
-   │  (legacy / lab)  │                │  (REST + JSON)      │
-   └──────────────────┘                └──────────┬──────────┘
-                                                  │ HTTP
-                                       ┌──────────▼──────────┐
-                                       │  Next.js frontend   │
-                                       │  motionlens-web/    │
-                                       │  port 3000          │
-                                       │  (modern UX)        │
-                                       └─────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                                                                        │
+│   USER (browser)                                                       │
+│      │                                                                  │
+│      ▼                                                                  │
+│   Next.js 16 frontend (Vercel)                                         │
+│   ┌──────────────────────────────────────────────────────────────┐    │
+│   │  TypeScript ports (live + biomech upload + posture):          │    │
+│   │  • lib/biomech/{shoulder,neck,knee,hip,ankle}.ts              │    │
+│   │  • lib/posture/measurements.ts                                │    │
+│   │                                                                │    │
+│   │  Pose detector — TensorFlow.js + MoveNet Lightning            │    │
+│   │  Runtime — WebGL (GPU acceleration via browser)               │    │
+│   │  Output — 17 keypoints @ 50 FPS                               │    │
+│   └──────────────────────────────────────────────────────────────┘    │
+│      │                                                                  │
+│      │ ONLY for /gait/upload (gait needs heel + toe)                   │
+│      ▼ multipart HTTPS POST                                            │
+│   FastAPI backend (Hugging Face Spaces · Docker)                       │
+│   ┌──────────────────────────────────────────────────────────────┐    │
+│   │  Python engines (source of truth):                            │    │
+│   │  • gait_engine.py    — kinematic pipeline                     │    │
+│   │  • gait_cycle.py     — heel-strike + cycle extraction         │    │
+│   │  • gait_plots.py     — Plotly figure builder                  │    │
+│   │  • shoulder_engine.py / neck_engine.py — ROM math             │    │
+│   │  • biomech_flow.py   — orchestrator                           │    │
+│   │                                                                │    │
+│   │  Pose detector — MediaPipe Tasks (BlazePose, 33 keypoints)    │    │
+│   │  Runtime — Python C-extensions, server CPU                    │    │
+│   └──────────────────────────────────────────────────────────────┘    │
+│                                                                        │
+└──────────────────────────────────────────────────────────────────────┘
+
+           Auto-deploy CI/CD
+           ─────────────────
+           git push main → GitHub Actions
+                              │
+                              ├─→ Vercel rebuild (frontend, ~2 min)
+                              └─→ HF Spaces auto-push + Docker rebuild (~5 min)
 ```
 
-The **engine modules are the source of truth**. The FastAPI layer (`api.py`, `api_helpers.py`, `api_models.py`) only handles file I/O, JSON sanitisation, and CORS — it never modifies engine logic.
+The Python **engine modules remain the source of truth**. The FastAPI layer (`api.py`, `api_helpers.py`, `api_models.py`) only handles file I/O, JSON sanitisation, and CORS. The TypeScript shoulder/neck math (`motionlens-web/lib/biomech/*.ts`) is a **direct port** of the Python engines — both produce byte-identical results so live and upload measurements stay consistent. The Streamlit UI continues to call the Python engines directly via Python imports.
 
 ---
 
@@ -158,18 +212,22 @@ The **engine modules are the source of truth**. The FastAPI layer (`api.py`, `ap
 |---|---|
 | Framework | Next.js 16 (App Router, Turbopack), React 19, TypeScript 5 |
 | Styling | Tailwind CSS v4 (CSS-first `@theme` tokens, no JS config) |
+| **Pose detection** | `@tensorflow/tfjs` + `@tensorflow-models/pose-detection` (MoveNet Lightning) |
+| **GPU acceleration** | WebGL backend (browser GPU — works on integrated graphics too) |
 | Charts | Plotly.js via `react-plotly.js` |
 | Animations | `framer-motion` |
 | Icons | `lucide-react` |
-| PDF export | `jspdf` |
 
 ### Deployment
 
-| Component | Target |
-|---|---|
-| FastAPI backend | Hugging Face Spaces (Docker SDK) — pre-bakes the pose-landmarker model in the image |
-| Next.js frontend | Vercel — points at `NEXT_PUBLIC_API_BASE_URL` |
-| Streamlit (legacy) | Streamlit Cloud (`packages.txt` for apt deps) |
+| Component | Target | URL |
+|---|---|---|
+| **Frontend** | Vercel (Hobby — free) | [gait-analysis123.vercel.app](https://gait-analysis123.vercel.app/) |
+| **Backend** | Hugging Face Spaces (CPU Basic — free) | [thakurdinkar-motionlens-api.hf.space](https://thakurdinkar-motionlens-api.hf.space/api/health) |
+| Streamlit (legacy) | Streamlit Cloud (`packages.txt` for apt deps) | — |
+| Auto-deploy CI/CD | GitHub Actions (`.github/workflows/deploy-hf.yml`) | Triggers HF rebuild on every `main` push |
+
+📘 **Step-by-step deployment guide:** See **[DEPLOYMENT.md](DEPLOYMENT.md)** (~30 min from `git push` to live URL).
 
 ---
 
@@ -377,35 +435,9 @@ curl -X POST http://localhost:8000/api/analyze-neck \
 
 > ⚠ The neck engine has **no per-side parameter** — `lateral_flexion` and `rotation` are computed from both ears + shoulder midline regardless of which side the patient tilts/turns toward.
 
-### `POST /api/live/biomech-frame`
+### `POST /api/live/biomech-frame` *(deprecated)*
 
-Single-frame analysis for live mode. Designed to be called at ~6 fps.
-
-Multipart form-data:
-
-| Field | Type | Notes |
-|---|---|---|
-| `frame` | image/jpeg | single decoded webcam frame |
-| `body_part` | string | `shoulder` or `neck` |
-| `movement_type` | string | per the body-part vocabularies above |
-| `side` | string | `left` or `right` (shoulder only) |
-
-Response:
-
-```jsonc
-{
-  "success": true,
-  "data": {
-    "status":            "good" | "low_visibility" | "no_landmarks",
-    "landmarks":         [{ "x", "y", "visibility" }, …],   // 33 normalised points
-    "current_angle":     12.5,
-    "current_magnitude": 12.5
-  },
-  "error": null
-}
-```
-
-The frontend draws the skeleton overlay from `landmarks`.
+> ⚠ This endpoint exists only for backward compatibility with the original Streamlit + WebRTC pipeline. The Next.js frontend no longer calls it — all live biomech detection runs in the browser via TensorFlow.js + MoveNet. Kept in the codebase as a fallback path; will likely be removed in a future cleanup.
 
 ### Common response envelope
 
@@ -451,19 +483,25 @@ Gait_Analysis/
 ├── .dockerignore
 ├── README.md                 # this file
 │
-└── motionlens-web/           # Next.js frontend
+└── motionlens-web/           # Next.js frontend (deployed on Vercel)
     ├── app/
     │   ├── layout.tsx
     │   ├── globals.css       # Tailwind v4 @theme tokens + custom utilities
-    │   ├── page.tsx          # Landing
+    │   ├── page.tsx          # Landing — Hero + 3 modules + use cases
     │   ├── gait/
     │   │   ├── page.tsx      # Patient + height + capture mode
     │   │   ├── upload/page.tsx
     │   │   └── results/page.tsx  # Total + Clean metrics, joint tabs,
-    │   │                          # gait-cycle charts
-    │   └── biomech/
-    │       ├── page.tsx
-    │       ├── shoulder/{page,live,upload}/page.tsx
+    │   │                          # gait-cycle charts (server-backed)
+    │   ├── biomech/                # 5 joints, 18 movements
+    │   │   ├── page.tsx            # Joint chooser
+    │   │   ├── shoulder/{page,live,upload}/page.tsx
+    │   │   ├── neck/{page,live,upload}/page.tsx
+    │   │   ├── knee/{page,live,upload}/page.tsx
+    │   │   ├── hip/{page,live,upload}/page.tsx
+    │   │   └── ankle/{page,live,upload}/page.tsx
+    │   └── posture/
+    │       └── page.tsx            # Front + side photo upload + report
     │       └── neck/{page,live,upload}/page.tsx
     ├── components/
     │   ├── layout/{Nav,Footer}.tsx
@@ -504,14 +542,37 @@ Gait_Analysis/
 8. **Cycle assembly** — `extract_cycles` → duration filter → MAD filter → `ensemble_statistics` per leg per joint, producing length-101 mean ± SD curves.
 9. **Rule-based interpretation** — `interpret()` reads `clean_metrics` and emits observation + suggestion strings.
 
-### Live biomech — per-frame loop
+### Live biomech — per-frame loop (Next.js, browser-only)
 
-1. Browser captures a frame from the webcam at ~6 fps via an offscreen canvas.
-2. Frame encoded as JPEG (quality 0.7) and POSTed to `/api/live/biomech-frame`.
-3. FastAPI decodes the JPEG with OpenCV, hands it to a **module-level cached `PoseLandmarker`** (lock-protected for thread safety).
-4. The detected landmarks are wrapped via `_LandmarkAdapter` and routed to `compute_shoulder_angle()` or `compute_neck_angle()`.
-5. JSON response includes `current_angle`, `status`, and the 33 raw landmarks.
-6. Frontend draws the skeleton + updates current/peak/frame counters in a 10 Hz UI tick (state lives in a `useRef` to survive React batching at 30 fps).
+1. `<video>` element holds the webcam stream (`getUserMedia`, mirrored selfie view).
+2. `requestAnimationFrame` loop runs at the browser's vsync rate (~60 Hz max).
+3. Each tick: `tf.browser.fromPixels(video)` uploads the current frame to a WebGL texture (GPU memory) — ~2 ms.
+4. **MoveNet Lightning** runs entirely on the GPU as a chain of GLSL fragment shaders (MobileNetV2 backbone → FPN → heatmap heads → argmax + offset refinement) — ~12 ms.
+5. `gl.readPixels` returns 17 keypoints to CPU (~3 ms).
+6. **EMA smoothing** (α = 0.4) applied per-keypoint to suppress jitter.
+7. Joint angle computed by the relevant TS module (`shoulder.ts` / `neck.ts` / `knee.ts` / `hip.ts` / `ankle.ts`).
+8. Skeleton drawn directly to `<canvas>` via `ctx.beginPath / fill / stroke` (bypassing React reconciliation for zero-state-churn).
+9. Result handed to `LiveAssessment` via a ref — separate 10 Hz `setInterval` triggers React re-render to update Current/Peak/Frames readouts.
+
+**Total per-frame: ~17-22 ms = sustained 45-55 FPS on integrated GPU. Zero network calls.**
+
+### Biomech video upload — browser-only
+
+1. User picks a video file → `URL.createObjectURL` → off-screen `<video>` element.
+2. `requestVideoFrameCallback` fires per rendered frame (Chrome/Edge/Safari 15+); fallback to seek-by-time at 15 FPS sample rate on older browsers.
+3. Video plays at **4× speed** so a 10-sec clip processes in ~2.5 sec of wall time + inference.
+4. Each frame → MoveNet → angle math → time-series accumulator.
+5. Peak detection on the time series → `BiomechDataDTO` with peak angle, magnitude, status, percentage, interpretation.
+6. Same `AssessmentReport` component renders the result.
+
+### Posture screening — single-image flow
+
+1. Two `<input type="file">` slots: front view + side view (both required).
+2. Each file → `Image` element → `analyzePostureImage(file, view)` runs MoveNet once.
+3. **Front measurements** — head/shoulder/hip tilts (signed angle from horizontal) + left/right knee Q-angle (interior angle of hip-knee-ankle).
+4. **Side measurements** — pick the side with higher keypoint confidence, then compute horizontal offsets (head/shoulder/hip/knee shifts) as percentage of body height (shoulder→ankle vertical span as proxy).
+5. `PostureImageOverlay` draws the original image to a canvas, overlays plumb line + horizontal reference bands + keypoint dots + measurement badges — looks like a clinical screening shot.
+6. Severity-graded `FindingsTable` (OK / Mild / Notable) renders below.
 
 ---
 
@@ -554,8 +615,14 @@ Only **gait analysis** (video upload). Live biomech, biomech upload, and posture
 | `ModuleNotFoundError: api` when starting uvicorn | Wrong working directory | `cd /path/to/Gait_Analysis` first, then run uvicorn |
 | `pip` complains about `fastmcp` packaging conflict | Unrelated MCP package on your system | Ignore — install line says `Successfully installed fastapi …` |
 | `http://0.0.0.0:8000` "site can't be reached" | `0.0.0.0` is a bind address, not a browseable URL | Use `http://localhost:8000` |
-| Live biomech shows `0/0` frames | Backend not running | Start uvicorn, verify `http://localhost:8000/docs` |
-| Live biomech: "Required landmarks below visibility threshold" | Patient partially out of frame | Stand 6 ft back, full upper body in shot |
+| Live biomech: camera permission denied / `getUserMedia is undefined` | Browser blocks camera on plain HTTP from non-localhost origin | Use `https://` (Vercel auto-HTTPS) or `localhost:3000` for local dev. For LAN testing run `npm run dev:https`. |
+| Live biomech: "Required landmarks below visibility threshold" | Patient partially out of frame, or pose model just loaded | Stand 6 ft back, full upper body in shot. First inference is slower (shader compile). |
+| Live biomech: skeleton doesn't draw | TF.js failed to load WebGL backend | Open browser console, check `tf.getBackend()` — should be `"webgl"`. Falls back to CPU automatically (~10 FPS instead of 50). |
+| Live biomech: NaN coordinates / detection fails silently | Older `BlazePose-tfjs` issue | We use MoveNet now, not BlazePose-tfjs — should not happen. If it does, check `lib/pose/detector.ts` |
+| Biomech video upload hangs | Video file unsupported codec or corrupt | Try a different MP4 (H.264 + AAC works best) |
+| Posture: "No person detected" | Patient not fully in frame, or low contrast clothing | Plain background, full body in frame, contrasting clothing |
+| Gait upload network error | `NEXT_PUBLIC_API_BASE_URL` missing in Vercel | Set env var, **then redeploy** (Next.js bakes env at build time) |
+| Vercel build fails: missing `@/components/gait/...` on case-insensitive systems | Root `.gitignore` rule like `Gait/` matches lowercase `gait/` | Anchor to root: `/Gait/` not `Gait/` |
 | Gait cycle tab: "not enough clean cycles" | Clip too short / too few strides per leg in passes | Use a 10–15 s side-on clip with ≥4 full cycles |
 | Frontend `npm run dev` shows API errors | `NEXT_PUBLIC_API_BASE_URL` mis-set or backend down | Check `.env.local`, verify `/api/health` |
 | Build error: `@mediapipe/pose` missing exports | Stale `node_modules` | The `next.config.ts` aliases this to a local stub; ensure that alias is intact and rebuild |
