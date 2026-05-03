@@ -1,12 +1,12 @@
 ---
 title: MotionLens API
 emoji: 🦴
-colorFrom: orange
-colorTo: red
+colorFrom: red
+colorTo: yellow
 sdk: docker
 app_port: 7860
 pinned: false
-short_description: Markerless gait + biomechanical ROM API (FastAPI + MediaPipe)
+short_description: Markerless gait + biomech ROM API (FastAPI + MediaPipe)
 ---
 
 # MotionLens
