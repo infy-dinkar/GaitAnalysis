@@ -1,5 +1,7 @@
-# Conda Virtual Environment
-Gait/
+# Conda Virtual Environment — anchored to repo root so it doesn't
+# accidentally exclude motionlens-web/components/gait on case-insensitive
+# filesystems (Windows / macOS default).
+/Gait/
 .conda/
 .env/
 env/
