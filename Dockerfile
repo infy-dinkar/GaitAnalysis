@@ -5,10 +5,14 @@
 FROM python:3.11-slim
 
 # ── System libs needed by OpenCV + MediaPipe ──────────────────────
-# Use libgl1 (modern replacement for libgl1-mesa-glx, which was dropped
-# in Debian Trixie). Other libs still exist with the same names.
+# - libgl1: desktop OpenGL (replaces libgl1-mesa-glx in Debian Trixie)
+# - libgles2: OpenGL ES 2.0 — MediaPipe's Tasks API imports this at
+#   load-time even when running CPU-only inference
+# - libegl1: EGL — needed for GL context creation, paired with libgles2
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 \
+        libgles2 \
+        libegl1 \
         libglib2.0-0 \
         libsm6 \
         libxext6 \
