@@ -48,68 +48,57 @@ const FACE_DOTS = [
 
 const FACE_EDGES: Array<[number, number]> = [];
 
-const LOWER_BODY_DOTS = [
-  LM.LEFT_HIP, LM.RIGHT_HIP,
-  LM.LEFT_KNEE, LM.RIGHT_KNEE,
-  LM.LEFT_ANKLE, LM.RIGHT_ANKLE,
+// Full-body skeleton — drawn for ALL body-part modes regardless of
+// which joint the math layer is targeting. Showing the entire body
+// gives the user spatial context (am I in frame? is the camera angle
+// right?) — the angle math itself only consumes the joints relevant
+// to the chosen movement, so the skeleton is purely visual feedback.
+const FULL_BODY_DOTS: number[] = [
+  ...FACE_DOTS,
+  LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER,
+  LM.LEFT_ELBOW,    LM.RIGHT_ELBOW,
+  LM.LEFT_WRIST,    LM.RIGHT_WRIST,
+  LM.LEFT_HIP,      LM.RIGHT_HIP,
+  LM.LEFT_KNEE,     LM.RIGHT_KNEE,
+  LM.LEFT_ANKLE,    LM.RIGHT_ANKLE,
 ];
 
-const LOWER_BODY_EDGES: Array<[number, number]> = [
-  [LM.LEFT_HIP,   LM.RIGHT_HIP],
-  [LM.LEFT_HIP,   LM.LEFT_KNEE],
-  [LM.LEFT_KNEE,  LM.LEFT_ANKLE],
-  [LM.RIGHT_HIP,  LM.RIGHT_KNEE],
-  [LM.RIGHT_KNEE, LM.RIGHT_ANKLE],
+const FULL_BODY_EDGES: Array<[number, number]> = [
+  ...FACE_EDGES,
+  // Arms
+  [LM.LEFT_SHOULDER,  LM.LEFT_ELBOW],
+  [LM.LEFT_ELBOW,     LM.LEFT_WRIST],
+  [LM.RIGHT_SHOULDER, LM.RIGHT_ELBOW],
+  [LM.RIGHT_ELBOW,    LM.RIGHT_WRIST],
+  // Torso
+  [LM.LEFT_SHOULDER,  LM.RIGHT_SHOULDER],
+  [LM.LEFT_SHOULDER,  LM.LEFT_HIP],
+  [LM.RIGHT_SHOULDER, LM.RIGHT_HIP],
+  [LM.LEFT_HIP,       LM.RIGHT_HIP],
+  // Legs
+  [LM.LEFT_HIP,       LM.LEFT_KNEE],
+  [LM.LEFT_KNEE,      LM.LEFT_ANKLE],
+  [LM.RIGHT_HIP,      LM.RIGHT_KNEE],
+  [LM.RIGHT_KNEE,     LM.RIGHT_ANKLE],
 ];
 
+// Same skeleton drawn for every mode — only the math dispatch (in the
+// detection loop) differs based on `bodyPart`. This gives consistent
+// visual feedback (full skeleton) across all 5 joints.
 const RELEVANT_DOTS: Record<BiomechBodyPart, number[]> = {
-  shoulder: [
-    ...FACE_DOTS,
-    LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER,
-    LM.LEFT_ELBOW, LM.RIGHT_ELBOW,
-    LM.LEFT_WRIST, LM.RIGHT_WRIST,
-    LM.LEFT_HIP, LM.RIGHT_HIP,
-  ],
-  neck: [
-    ...FACE_DOTS,
-    LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER,
-  ],
-  knee: [
-    ...LOWER_BODY_DOTS,
-  ],
-  hip: [
-    LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER,
-    ...LOWER_BODY_DOTS,
-  ],
-  ankle: [
-    ...LOWER_BODY_DOTS,
-  ],
+  shoulder: FULL_BODY_DOTS,
+  neck:     FULL_BODY_DOTS,
+  knee:     FULL_BODY_DOTS,
+  hip:      FULL_BODY_DOTS,
+  ankle:    FULL_BODY_DOTS,
 };
 
 const RELEVANT_EDGES: Record<BiomechBodyPart, Array<[number, number]>> = {
-  shoulder: [
-    ...FACE_EDGES,
-    [LM.LEFT_SHOULDER,  LM.LEFT_ELBOW],
-    [LM.LEFT_ELBOW,     LM.LEFT_WRIST],
-    [LM.RIGHT_SHOULDER, LM.RIGHT_ELBOW],
-    [LM.RIGHT_ELBOW,    LM.RIGHT_WRIST],
-    [LM.LEFT_SHOULDER,  LM.RIGHT_SHOULDER],
-    [LM.LEFT_SHOULDER,  LM.LEFT_HIP],
-    [LM.RIGHT_SHOULDER, LM.RIGHT_HIP],
-    [LM.LEFT_HIP,       LM.RIGHT_HIP],
-  ],
-  neck: [
-    ...FACE_EDGES,
-    [LM.LEFT_SHOULDER,  LM.RIGHT_SHOULDER],
-  ],
-  knee: [...LOWER_BODY_EDGES],
-  hip: [
-    [LM.LEFT_SHOULDER, LM.LEFT_HIP],
-    [LM.RIGHT_SHOULDER, LM.RIGHT_HIP],
-    [LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER],
-    ...LOWER_BODY_EDGES,
-  ],
-  ankle: [...LOWER_BODY_EDGES],
+  shoulder: FULL_BODY_EDGES,
+  neck:     FULL_BODY_EDGES,
+  knee:     FULL_BODY_EDGES,
+  hip:      FULL_BODY_EDGES,
+  ankle:    FULL_BODY_EDGES,
 };
 
 interface Norm {
