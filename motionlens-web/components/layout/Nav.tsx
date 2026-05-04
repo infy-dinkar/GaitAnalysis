@@ -1,8 +1,9 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Menu, X } from "lucide-react";
+import { Menu, X, LayoutDashboard, LogOut } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useAuth } from "@/contexts/AuthContext";
 
 const NAV_LINKS = [
   { href: "#product", label: "Product" },
@@ -12,6 +13,7 @@ const NAV_LINKS = [
 export function Nav() {
   const [scrolled, setScrolled] = useState(false);
   const [open, setOpen] = useState(false);
+  const { doctor, signOut, loading } = useAuth();
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 12);
@@ -38,7 +40,7 @@ export function Nav() {
           <span className="text-accent">.</span>
         </Link>
 
-        <nav className="hidden gap-8 md:flex">
+        <nav className="hidden items-center gap-8 md:flex">
           {NAV_LINKS.map((l) => (
             <Link
               key={l.href}
@@ -48,6 +50,46 @@ export function Nav() {
               {l.label}
             </Link>
           ))}
+
+          {/* Auth buttons — only render after auth check completes to avoid flash */}
+          {!loading && (
+            <div className="flex items-center gap-3 border-l border-border pl-6">
+              {doctor ? (
+                <>
+                  <Link
+                    href="/dashboard"
+                    className="inline-flex items-center gap-1.5 text-sm text-muted transition hover:text-foreground"
+                  >
+                    <LayoutDashboard className="h-4 w-4" />
+                    Dashboard
+                  </Link>
+                  <button
+                    type="button"
+                    onClick={signOut}
+                    className="inline-flex items-center gap-1.5 text-sm text-muted transition hover:text-error"
+                  >
+                    <LogOut className="h-4 w-4" />
+                    Sign out
+                  </button>
+                </>
+              ) : (
+                <>
+                  <Link
+                    href="/auth/signin"
+                    className="text-sm text-muted transition hover:text-foreground"
+                  >
+                    Sign in
+                  </Link>
+                  <Link
+                    href="/auth/signup"
+                    className="rounded-full bg-accent px-4 py-1.5 text-sm font-medium text-white transition hover:bg-accent/90"
+                  >
+                    Sign up
+                  </Link>
+                </>
+              )}
+            </div>
+          )}
         </nav>
 
         <button
@@ -73,6 +115,48 @@ export function Nav() {
                 {l.label}
               </Link>
             ))}
+            <div className="border-t border-border pt-4">
+              {!loading && doctor ? (
+                <div className="flex flex-col gap-3">
+                  <Link
+                    href="/dashboard"
+                    onClick={() => setOpen(false)}
+                    className="inline-flex items-center gap-2 text-sm text-foreground"
+                  >
+                    <LayoutDashboard className="h-4 w-4" />
+                    Dashboard
+                  </Link>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpen(false);
+                      signOut();
+                    }}
+                    className="inline-flex items-center gap-2 text-left text-sm text-error"
+                  >
+                    <LogOut className="h-4 w-4" />
+                    Sign out
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  <Link
+                    href="/auth/signin"
+                    onClick={() => setOpen(false)}
+                    className="text-sm text-foreground"
+                  >
+                    Sign in
+                  </Link>
+                  <Link
+                    href="/auth/signup"
+                    onClick={() => setOpen(false)}
+                    className="inline-block rounded-full bg-accent px-4 py-2 text-center text-sm font-medium text-white"
+                  >
+                    Sign up
+                  </Link>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}

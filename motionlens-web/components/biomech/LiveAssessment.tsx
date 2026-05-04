@@ -9,7 +9,10 @@ import {
 } from "lucide-react";
 import { LiveBiomechCamera } from "@/components/biomech/LiveBiomechCamera";
 import { AssessmentReport } from "@/components/biomech/AssessmentReport";
+import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
+import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
 import { Button } from "@/components/ui/Button";
+import { usePatientContext } from "@/hooks/usePatientContext";
 import { fmt } from "@/lib/utils";
 import { getInstructions, isRotationMovement } from "@/lib/biomech/instructions";
 import type { LiveBiomechFrameDataDTO } from "@/lib/api";
@@ -55,6 +58,10 @@ export function LiveAssessment({
 
   const [, setVersion] = useState(0);
   const [showResult, setShowResult] = useState(false);
+
+  // Doctor-flow context (no-op when accessed publicly). Save happens
+  // explicitly via the SaveToPatientButton inside the report view.
+  const { isDoctorFlow, patient } = usePatientContext();
 
   // 10 Hz UI sync — pulls latest values from the ref.
   useEffect(() => {
@@ -295,6 +302,23 @@ export function LiveAssessment({
           side={side}
         />
 
+        {/* Explicit save button — only renders in doctor flow */}
+        <SaveToPatientButton
+          buildPayload={() => ({
+            module: "biomech",
+            body_part: bodyPart,
+            movement: movementId,
+            side,
+            metrics: {
+              peak_magnitude: peakMag,
+              peak_signed: peakSigned,
+              target,
+              valid_frames: validFrames,
+              total_frames: totalFrames,
+            },
+          })}
+        />
+
         <div className="flex justify-center gap-3 border-t border-border pt-6">
           <Button variant="secondary" onClick={resetPeak}>
             <RotateCcw className="h-4 w-4" />
@@ -305,5 +329,15 @@ export function LiveAssessment({
     );
   }
 
-  return liveLayout;
+  // Pre-result view — gentle reminder banner if doctor flow
+  return (
+    <>
+      {isDoctorFlow && (
+        <div className="mb-6">
+          <SaveStatusBanner patient={patient} saveStatus={null} />
+        </div>
+      )}
+      {liveLayout}
+    </>
+  );
 }

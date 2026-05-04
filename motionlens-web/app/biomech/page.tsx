@@ -1,4 +1,7 @@
+"use client";
+import { Suspense } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { ArrowUpRight } from "lucide-react";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -59,22 +62,41 @@ export default function BiomechPage() {
       <Nav />
       <main className="flex flex-col">
         <Section className="pt-32 md:pt-40">
-          <div className="max-w-2xl">
-            <Badge>Biomechanics module</Badge>
-            <h1 className="mt-5 text-4xl font-semibold tracking-tight md:text-6xl">
-              Choose a joint<span className="text-accent">.</span>
-            </h1>
-            <p className="mt-5 text-lg text-muted">
-              Pick the body region you want to assess. Each module guides you through patient
-              setup, movement selection, and live or upload-based capture.
-            </p>
-          </div>
+          <Suspense fallback={null}>
+            <BiomechInner />
+          </Suspense>
+        </Section>
+      </main>
+      <Footer />
+    </>
+  );
+}
 
-          <div className="mt-16 grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {JOINTS.map((j) => (
+function BiomechInner() {
+  const params = useSearchParams();
+  const patientId = params.get("patientId");
+  // Forward patientId through every joint card so the doctor flow
+  // stays connected end-to-end (joint chooser → setup → live/upload).
+  const qs = patientId ? `?patientId=${patientId}` : "";
+
+  return (
+    <>
+      <div className="max-w-2xl">
+        <Badge>Biomechanics module</Badge>
+        <h1 className="mt-5 text-4xl font-semibold tracking-tight md:text-6xl">
+          Choose a joint<span className="text-accent">.</span>
+        </h1>
+        <p className="mt-5 text-lg text-muted">
+          Pick the body region you want to assess. Each module guides you through patient
+          setup, movement selection, and live or upload-based capture.
+        </p>
+      </div>
+
+      <div className="mt-16 grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+        {JOINTS.map((j) => (
               <Link
                 key={j.href}
-                href={j.href}
+                href={`${j.href}${qs}`}
                 className="group relative flex aspect-[4/3] flex-col justify-between overflow-hidden rounded-hero border border-border bg-elevated p-6 transition-all duration-300 hover:border-accent hover:shadow-glow-sm md:p-8"
               >
                 <div
@@ -98,9 +120,6 @@ export default function BiomechPage() {
               </Link>
             ))}
           </div>
-        </Section>
-      </main>
-      <Footer />
     </>
   );
 }

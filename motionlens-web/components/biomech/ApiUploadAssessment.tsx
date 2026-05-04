@@ -4,6 +4,9 @@ import { Play, RotateCcw, AlertCircle } from "lucide-react";
 import { VideoUpload } from "@/components/analysis/VideoUpload";
 import { Button } from "@/components/ui/Button";
 import { AssessmentReport } from "@/components/biomech/AssessmentReport";
+import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
+import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { usePatientContext } from "@/hooks/usePatientContext";
 import type { BiomechDataDTO } from "@/lib/api";
 import { analyzeBiomechVideo } from "@/lib/biomech/uploadAnalyze";
 
@@ -35,6 +38,10 @@ export function ApiUploadAssessment({
   const [phase, setPhase] = useState<"idle" | "analysing" | "done" | "error">("idle");
   const [result, setResult] = useState<BiomechDataDTO | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Doctor-flow context — analysis result will be saved on explicit
+  // user click via the SaveToPatientButton in the report view.
+  const { isDoctorFlow, patient } = usePatientContext();
 
   const onSelect = useCallback((f: File) => {
     setFile(f);
@@ -93,6 +100,30 @@ export function ApiUploadAssessment({
           side={side}
         />
 
+        {/* Explicit "Save to patient history" — only shows in doctor flow */}
+        <SaveToPatientButton
+          buildPayload={() => ({
+            module: "biomech",
+            body_part: bodyPart,
+            movement: movementId,
+            side,
+            metrics: {
+              peak_angle: result.peak_angle,
+              peak_magnitude: result.peak_magnitude,
+              reference_range: result.reference_range,
+              target: result.target,
+              percentage: result.percentage,
+              status: result.status,
+              valid_frames: result.valid_frames,
+              total_frames: result.total_frames,
+              fps: result.fps,
+            },
+            observations: { interpretation: result.interpretation },
+            video_filename: file?.name,
+            video_size_bytes: file?.size,
+          })}
+        />
+
         <div className="flex flex-wrap items-center justify-center gap-3 border-t border-border pt-6 text-xs text-muted">
           <span>
             Valid frames:{" "}
@@ -118,6 +149,10 @@ export function ApiUploadAssessment({
 
   return (
     <div className="space-y-8">
+      {isDoctorFlow && phase !== "done" && (
+        <SaveStatusBanner patient={patient} saveStatus={null} />
+      )}
+
       <div>
         <p className="eyebrow">Movement</p>
         <h2 className="mt-2 text-2xl font-semibold tracking-tight md:text-3xl">

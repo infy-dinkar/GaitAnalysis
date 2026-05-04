@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import { PlotlyChart } from "@/components/gait/PlotlyChart";
-import { loadPatient, type PatientInfo } from "@/components/biomech/PatientForm";
 import { fmt } from "@/lib/utils";
+import { usePatientContext } from "@/hooks/usePatientContext";
 
 interface Props {
   bodyPart: "shoulder" | "neck" | "knee" | "hip" | "ankle";
@@ -108,13 +108,20 @@ export function AssessmentReport({
   target,
   side,
 }: Props) {
-  const [patient, setPatient] = useState<PatientInfo | null>(null);
+  // Patient identity comes from the doctor-flow context when the
+  // assessment is launched from /dashboard/patients/{id}/analyze.
+  // Outside the doctor flow we just render the report with no patient
+  // header (or a session-scoped anonymous ID).
+  const { patient: doctorPatient } = usePatientContext();
   const [patientId, setPatientId] = useState("");
 
   useEffect(() => {
-    setPatient(loadPatient());
     setPatientId(getOrCreatePatientId());
   }, []);
+
+  const patient = doctorPatient
+    ? { name: doctorPatient.name, height_cm: doctorPatient.height_cm }
+    : null;
 
   const { status, pct } = useMemo(() => classify(measured, target), [measured, target]);
   const isRotation = isRotationMovement(bodyPart, movementId);

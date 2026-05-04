@@ -7,6 +7,13 @@
 env/
 venv/
 
+# Environment files — secrets, credentials, MongoDB URI, JWT secret
+# NEVER commit these. Use .env.example as a template.
+.env
+.env.local
+.env.*.local
+!.env.example
+
 # Streamlit and Python caches
 __pycache__/
 *.py[cod]

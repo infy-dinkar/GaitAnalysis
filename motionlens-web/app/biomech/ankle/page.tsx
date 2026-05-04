@@ -1,18 +1,30 @@
 "use client";
 import Link from "next/link";
-import { useState } from "react";
+import { Suspense, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Camera, Upload } from "lucide-react";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
 import { Section } from "@/components/ui/Section";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { PatientForm } from "@/components/biomech/PatientForm";
 import { MovementGrid } from "@/components/biomech/MovementGrid";
 import { SideSelector } from "@/components/biomech/SideSelector";
 import { ANKLE_MOVEMENTS } from "@/lib/biomech/ankle";
 
 export default function AnkleSetupPage() {
+  return (
+    <Suspense fallback={null}>
+      <AnkleSetupInner />
+    </Suspense>
+  );
+}
+
+function AnkleSetupInner() {
+  const params = useSearchParams();
+  const patientId = params.get("patientId");
+  const patientQS = patientId ? `&patientId=${patientId}` : "";
+
   const [movement, setMovement] = useState<string | null>(null);
   const [side, setSide] = useState<"left" | "right" | null>(null);
   const canProceed = !!movement && !!side;
@@ -33,15 +45,6 @@ export default function AnkleSetupPage() {
           </div>
 
           <div className="mt-12 space-y-12">
-            <section>
-              <h2 className="text-sm font-bold uppercase tracking-[0.12em] text-foreground">
-                Patient details
-              </h2>
-              <div className="mt-4">
-                <PatientForm />
-              </div>
-            </section>
-
             <section>
               <h2 className="text-sm font-bold uppercase tracking-[0.12em] text-foreground">
                 Movement
@@ -70,7 +73,7 @@ export default function AnkleSetupPage() {
               </h2>
               <div className="mt-4 grid gap-4 md:grid-cols-2">
                 <Link
-                  href={`/biomech/ankle/live?movement=${movement ?? ""}&side=${side ?? ""}`}
+                  href={`/biomech/ankle/live?movement=${movement ?? ""}&side=${side ?? ""}${patientQS}`}
                   className={`rounded-card border p-6 transition ${
                     canProceed
                       ? "border-border bg-surface hover:border-accent"
@@ -86,7 +89,7 @@ export default function AnkleSetupPage() {
                   </p>
                 </Link>
                 <Link
-                  href={`/biomech/ankle/upload?movement=${movement ?? ""}&side=${side ?? ""}`}
+                  href={`/biomech/ankle/upload?movement=${movement ?? ""}&side=${side ?? ""}${patientQS}`}
                   className={`rounded-card border p-6 transition ${
                     canProceed
                       ? "border-border bg-surface hover:border-accent"

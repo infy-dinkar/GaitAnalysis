@@ -10,7 +10,8 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { VideoUpload } from "@/components/analysis/VideoUpload";
 import { analyzeGait } from "@/lib/api";
-import { loadPatient } from "@/components/biomech/PatientForm";
+import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
+import { usePatientContext } from "@/hooks/usePatientContext";
 
 const STORAGE_KEY = "motionlens.gait_api_result";
 const HEIGHT_KEY = "motionlens.height_cm";
@@ -23,6 +24,8 @@ export default function GaitUploadPage() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
+
+  const { isDoctorFlow, patientId, patient } = usePatientContext();
 
   const onSelect = useCallback((f: File) => {
     setFile(f);
@@ -38,8 +41,7 @@ export default function GaitUploadPage() {
     setPhase("uploading");
 
     const heightStr = sessionStorage.getItem(HEIGHT_KEY);
-    const heightCm = heightStr ? parseFloat(heightStr) : 170;
-    const patient = loadPatient();
+    const heightCm = heightStr ? parseFloat(heightStr) : (patient?.height_cm ?? 170);
     const patientName = patient?.name?.trim() || null;
 
     try {
@@ -65,9 +67,20 @@ export default function GaitUploadPage() {
             ...res.data.patient_info,
             name: patientName,
           },
+          // Carry the source video metadata — used by the results page
+          // to build the report payload when the doctor clicks "Save".
+          _video_filename: file.name,
+          _video_size_bytes: file.size,
         }),
       );
-      router.push("/gait/results");
+
+      // Forward patientId through to /gait/results so the results page
+      // can show the doctor an explicit "Save to patient history" button
+      // alongside the full charts + metrics view.
+      const url = isDoctorFlow
+        ? `/gait/results?patientId=${patientId}`
+        : "/gait/results";
+      router.push(url);
     } catch (e) {
       setPhase("error");
       setError(
@@ -107,6 +120,8 @@ export default function GaitUploadPage() {
           </div>
 
           <div className="mt-10 space-y-8">
+            {isDoctorFlow && <SaveStatusBanner patient={patient} saveStatus={null} />}
+
             <VideoUpload onSelect={onSelect} />
 
             {file && phase === "idle" && (

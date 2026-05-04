@@ -6,3 +6,16 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 python-multipart>=0.0.9
 pydantic>=2.6
+pydantic[email]>=2.6
+
+# ─── Auth + database (Phase 1) ─────────────────────────────────────
+# motor    : async MongoDB driver (built on pymongo)
+# pymongo  : underlying sync driver
+# passlib  : password hashing — bcrypt round 12
+# python-jose : JWT encode/decode for auth tokens
+# python-dotenv : loads .env file in local dev (HF Spaces uses platform env)
+motor>=3.5
+pymongo>=4.6
+passlib[bcrypt]>=1.7.4
+python-jose[cryptography]>=3.3
+python-dotenv>=1.0

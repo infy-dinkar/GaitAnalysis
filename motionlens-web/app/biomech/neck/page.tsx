@@ -1,17 +1,29 @@
 "use client";
 import Link from "next/link";
-import { useState } from "react";
+import { Suspense, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Camera, Upload } from "lucide-react";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
 import { Section } from "@/components/ui/Section";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { PatientForm } from "@/components/biomech/PatientForm";
 import { MovementGrid } from "@/components/biomech/MovementGrid";
 import { NECK_MOVEMENTS } from "@/lib/biomech/neck";
 
 export default function NeckSetupPage() {
+  return (
+    <Suspense fallback={null}>
+      <NeckSetupInner />
+    </Suspense>
+  );
+}
+
+function NeckSetupInner() {
+  const params = useSearchParams();
+  const patientId = params.get("patientId");
+  const patientQS = patientId ? `&patientId=${patientId}` : "";
+
   const [movement, setMovement] = useState<string | null>(null);
   const canProceed = !!movement;
 
@@ -33,15 +45,6 @@ export default function NeckSetupPage() {
           <div className="mt-12 space-y-12">
             <section>
               <h2 className="text-sm font-bold uppercase tracking-[0.12em] text-foreground">
-                Patient details
-              </h2>
-              <div className="mt-4">
-                <PatientForm />
-              </div>
-            </section>
-
-            <section>
-              <h2 className="text-sm font-bold uppercase tracking-[0.12em] text-foreground">
                 Movement
               </h2>
               <div className="mt-4">
@@ -59,7 +62,7 @@ export default function NeckSetupPage() {
               </h2>
               <div className="mt-4 grid gap-4 md:grid-cols-2">
                 <Link
-                  href={`/biomech/neck/live?movement=${movement ?? ""}`}
+                  href={`/biomech/neck/live?movement=${movement ?? ""}${patientQS}`}
                   className={`rounded-card border p-6 transition ${
                     canProceed
                       ? "border-border bg-surface hover:border-accent"
@@ -75,7 +78,7 @@ export default function NeckSetupPage() {
                   </p>
                 </Link>
                 <Link
-                  href={`/biomech/neck/upload?movement=${movement ?? ""}`}
+                  href={`/biomech/neck/upload?movement=${movement ?? ""}${patientQS}`}
                   className={`rounded-card border p-6 transition ${
                     canProceed
                       ? "border-border bg-surface hover:border-accent"

@@ -27,12 +27,13 @@ interface Props {
 
 const LINE_COLOR = "#FFFFFF";
 const DOT_COLOR = "#EF4444";
-// BlazePose-tfjs `score` for a confidently visible joint is typically
-// 0.4-0.99, but partially-occluded joints can drop to 0.1-0.2. We draw
-// any keypoint the model is at least minimally confident about so the
-// skeleton doesn't blink in/out. The math layer applies its own (lower)
-// threshold for angle compute.
-const OVERLAY_VIS_THRESHOLD = 0.1;
+// MoveNet `score` for a confidently visible joint is typically 0.4-0.99.
+// Out-of-frame or fully-occluded joints often still get hallucinated
+// positions with low scores (0.1-0.25), which create those weird
+// "phantom" lines extending off the body when only the upper torso is
+// in view. Setting the threshold at 0.35 cuts those false positives
+// without making clearly-visible joints flicker.
+const OVERLAY_VIS_THRESHOLD = 0.35;
 
 // Face points always shown for visual completeness — even when the
 // movement math doesn't strictly need them, they help the user see
@@ -180,6 +181,23 @@ export function LiveBiomechCamera({
         y: landmarks[i].y * h,
       });
 
+      // Out-of-frame guard — even when a keypoint passes the score
+      // threshold, MoveNet sometimes reports positions outside [0, 1]
+      // for joints that are actually below/above the camera view. We
+      // reject those before drawing so phantom limbs don't extend off
+      // the canvas in odd directions.
+      const inFrame = (i: number): boolean => {
+        const lm = landmarks[i];
+        if (!lm) return false;
+        const margin = 0.05; // allow tiny overhang for joints near the edge
+        return (
+          lm.x >= -margin &&
+          lm.x <= 1 + margin &&
+          lm.y >= -margin &&
+          lm.y <= 1 + margin
+        );
+      };
+
       const edges = RELEVANT_EDGES[bodyPart];
       const dots = RELEVANT_DOTS[bodyPart];
 
@@ -198,6 +216,7 @@ export function LiveBiomechCamera({
           la.visibility < OVERLAY_VIS_THRESHOLD ||
           lb.visibility < OVERLAY_VIS_THRESHOLD
         ) continue;
+        if (!inFrame(a) || !inFrame(b)) continue;
         const pa = xy(a);
         const pb = xy(b);
         if (!isFinite(pa.x) || !isFinite(pb.x)) continue;
@@ -216,6 +235,7 @@ export function LiveBiomechCamera({
       for (const j of dots) {
         const lm = landmarks[j];
         if (!lm || lm.visibility < OVERLAY_VIS_THRESHOLD) continue;
+        if (!inFrame(j)) continue;
         const p = xy(j);
         if (!isFinite(p.x) || !isFinite(p.y)) continue;
         ctx.beginPath();

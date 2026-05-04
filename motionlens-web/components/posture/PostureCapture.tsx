@@ -12,6 +12,13 @@ import {
   type PostureAnalysisResult,
 } from "@/lib/posture/analyzer";
 import { PostureReport } from "@/components/posture/PostureReport";
+import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
+import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { usePatientContext } from "@/hooks/usePatientContext";
+import {
+  buildFrontFindings,
+  buildSideFindings,
+} from "@/lib/posture/measurements";
 
 export function PostureCapture() {
   const [frontFile, setFrontFile] = useState<File | null>(null);
@@ -21,6 +28,9 @@ export function PostureCapture() {
   const [front, setFront] = useState<PostureAnalysisResult | null>(null);
   const [side, setSide] = useState<PostureAnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Doctor-flow context — save is explicit via SaveToPatientButton.
+  const { isDoctorFlow, patient } = usePatientContext();
 
   const onPick = useCallback(
     (which: "front" | "side", f: File | null) => {
@@ -70,6 +80,26 @@ export function PostureCapture() {
     return (
       <div className="space-y-8">
         <PostureReport front={front} side={side} />
+
+        {/* Explicit save button — only renders in doctor flow */}
+        <SaveToPatientButton
+          buildPayload={() => {
+            const frontFindings = front?.front ? buildFrontFindings(front.front) : [];
+            const sideFindings = side?.side ? buildSideFindings(side.side) : [];
+            return {
+              module: "posture",
+              metrics: {
+                front: front?.front ?? {},
+                side: side?.side ?? {},
+              },
+              observations: {
+                front_findings: frontFindings,
+                side_findings: sideFindings,
+              },
+            };
+          }}
+        />
+
         <div className="flex justify-center border-t border-border pt-6">
           <Button variant="secondary" onClick={reset}>
             <RotateCcw className="h-4 w-4" />
@@ -82,6 +112,8 @@ export function PostureCapture() {
 
   return (
     <div className="space-y-8">
+      {isDoctorFlow && <SaveStatusBanner patient={patient} saveStatus={null} />}
+
       <div className="grid gap-5 md:grid-cols-2">
         <PhotoSlot
           label="Front view"

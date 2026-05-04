@@ -64,6 +64,17 @@ from api_models import (
     LiveBiomechFrameResponse,
 )
 
+# ─── Auth + database (Phase 1) ─────────────────────────────────────
+import db as db_module
+from auth_routes import router as auth_router
+
+# ─── Patient + report endpoints (Phase 2) ──────────────────────────
+from patient_routes import router as patient_router
+from report_routes import (
+    patient_reports_router,
+    reports_router,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -89,6 +100,34 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ─── Database lifecycle ────────────────────────────────────────────
+@app.on_event("startup")
+async def _on_startup() -> None:
+    """Connect to MongoDB once at process start.
+
+    If MONGODB_URI isn't set, we log a warning and continue — non-DB
+    endpoints (gait/biomech analysis) keep working. Only auth/patient/
+    report endpoints will fail until the env var is provided.
+    """
+    try:
+        await db_module.connect()
+    except Exception as e:
+        log.warning("MongoDB unavailable at startup: %s", e)
+        log.warning("Auth + patient + report endpoints will return 500 until MONGODB_URI is configured.")
+
+
+@app.on_event("shutdown")
+async def _on_shutdown() -> None:
+    await db_module.disconnect()
+
+
+# ─── Routers ───────────────────────────────────────────────────────
+app.include_router(auth_router)
+app.include_router(patient_router)
+app.include_router(patient_reports_router)
+app.include_router(reports_router)
 
 
 # ══════════════════════════════════════════════════════════════════════

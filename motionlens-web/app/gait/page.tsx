@@ -7,7 +7,6 @@ import { Footer } from "@/components/layout/Footer";
 import { Section } from "@/components/ui/Section";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { PatientForm } from "@/components/biomech/PatientForm";
 
 const HEIGHT_KEY = "motionlens.height_cm";
 
@@ -42,15 +41,6 @@ export default function GaitPage() {
               </p>
 
               <div className="mt-12 space-y-12">
-                <section>
-                  <h2 className="text-sm font-bold uppercase tracking-[0.12em] text-foreground">
-                    Patient details
-                  </h2>
-                  <div className="mt-4">
-                    <PatientForm />
-                  </div>
-                </section>
-
                 <section>
                   <h2 className="text-sm font-bold uppercase tracking-[0.12em] text-foreground">
                     Height (for distance calibration)
