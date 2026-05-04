@@ -48,7 +48,7 @@ export function ProductShowcase() {
           <Link
             key={p.href}
             href={p.href}
-            className="group relative flex aspect-[4/3] flex-col overflow-hidden rounded-hero border border-border bg-elevated p-8 transition-all duration-300 hover:border-accent hover:shadow-glow-sm md:p-10"
+            className="group relative flex aspect-[4/3] flex-col overflow-hidden rounded-hero border border-border bg-elevated p-8 pb-16 transition-all duration-300 hover:border-accent hover:shadow-glow-sm md:p-10 md:pb-20"
           >
             <div
               className="pointer-events-none absolute inset-0 opacity-90 transition-opacity duration-500 group-hover:opacity-100"
@@ -62,7 +62,9 @@ export function ProductShowcase() {
               <Badge>{p.eyebrow}</Badge>
             </div>
 
-            {/* Middle: title + body — pushed to bottom of card via mt-auto */}
+            {/* Middle: title + body — pushed to bottom of card via mt-auto.
+                Reserved space at the bottom (pb-16/pb-20 on parent) makes
+                room for the absolutely-positioned Learn more below. */}
             <div className="relative mt-auto">
               <h3 className="text-2xl font-semibold tracking-tight md:text-3xl">
                 {p.title}
@@ -72,8 +74,10 @@ export function ProductShowcase() {
               </p>
             </div>
 
-            {/* Bottom: Learn more — fixed gap from body, identical position across all cards */}
-            <div className="relative mt-6 inline-flex items-center gap-1 text-sm text-accent">
+            {/* Bottom: Learn more — absolutely positioned to guarantee
+                identical Y-coordinate across all cards regardless of body
+                length. */}
+            <div className="absolute bottom-8 left-8 inline-flex items-center gap-1 text-sm text-accent md:bottom-10 md:left-10">
               Learn more
               <ArrowUpRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
             </div>
