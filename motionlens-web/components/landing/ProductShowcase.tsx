@@ -48,7 +48,7 @@ export function ProductShowcase() {
           <Link
             key={p.href}
             href={p.href}
-            className="group relative flex aspect-[4/3] flex-col justify-between overflow-hidden rounded-hero border border-border bg-elevated p-8 transition-all duration-300 hover:border-accent hover:shadow-glow-sm md:p-10"
+            className="group relative flex aspect-[4/3] flex-col overflow-hidden rounded-hero border border-border bg-elevated p-8 transition-all duration-300 hover:border-accent hover:shadow-glow-sm md:p-10"
           >
             <div
               className="pointer-events-none absolute inset-0 opacity-90 transition-opacity duration-500 group-hover:opacity-100"
@@ -57,17 +57,25 @@ export function ProductShowcase() {
             />
             <div className="pointer-events-none absolute inset-0 bg-grid opacity-30" aria-hidden />
 
+            {/* Top: badge */}
             <div className="relative">
               <Badge>{p.eyebrow}</Badge>
             </div>
 
-            <div className="relative">
-              <h3 className="text-2xl font-semibold tracking-tight md:text-3xl">{p.title}</h3>
-              <p className="mt-4 max-w-md text-sm leading-relaxed text-muted">{p.body}</p>
-              <div className="mt-6 inline-flex items-center gap-1 text-sm text-accent">
-                Learn more
-                <ArrowUpRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
-              </div>
+            {/* Middle: title + body — pushed to bottom of card via mt-auto */}
+            <div className="relative mt-auto">
+              <h3 className="text-2xl font-semibold tracking-tight md:text-3xl">
+                {p.title}
+              </h3>
+              <p className="mt-4 max-w-md text-sm leading-relaxed text-muted">
+                {p.body}
+              </p>
+            </div>
+
+            {/* Bottom: Learn more — fixed gap from body, identical position across all cards */}
+            <div className="relative mt-6 inline-flex items-center gap-1 text-sm text-accent">
+              Learn more
+              <ArrowUpRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
             </div>
           </Link>
         ))}
