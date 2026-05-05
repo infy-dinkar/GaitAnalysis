@@ -47,7 +47,7 @@ export function DashboardShell({ children, backHref, backLabel, title }: Props) 
       >
         {/* Logo */}
         <Link
-          href="/dashboard"
+          href="/"
           className="flex h-16 items-center gap-0.5 border-b border-border px-6 text-base font-semibold tracking-tight"
         >
           <Stethoscope className="mr-2 h-5 w-5 text-accent" />
