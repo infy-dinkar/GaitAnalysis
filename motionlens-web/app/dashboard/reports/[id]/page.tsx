@@ -24,6 +24,7 @@ import { GaitResultsView } from "@/components/gait/GaitResultsView";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { getReport, type ReportDTO } from "@/lib/reports";
 import { getPatient, type PatientDTO } from "@/lib/patients";
+import { formatIST, formatISTIsoDate } from "@/lib/format/datetime";
 import type { GaitDataDTO } from "@/lib/api";
 import type {
   FrontMeasurements,
@@ -97,8 +98,8 @@ function ReportView({ id }: { id: string }) {
 
   const meta = MODULE_META[report.module];
   const Icon = meta.icon;
-  const dateStr = new Date(report.created_at).toLocaleString();
-  const isoDate = new Date(report.created_at).toISOString().slice(0, 10);
+  const dateStr = `${formatIST(report.created_at)} IST`;
+  const isoDate = formatISTIsoDate(report.created_at);
 
   return (
     <div className="space-y-8">

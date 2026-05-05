@@ -4,6 +4,7 @@
 import Link from "next/link";
 import { Activity, Footprints, PersonStanding, ChevronRight } from "lucide-react";
 import type { ReportSummaryDTO } from "@/lib/reports";
+import { formatISTDate, formatISTTime } from "@/lib/format/datetime";
 
 const MODULE_META: Record<
   ReportSummaryDTO["module"],
@@ -56,7 +57,8 @@ export function ReportCard({ report }: { report: ReportSummaryDTO }) {
       </div>
 
       <div className="shrink-0 text-right">
-        <p className="text-xs tabular text-subtle">{formatDateTime(report.created_at)}</p>
+        <p className="text-xs tabular text-foreground">{formatISTDate(report.created_at)}</p>
+        <p className="text-[11px] tabular text-subtle">{formatISTTime(report.created_at)} IST</p>
       </div>
 
       <ChevronRight className="h-4 w-4 text-muted transition group-hover:text-accent" />
@@ -70,21 +72,4 @@ function capitalize(s: string): string {
 
 function humanize(s: string): string {
   return s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-function formatDateTime(iso: string): string {
-  try {
-    const d = new Date(iso);
-    const today = new Date();
-    const sameDay = d.toDateString() === today.toDateString();
-    if (sameDay) {
-      return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-    }
-    return d.toLocaleDateString(undefined, {
-      day: "numeric",
-      month: "short",
-    });
-  } catch {
-    return "";
-  }
 }

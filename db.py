@@ -55,10 +55,14 @@ async def connect() -> None:
 
     # serverSelectionTimeoutMS keeps app from hanging forever if Atlas
     # is unreachable; 5 sec is a reasonable failure-fast threshold.
+    # tz_aware=True returns tz-aware UTC datetimes from BSON reads — without
+    # this, Pydantic emits naive ISO strings that browsers parse as LOCAL
+    # time, shifting every saved-report timestamp by the user's tz offset.
     _client = AsyncIOMotorClient(
         uri,
         serverSelectionTimeoutMS=5000,
         appname="motionlens-api",
+        tz_aware=True,
     )
     _db = _client[db_name]
 
