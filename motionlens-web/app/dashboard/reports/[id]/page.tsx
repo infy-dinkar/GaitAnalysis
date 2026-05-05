@@ -99,7 +99,7 @@ function ReportView({ id }: { id: string }) {
   const meta = MODULE_META[report.module];
   const Icon = meta.icon;
   const dateStr = `${formatIST(report.created_at)} IST`;
-  const isoDate = formatISTIsoDate(report.created_at);
+  const isoDate = `${formatIST(report.created_at)} IST`;
 
   return (
     <div className="space-y-8">

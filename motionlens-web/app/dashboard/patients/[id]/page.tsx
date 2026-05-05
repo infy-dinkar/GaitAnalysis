@@ -148,7 +148,7 @@ function PatientDetail({ id }: { id: string }) {
             className="text-error hover:bg-error/10"
           >
             <Trash2 className="h-4 w-4" />
-            Delete
+            Delete patient
           </Button>
         </div>
       </div>
@@ -193,7 +193,13 @@ function PatientDetail({ id }: { id: string }) {
         ) : (
           <div className="mt-4 space-y-3">
             {reports.map((r) => (
-              <ReportCard key={r.id} report={r} />
+              <ReportCard
+                key={r.id}
+                report={r}
+                onDeleted={(id) =>
+                  setReports((prev) => (prev ?? []).filter((x) => x.id !== id))
+                }
+              />
             ))}
           </div>
         )}

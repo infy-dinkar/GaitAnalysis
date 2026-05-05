@@ -11,7 +11,7 @@ import { AssessmentReport } from "@/components/biomech/AssessmentReport";
 import { SavedPostureReport } from "@/components/posture/SavedPostureReport";
 import { GaitResultsView } from "@/components/gait/GaitResultsView";
 import { resolveMovement } from "@/lib/biomech/movements";
-import { formatIST, formatISTIsoDate } from "@/lib/format/datetime";
+import { formatIST } from "@/lib/format/datetime";
 import type { ReportDTO } from "@/lib/reports";
 import type { PatientDTO } from "@/lib/patients";
 import type { GaitDataDTO } from "@/lib/api";
@@ -188,7 +188,7 @@ function ReportBody({
   report: ReportDTO;
   patient: PatientDTO;
 }) {
-  const dateOverride = formatISTIsoDate(report.created_at);
+  const dateOverride = `${formatIST(report.created_at)} IST`;
 
   if (report.module === "biomech") {
     const bodyPart = report.body_part as
