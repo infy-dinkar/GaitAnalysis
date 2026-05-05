@@ -12,6 +12,10 @@ interface Props {
   measured: number;
   target: [number, number];
   side?: "left" | "right";
+  /** When rendering a saved report, override the live patient header. */
+  patientNameOverride?: string | null;
+  patientIdOverride?: string | null;
+  dateOverride?: string;
 }
 
 // Educational text — direct port of biomech_flow.py SHOULDER_EDU / NECK_EDU.
@@ -107,27 +111,39 @@ export function AssessmentReport({
   measured,
   target,
   side,
+  patientNameOverride,
+  patientIdOverride,
+  dateOverride,
 }: Props) {
   // Patient identity comes from the doctor-flow context when the
   // assessment is launched from /dashboard/patients/{id}/analyze.
   // Outside the doctor flow we just render the report with no patient
   // header (or a session-scoped anonymous ID).
   const { patient: doctorPatient } = usePatientContext();
-  const [patientId, setPatientId] = useState("");
+  const [sessionPatientId, setSessionPatientId] = useState("");
 
   useEffect(() => {
-    setPatientId(getOrCreatePatientId());
-  }, []);
+    if (patientIdOverride === undefined) {
+      setSessionPatientId(getOrCreatePatientId());
+    }
+  }, [patientIdOverride]);
 
-  const patient = doctorPatient
-    ? { name: doctorPatient.name, height_cm: doctorPatient.height_cm }
-    : null;
+  const patient = patientNameOverride !== undefined
+    ? (patientNameOverride ? { name: patientNameOverride, height_cm: 0 } : null)
+    : doctorPatient
+      ? { name: doctorPatient.name, height_cm: doctorPatient.height_cm }
+      : null;
+
+  const patientId = patientIdOverride !== undefined
+    ? (patientIdOverride ?? "")
+    : sessionPatientId;
 
   const { status, pct } = useMemo(() => classify(measured, target), [measured, target]);
   const isRotation = isRotationMovement(bodyPart, movementId);
 
   const today = new Date();
-  const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const dateStr = dateOverride
+    ?? `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 
   const sideLabel = side ? side.charAt(0).toUpperCase() + side.slice(1) : "—";
   const rangeStr =

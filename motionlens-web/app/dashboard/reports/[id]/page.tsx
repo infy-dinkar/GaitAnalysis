@@ -1,9 +1,13 @@
 "use client";
-// /dashboard/reports/[id] — view saved report (with all metrics + figures)
+// /dashboard/reports/[id] — view a saved report.
+//
+// Renders the same UI the doctor saw at capture time:
+//   biomech → <AssessmentReport>     (table + Measured-vs-Normal chart + interpretation)
+//   posture → <SavedPostureReport>   (front + side findings tables)
+//   gait    → <GaitResultsView>      (full metrics + per-joint tabs)
 
 import { useEffect, useState, use as usePromise } from "react";
 import Link from "next/link";
-import dynamic from "next/dynamic";
 import {
   Activity,
   Calendar,
@@ -14,13 +18,18 @@ import {
 } from "lucide-react";
 import { AuthGuard } from "@/components/auth/AuthGuard";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
+import { AssessmentReport } from "@/components/biomech/AssessmentReport";
+import { SavedPostureReport } from "@/components/posture/SavedPostureReport";
+import { GaitResultsView } from "@/components/gait/GaitResultsView";
+import { resolveMovement } from "@/lib/biomech/movements";
 import { getReport, type ReportDTO } from "@/lib/reports";
-
-// Plotly is heavy + browser-only — load it lazily.
-const PlotlyChart = dynamic(
-  () => import("@/components/gait/PlotlyChart").then((m) => m.PlotlyChart),
-  { ssr: false },
-);
+import { getPatient, type PatientDTO } from "@/lib/patients";
+import type { GaitDataDTO } from "@/lib/api";
+import type {
+  FrontMeasurements,
+  SideMeasurements,
+  PostureFinding,
+} from "@/lib/posture/measurements";
 
 const MODULE_META: Record<
   ReportDTO["module"],
@@ -48,12 +57,22 @@ export default function ReportViewPage({
 
 function ReportView({ id }: { id: string }) {
   const [report, setReport] = useState<ReportDTO | null>(null);
+  const [patient, setPatient] = useState<PatientDTO | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     getReport(id)
-      .then((r) => !cancelled && setReport(r))
+      .then(async (r) => {
+        if (cancelled) return;
+        setReport(r);
+        try {
+          const p = await getPatient(r.patient_id);
+          if (!cancelled) setPatient(p);
+        } catch {
+          // patient fetch failure is non-fatal — the report still renders
+        }
+      })
       .catch((e) => !cancelled && setError(e.message));
     return () => {
       cancelled = true;
@@ -78,6 +97,8 @@ function ReportView({ id }: { id: string }) {
 
   const meta = MODULE_META[report.module];
   const Icon = meta.icon;
+  const dateStr = new Date(report.created_at).toLocaleString();
+  const isoDate = new Date(report.created_at).toISOString().slice(0, 10);
 
   return (
     <div className="space-y-8">
@@ -97,7 +118,7 @@ function ReportView({ id }: { id: string }) {
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted">
             <span className="inline-flex items-center gap-1">
               <Calendar className="h-3.5 w-3.5" />
-              {new Date(report.created_at).toLocaleString()}
+              {dateStr}
             </span>
             <Link
               href={`/dashboard/patients/${report.patient_id}`}
@@ -110,61 +131,202 @@ function ReportView({ id }: { id: string }) {
         </div>
       </div>
 
-      {/* Metrics */}
-      {report.metrics && Object.keys(report.metrics).length > 0 && (
-        <section>
-          <h2 className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-            Metrics
-          </h2>
-          <div className="mt-3 overflow-hidden rounded-card border border-border bg-surface">
-            <pre className="overflow-x-auto p-5 text-xs text-foreground">
-              {JSON.stringify(report.metrics, null, 2)}
-            </pre>
-          </div>
-        </section>
+      {/* Module-specific body */}
+      {report.module === "biomech" && (
+        <BiomechBody
+          report={report}
+          patientName={patient?.name ?? null}
+          patientCode={report.patient_id}
+          isoDate={isoDate}
+        />
       )}
+      {report.module === "posture" && <PostureBody report={report} />}
+      {report.module === "gait" && (
+        <GaitBody
+          report={report}
+          patientNameOverride={patient?.name ?? null}
+        />
+      )}
+    </div>
+  );
+}
 
-      {/* Figures */}
-      {report.figures.length > 0 && (
-        <section>
-          <h2 className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-            Charts ({report.figures.length})
-          </h2>
-          <div className="mt-3 space-y-4">
-            {report.figures.map((fig, i) => {
-              const data = (fig as { data?: unknown[] }).data;
-              const layout = (fig as { layout?: Record<string, unknown> }).layout;
-              if (!Array.isArray(data)) return null;
-              return (
-                <div
-                  key={i}
-                  className="rounded-card border border-border bg-surface p-4"
-                >
-                  <PlotlyChart
-                    data={data as unknown[]}
-                    layout={(layout as Record<string, unknown>) || {}}
-                    height={360}
-                  />
-                </div>
-              );
-            })}
-          </div>
-        </section>
-      )}
+// ─── Biomech body ─────────────────────────────────────────────────
+function BiomechBody({
+  report,
+  patientName,
+  patientCode,
+  isoDate,
+}: {
+  report: ReportDTO;
+  patientName: string | null;
+  patientCode: string | null;
+  isoDate: string;
+}) {
+  const bodyPart = report.body_part as
+    | "shoulder" | "neck" | "knee" | "hip" | "ankle" | null;
+  if (!bodyPart || !report.movement) {
+    return <UnsupportedNotice reason="Missing body part or movement on this saved report." />;
+  }
 
-      {/* Observations */}
-      {report.observations && Object.keys(report.observations).length > 0 && (
+  const meta = resolveMovement(bodyPart, report.movement);
+  const movementName = meta?.label ?? report.movement;
+
+  // The saved metrics shape varies between live capture and upload analysis.
+  const m = report.metrics as Record<string, unknown>;
+  const measured = pickNumber(m, "peak_magnitude") ?? pickNumber(m, "peak_angle");
+
+  const target = pickRange(m, "reference_range")
+    ?? pickRange(m, "target")
+    ?? meta?.target
+    ?? null;
+
+  if (measured === null || target === null) {
+    return <UnsupportedNotice reason="This saved report is missing the measured angle or normal range." />;
+  }
+
+  const side = (report.side === "left" || report.side === "right") ? report.side : undefined;
+  const interpretation = pickString(report.observations, "interpretation");
+
+  return (
+    <div className="space-y-8">
+      <AssessmentReport
+        bodyPart={bodyPart}
+        movementName={movementName}
+        movementId={report.movement}
+        measured={measured}
+        target={target}
+        side={side}
+        patientNameOverride={patientName}
+        patientIdOverride={patientCode}
+        dateOverride={isoDate}
+      />
+      {interpretation && (
         <section>
-          <h2 className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-            Observations
-          </h2>
-          <div className="mt-3 overflow-hidden rounded-card border border-border bg-surface">
-            <pre className="overflow-x-auto p-5 text-xs text-foreground">
-              {JSON.stringify(report.observations, null, 2)}
-            </pre>
+          <h3 className="text-base font-semibold tracking-tight">Saved interpretation</h3>
+          <div className="mt-3 rounded-card border border-border bg-surface p-5 text-sm leading-relaxed text-foreground">
+            {interpretation}
           </div>
         </section>
       )}
+      <BackLink patientId={report.patient_id} />
+    </div>
+  );
+}
+
+// ─── Posture body ─────────────────────────────────────────────────
+function PostureBody({ report }: { report: ReportDTO }) {
+  const m = report.metrics as Record<string, unknown>;
+  const front = (m.front as FrontMeasurements | null | undefined) ?? null;
+  const side = (m.side as SideMeasurements | null | undefined) ?? null;
+
+  const o = report.observations as Record<string, unknown>;
+  const frontFindings = (o.front_findings as PostureFinding[] | undefined) ?? null;
+  const sideFindings = (o.side_findings as PostureFinding[] | undefined) ?? null;
+
+  return (
+    <div className="space-y-8">
+      <SavedPostureReport
+        front={front}
+        side={side}
+        frontFindings={frontFindings}
+        sideFindings={sideFindings}
+      />
+      <BackLink patientId={report.patient_id} />
+    </div>
+  );
+}
+
+// ─── Gait body ────────────────────────────────────────────────────
+function GaitBody({
+  report,
+  patientNameOverride,
+}: {
+  report: ReportDTO;
+  patientNameOverride: string | null;
+}) {
+  const m = report.metrics as Record<string, unknown>;
+
+  // Required pieces — if any are missing the saved report can't be reconstructed.
+  const required = [
+    "metrics_total",
+    "metrics_clean",
+    "video_info",
+    "joint_angles",
+    "normalized_overview",
+    "tabs_data",
+  ];
+  for (const key of required) {
+    if (!(key in m)) {
+      return <UnsupportedNotice reason={`This saved report is missing the "${key}" field.`} />;
+    }
+  }
+
+  // Reconstruct the GaitDataDTO shape from saved metrics + patient_info pulled from the report.
+  const data: GaitDataDTO = {
+    patient_info: {
+      name: patientNameOverride,
+      // height_cm is needed for CalibrationHeader; saved video_info also carries calibration.
+      height_cm: 0,
+    },
+    video_info: m.video_info as GaitDataDTO["video_info"],
+    walking_direction: (m.walking_direction as string) ?? "—",
+    metrics_total: m.metrics_total as GaitDataDTO["metrics_total"],
+    metrics_clean: m.metrics_clean as GaitDataDTO["metrics_clean"],
+    joint_angles: m.joint_angles as GaitDataDTO["joint_angles"],
+    gait_cycle_data: (m.gait_cycle_data as GaitDataDTO["gait_cycle_data"]) ?? null,
+    normalized_overview: m.normalized_overview as GaitDataDTO["normalized_overview"],
+    tabs_data: m.tabs_data as GaitDataDTO["tabs_data"],
+    observations: (report.observations as unknown as GaitDataDTO["observations"]) ?? {
+      hip: [], knee: [], ankle: [], overall: [], suggestions: [],
+    },
+  };
+
+  return (
+    <div className="space-y-8">
+      <GaitResultsView data={data} patientNameOverride={patientNameOverride} />
+      <BackLink patientId={report.patient_id} />
+    </div>
+  );
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────
+function pickNumber(obj: Record<string, unknown>, key: string): number | null {
+  const v = obj?.[key];
+  return typeof v === "number" && isFinite(v) ? v : null;
+}
+
+function pickString(obj: Record<string, unknown>, key: string): string | null {
+  const v = obj?.[key];
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+function pickRange(obj: Record<string, unknown>, key: string): [number, number] | null {
+  const v = obj?.[key];
+  if (Array.isArray(v) && v.length === 2 && typeof v[0] === "number" && typeof v[1] === "number") {
+    return [v[0], v[1]];
+  }
+  return null;
+}
+
+function UnsupportedNotice({ reason }: { reason: string }) {
+  return (
+    <div className="rounded-card border border-warning/40 bg-warning/5 p-5 text-sm text-foreground">
+      <p className="font-medium">This saved report can&apos;t be rendered as a polished view.</p>
+      <p className="mt-1 text-muted">{reason}</p>
+    </div>
+  );
+}
+
+function BackLink({ patientId }: { patientId: string }) {
+  return (
+    <div className="border-t border-border pt-6">
+      <Link
+        href={`/dashboard/patients/${patientId}`}
+        className="text-sm text-accent hover:underline"
+      >
+        ← Back to patient
+      </Link>
     </div>
   );
 }
