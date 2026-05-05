@@ -9,6 +9,7 @@ import {
   ArrowRight,
   Calendar,
   FileText,
+  GitCompare,
   Loader2,
   Phone,
   Ruler,
@@ -132,6 +133,14 @@ function PatientDetail({ id }: { id: string }) {
               <ArrowRight className="h-4 w-4" />
             </Button>
           </Link>
+          {reports.length >= 2 && (
+            <Link href={`/dashboard/patients/${id}/compare`}>
+              <Button variant="secondary">
+                <GitCompare className="h-4 w-4" />
+                Compare
+              </Button>
+            </Link>
+          )}
           <Button
             variant="secondary"
             onClick={handleDelete}
