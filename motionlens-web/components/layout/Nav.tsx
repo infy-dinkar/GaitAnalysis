@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Menu, X, LayoutDashboard, LogOut } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/contexts/AuthContext";
+import { ThemeToggle } from "@/components/ui/ThemeToggle";
 
 const NAV_LINKS = [
   { href: "#product", label: "Product" },
@@ -51,6 +52,9 @@ export function Nav() {
             </Link>
           ))}
 
+          {/* Theme toggle — visible to everyone, including landing-page guests. */}
+          <ThemeToggle />
+
           {/* Auth buttons — only render after auth check completes to avoid flash */}
           {!loading && (
             <div className="flex items-center gap-3 border-l border-border pl-6">
@@ -92,14 +96,17 @@ export function Nav() {
           )}
         </nav>
 
-        <button
-          type="button"
-          aria-label="Toggle menu"
-          className="text-foreground md:hidden"
-          onClick={() => setOpen((v) => !v)}
-        >
-          {open ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
-        </button>
+        <div className="flex items-center gap-3 md:hidden">
+          <ThemeToggle />
+          <button
+            type="button"
+            aria-label="Toggle menu"
+            className="text-foreground"
+            onClick={() => setOpen((v) => !v)}
+          >
+            {open ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
+          </button>
+        </div>
       </div>
 
       {open && (
