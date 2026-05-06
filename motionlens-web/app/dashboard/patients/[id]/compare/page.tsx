@@ -328,6 +328,7 @@ function comparisonKey(r: { module: string; body_part?: string | null; movement?
 function moduleLabel(r: ReportSummaryDTO): string {
   if (r.module === "gait") return "Gait analysis";
   if (r.module === "posture") return "Posture screening";
+  if (r.module === "trendelenburg") return "Trendelenburg test";
   return "Biomechanics";
 }
 

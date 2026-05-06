@@ -10,6 +10,7 @@ import {
   PersonStanding,
   ChevronRight,
   Loader2,
+  StretchHorizontal,
   Trash2,
 } from "lucide-react";
 import { deleteReport, type ReportSummaryDTO } from "@/lib/reports";
@@ -33,6 +34,11 @@ const MODULE_META: Record<
     label: "Posture screening",
     icon: PersonStanding,
     tone: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+  },
+  trendelenburg: {
+    label: "Trendelenburg test",
+    icon: StretchHorizontal,
+    tone: "bg-violet-500/10 text-violet-700 dark:text-violet-400",
   },
 };
 

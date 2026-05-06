@@ -3,7 +3,13 @@
 
 import Link from "next/link";
 import { use as usePromise } from "react";
-import { ArrowUpRight, Footprints, Activity, PersonStanding } from "lucide-react";
+import {
+  ArrowUpRight,
+  Footprints,
+  Activity,
+  PersonStanding,
+  StretchHorizontal,
+} from "lucide-react";
 import { AuthGuard } from "@/components/auth/AuthGuard";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
 
@@ -34,6 +40,15 @@ const MODULES = [
     icon: PersonStanding,
     tone: "from-emerald-500/15 to-emerald-500/5",
     iconTone: "text-emerald-600",
+  },
+  {
+    href: "orthopedic/trendelenburg",
+    eyebrow: "Orthopedic test",
+    title: "Trendelenburg",
+    body: "Live single-leg-stance test. 30-second hold per side, automatic pelvic-tilt + trunk-lean tracking, side-by-side report.",
+    icon: StretchHorizontal,
+    tone: "from-violet-500/15 to-violet-500/5",
+    iconTone: "text-violet-600",
   },
 ];
 

@@ -31,24 +31,33 @@ const PRODUCTS = [
     gradient:
       "linear-gradient(135deg, rgba(168,85,247,0.18) 0%, rgba(34,197,94,0.10) 50%, rgba(28,28,33,0.0) 100%)",
   },
+  {
+    href: "/orthopedic/trendelenburg",
+    eyebrow: "Orthopedic test",
+    title: "Trendelenburg, in 30 seconds.",
+    body:
+      "Live single-leg-stance assessment for hip-abductor strength — 30-second hold per side, automatic pelvic tilt + trunk lean tracking, side-by-side report.",
+    gradient:
+      "linear-gradient(135deg, rgba(139,92,246,0.20) 0%, rgba(236,72,153,0.10) 50%, rgba(28,28,33,0.0) 100%)",
+  },
 ];
 
 export function ProductShowcase() {
   return (
     <Section id="modules" className="bg-dots">
       <div className="max-w-2xl">
-        <Badge>Three modules</Badge>
+        <Badge>Four modules</Badge>
         <h2 className="mt-5 text-3xl font-semibold tracking-tight md:text-5xl">
-          Movement, measured<br />three ways.
+          Movement, measured<br />four ways.
         </h2>
       </div>
 
-      <div className="mt-16 grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+      <div className="mt-16 grid gap-6 md:grid-cols-2">
         {PRODUCTS.map((p) => (
           <Link
             key={p.href}
             href={p.href}
-            className="group relative flex min-h-[440px] flex-col justify-between overflow-hidden rounded-hero border border-border bg-elevated p-8 transition-all duration-300 hover:border-accent hover:shadow-glow-sm md:min-h-[480px] md:p-10"
+            className="group relative m-[2px] flex min-h-[436px] flex-col justify-between overflow-hidden rounded-hero border border-border bg-elevated p-8 transition-all duration-300 hover:border-accent hover:shadow-glow-sm md:min-h-[476px] md:p-10"
           >
             <div
               className="pointer-events-none absolute inset-0 opacity-90 transition-opacity duration-500 group-hover:opacity-100"

@@ -21,7 +21,7 @@ class ReportCreate(BaseModel):
     persist the result against a patient record.
     """
 
-    module: Literal["gait", "biomech", "posture"]
+    module: Literal["gait", "biomech", "posture", "trendelenburg"]
 
     # Biomech-specific (optional for other modules)
     body_part: Optional[Literal["shoulder", "neck", "knee", "hip", "ankle"]] = None

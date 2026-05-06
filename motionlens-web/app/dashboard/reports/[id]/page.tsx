@@ -16,12 +16,14 @@ import {
   Footprints,
   Loader2,
   PersonStanding,
+  StretchHorizontal,
 } from "lucide-react";
 import { AuthGuard } from "@/components/auth/AuthGuard";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { AssessmentReport } from "@/components/biomech/AssessmentReport";
 import { SavedPostureReport } from "@/components/posture/SavedPostureReport";
 import { GaitResultsView } from "@/components/gait/GaitResultsView";
+import { SavedTrendelenburgReport } from "@/components/orthopedic/SavedTrendelenburgReport";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { getReport, type ReportDTO } from "@/lib/reports";
 import { getPatient, type PatientDTO } from "@/lib/patients";
@@ -41,6 +43,7 @@ const MODULE_META: Record<
   gait: { label: "Gait analysis", icon: Footprints },
   biomech: { label: "Biomechanics", icon: Activity },
   posture: { label: "Posture screening", icon: PersonStanding },
+  trendelenburg: { label: "Trendelenburg test", icon: StretchHorizontal },
 };
 
 export default function ReportViewPage({
@@ -206,6 +209,13 @@ function ReportView({ id }: { id: string }) {
           <GaitBody
             report={report}
             patientNameOverride={patient?.name ?? null}
+          />
+        )}
+        {report.module === "trendelenburg" && (
+          <SavedTrendelenburgReport
+            patientName={patient?.name ?? null}
+            metrics={report.metrics as Record<string, unknown>}
+            observations={report.observations as Record<string, unknown>}
           />
         )}
       </div>

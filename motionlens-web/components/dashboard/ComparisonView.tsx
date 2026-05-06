@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { AssessmentReport } from "@/components/biomech/AssessmentReport";
 import { SavedPostureReport } from "@/components/posture/SavedPostureReport";
 import { GaitResultsView } from "@/components/gait/GaitResultsView";
+import { SavedTrendelenburgReport } from "@/components/orthopedic/SavedTrendelenburgReport";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { formatIST } from "@/lib/format/datetime";
 import type { ReportDTO } from "@/lib/reports";
@@ -263,6 +264,16 @@ function ReportBody({
     return <GaitResultsView data={data} patientNameOverride={patient.name} />;
   }
 
+  if (report.module === "trendelenburg") {
+    return (
+      <SavedTrendelenburgReport
+        patientName={patient.name}
+        metrics={report.metrics as Record<string, unknown>}
+        observations={report.observations as Record<string, unknown>}
+      />
+    );
+  }
+
   return <Notice>Unsupported module: {report.module}</Notice>;
 }
 
@@ -290,7 +301,38 @@ function buildDeltaRows(left: ReportDTO, right: ReportDTO): DeltaRow[] {
   if (left.module === "biomech") return biomechDeltas(left, right);
   if (left.module === "gait") return gaitDeltas(left, right);
   if (left.module === "posture") return postureDeltas(left, right);
+  if (left.module === "trendelenburg") return trendelenburgDeltas(left, right);
   return [];
+}
+
+function trendelenburgDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
+  const ml = left.metrics  as Record<string, unknown>;
+  const mr = right.metrics as Record<string, unknown>;
+  const sides = ["left", "right"] as const;
+  const rows: DeltaRow[] = [];
+  for (const s of sides) {
+    const lSide = (ml[s] as Record<string, unknown> | null | undefined) ?? null;
+    const rSide = (mr[s] as Record<string, unknown> | null | undefined) ?? null;
+    rows.push(deltaRow(
+      `${cap(s)}-leg max drop`,
+      pickNumber(lSide, "max_drop_deg"),
+      pickNumber(rSide, "max_drop_deg"),
+      "°",
+      "lower_is_better",
+    ));
+    rows.push(deltaRow(
+      `${cap(s)}-leg hold duration`,
+      pickNumber(lSide, "hold_seconds"),
+      pickNumber(rSide, "hold_seconds"),
+      " s",
+      "higher_is_better",
+    ));
+  }
+  return rows.filter((r) => r.before !== null || r.after !== null);
+}
+
+function cap(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 function biomechDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
@@ -453,6 +495,7 @@ function pickRange(obj: Record<string, unknown>, key: string): [number, number] 
 function moduleHeading(r: ReportDTO): string {
   if (r.module === "gait") return "Gait analysis";
   if (r.module === "posture") return "Posture screening";
+  if (r.module === "trendelenburg") return "Trendelenburg test";
   const bp = r.body_part ? `${r.body_part.charAt(0).toUpperCase()}${r.body_part.slice(1)}` : "";
   const mv = r.movement ? `${r.movement.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}` : "";
   return [bp, mv].filter(Boolean).join(" · ") || "Biomechanics";
