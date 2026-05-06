@@ -6,8 +6,9 @@
 //   posture → <SavedPostureReport>   (front + side findings tables)
 //   gait    → <GaitResultsView>      (full metrics + per-joint tabs)
 
-import { useEffect, useState, use as usePromise } from "react";
+import { useCallback, useEffect, useRef, useState, use as usePromise } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import {
   Activity,
   Calendar,
@@ -25,6 +26,7 @@ import { resolveMovement } from "@/lib/biomech/movements";
 import { getReport, type ReportDTO } from "@/lib/reports";
 import { getPatient, type PatientDTO } from "@/lib/patients";
 import { formatIST, formatISTIsoDate } from "@/lib/format/datetime";
+import { exportReportPdf } from "@/lib/pdf/exportReportPdf";
 import type { GaitDataDTO } from "@/lib/api";
 import type {
   FrontMeasurements,
@@ -57,9 +59,15 @@ export default function ReportViewPage({
 }
 
 function ReportView({ id }: { id: string }) {
+  const sp = useSearchParams();
+  const autoDownload = sp.get("download") === "1";
+
   const [report, setReport] = useState<ReportDTO | null>(null);
   const [patient, setPatient] = useState<PatientDTO | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const reportBodyRef = useRef<HTMLDivElement | null>(null);
+  const autoDownloadFiredRef = useRef<boolean>(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -79,6 +87,50 @@ function ReportView({ id }: { id: string }) {
       cancelled = true;
     };
   }, [id]);
+
+  // All hooks (useCallback + auto-download useEffect) MUST run on every
+  // render in the same order; defining them before the early-return
+  // branches below keeps the hook order stable. Both guard against the
+  // null-report state internally.
+  const handleDownload = useCallback(async () => {
+    if (!reportBodyRef.current || !report) return;
+    setDownloading(true);
+    try {
+      const meta = MODULE_META[report.module];
+      const dateStr = `${formatIST(report.created_at)} IST`;
+      const safePatient = (patient?.name ?? "patient").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+      const ymd = formatISTIsoDate(report.created_at);
+      const filename = `motionlens-${report.module}-${safePatient}-${ymd}.pdf`;
+      const moduleLabel =
+        [report.body_part, report.movement, report.side]
+          .filter(Boolean)
+          .map((s) => s && s.charAt(0).toUpperCase() + s.slice(1).replace(/_/g, " "))
+          .join(" · ") || meta.label;
+      const title = `${meta.label} — ${patient?.name ?? "Patient"} · ${moduleLabel} · ${dateStr}`;
+      await exportReportPdf(reportBodyRef.current, { filename, title });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "PDF export failed.";
+      alert(`Could not generate PDF: ${msg}`);
+    } finally {
+      setDownloading(false);
+    }
+  }, [report, patient]);
+
+  // When the page is reached via a "Download" icon on the patient
+  // profile (?download=1), auto-fire the PDF export once the report
+  // body has finished mounting + rendering its charts. The 600ms
+  // delay gives Plotly a frame to paint into the canvas before
+  // html2canvas snapshots it.
+  useEffect(() => {
+    if (!autoDownload) return;
+    if (!report || !patient) return;
+    if (autoDownloadFiredRef.current) return;
+    autoDownloadFiredRef.current = true;
+    const t = window.setTimeout(() => {
+      handleDownload();
+    }, 600);
+    return () => window.clearTimeout(t);
+  }, [autoDownload, report, patient, handleDownload]);
 
   if (error) {
     return (
@@ -103,7 +155,7 @@ function ReportView({ id }: { id: string }) {
 
   return (
     <div className="space-y-8">
-      {/* Header */}
+      {/* Header (buttons hidden in PDF capture via .no-pdf class) */}
       <div className="flex items-start gap-4">
         <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-card bg-accent/10 text-accent">
           <Icon className="h-6 w-6" />
@@ -130,24 +182,33 @@ function ReportView({ id }: { id: string }) {
             </Link>
           </div>
         </div>
+        {downloading && (
+          <div className="no-pdf flex shrink-0 items-center gap-2 rounded-card border border-accent/30 bg-accent/5 px-3 py-2 text-xs text-foreground">
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" />
+            Generating PDF…
+          </div>
+        )}
       </div>
 
-      {/* Module-specific body */}
-      {report.module === "biomech" && (
-        <BiomechBody
-          report={report}
-          patientName={patient?.name ?? null}
-          patientCode={report.patient_id}
-          isoDate={isoDate}
-        />
-      )}
-      {report.module === "posture" && <PostureBody report={report} />}
-      {report.module === "gait" && (
-        <GaitBody
-          report={report}
-          patientNameOverride={patient?.name ?? null}
-        />
-      )}
+      {/* Body wrapped in a ref so the PDF exporter can capture every
+          chart, table, image, and disclaimer the doctor sees on screen. */}
+      <div ref={reportBodyRef} className="space-y-8">
+        {report.module === "biomech" && (
+          <BiomechBody
+            report={report}
+            patientName={patient?.name ?? null}
+            patientCode={report.patient_id}
+            isoDate={isoDate}
+          />
+        )}
+        {report.module === "posture" && <PostureBody report={report} />}
+        {report.module === "gait" && (
+          <GaitBody
+            report={report}
+            patientNameOverride={patient?.name ?? null}
+          />
+        )}
+      </div>
     </div>
   );
 }

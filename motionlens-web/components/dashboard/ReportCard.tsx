@@ -5,6 +5,7 @@ import { useState } from "react";
 import Link from "next/link";
 import {
   Activity,
+  Download,
   Footprints,
   PersonStanding,
   ChevronRight,
@@ -101,13 +102,24 @@ export function ReportCard({
           <ChevronRight className="h-4 w-4 text-muted transition group-hover:text-accent" />
         </Link>
 
+        <a
+          href={`/dashboard/reports/${report.id}?download=1`}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="Download this report as PDF"
+          title="Download this report as PDF"
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted transition hover:bg-accent/10 hover:text-accent"
+        >
+          <Download className="h-4 w-4" />
+        </a>
+
         <button
           type="button"
           onClick={handleDelete}
           disabled={busy}
           aria-label="Delete this report"
           title="Delete this report"
-          className="ml-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted transition hover:bg-error/10 hover:text-error disabled:opacity-50"
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted transition hover:bg-error/10 hover:text-error disabled:opacity-50"
         >
           {busy ? (
             <Loader2 className="h-4 w-4 animate-spin" />
