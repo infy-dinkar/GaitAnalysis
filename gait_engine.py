@@ -74,7 +74,15 @@ def extract_poses(video_path: str, pose_options, progress_callback=None):
     pose_model = mp.tasks.vision.PoseLandmarker.create_from_options(pose_options)
 
     cap = cv2.VideoCapture(video_path)
-    fps          = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    # FPS is validated upstream in api.analyze_gait (must be >= 24 FPS).
+    # The previous `or 30.0` silent fallback masked broken clips and
+    # produced wrong cadence/step-time metrics — removed.
+    fps          = float(cap.get(cv2.CAP_PROP_FPS))
+    if fps <= 0:
+        cap.release()
+        raise ValueError(
+            "Video frame rate could not be determined from the file."
+        )
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     frame_w      = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))  or 1
     frame_h      = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1

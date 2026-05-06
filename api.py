@@ -81,6 +81,18 @@ logging.basicConfig(
 )
 log = logging.getLogger("motionlens.api")
 
+# ─── Gait upload validation limits ────────────────────────────────
+# Per MotionLens Test Battery spec v1.0. Clinical gait analysis only
+# needs ~10 sec of footage; anything beyond 60 sec is noise and risks
+# OOM. Sub-24 FPS uploads silently produce wrong cadence/step-time
+# metrics, so reject them outright; 24-29 FPS gets a soft warning.
+MAX_GAIT_FILE_SIZE_MB = 100
+MAX_GAIT_DURATION_SEC = 60
+MIN_GAIT_DURATION_SEC = 5
+MIN_REQUIRED_FPS = 24
+RECOMMENDED_FPS = 30
+
+
 app = FastAPI(
     title="MotionLens API",
     description="REST endpoints exposing the gait + biomech engines.",
@@ -133,6 +145,9 @@ app.include_router(reports_router)
 # ══════════════════════════════════════════════════════════════════════
 # Pose-model setup (module-level, reused across requests)
 # ══════════════════════════════════════════════════════════════════════
+# Using Full variant for clinical-grade landmark accuracy
+# (BlazePose Full per MotionLens Test Battery spec v1.0).
+# Lite was previously used; upgraded for Module D readiness.
 def _build_gait_pose_options():
     """Construct PoseLandmarkerOptions for VIDEO running mode — exactly
     matching app.py's load_pose_model_options() construction."""
@@ -249,6 +264,9 @@ _OVERLAY_SMOOTH_ALPHA = float(
 )
 
 
+# Using Full variant for clinical-grade landmark accuracy
+# (BlazePose Full per MotionLens Test Battery spec v1.0).
+# Lite was previously used; upgraded for Module D readiness.
 def _build_video_landmarker() -> _StatefulVideoLandmarker:
     from mediapipe.tasks.python import BaseOptions
     from mediapipe.tasks.python.vision import (
@@ -315,12 +333,95 @@ async def analyze_gait(
         contents = await video.read()
         if not contents:
             raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        # ── 1) FILE SIZE GATE — reject before touching the disk ──────
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB. "
+                    "Please trim or compress the video."
+                ),
+            )
+
         tmp_path = save_uploaded_video(contents, video.filename or "video.mp4")
         log.info(
             "gait: file=%s size=%.2f MB height=%scm",
-            video.filename, len(contents) / 1024 / 1024, height_cm,
+            video.filename, size_mb, height_cm,
         )
 
+        # ── 2) FPS + DURATION GATE — peek at the container before the
+        # full pose-extraction pass. A bad clip should fail in <100 ms,
+        # not after 30 sec of MediaPipe work.
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not determine video frame rate. "
+                    "Please upload a different file."
+                ),
+            )
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video frame rate too low ({probe_fps:.1f} FPS). "
+                    f"Minimum {MIN_REQUIRED_FPS} FPS required for gait "
+                    f"analysis. Recommended: {RECOMMENDED_FPS}+ FPS. "
+                    "Please re-record at higher frame rate."
+                ),
+            )
+
+        fps_warning: Optional[str] = None
+        if probe_fps < RECOMMENDED_FPS:
+            fps_warning = (
+                f"Note: Video is {probe_fps:.1f} FPS, below recommended "
+                f"{RECOMMENDED_FPS} FPS — results may be less accurate."
+            )
+            log.warning("gait: low fps %.1f (below recommended)", probe_fps)
+
+        if probe_total_frames <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not determine video length. "
+                    "Please upload a different file."
+                ),
+            )
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video too long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed. "
+                    "Please trim to capture 4-6 gait cycles "
+                    "(~10 seconds is ideal)."
+                ),
+            )
+
+        duration_warning: Optional[str] = None
+        if duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = (
+                f"Video is short ({duration_seconds:.1f}s) — at least "
+                f"{MIN_GAIT_DURATION_SEC} seconds (4 gait cycles) "
+                "recommended for reliable metrics."
+            )
+            log.warning(
+                "gait: short clip %.1fs (below recommended)", duration_seconds,
+            )
+
+        # ── 3) Validation passed — run the full pipeline ─────────────
         pose_options = _build_gait_pose_options()
         raw, fps, total_frames = extract_poses(tmp_path, pose_options)
         ts = build_time_series(raw)
@@ -336,7 +437,13 @@ async def analyze_gait(
             height_cm=float(height_cm),
             patient_name=patient_name,
         )
-        return GaitResponse(success=True, data=data, error=None)
+        return GaitResponse(
+            success=True,
+            data=data,
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+        )
 
     except HTTPException:
         raise

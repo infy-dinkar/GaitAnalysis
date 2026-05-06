@@ -679,12 +679,15 @@ _init_session_state()
 
 # ──────────────────────────────────────────────
 # CACHED MODEL LOADER
+# Using Full variant for clinical-grade landmark accuracy
+# (BlazePose Full per MotionLens Test Battery spec v1.0).
+# Lite was previously used; upgraded for Module D readiness.
 # ──────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def load_pose_model_options():
-    model_path = "pose_landmarker_lite.task"
+    model_path = "pose_landmarker_full.task"
     if not os.path.exists(model_path):
-        url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+        url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task"
         urllib.request.urlretrieve(url, model_path)
 
     BaseOptions = mp.tasks.BaseOptions

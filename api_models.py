@@ -221,6 +221,12 @@ class GaitResponse(BaseModel):
     success: bool
     data: Optional[GaitData] = None
     error: Optional[str] = None
+    # Soft-warning fields surfaced when the upload validation passes but
+    # one of the input quality dimensions is below the recommended bar
+    # (e.g. 24-29 FPS, sub-5-sec clip). The frontend renders these as a
+    # neutral banner above the report; they do not block analysis.
+    fps_warning: Optional[str] = None
+    duration_warning: Optional[str] = None
 
 
 # ══════════════════════════════════════════════════════════════════════

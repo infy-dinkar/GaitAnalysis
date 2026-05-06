@@ -168,6 +168,9 @@ MOVEMENT_INSTRUCTIONS = {
 # removed from recent MediaPipe builds and was crashing on
 # Streamlit Cloud with `AttributeError`). Same model + API the gait
 # pipeline already uses, so deployment compatibility is identical.
+# Using Full variant for clinical-grade landmark accuracy
+# (BlazePose Full per MotionLens Test Battery spec v1.0).
+# Lite was previously used; upgraded for Module D readiness.
 # ──────────────────────────────────────────────
 def _ensure_pose_model_file() -> str:
     """Download the pose-landmarker .task file if it's not already in
@@ -175,11 +178,11 @@ def _ensure_pose_model_file() -> str:
     import os
     import urllib.request
 
-    model_path = "pose_landmarker_lite.task"
+    model_path = "pose_landmarker_full.task"
     if not os.path.exists(model_path):
         url = ("https://storage.googleapis.com/mediapipe-models/"
-               "pose_landmarker/pose_landmarker_lite/float16/1/"
-               "pose_landmarker_lite.task")
+               "pose_landmarker/pose_landmarker_full/float16/1/"
+               "pose_landmarker_full.task")
         urllib.request.urlretrieve(url, model_path)
     return model_path
 

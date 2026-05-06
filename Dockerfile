@@ -31,8 +31,11 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 # ── Pre-download the pose-landmarker .task at build time ──────────
 # Saves ~5 sec on every cold start.
-RUN wget -q -O /app/pose_landmarker_lite.task \
-    https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task
+# Using Full variant for clinical-grade landmark accuracy
+# (BlazePose Full per MotionLens Test Battery spec v1.0).
+# Lite was previously used; upgraded for Module D readiness.
+RUN wget -q -O /app/pose_landmarker_full.task \
+    https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task
 
 # ── App code ──────────────────────────────────────────────────────
 # .dockerignore excludes motionlens-web/, sample media, caches, etc.
