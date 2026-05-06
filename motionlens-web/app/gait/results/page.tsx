@@ -19,6 +19,8 @@ import {
   hLineShape,
 } from "@/components/gait/PlotlyChart";
 import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
+import { REPORT_DISCLAIMER } from "@/lib/disclaimer";
 import { fmt } from "@/lib/utils";
 import type { GaitDataDTO, JointDetailDTO, PassSegmentDTO } from "@/lib/api";
 
@@ -117,6 +119,38 @@ export default function GaitResultsPage() {
       writeRow("Step length", c.step_length !== null ? `${fmt(c.step_length, 2)} ${c.step_length_unit}` : "—");
       writeRow("Torso lean",  c.torso_lean !== null ? `${fmt(c.torso_lean, 1)}°` : "—");
       writeRow("Step time",   c.step_time !== null ? `${fmt(c.step_time, 2)} s` : "—");
+
+      // ── Disclaimer footer (always at the bottom of the last page) ──
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const wrapWidth = pageWidth - margin * 2;
+      const lineHeight = 11;
+
+      doc.setFontSize(9);
+      doc.setFont("helvetica", "italic");
+      const wrapped = doc.splitTextToSize(REPORT_DISCLAIMER, wrapWidth);
+      const blockHeight = wrapped.length * lineHeight + 12; // +12 for separator + gap
+
+      // If the disclaimer wouldn't fit on the current page, push it to a
+      // new one so it's never truncated.
+      if (y + blockHeight > pageHeight - margin) {
+        doc.addPage();
+        y = margin;
+      } else {
+        y += 16;
+      }
+
+      // Thin separator line above
+      doc.setDrawColor(180);
+      doc.setLineWidth(0.5);
+      doc.line(margin, y, pageWidth - margin, y);
+      y += 10;
+
+      doc.setTextColor(90);
+      doc.text(wrapped, margin, y);
+      // Reset font state in case caller adds anything else after
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(0);
 
       doc.save(`motionlens-gait-${dateStr.replaceAll("/", "-")}.pdf`);
     });
@@ -237,6 +271,9 @@ export default function GaitResultsPage() {
               <Button variant="ghost">Analyse another clip</Button>
             </Link>
           </div>
+
+          {/* ── Unified report disclaimer ──────────────────────────── */}
+          <ReportDisclaimer />
         </Section>
       </main>
       <Footer />

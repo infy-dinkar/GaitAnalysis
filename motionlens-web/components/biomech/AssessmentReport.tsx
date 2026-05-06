@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import { PlotlyChart } from "@/components/gait/PlotlyChart";
+import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
 import { fmt } from "@/lib/utils";
 import { usePatientContext } from "@/hooks/usePatientContext";
 
@@ -82,16 +83,6 @@ function getOrCreatePatientId(): string {
   }
 }
 
-function isRotationMovement(
-  bodyPart: "shoulder" | "neck" | "knee" | "hip" | "ankle",
-  id: string,
-) {
-  if (bodyPart === "shoulder" || bodyPart === "hip")
-    return id === "external_rotation" || id === "internal_rotation";
-  if (bodyPart === "neck") return id === "rotation";
-  return false;
-}
-
 /** Mirrors biomech_flow._classify in the Streamlit app. */
 function classify(measured: number, target: [number, number]) {
   // Use the upper bound as the canonical target when the range is wide,
@@ -139,7 +130,6 @@ export function AssessmentReport({
     : sessionPatientId;
 
   const { status, pct } = useMemo(() => classify(measured, target), [measured, target]);
-  const isRotation = isRotationMovement(bodyPart, movementId);
 
   const today = new Date();
   const dateStr = dateOverride
@@ -305,14 +295,8 @@ export function AssessmentReport({
         </div>
       </section>
 
-      {/* ── Subtle disclaimer footer ───────────────────────────── */}
-      <p className="border-t border-border/60 pt-4 text-center text-[11px] leading-relaxed text-subtle/80">
-        Measurements are estimated from a single 2D camera and are intended for
-        movement tracking and self-screening
-        {isRotation ? " — rotation values are approximate. " : ". "}
-        For clinical-grade range-of-motion assessment, please consult a qualified
-        practitioner.
-      </p>
+      {/* ── Unified report disclaimer ──────────────────────────── */}
+      <ReportDisclaimer />
     </div>
   );
 }

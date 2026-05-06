@@ -4,6 +4,7 @@
 // (no annotated images — those were never persisted to the DB).
 
 import { useMemo } from "react";
+import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
 import {
   buildFrontFindings,
   buildSideFindings,
@@ -69,11 +70,7 @@ export function SavedPostureReport({
         </p>
       )}
 
-      <p className="border-t border-border/60 pt-4 text-center text-[11px] leading-relaxed text-subtle/80">
-        Postural measurements are estimated from 2D pose detection and are
-        intended for screening only. For a clinical-grade postural assessment,
-        please consult a qualified practitioner.
-      </p>
+      <ReportDisclaimer />
     </div>
   );
 }

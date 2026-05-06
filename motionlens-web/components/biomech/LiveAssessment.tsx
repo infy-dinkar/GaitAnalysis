@@ -14,7 +14,8 @@ import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton"
 import { Button } from "@/components/ui/Button";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import { fmt } from "@/lib/utils";
-import { getInstructions, isRotationMovement } from "@/lib/biomech/instructions";
+import { getInstructions } from "@/lib/biomech/instructions";
+import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
 import type { LiveBiomechFrameDataDTO } from "@/lib/api";
 
 type PostureStatus = "idle" | "good" | "low_visibility" | "no_landmarks";
@@ -113,7 +114,6 @@ export function LiveAssessment({
   const hasPeak = peakMag > 0;
 
   const instructions = getInstructions(bodyPart, movementId);
-  const isRotation = isRotationMovement(bodyPart, movementId);
 
   const statusPresentation: Record<
     PostureStatus,
@@ -279,14 +279,8 @@ export function LiveAssessment({
         </div>
       </div>
 
-      {/* ─── Subtle disclaimer footer ─────────────────────────── */}
-      <p className="border-t border-border/60 pt-4 text-center text-[11px] leading-relaxed text-subtle/80">
-        Measurements are estimated from a single 2D camera and are intended for
-        movement tracking and self-screening
-        {isRotation ? " — rotation values are approximate. " : ". "}
-        For clinical-grade range-of-motion assessment, please consult a qualified
-        practitioner.
-      </p>
+      {/* ─── Unified report disclaimer ──────────────────────────── */}
+      <ReportDisclaimer />
     </div>
   );
 
