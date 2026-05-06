@@ -15,6 +15,7 @@ import {
   FileText,
   Footprints,
   Loader2,
+  Move3d,
   PersonStanding,
   StretchHorizontal,
 } from "lucide-react";
@@ -24,6 +25,7 @@ import { AssessmentReport } from "@/components/biomech/AssessmentReport";
 import { SavedPostureReport } from "@/components/posture/SavedPostureReport";
 import { GaitResultsView } from "@/components/gait/GaitResultsView";
 import { SavedTrendelenburgReport } from "@/components/orthopedic/SavedTrendelenburgReport";
+import { SavedSingleLegSquatReport } from "@/components/orthopedic/SavedSingleLegSquatReport";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { getReport, type ReportDTO } from "@/lib/reports";
 import { getPatient, type PatientDTO } from "@/lib/patients";
@@ -44,6 +46,7 @@ const MODULE_META: Record<
   biomech: { label: "Biomechanics", icon: Activity },
   posture: { label: "Posture screening", icon: PersonStanding },
   trendelenburg: { label: "Trendelenburg test", icon: StretchHorizontal },
+  single_leg_squat: { label: "Single-leg squat", icon: Move3d },
 };
 
 export default function ReportViewPage({
@@ -213,6 +216,13 @@ function ReportView({ id }: { id: string }) {
         )}
         {report.module === "trendelenburg" && (
           <SavedTrendelenburgReport
+            patientName={patient?.name ?? null}
+            metrics={report.metrics as Record<string, unknown>}
+            observations={report.observations as Record<string, unknown>}
+          />
+        )}
+        {report.module === "single_leg_squat" && (
+          <SavedSingleLegSquatReport
             patientName={patient?.name ?? null}
             metrics={report.metrics as Record<string, unknown>}
             observations={report.observations as Record<string, unknown>}

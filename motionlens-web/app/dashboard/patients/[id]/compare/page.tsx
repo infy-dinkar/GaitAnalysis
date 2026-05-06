@@ -329,6 +329,7 @@ function moduleLabel(r: ReportSummaryDTO): string {
   if (r.module === "gait") return "Gait analysis";
   if (r.module === "posture") return "Posture screening";
   if (r.module === "trendelenburg") return "Trendelenburg test";
+  if (r.module === "single_leg_squat") return "Single-leg squat";
   return "Biomechanics";
 }
 

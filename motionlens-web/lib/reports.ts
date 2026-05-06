@@ -7,7 +7,7 @@ export interface ReportSummaryDTO {
   id: string;
   patient_id: string;
   doctor_id: string;
-  module: "gait" | "biomech" | "posture" | "trendelenburg";
+  module: "gait" | "biomech" | "posture" | "trendelenburg" | "single_leg_squat";
   body_part: string | null;
   movement: string | null;
   side: string | null;
@@ -37,7 +37,7 @@ export interface ReportDTO extends ReportSummaryDTO {
 }
 
 export interface ReportCreatePayload {
-  module: "gait" | "biomech" | "posture" | "trendelenburg";
+  module: "gait" | "biomech" | "posture" | "trendelenburg" | "single_leg_squat";
   body_part?: "shoulder" | "neck" | "knee" | "hip" | "ankle";
   movement?: string;
   side?: "left" | "right";

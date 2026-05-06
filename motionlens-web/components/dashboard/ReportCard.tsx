@@ -10,6 +10,7 @@ import {
   PersonStanding,
   ChevronRight,
   Loader2,
+  Move3d,
   StretchHorizontal,
   Trash2,
 } from "lucide-react";
@@ -39,6 +40,11 @@ const MODULE_META: Record<
     label: "Trendelenburg test",
     icon: StretchHorizontal,
     tone: "bg-violet-500/10 text-violet-700 dark:text-violet-400",
+  },
+  single_leg_squat: {
+    label: "Single-leg squat",
+    icon: Move3d,
+    tone: "bg-fuchsia-500/10 text-fuchsia-700 dark:text-fuchsia-400",
   },
 };
 

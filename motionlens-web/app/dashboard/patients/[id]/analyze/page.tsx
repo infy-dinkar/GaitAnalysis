@@ -7,6 +7,7 @@ import {
   ArrowUpRight,
   Footprints,
   Activity,
+  Move3d,
   PersonStanding,
   StretchHorizontal,
 } from "lucide-react";
@@ -49,6 +50,15 @@ const MODULES = [
     icon: StretchHorizontal,
     tone: "from-violet-500/15 to-violet-500/5",
     iconTone: "text-violet-600",
+  },
+  {
+    href: "orthopedic/single-leg-squat",
+    eyebrow: "Orthopedic test",
+    title: "Single-leg squat",
+    body: "Live frontal-plane knee-control screen. 5 squats per side, automatic KFPPA + pelvic drop + trunk lean, composite injury-risk score.",
+    icon: Move3d,
+    tone: "from-fuchsia-500/15 to-fuchsia-500/5",
+    iconTone: "text-fuchsia-600",
   },
 ];
 

@@ -374,7 +374,14 @@ export function TrendelenburgCapture() {
         </p>
       </div>
 
-      <TrendelenburgLiveCamera onFrame={handleFrame} onError={setError} />
+      {/* Sticky camera dock — capped to ~480 px wide, pinned right-
+          aligned and just below the Nav so the operator can keep
+          watching the live skeleton while scrolling through controls
+          and coaching. Same design pattern as the Single-Leg Squat
+          test for consistency. */}
+      <div className="sticky top-20 z-20 ml-auto w-full max-w-md rounded-card bg-background/85 p-1 shadow-lg backdrop-blur supports-[backdrop-filter]:bg-background/65">
+        <TrendelenburgLiveCamera onFrame={handleFrame} onError={setError} />
+      </div>
 
       {/* Status / control panel */}
       {phase === "recording" && recordingRef.current && (

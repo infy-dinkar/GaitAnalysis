@@ -1,15 +1,10 @@
 "use client";
-// Live webcam + MoveNet pose detection for the Trendelenburg test.
-//
-// Convention matches LiveBiomechCamera: the main view is a dark canvas
-// showing the skeleton overlay only (no full-size video). A small
-// mirrored selfie PiP sits in the bottom-right corner so the patient
-// can verify framing without being distracted by their own image at
-// full size. A toggle lets the operator hide the preview.
-//
-// Owns: webcam stream, rAF detect loop, skeleton drawing, peak-drop
-// screenshot capture (video + skeleton compositied — the saved frame
-// is still informative even though the live view is dark-on-skeleton).
+// Live MoveNet capture for the Single-Leg Squat test. Same PiP
+// convention as Trendelenburg / biomech: dark canvas with skeleton
+// overlay only, mirrored selfie PiP in the bottom-right corner,
+// show/hide toggle. The component is structurally a sibling of
+// TrendelenburgLiveCamera (kept separate so that test stays
+// untouched) but uses its own window-level capture helper.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -39,19 +34,18 @@ const FULL_BODY_DOTS: number[] = [
 ];
 
 interface Norm {
-  x: number;       // 0..1 (mirrored to match the PiP selfie view)
+  x: number;       // 0..1, mirrored to match the PiP selfie view
   y: number;       // 0..1
   visibility: number;
 }
 
 interface Props {
-  /** Per-frame callback. Keypoints are RAW (in video pixel coords) so
-   *  the parent's metric math is unchanged. */
+  /** Per-frame callback. Keypoints are RAW (in video pixel coords). */
   onFrame: (keypoints: Keypoint[], video: HTMLVideoElement) => void;
   onError?: (msg: string) => void;
 }
 
-export function TrendelenburgLiveCamera({ onFrame, onError }: Props) {
+export function SingleLegSquatLiveCamera({ onFrame, onError }: Props) {
   const { videoRef, active, error: camError, start, stop } = useCamera();
   const { ready: detectorReady, error: detectorError, detect } = usePoseDetection();
 
@@ -74,16 +68,10 @@ export function TrendelenburgLiveCamera({ onFrame, onError }: Props) {
     if (detectorError) onError?.(detectorError);
   }, [camError, detectorError, onError]);
 
-  // ── Skeleton drawing ────────────────────────────────────────────
-  // Operates in container-pixel space, with devicePixelRatio scaling
-  // for sharp lines on retina displays. Landmarks come in normalised
-  // (0..1) coordinates already mirrored to match the selfie PiP, so
-  // movement direction reads correctly.
   const drawSkeleton = useCallback((landmarks: Norm[] | null) => {
     const overlay = overlayRef.current;
     const container = containerRef.current;
     if (!overlay || !container) return;
-
     const w = container.clientWidth;
     const h = container.clientHeight;
     if (w === 0 || h === 0) return;
@@ -102,7 +90,6 @@ export function TrendelenburgLiveCamera({ onFrame, onError }: Props) {
 
     const px = (n: Norm) => ({ x: n.x * w, y: n.y * h });
 
-    // Edges
     ctx.strokeStyle = "#FFFFFF";
     ctx.lineWidth = Math.max(2, w * 0.0035);
     ctx.shadowColor = "rgba(0,0,0,0.6)";
@@ -121,7 +108,6 @@ export function TrendelenburgLiveCamera({ onFrame, onError }: Props) {
       ctx.lineTo(B.x, B.y);
       ctx.stroke();
     }
-    // Joint dots
     ctx.fillStyle = "#EF4444";
     ctx.lineWidth = 2;
     for (const i of FULL_BODY_DOTS) {
@@ -136,7 +122,7 @@ export function TrendelenburgLiveCamera({ onFrame, onError }: Props) {
     ctx.shadowBlur = 0;
   }, []);
 
-  // ── Detection loop ──────────────────────────────────────────────
+  // Detection loop
   useEffect(() => {
     if (!active || !detectorReady) {
       drawSkeleton(null);
@@ -164,8 +150,6 @@ export function TrendelenburgLiveCamera({ onFrame, onError }: Props) {
         } else {
           const sw = video.videoWidth;
           const sh = video.videoHeight;
-          // Mirror the X axis on the normalised draw coords so the
-          // skeleton tracks the selfie PiP visually.
           const norm: Norm[] = kp.map((p) => ({
             x: 1 - p.x / sw,
             y: p.y / sh,
@@ -173,13 +157,10 @@ export function TrendelenburgLiveCamera({ onFrame, onError }: Props) {
           }));
           drawSkeleton(norm);
           lastNormRef.current = norm;
-          // Per-frame callback gets RAW keypoints (in video pixel
-          // coords). The metric library is sign-aware on its own, so
-          // mirroring the visualisation does not affect the math.
           onFrameRef.current(kp, video);
         }
       } catch {
-        // ignore frame errors; keep ticking
+        // ignore
       }
       if (!cancelledRef.current) rafRef.current = requestAnimationFrame(tick);
     };
@@ -191,21 +172,14 @@ export function TrendelenburgLiveCamera({ onFrame, onError }: Props) {
     };
   }, [active, detectorReady, detect, drawSkeleton, videoRef]);
 
-  // ── Peak-drop screenshot ───────────────────────────────────────
-  // Returns a downscaled JPEG that composites the live video frame
-  // (mirrored to match the live view) and the skeleton overlay. We
-  // render to an off-screen canvas instead of relying on the DOM
-  // overlay so the saved still is informative even when the operator
-  // has hidden the PiP preview.
+  // Worst-rep screenshot — composite of mirrored video + skeleton.
   const captureFrame = useCallback((): string | null => {
     const video = lastVideoRef.current ?? videoRef.current;
     if (!video || !video.videoWidth) return null;
-
     const targetW = Math.min(480, video.videoWidth);
     const scale = targetW / video.videoWidth;
     const cw = Math.round(video.videoWidth * scale);
     const ch = Math.round(video.videoHeight * scale);
-
     let comp = compositeCanvasRef.current;
     if (!comp) {
       comp = document.createElement("canvas");
@@ -215,17 +189,11 @@ export function TrendelenburgLiveCamera({ onFrame, onError }: Props) {
     comp.height = ch;
     const ctx = comp.getContext("2d");
     if (!ctx) return null;
-
-    // Mirror so the screenshot reads the same way as the on-screen
-    // skeleton (selfie convention).
     ctx.save();
     ctx.translate(cw, 0);
     ctx.scale(-1, 1);
     ctx.drawImage(video, 0, 0, cw, ch);
     ctx.restore();
-
-    // Re-draw the skeleton in mirrored space (skeleton norms are
-    // already mirrored, so we draw them un-flipped).
     const norm = lastNormRef.current;
     if (norm) {
       const px = (n: Norm) => ({ x: n.x * cw, y: n.y * ch });
@@ -259,20 +227,16 @@ export function TrendelenburgLiveCamera({ onFrame, onError }: Props) {
       }
       ctx.shadowBlur = 0;
     }
-
     return comp.toDataURL("image/jpeg", 0.78);
   }, [videoRef]);
 
-  // Expose captureFrame to the parent capture flow via a window-level
-  // escape hatch (matches the existing pattern used elsewhere).
   useEffect(() => {
-    (window as unknown as { __trendelenburgCapture?: () => string | null }).__trendelenburgCapture = captureFrame;
+    (window as unknown as { __singleLegSquatCapture?: () => string | null }).__singleLegSquatCapture = captureFrame;
     return () => {
-      delete (window as unknown as { __trendelenburgCapture?: () => string | null }).__trendelenburgCapture;
+      delete (window as unknown as { __singleLegSquatCapture?: () => string | null }).__singleLegSquatCapture;
     };
   }, [captureFrame]);
 
-  // Tear down the camera on unmount.
   useEffect(() => () => stop(), [stop]);
 
   async function handleStart() {
@@ -286,15 +250,7 @@ export function TrendelenburgLiveCamera({ onFrame, onError }: Props) {
         ref={containerRef}
         className="relative aspect-video overflow-hidden rounded-card border border-border bg-gradient-to-br from-[#0A0A0B] via-[#0d0d10] to-[#15151a]"
       >
-        {/* Skeleton-only canvas — primary view on dark bg. */}
-        <canvas
-          ref={overlayRef}
-          className="pointer-events-none absolute inset-0"
-        />
-
-        {/* PiP — small mirrored selfie preview. Video element is always
-            in the DOM so the ref stays stable; visibility is toggled by
-            opacity. */}
+        <canvas ref={overlayRef} className="pointer-events-none absolute inset-0" />
         <div
           className={`absolute bottom-3 right-3 z-10 overflow-hidden rounded-lg border border-white/15 bg-black/80 shadow-2xl transition-opacity duration-200 ${
             active && showPip ? "opacity-100" : "pointer-events-none opacity-0"
@@ -310,8 +266,6 @@ export function TrendelenburgLiveCamera({ onFrame, onError }: Props) {
             Live
           </span>
         </div>
-
-        {/* Camera-off placeholder */}
         {!active && (
           <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
             {!detectorReady ? (
@@ -327,8 +281,6 @@ export function TrendelenburgLiveCamera({ onFrame, onError }: Props) {
             )}
           </div>
         )}
-
-        {/* Pose-model load error */}
         {active && detectorError && (
           <div className="absolute inset-x-3 top-3 mx-auto flex max-w-md items-start gap-2 rounded-md bg-error/90 px-3 py-2 text-xs text-white">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -336,9 +288,7 @@ export function TrendelenburgLiveCamera({ onFrame, onError }: Props) {
           </div>
         )}
       </div>
-
       {camError && <p className="mt-3 text-xs text-error">{camError}</p>}
-
       <div className="mt-4 flex flex-wrap gap-3">
         {!active ? (
           <Button onClick={handleStart} disabled={busy}>
