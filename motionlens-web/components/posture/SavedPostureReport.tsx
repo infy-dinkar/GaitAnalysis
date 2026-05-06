@@ -5,6 +5,7 @@
 
 import { useMemo } from "react";
 import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
+import { RelativeUnitsCaveat } from "@/components/posture/RelativeUnitsCaveat";
 import {
   buildFrontFindings,
   buildSideFindings,
@@ -61,7 +62,10 @@ export function SavedPostureReport({
         <FindingsTable title="Front view findings" findings={fFindings} />
       )}
       {sFindings.length > 0 && (
-        <FindingsTable title="Side view findings" findings={sFindings} />
+        <div>
+          <FindingsTable title="Side view findings" findings={sFindings} />
+          <RelativeUnitsCaveat />
+        </div>
       )}
 
       {fFindings.length === 0 && sFindings.length === 0 && (

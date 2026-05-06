@@ -14,12 +14,26 @@ export interface ReportSummaryDTO {
   created_at: string;
 }
 
+// Per-keypoint shape stored on posture sessions. Matches the
+// `Keypoint` type emitted by @tensorflow-models/pose-detection
+// (TF.js MoveNet); only x/y are required, score/name optional.
+export interface KeypointDTO {
+  x: number;
+  y: number;
+  score?: number;
+  name?: string;
+}
+
 export interface ReportDTO extends ReportSummaryDTO {
   metrics: Record<string, unknown>;
   figures: Record<string, unknown>[];
   observations: Record<string, unknown>;
   video_filename: string | null;
   video_size_bytes: number | null;
+  // Spec Section 2 (a): raw landmark stream as JSON. Posture saves
+  // a single front + side snapshot; null-valued for legacy reports
+  // saved before this field existed.
+  keypoints?: Record<string, KeypointDTO[] | null> | null;
 }
 
 export interface ReportCreatePayload {
@@ -32,6 +46,7 @@ export interface ReportCreatePayload {
   observations?: Record<string, unknown>;
   video_filename?: string;
   video_size_bytes?: number;
+  keypoints?: Record<string, KeypointDTO[] | null>;
 }
 
 export interface ReportListResponse {

@@ -96,6 +96,14 @@ export function PostureCapture() {
                 front_findings: frontFindings,
                 side_findings: sideFindings,
               },
+              // Spec Section 2 (a): persist the raw landmark stream as
+              // JSON. Photos are NOT uploaded — only the keypoint
+              // arrays the in-browser detector produced. ~1-2 KB per
+              // view × 2 views = well under 10 KB total.
+              keypoints: {
+                front: front?.keypoints ?? null,
+                side: side?.keypoints ?? null,
+              },
             };
           }}
         />

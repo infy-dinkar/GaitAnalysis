@@ -62,6 +62,9 @@ def _to_report(doc: dict) -> Report:
         observations=doc.get("observations") or {},
         video_filename=doc.get("video_filename"),
         video_size_bytes=doc.get("video_size_bytes"),
+        # `.get(...)` keeps legacy docs (no keypoints key) returning None
+        # rather than KeyError-ing.
+        keypoints=doc.get("keypoints"),
         created_at=doc["created_at"],
     )
 
@@ -121,6 +124,9 @@ async def create_report(
         "observations": payload.observations,
         "video_filename": payload.video_filename,
         "video_size_bytes": payload.video_size_bytes,
+        # Spec Section 2 (a): raw landmark stream is persisted alongside
+        # metrics so saved posture sessions can be re-rendered later.
+        "keypoints": payload.keypoints,
         "created_at": now,
     }
     result = await db.reports.insert_one(doc)

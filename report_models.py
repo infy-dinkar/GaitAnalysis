@@ -45,6 +45,15 @@ class ReportCreate(BaseModel):
     video_filename: Optional[str] = Field(default=None, max_length=200)
     video_size_bytes: Optional[int] = Field(default=None, ge=0)
 
+    # Spec Section 2 (a): raw landmark stream as JSON. Currently used
+    # by the posture module — saves the front + side keypoint arrays
+    # so saved sessions can be re-rendered (annotation overlay, side-
+    # by-side comparison, future trend tracking) without keeping the
+    # original photo on disk. Optional for backward compatibility
+    # with reports saved before this field existed.
+    # Shape: { "<view-name>": [ { x, y, score?, name? }, ... ] | null }
+    keypoints: Optional[dict[str, Optional[list[dict[str, Any]]]]] = None
+
 
 # ─── Public report response ────────────────────────────────────────
 class Report(BaseModel):
@@ -60,6 +69,8 @@ class Report(BaseModel):
     observations: dict[str, Any] = Field(default_factory=dict)
     video_filename: Optional[str] = None
     video_size_bytes: Optional[int] = None
+    # Optional raw-landmark stream (posture sessions). See ReportCreate.
+    keypoints: Optional[dict[str, Optional[list[dict[str, Any]]]]] = None
     created_at: datetime
 
 

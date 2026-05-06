@@ -5,6 +5,7 @@
 import { useMemo } from "react";
 import { PostureImageOverlay } from "@/components/posture/PostureImageOverlay";
 import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
+import { RelativeUnitsCaveat } from "@/components/posture/RelativeUnitsCaveat";
 import {
   buildFrontFindings,
   buildSideFindings,
@@ -65,10 +66,13 @@ export function PostureReport({ front, side }: Props) {
         />
       )}
       {sideFindings.length > 0 && (
-        <FindingsTable
-          title="Side view findings"
-          findings={sideFindings}
-        />
+        <div>
+          <FindingsTable
+            title="Side view findings"
+            findings={sideFindings}
+          />
+          <RelativeUnitsCaveat />
+        </div>
       )}
 
       {/* ── Unified report disclaimer ──────────────────────────── */}
