@@ -291,8 +291,16 @@ function drawSideBadges(
   w: number,
   _h: number,
 ) {
-  if (m.pickedSide === null) return;
-  const idx = m.pickedSide === "left"
+  // After Fix 4 the metrics live under m.left / m.right. Use whichever
+  // side has data, preferring `pickedSide` for the on-image overlay
+  // (only one set of badges fits on a single photo).
+  const block =
+    (m.pickedSide === "left" ? m.left : null) ??
+    (m.pickedSide === "right" ? m.right : null) ??
+    m.left ?? m.right;
+  if (!block) return;
+  const overlaySide = m.pickedSide ?? (m.left ? "left" : "right");
+  const idx = overlaySide === "left"
     ? { ear: LM.LEFT_EAR, sh: LM.LEFT_SHOULDER, hip: LM.LEFT_HIP, knee: LM.LEFT_KNEE }
     : { ear: LM.RIGHT_EAR, sh: LM.RIGHT_SHOULDER, hip: LM.RIGHT_HIP, knee: LM.RIGHT_KNEE };
 
@@ -302,12 +310,12 @@ function drawSideBadges(
     drawBadge(ctx, label, p.x + 12, p.y, w);
   };
 
-  if (m.forwardHeadPct !== null)
-    drawAt(`${m.forwardHeadPct.toFixed(2)}%`, idx.ear);
-  if (m.shoulderShiftPct !== null)
-    drawAt(`${m.shoulderShiftPct.toFixed(2)}%`, idx.sh);
-  if (m.hipShiftPct !== null)
-    drawAt(`${m.hipShiftPct.toFixed(2)}%`, idx.hip);
-  if (m.kneeShiftPct !== null)
-    drawAt(`${m.kneeShiftPct.toFixed(2)}%`, idx.knee);
+  if (block.forwardHeadPct !== null)
+    drawAt(`${block.forwardHeadPct.toFixed(2)}%`, idx.ear);
+  if (block.shoulderShiftPct !== null)
+    drawAt(`${block.shoulderShiftPct.toFixed(2)}%`, idx.sh);
+  if (block.hipShiftPct !== null)
+    drawAt(`${block.hipShiftPct.toFixed(2)}%`, idx.hip);
+  if (block.kneeShiftPct !== null)
+    drawAt(`${block.kneeShiftPct.toFixed(2)}%`, idx.knee);
 }
