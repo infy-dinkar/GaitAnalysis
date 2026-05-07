@@ -14,7 +14,8 @@ export interface ReportSummaryDTO {
     | "trendelenburg"
     | "single_leg_squat"
     | "sit_to_stand"
-    | "chair_stand_30s";
+    | "chair_stand_30s"
+    | "single_leg_stance";
   body_part: string | null;
   movement: string | null;
   side: string | null;
@@ -51,7 +52,8 @@ export interface ReportCreatePayload {
     | "trendelenburg"
     | "single_leg_squat"
     | "sit_to_stand"
-    | "chair_stand_30s";
+    | "chair_stand_30s"
+    | "single_leg_stance";
   body_part?: "shoulder" | "neck" | "knee" | "hip" | "ankle";
   movement?: string;
   side?: "left" | "right";

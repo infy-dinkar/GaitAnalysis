@@ -14,6 +14,7 @@ import { SavedTrendelenburgReport } from "@/components/orthopedic/SavedTrendelen
 import { SavedSingleLegSquatReport } from "@/components/orthopedic/SavedSingleLegSquatReport";
 import { SavedSitToStandReport } from "@/components/orthopedic/SavedSitToStandReport";
 import { SavedChairStand30sReport } from "@/components/orthopedic/SavedChairStand30sReport";
+import { SavedSingleLegStanceReport } from "@/components/orthopedic/SavedSingleLegStanceReport";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { formatIST } from "@/lib/format/datetime";
 import type { ReportDTO } from "@/lib/reports";
@@ -307,6 +308,16 @@ function ReportBody({
     );
   }
 
+  if (report.module === "single_leg_stance") {
+    return (
+      <SavedSingleLegStanceReport
+        patientName={patient.name}
+        metrics={report.metrics as Record<string, unknown>}
+        observations={report.observations as Record<string, unknown>}
+      />
+    );
+  }
+
   return <Notice>Unsupported module: {report.module}</Notice>;
 }
 
@@ -338,7 +349,35 @@ function buildDeltaRows(left: ReportDTO, right: ReportDTO): DeltaRow[] {
   if (left.module === "single_leg_squat") return singleLegSquatDeltas(left, right);
   if (left.module === "sit_to_stand") return sitToStandDeltas(left, right);
   if (left.module === "chair_stand_30s") return chairStand30sDeltas(left, right);
+  if (left.module === "single_leg_stance") return singleLegStanceDeltas(left, right);
   return [];
+}
+
+function singleLegStanceDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
+  const ls = (left.metrics  as Record<string, unknown>).session as Record<string, unknown> | null | undefined;
+  const rs = (right.metrics as Record<string, unknown>).session as Record<string, unknown> | null | undefined;
+  if (!ls || !rs) return [];
+  const trialsL = ls.trials as Record<string, Record<string, unknown> | null | undefined> | undefined;
+  const trialsR = rs.trials as Record<string, Record<string, unknown> | null | undefined> | undefined;
+  const rows: DeltaRow[] = [];
+  for (const key of ["left_open", "right_open", "left_closed", "right_closed"] as const) {
+    const lT = trialsL?.[key];
+    const rT = trialsR?.[key];
+    if (!lT && !rT) continue;
+    const label =
+      key === "left_open"    ? "Left (eyes-open) hold"
+      : key === "right_open"  ? "Right (eyes-open) hold"
+      : key === "left_closed" ? "Left (eyes-closed) hold"
+      :                         "Right (eyes-closed) hold";
+    rows.push(deltaRow(
+      label,
+      lT ? pickNumber(lT, "hold_seconds") : null,
+      rT ? pickNumber(rT, "hold_seconds") : null,
+      " s",
+      "higher_is_better",
+    ));
+  }
+  return rows.filter((r) => r.before !== null || r.after !== null);
 }
 
 function chairStand30sDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
@@ -628,6 +667,7 @@ function moduleHeading(r: ReportDTO): string {
   if (r.module === "single_leg_squat") return "Single-leg squat";
   if (r.module === "sit_to_stand") return "5x Sit-to-Stand";
   if (r.module === "chair_stand_30s") return "30-Second Chair Stand";
+  if (r.module === "single_leg_stance") return "Single-Leg Stance";
   const bp = r.body_part ? `${r.body_part.charAt(0).toUpperCase()}${r.body_part.slice(1)}` : "";
   const mv = r.movement ? `${r.movement.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}` : "";
   return [bp, mv].filter(Boolean).join(" · ") || "Biomechanics";

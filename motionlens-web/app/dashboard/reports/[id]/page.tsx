@@ -18,6 +18,7 @@ import {
   Loader2,
   Move3d,
   PersonStanding,
+  Scale,
   StretchHorizontal,
   TimerIcon,
 } from "lucide-react";
@@ -30,6 +31,7 @@ import { SavedTrendelenburgReport } from "@/components/orthopedic/SavedTrendelen
 import { SavedSingleLegSquatReport } from "@/components/orthopedic/SavedSingleLegSquatReport";
 import { SavedSitToStandReport } from "@/components/orthopedic/SavedSitToStandReport";
 import { SavedChairStand30sReport } from "@/components/orthopedic/SavedChairStand30sReport";
+import { SavedSingleLegStanceReport } from "@/components/orthopedic/SavedSingleLegStanceReport";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { getReport, type ReportDTO } from "@/lib/reports";
 import { getPatient, type PatientDTO } from "@/lib/patients";
@@ -53,6 +55,7 @@ const MODULE_META: Record<
   single_leg_squat: { label: "Single-leg squat", icon: Move3d },
   sit_to_stand: { label: "5x Sit-to-Stand", icon: ArmchairIcon },
   chair_stand_30s: { label: "30-Second Chair Stand", icon: TimerIcon },
+  single_leg_stance: { label: "Single-Leg Stance", icon: Scale },
 };
 
 export default function ReportViewPage({
@@ -243,6 +246,13 @@ function ReportView({ id }: { id: string }) {
         )}
         {report.module === "chair_stand_30s" && (
           <SavedChairStand30sReport
+            patientName={patient?.name ?? null}
+            metrics={report.metrics as Record<string, unknown>}
+            observations={report.observations as Record<string, unknown>}
+          />
+        )}
+        {report.module === "single_leg_stance" && (
+          <SavedSingleLegStanceReport
             patientName={patient?.name ?? null}
             metrics={report.metrics as Record<string, unknown>}
             observations={report.observations as Record<string, unknown>}

@@ -108,3 +108,77 @@ export function getChairStand30sNorm(
     bandLabel: "generic threshold (band lookup failed)",
   };
 }
+
+// ─── Single-Leg Stance hold-time thresholds (PDF Test C5) ───────
+//
+// Minimum hold-time in seconds for a "normal" classification. Below
+// the threshold = positive screen for balance impairment / fall
+// risk. Eyes-closed is roughly half eyes-open per PDF guidance.
+//
+// Bands extend below 60 (use the <60 row) and clamp at 70+ for the
+// oldest patients, with `comparable: false` on out-of-band age or
+// missing demographics.
+interface SingleLegStanceBand {
+  readonly ageMin: number;
+  readonly ageMax: number;
+  readonly eyesOpenSec: number;
+  readonly eyesClosedSec: number;
+}
+
+const SINGLE_LEG_STANCE_BANDS: readonly SingleLegStanceBand[] = [
+  { ageMin: 0,   ageMax: 59,  eyesOpenSec: 10, eyesClosedSec: 5   },
+  { ageMin: 60,  ageMax: 69,  eyesOpenSec: 7,  eyesClosedSec: 3.5 },
+  { ageMin: 70,  ageMax: 200, eyesOpenSec: 5,  eyesClosedSec: 2.5 },
+];
+
+export interface SingleLegStanceNorm {
+  /** Hold-this-many-seconds-or-more = passing per the matched band. */
+  passThresholdSec: number;
+  /** True when the patient's age was provided (the table covers all
+   *  ages via clamping, so the only failure mode is missing age). */
+  comparable: boolean;
+  /** Human-readable description of the matched band. */
+  bandLabel: string;
+}
+
+export function getSingleLegStanceNorm(
+  age: number | null | undefined,
+  eyesClosed: boolean,
+): SingleLegStanceNorm {
+  // Missing age — fall back to the strictest band (age <60) so we
+  // err toward flagging rather than missing fall risk. Flagged as
+  // non-comparable so the report calls it out.
+  if (age === null || age === undefined) {
+    const band = SINGLE_LEG_STANCE_BANDS[0];
+    return {
+      passThresholdSec: eyesClosed ? band.eyesClosedSec : band.eyesOpenSec,
+      comparable: false,
+      bandLabel: "strictest threshold (patient age not available)",
+    };
+  }
+
+  for (const band of SINGLE_LEG_STANCE_BANDS) {
+    if (age >= band.ageMin && age <= band.ageMax) {
+      const eo = band.eyesOpenSec;
+      const ec = band.eyesClosedSec;
+      const cond = eyesClosed ? "eyes-closed" : "eyes-open";
+      const ageLabel =
+        band.ageMin === 0     ? "under 60" :
+        band.ageMax === 200   ? "70+" :
+        `${band.ageMin}–${band.ageMax}`;
+      return {
+        passThresholdSec: eyesClosed ? ec : eo,
+        comparable: true,
+        bandLabel: `age ${ageLabel}, ${cond}`,
+      };
+    }
+  }
+
+  // Defensive — clamp + flag non-comparable.
+  const last = SINGLE_LEG_STANCE_BANDS[SINGLE_LEG_STANCE_BANDS.length - 1];
+  return {
+    passThresholdSec: eyesClosed ? last.eyesClosedSec : last.eyesOpenSec,
+    comparable: false,
+    bandLabel: "out-of-range fallback",
+  };
+}
