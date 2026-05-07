@@ -15,6 +15,7 @@ import {
   Calendar,
   FileText,
   Footprints,
+  Layers,
   Loader2,
   Move3d,
   PersonStanding,
@@ -32,6 +33,7 @@ import { SavedSingleLegSquatReport } from "@/components/orthopedic/SavedSingleLe
 import { SavedSitToStandReport } from "@/components/orthopedic/SavedSitToStandReport";
 import { SavedChairStand30sReport } from "@/components/orthopedic/SavedChairStand30sReport";
 import { SavedSingleLegStanceReport } from "@/components/orthopedic/SavedSingleLegStanceReport";
+import { SavedFourStageBalanceReport } from "@/components/orthopedic/SavedFourStageBalanceReport";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { getReport, type ReportDTO } from "@/lib/reports";
 import { getPatient, type PatientDTO } from "@/lib/patients";
@@ -56,6 +58,7 @@ const MODULE_META: Record<
   sit_to_stand: { label: "5x Sit-to-Stand", icon: ArmchairIcon },
   chair_stand_30s: { label: "30-Second Chair Stand", icon: TimerIcon },
   single_leg_stance: { label: "Single-Leg Stance", icon: Scale },
+  four_stage_balance: { label: "4-Stage Balance Test", icon: Layers },
 };
 
 export default function ReportViewPage({
@@ -253,6 +256,13 @@ function ReportView({ id }: { id: string }) {
         )}
         {report.module === "single_leg_stance" && (
           <SavedSingleLegStanceReport
+            patientName={patient?.name ?? null}
+            metrics={report.metrics as Record<string, unknown>}
+            observations={report.observations as Record<string, unknown>}
+          />
+        )}
+        {report.module === "four_stage_balance" && (
+          <SavedFourStageBalanceReport
             patientName={patient?.name ?? null}
             metrics={report.metrics as Record<string, unknown>}
             observations={report.observations as Record<string, unknown>}

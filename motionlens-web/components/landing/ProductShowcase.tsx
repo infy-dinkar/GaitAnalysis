@@ -4,6 +4,7 @@ import {
   ArmchairIcon,
   ArrowUpRight,
   Footprints,
+  Layers,
   Move3d,
   PersonStanding,
   Scale,
@@ -113,15 +114,26 @@ const PRODUCTS: ProductCard[] = [
     icon: Scale,
     iconTone: "text-teal-500",
   },
+  {
+    href: "/orthopedic/4-stage-balance",
+    eyebrow: "Balance test",
+    title: "4-Stage Balance Test.",
+    body:
+      "CDC fall-risk progression. 4 progressively harder static stances held for 10 s each, sway path + 95% ellipse per stage, classification on stage reached.",
+    gradient:
+      "linear-gradient(135deg, rgba(99,102,241,0.20) 0%, rgba(129,140,248,0.10) 50%, rgba(28,28,33,0.0) 100%)",
+    icon: Layers,
+    iconTone: "text-indigo-500",
+  },
 ];
 
 export function ProductShowcase() {
   return (
     <Section id="modules" className="bg-dots">
       <div className="max-w-2xl">
-        <Badge>Eight modules</Badge>
+        <Badge>Nine modules</Badge>
         <h2 className="mt-5 text-3xl font-semibold tracking-tight md:text-5xl">
-          Movement, measured<br />eight ways.
+          Movement, measured<br />nine ways.
         </h2>
       </div>
 

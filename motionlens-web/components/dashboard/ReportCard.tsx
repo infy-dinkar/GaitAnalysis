@@ -8,6 +8,7 @@ import {
   ArmchairIcon,
   Download,
   Footprints,
+  Layers,
   PersonStanding,
   ChevronRight,
   Loader2,
@@ -63,6 +64,11 @@ const MODULE_META: Record<
     label: "Single-Leg Stance",
     icon: Scale,
     tone: "bg-teal-500/10 text-teal-700 dark:text-teal-400",
+  },
+  four_stage_balance: {
+    label: "4-Stage Balance Test",
+    icon: Layers,
+    tone: "bg-indigo-500/10 text-indigo-700 dark:text-indigo-400",
   },
 };
 

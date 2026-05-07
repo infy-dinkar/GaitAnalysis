@@ -30,6 +30,7 @@ class ReportCreate(BaseModel):
         "sit_to_stand",
         "chair_stand_30s",
         "single_leg_stance",
+        "four_stage_balance",
     ]
 
     # Biomech-specific (optional for other modules)

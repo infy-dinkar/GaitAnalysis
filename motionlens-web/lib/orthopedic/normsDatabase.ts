@@ -182,3 +182,49 @@ export function getSingleLegStanceNorm(
     bandLabel: "out-of-range fallback",
   };
 }
+
+// ─── 4-Stage Balance Test (PDF Test C4) ─────────────────────────
+//
+// CDC fall-risk progression: side-by-side → semi-tandem → tandem
+// → single-leg, 10 s each. Cutoffs are at the SESSION level
+// (which stage they reach, plus age-gated stage-4 hold time):
+//
+//   - Failed before holding tandem (stage 3) for full 10 s = high
+//     fall risk (CDC criterion).
+//   - Age > 60 AND single-leg (stage 4) < 5 s = high fall risk
+//     (PDF C4 sub-criterion).
+//   - Held tandem but did not pass stage 4 = elevated fall risk.
+//   - Held all four stages = normal.
+//
+// The actual classification logic lives in fourStageBalance.ts —
+// this helper just returns the band label + comparable flag so the
+// report can describe what was applied (and warn when age is
+// missing).
+export interface FourStageBalanceNorm {
+  /** Age-gated stage-4 minimum hold (seconds) below which the
+   *  patient is classified high-fall-risk. Always 5 today, but
+   *  exposed here so the rule remains discoverable in one place. */
+  stage4HighRiskBelowSec: number;
+  /** True when patient age was provided. */
+  comparable: boolean;
+  /** Human-readable description of the matched band. */
+  bandLabel: string;
+}
+
+export function getFourStageBalanceNorm(
+  age: number | null | undefined,
+): FourStageBalanceNorm {
+  if (age === null || age === undefined) {
+    return {
+      stage4HighRiskBelowSec: 5,
+      comparable: false,
+      bandLabel: "CDC criteria — patient age not available",
+    };
+  }
+  const ageBand = age > 60 ? "age > 60" : "age ≤ 60";
+  return {
+    stage4HighRiskBelowSec: 5,
+    comparable: true,
+    bandLabel: `CDC fall-risk criteria, ${ageBand}`,
+  };
+}
