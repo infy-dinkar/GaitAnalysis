@@ -11,6 +11,7 @@ import {
   Move3d,
   PersonStanding,
   StretchHorizontal,
+  TimerIcon,
 } from "lucide-react";
 import { AuthGuard } from "@/components/auth/AuthGuard";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
@@ -69,6 +70,15 @@ const MODULES = [
     icon: ArmchairIcon,
     tone: "from-rose-500/15 to-rose-500/5",
     iconTone: "text-rose-600",
+  },
+  {
+    href: "orthopedic/30-second-chair-stand",
+    eyebrow: "Geriatric screen",
+    title: "30-Second Chair Stand",
+    body: "CDC STEADI fall-risk screen. Max sit-to-stand reps in 30 s, age- and sex-matched norm comparison, fatigue trend.",
+    icon: TimerIcon,
+    tone: "from-sky-500/15 to-sky-500/5",
+    iconTone: "text-sky-600",
   },
 ];
 

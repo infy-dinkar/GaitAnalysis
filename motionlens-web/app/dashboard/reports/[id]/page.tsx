@@ -19,6 +19,7 @@ import {
   Move3d,
   PersonStanding,
   StretchHorizontal,
+  TimerIcon,
 } from "lucide-react";
 import { AuthGuard } from "@/components/auth/AuthGuard";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
@@ -28,6 +29,7 @@ import { GaitResultsView } from "@/components/gait/GaitResultsView";
 import { SavedTrendelenburgReport } from "@/components/orthopedic/SavedTrendelenburgReport";
 import { SavedSingleLegSquatReport } from "@/components/orthopedic/SavedSingleLegSquatReport";
 import { SavedSitToStandReport } from "@/components/orthopedic/SavedSitToStandReport";
+import { SavedChairStand30sReport } from "@/components/orthopedic/SavedChairStand30sReport";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { getReport, type ReportDTO } from "@/lib/reports";
 import { getPatient, type PatientDTO } from "@/lib/patients";
@@ -50,6 +52,7 @@ const MODULE_META: Record<
   trendelenburg: { label: "Trendelenburg test", icon: StretchHorizontal },
   single_leg_squat: { label: "Single-leg squat", icon: Move3d },
   sit_to_stand: { label: "5x Sit-to-Stand", icon: ArmchairIcon },
+  chair_stand_30s: { label: "30-Second Chair Stand", icon: TimerIcon },
 };
 
 export default function ReportViewPage({
@@ -233,6 +236,13 @@ function ReportView({ id }: { id: string }) {
         )}
         {report.module === "sit_to_stand" && (
           <SavedSitToStandReport
+            patientName={patient?.name ?? null}
+            metrics={report.metrics as Record<string, unknown>}
+            observations={report.observations as Record<string, unknown>}
+          />
+        )}
+        {report.module === "chair_stand_30s" && (
+          <SavedChairStand30sReport
             patientName={patient?.name ?? null}
             metrics={report.metrics as Record<string, unknown>}
             observations={report.observations as Record<string, unknown>}

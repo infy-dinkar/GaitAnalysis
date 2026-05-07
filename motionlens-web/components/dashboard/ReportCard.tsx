@@ -13,6 +13,7 @@ import {
   Loader2,
   Move3d,
   StretchHorizontal,
+  TimerIcon,
   Trash2,
 } from "lucide-react";
 import { deleteReport, type ReportSummaryDTO } from "@/lib/reports";
@@ -51,6 +52,11 @@ const MODULE_META: Record<
     label: "5x Sit-to-Stand",
     icon: ArmchairIcon,
     tone: "bg-rose-500/10 text-rose-700 dark:text-rose-400",
+  },
+  chair_stand_30s: {
+    label: "30-Second Chair Stand",
+    icon: TimerIcon,
+    tone: "bg-sky-500/10 text-sky-700 dark:text-sky-400",
   },
 };
 

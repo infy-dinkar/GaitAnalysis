@@ -7,6 +7,7 @@ import {
   Move3d,
   PersonStanding,
   StretchHorizontal,
+  TimerIcon,
   type LucideIcon,
 } from "lucide-react";
 import { Section } from "@/components/ui/Section";
@@ -89,15 +90,26 @@ const PRODUCTS: ProductCard[] = [
     icon: ArmchairIcon,
     iconTone: "text-rose-500",
   },
+  {
+    href: "/orthopedic/30-second-chair-stand",
+    eyebrow: "Geriatric screen",
+    title: "30-Second Chair Stand.",
+    body:
+      "CDC STEADI fall-risk screen. Max sit-to-stand reps in 30 s, age- and sex-matched norm comparison, fatigue trend.",
+    gradient:
+      "linear-gradient(135deg, rgba(14,165,233,0.20) 0%, rgba(56,189,248,0.10) 50%, rgba(28,28,33,0.0) 100%)",
+    icon: TimerIcon,
+    iconTone: "text-sky-500",
+  },
 ];
 
 export function ProductShowcase() {
   return (
     <Section id="modules" className="bg-dots">
       <div className="max-w-2xl">
-        <Badge>Six modules</Badge>
+        <Badge>Seven modules</Badge>
         <h2 className="mt-5 text-3xl font-semibold tracking-tight md:text-5xl">
-          Movement, measured<br />six ways.
+          Movement, measured<br />seven ways.
         </h2>
       </div>
 
