@@ -5,6 +5,7 @@ import { useState } from "react";
 import Link from "next/link";
 import {
   Activity,
+  ArmchairIcon,
   Download,
   Footprints,
   PersonStanding,
@@ -45,6 +46,11 @@ const MODULE_META: Record<
     label: "Single-leg squat",
     icon: Move3d,
     tone: "bg-fuchsia-500/10 text-fuchsia-700 dark:text-fuchsia-400",
+  },
+  sit_to_stand: {
+    label: "5x Sit-to-Stand",
+    icon: ArmchairIcon,
+    tone: "bg-rose-500/10 text-rose-700 dark:text-rose-400",
   },
 };
 

@@ -4,6 +4,7 @@
 import Link from "next/link";
 import { use as usePromise } from "react";
 import {
+  ArmchairIcon,
   ArrowUpRight,
   Footprints,
   Activity,
@@ -59,6 +60,15 @@ const MODULES = [
     icon: Move3d,
     tone: "from-fuchsia-500/15 to-fuchsia-500/5",
     iconTone: "text-fuchsia-600",
+  },
+  {
+    href: "orthopedic/sit-to-stand",
+    eyebrow: "Geriatric screen",
+    title: "5x Sit-to-Stand",
+    body: "Lower-extremity strength + fall-risk indicator. 5 timed sit-to-stand cycles, auto rep detection, fatigue + arm-uncrossing flags.",
+    icon: ArmchairIcon,
+    tone: "from-rose-500/15 to-rose-500/5",
+    iconTone: "text-rose-600",
   },
 ];
 

@@ -27,6 +27,7 @@ class ReportCreate(BaseModel):
         "posture",
         "trendelenburg",
         "single_leg_squat",
+        "sit_to_stand",
     ]
 
     # Biomech-specific (optional for other modules)

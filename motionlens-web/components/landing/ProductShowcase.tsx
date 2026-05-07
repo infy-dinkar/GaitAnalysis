@@ -1,6 +1,7 @@
 import Link from "next/link";
 import {
   Activity,
+  ArmchairIcon,
   ArrowUpRight,
   Footprints,
   Move3d,
@@ -77,15 +78,26 @@ const PRODUCTS: ProductCard[] = [
     icon: Move3d,
     iconTone: "text-fuchsia-500",
   },
+  {
+    href: "/orthopedic/sit-to-stand",
+    eyebrow: "Geriatric screen",
+    title: "5x Sit-to-Stand.",
+    body:
+      "Lower-extremity strength + fall-risk indicator. 5 timed sit-to-stand cycles, auto rep detection, fatigue + arm-uncrossing flags.",
+    gradient:
+      "linear-gradient(135deg, rgba(244,63,94,0.20) 0%, rgba(251,113,133,0.10) 50%, rgba(28,28,33,0.0) 100%)",
+    icon: ArmchairIcon,
+    iconTone: "text-rose-500",
+  },
 ];
 
 export function ProductShowcase() {
   return (
     <Section id="modules" className="bg-dots">
       <div className="max-w-2xl">
-        <Badge>Five modules</Badge>
+        <Badge>Six modules</Badge>
         <h2 className="mt-5 text-3xl font-semibold tracking-tight md:text-5xl">
-          Movement, measured<br />five ways.
+          Movement, measured<br />six ways.
         </h2>
       </div>
 
