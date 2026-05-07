@@ -15,6 +15,7 @@ import { SavedSingleLegSquatReport } from "@/components/orthopedic/SavedSingleLe
 import { SavedSitToStandReport } from "@/components/orthopedic/SavedSitToStandReport";
 import { SavedChairStand30sReport } from "@/components/orthopedic/SavedChairStand30sReport";
 import { SavedSingleLegStanceReport } from "@/components/orthopedic/SavedSingleLegStanceReport";
+import { SavedFourStageBalanceReport } from "@/components/orthopedic/SavedFourStageBalanceReport";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { formatIST } from "@/lib/format/datetime";
 import type { ReportDTO } from "@/lib/reports";
@@ -318,6 +319,16 @@ function ReportBody({
     );
   }
 
+  if (report.module === "four_stage_balance") {
+    return (
+      <SavedFourStageBalanceReport
+        patientName={patient.name}
+        metrics={report.metrics as Record<string, unknown>}
+        observations={report.observations as Record<string, unknown>}
+      />
+    );
+  }
+
   return <Notice>Unsupported module: {report.module}</Notice>;
 }
 
@@ -350,7 +361,38 @@ function buildDeltaRows(left: ReportDTO, right: ReportDTO): DeltaRow[] {
   if (left.module === "sit_to_stand") return sitToStandDeltas(left, right);
   if (left.module === "chair_stand_30s") return chairStand30sDeltas(left, right);
   if (left.module === "single_leg_stance") return singleLegStanceDeltas(left, right);
+  if (left.module === "four_stage_balance") return fourStageBalanceDeltas(left, right);
   return [];
+}
+
+function fourStageBalanceDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
+  const ls = (left.metrics  as Record<string, unknown>).session as Record<string, unknown> | null | undefined;
+  const rs = (right.metrics as Record<string, unknown>).session as Record<string, unknown> | null | undefined;
+  if (!ls || !rs) return [];
+  const rows: DeltaRow[] = [];
+  rows.push(deltaRow(
+    "Final stage completed",
+    pickNumber(ls, "final_stage_completed"),
+    pickNumber(rs, "final_stage_completed"),
+    " / 4",
+    "higher_is_better",
+  ));
+  // Per-stage hold seconds.
+  const stagesL = ls.stages as Record<string, Record<string, unknown> | null | undefined> | undefined;
+  const stagesR = rs.stages as Record<string, Record<string, unknown> | null | undefined> | undefined;
+  for (const s of ["1", "2", "3", "4"] as const) {
+    const lT = stagesL?.[s];
+    const rT = stagesR?.[s];
+    if (!lT && !rT) continue;
+    rows.push(deltaRow(
+      `Stage ${s} duration`,
+      lT ? pickNumber(lT, "duration_seconds") : null,
+      rT ? pickNumber(rT, "duration_seconds") : null,
+      " s",
+      "higher_is_better",
+    ));
+  }
+  return rows.filter((r) => r.before !== null || r.after !== null);
 }
 
 function singleLegStanceDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
@@ -668,6 +710,7 @@ function moduleHeading(r: ReportDTO): string {
   if (r.module === "sit_to_stand") return "5x Sit-to-Stand";
   if (r.module === "chair_stand_30s") return "30-Second Chair Stand";
   if (r.module === "single_leg_stance") return "Single-Leg Stance";
+  if (r.module === "four_stage_balance") return "4-Stage Balance Test";
   const bp = r.body_part ? `${r.body_part.charAt(0).toUpperCase()}${r.body_part.slice(1)}` : "";
   const mv = r.movement ? `${r.movement.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}` : "";
   return [bp, mv].filter(Boolean).join(" · ") || "Biomechanics";

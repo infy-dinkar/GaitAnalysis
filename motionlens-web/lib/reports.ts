@@ -15,7 +15,8 @@ export interface ReportSummaryDTO {
     | "single_leg_squat"
     | "sit_to_stand"
     | "chair_stand_30s"
-    | "single_leg_stance";
+    | "single_leg_stance"
+    | "four_stage_balance";
   body_part: string | null;
   movement: string | null;
   side: string | null;
@@ -53,7 +54,8 @@ export interface ReportCreatePayload {
     | "single_leg_squat"
     | "sit_to_stand"
     | "chair_stand_30s"
-    | "single_leg_stance";
+    | "single_leg_stance"
+    | "four_stage_balance";
   body_part?: "shoulder" | "neck" | "knee" | "hip" | "ankle";
   movement?: string;
   side?: "left" | "right";

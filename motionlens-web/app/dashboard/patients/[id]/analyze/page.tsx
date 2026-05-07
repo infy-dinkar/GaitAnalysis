@@ -8,6 +8,7 @@ import {
   ArrowUpRight,
   Footprints,
   Activity,
+  Layers,
   Move3d,
   PersonStanding,
   Scale,
@@ -89,6 +90,15 @@ const MODULES = [
     icon: Scale,
     tone: "from-teal-500/15 to-teal-500/5",
     iconTone: "text-teal-600",
+  },
+  {
+    href: "orthopedic/4-stage-balance",
+    eyebrow: "Balance test",
+    title: "4-Stage Balance Test",
+    body: "CDC fall-risk progression. 4 progressively harder static stances held for 10 s each, sway path + 95% ellipse per stage, classification on stage reached.",
+    icon: Layers,
+    tone: "from-indigo-500/15 to-indigo-500/5",
+    iconTone: "text-indigo-600",
   },
 ];
 
