@@ -105,6 +105,19 @@ export function SingleLegSquatCapture() {
   const finishSide = useCallback((termination: SingleLegSquatSideResult["termination"]) => {
     const rec = recordingRef.current;
     if (!rec) return;
+    // Fallback screenshot: if no worst-rep frame was captured during
+    // the trial (e.g. trial was stopped early or no reps were
+    // detected), grab the current frame so the saved report still
+    // has a visual reference for the doctor.
+    if (!rec.worstScreenshot) {
+      const grab = (window as unknown as {
+        __singleLegSquatCapture?: () => string | null;
+      }).__singleLegSquatCapture;
+      if (grab) {
+        const url = grab();
+        if (url) rec.worstScreenshot = url;
+      }
+    }
     const summary = summarizeSide(
       rec.side,
       rec.startedAt,

@@ -108,6 +108,19 @@ export function TrendelenburgCapture() {
   const finishSide = useCallback((termination: TrendelenburgSideResult["termination"]) => {
     const rec = recordingRef.current;
     if (!rec) return;
+    // Fallback screenshot: if no peak-drop frame was captured during
+    // the trial (e.g. drop never exceeded 0 because the test was
+    // negative), grab the current frame so the report still has a
+    // visual reference of the stance.
+    if (!rec.peakScreenshotDataUrl) {
+      const grab = (window as unknown as {
+        __trendelenburgCapture?: () => string | null;
+      }).__trendelenburgCapture;
+      if (grab) {
+        const url = grab();
+        if (url) rec.peakScreenshotDataUrl = url;
+      }
+    }
     const summary = summarizeSide(
       rec.side,
       rec.startedAt,
