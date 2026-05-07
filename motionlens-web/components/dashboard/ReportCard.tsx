@@ -12,6 +12,7 @@ import {
   ChevronRight,
   Loader2,
   Move3d,
+  Scale,
   StretchHorizontal,
   TimerIcon,
   Trash2,
@@ -57,6 +58,11 @@ const MODULE_META: Record<
     label: "30-Second Chair Stand",
     icon: TimerIcon,
     tone: "bg-sky-500/10 text-sky-700 dark:text-sky-400",
+  },
+  single_leg_stance: {
+    label: "Single-Leg Stance",
+    icon: Scale,
+    tone: "bg-teal-500/10 text-teal-700 dark:text-teal-400",
   },
 };
 

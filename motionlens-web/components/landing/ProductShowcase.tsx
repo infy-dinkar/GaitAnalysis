@@ -6,6 +6,7 @@ import {
   Footprints,
   Move3d,
   PersonStanding,
+  Scale,
   StretchHorizontal,
   TimerIcon,
   type LucideIcon,
@@ -101,15 +102,26 @@ const PRODUCTS: ProductCard[] = [
     icon: TimerIcon,
     iconTone: "text-sky-500",
   },
+  {
+    href: "/orthopedic/single-leg-stance",
+    eyebrow: "Balance test",
+    title: "Single-Leg Stance.",
+    body:
+      "Standalone balance assessment. Eyes-open + optional eyes-closed trials per side, hold time, sway path + 95% ellipse, age-matched thresholds.",
+    gradient:
+      "linear-gradient(135deg, rgba(20,184,166,0.20) 0%, rgba(45,212,191,0.10) 50%, rgba(28,28,33,0.0) 100%)",
+    icon: Scale,
+    iconTone: "text-teal-500",
+  },
 ];
 
 export function ProductShowcase() {
   return (
     <Section id="modules" className="bg-dots">
       <div className="max-w-2xl">
-        <Badge>Seven modules</Badge>
+        <Badge>Eight modules</Badge>
         <h2 className="mt-5 text-3xl font-semibold tracking-tight md:text-5xl">
-          Movement, measured<br />seven ways.
+          Movement, measured<br />eight ways.
         </h2>
       </div>
 

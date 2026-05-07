@@ -10,6 +10,7 @@ import {
   Activity,
   Move3d,
   PersonStanding,
+  Scale,
   StretchHorizontal,
   TimerIcon,
 } from "lucide-react";
@@ -79,6 +80,15 @@ const MODULES = [
     icon: TimerIcon,
     tone: "from-sky-500/15 to-sky-500/5",
     iconTone: "text-sky-600",
+  },
+  {
+    href: "orthopedic/single-leg-stance",
+    eyebrow: "Balance test",
+    title: "Single-Leg Stance",
+    body: "Standalone balance assessment. Eyes-open + optional eyes-closed trials per side, hold time, sway path + 95% ellipse, age-matched thresholds.",
+    icon: Scale,
+    tone: "from-teal-500/15 to-teal-500/5",
+    iconTone: "text-teal-600",
   },
 ];
 
