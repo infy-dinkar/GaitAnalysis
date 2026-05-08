@@ -222,7 +222,7 @@ export function FourStageBalanceCapture() {
         }
         return;
       }
-      const inPosition = isStagePosition(run.stage, ankles);
+      const inPosition = isStagePosition(run.stage, ankles, kp);
       if (inPosition) {
         if (run.positionFirstValidMs === null) run.positionFirstValidMs = tNow;
         if (run.positionContinuousSinceMs === null) run.positionContinuousSinceMs = tNow;
@@ -234,7 +234,7 @@ export function FourStageBalanceCapture() {
           // Reset the sway buffer so it only contains the hold itself.
           run.hipPath = [];
           if (run.stage === 4) {
-            run.stage4StanceSide = detectStage4Stance(ankles);
+            run.stage4StanceSide = detectStage4Stance(ankles, kp);
           }
           run.stagePhase = "holding";
           setCoachIfChanged(
@@ -265,7 +265,7 @@ export function FourStageBalanceCapture() {
 
       // Position-drift watch (with grace window).
       if (ankles) {
-        const driftOK = isStagePosition(run.stage, ankles);
+        const driftOK = isStagePosition(run.stage, ankles, kp);
         if (driftOK) {
           run.lastValidDuringHoldMs = tNow;
         } else if (

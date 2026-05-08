@@ -66,9 +66,13 @@ const S2_X_MAX = 30;
 const S3_X_MAX = 15;
 const S3_Y_MIN = 40;
 
-// Stage 4 — Single-Leg. One ankle clearly above (smaller image-Y
-// than) the other.
-const S4_LIFT_MIN_PX = 100;
+// Stage 4 — Single-Leg. One ankle (or knee, as a fallback) clearly
+// above the other. Lowered from the original raw-px threshold to a
+// body-height-relative ratio because raw pixels don't generalise
+// across patient distance from the camera, and the previous 100 px
+// threshold caused frequent missed lifts at typical 2 m framing.
+const S4_LIFT_RATIO = 0.06;
+const S4_KNEE_LIFT_RATIO = 0.10;
 
 // Arm-grab termination — wrist abducts past 45° from vertical
 // (matches C5 / Trendelenburg).
@@ -148,6 +152,26 @@ export function computeHipMidpoint(
   return { x: (lHip.x + rHip.x) / 2, y: (lHip.y + rHip.y) / 2 };
 }
 
+// Body height in pixels — shoulder-midpoint to ankle-midpoint
+// distance. Used to scale lift / knee-lift thresholds so detection
+// works across camera distances. Returns null if neither shoulder
+// nor any ankle is reliably visible.
+function computeBodyHeightPx(keypoints: Keypoint[]): number | null {
+  const lSh = keypoints[LM.LEFT_SHOULDER];
+  const rSh = keypoints[LM.RIGHT_SHOULDER];
+  const lA = keypoints[LM.LEFT_ANKLE];
+  const rA = keypoints[LM.RIGHT_ANKLE];
+  if (!visible(lSh) || !visible(rSh)) return null;
+  const shY = (lSh.y + rSh.y) / 2;
+  const ankleY =
+    visible(lA) && visible(rA) ? (lA.y + rA.y) / 2
+    : visible(lA) ? lA.y
+    : visible(rA) ? rA.y
+    : null;
+  if (ankleY === null) return null;
+  return Math.abs(ankleY - shY);
+}
+
 export interface AnkleReading {
   lx: number; ly: number;
   rx: number; ry: number;
@@ -184,16 +208,39 @@ export function isStage3Position(a: AnkleReading): boolean {
 // Stage 4 returns the stance side (the foot still on the ground)
 // when one ankle is clearly lifted above the other. Null = neither
 // foot is meaningfully lifted yet.
-export function detectStage4Stance(a: AnkleReading): "left" | "right" | null {
-  const lift = a.dy_abs;
-  if (lift < S4_LIFT_MIN_PX) return null;
-  // Lower image-y (smaller value) = lifted foot. Stance = the OTHER foot.
-  return a.ly < a.ry ? "right" : "left";
+//
+// Body-height-relative thresholds replace the raw-px version so
+// detection holds across camera distances. Falls back to knee Y
+// diff when the ankle signal is too small (e.g. 90° hip flexion
+// with toe pointed down — the knee rises far more than the ankle).
+export function detectStage4Stance(
+  a: AnkleReading,
+  keypoints: Keypoint[],
+): "left" | "right" | null {
+  const bodyH = computeBodyHeightPx(keypoints);
+  if (!bodyH) return null;
+
+  // Primary: ankle Y difference.
+  if (a.dy_abs >= bodyH * S4_LIFT_RATIO) {
+    return a.ly < a.ry ? "right" : "left";
+  }
+
+  // Fallback: knee Y difference.
+  const lk = keypoints[LM.LEFT_KNEE];
+  const rk = keypoints[LM.RIGHT_KNEE];
+  if (lk && rk && (lk.score ?? 0) >= 0.2 && (rk.score ?? 0) >= 0.2) {
+    if (Math.abs(lk.y - rk.y) >= bodyH * S4_KNEE_LIFT_RATIO) {
+      return lk.y < rk.y ? "right" : "left";
+    }
+  }
+
+  return null;
 }
 
 export function isStagePosition(
   stage: StageIndex,
   a: AnkleReading,
+  keypoints: Keypoint[],
 ): boolean {
   if (a.dx_abs < MIN_ANKLE_SEPARATION_PX && (stage === 1 || stage === 2)) {
     // Stages 1 and 2 expect feet close together — but if MoveNet has
@@ -206,7 +253,7 @@ export function isStagePosition(
     case 1: return isStage1Position(a);
     case 2: return isStage2Position(a);
     case 3: return isStage3Position(a);
-    case 4: return detectStage4Stance(a) !== null;
+    case 4: return detectStage4Stance(a, keypoints) !== null;
   }
 }
 

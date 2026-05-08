@@ -45,6 +45,7 @@ import {
   isArmGrab,
   isFootTouchdown,
   isHopInWindow,
+  isLegLifted,
   summarizeTrial,
   type Condition,
   type FrameSample,
@@ -174,7 +175,15 @@ export function SingleLegStanceCapture() {
 
     // Pre-onset (waiting for leg lift).
     if (rec.firstStanceAt === null) {
-      if (detected === rec.side) {
+      // Three-tier check, ordered most→least specific:
+      //   1. Exact stance-side match (best — patient lifted the
+      //      expected leg, MoveNet labels are confident).
+      //   2. Any leg lifted (fallback — MoveNet labels can flip on
+      //      back-of-camera or partial-occlusion frames; we trust the
+      //      operator's clicked side and start the timer anyway).
+      //   3. Otherwise keep waiting.
+      const lifted = detected === rec.side || isLegLifted(kp);
+      if (lifted) {
         // Stance achieved. Reset baseline timestamps so hold-time
         // measures from this point.
         rec.firstStanceAt = tNow;
