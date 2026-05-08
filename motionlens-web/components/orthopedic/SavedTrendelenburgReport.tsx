@@ -11,14 +11,16 @@ import {
   type TrendelenburgFullResult,
   type TrendelenburgSideResult,
 } from "@/lib/orthopedic/trendelenburg";
+import type { PatientDTO } from "@/lib/patients";
 
 interface Props {
   patientName: string | null;
+  patient?: PatientDTO | null;
   metrics: Record<string, unknown>;
   observations: Record<string, unknown>;
 }
 
-export function SavedTrendelenburgReport({ patientName, metrics, observations }: Props) {
+export function SavedTrendelenburgReport({ patientName, patient, metrics, observations }: Props) {
   const result: TrendelenburgFullResult = {
     left:  (metrics.left  as TrendelenburgSideResult | null | undefined) ?? null,
     right: (metrics.right as TrendelenburgSideResult | null | undefined) ?? null,
@@ -33,6 +35,7 @@ export function SavedTrendelenburgReport({ patientName, metrics, observations }:
   return (
     <TrendelenburgReport
       patientName={patientName}
+      patient={patient}
       result={result}
       interpretation={interpretation}
     />

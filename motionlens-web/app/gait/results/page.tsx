@@ -20,8 +20,10 @@ import {
 } from "@/components/gait/PlotlyChart";
 import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
 import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
+import { PatientHeader } from "@/components/dashboard/PatientHeader";
 import { REPORT_DISCLAIMER } from "@/lib/disclaimer";
 import { fmt } from "@/lib/utils";
+import { usePatientContext } from "@/hooks/usePatientContext";
 import type { GaitDataDTO, JointDetailDTO, PassSegmentDTO } from "@/lib/api";
 
 const STORAGE_KEY = "motionlens.gait_api_result";
@@ -56,6 +58,11 @@ const TABS: TabDef<TabId>[] = [
 export default function GaitResultsPage() {
   const [data, setData] = useState<GaitDataDTO | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>("overview");
+
+  // Surfaces the registered patient (when launched from the doctor flow
+  // with ?patientId=...) so the PatientHeader can render age / gender /
+  // height / weight / contact / notes on the live results page.
+  const { patient: doctorPatient } = usePatientContext();
 
   useEffect(() => {
     try {
@@ -188,6 +195,15 @@ export default function GaitResultsPage() {
       <Nav />
       <main className="flex flex-col">
         <Section className="pt-32 md:pt-40">
+          {doctorPatient && (
+            <div className="mb-8">
+              <PatientHeader
+                patient={doctorPatient}
+                subtitle="Gait analysis · markerless 2D pose estimation"
+              />
+            </div>
+          )}
+
           <div className="flex items-start justify-between gap-4">
             <div>
               <Badge>Gait results</Badge>

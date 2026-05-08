@@ -79,7 +79,12 @@ export function PostureCapture() {
   if (phase === "done" && (front || side)) {
     return (
       <div className="space-y-8">
-        <PostureReport front={front} side={side} />
+        <PostureReport
+          front={front}
+          side={side}
+          patient={patient ?? null}
+          patientName={patient?.name ?? null}
+        />
 
         {/* Explicit save button — only renders in doctor flow */}
         <SaveToPatientButton

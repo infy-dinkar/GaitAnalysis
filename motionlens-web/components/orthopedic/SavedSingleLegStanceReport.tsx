@@ -6,14 +6,16 @@ import {
   buildInterpretation,
   type SessionResult,
 } from "@/lib/orthopedic/singleLegStance";
+import type { PatientDTO } from "@/lib/patients";
 
 interface Props {
   patientName: string | null;
+  patient?: PatientDTO | null;
   metrics: Record<string, unknown>;
   observations: Record<string, unknown>;
 }
 
-export function SavedSingleLegStanceReport({ patientName, metrics, observations }: Props) {
+export function SavedSingleLegStanceReport({ patientName, patient, metrics, observations }: Props) {
   const session = metrics.session as SessionResult | null | undefined;
   if (!session) {
     return (
@@ -30,6 +32,7 @@ export function SavedSingleLegStanceReport({ patientName, metrics, observations 
   return (
     <SingleLegStanceReport
       patientName={patientName}
+      patient={patient}
       session={session}
       interpretation={interpretation}
     />

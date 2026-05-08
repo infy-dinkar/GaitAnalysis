@@ -222,6 +222,7 @@ function ReportBody({
         patientNameOverride={patient.name}
         patientIdOverride={report.patient_id}
         dateOverride={dateOverride}
+        patientOverride={patient}
       />
     );
   }
@@ -239,6 +240,8 @@ function ReportBody({
         side={side}
         frontFindings={ff}
         sideFindings={sf}
+        patient={patient}
+        patientName={patient.name}
       />
     );
   }
@@ -266,13 +269,14 @@ function ReportBody({
         hip: [], knee: [], ankle: [], overall: [], suggestions: [],
       },
     };
-    return <GaitResultsView data={data} patientNameOverride={patient.name} />;
+    return <GaitResultsView data={data} patientNameOverride={patient.name} patientOverride={patient} />;
   }
 
   if (report.module === "trendelenburg") {
     return (
       <SavedTrendelenburgReport
         patientName={patient.name}
+        patient={patient}
         metrics={report.metrics as Record<string, unknown>}
         observations={report.observations as Record<string, unknown>}
       />
@@ -283,6 +287,7 @@ function ReportBody({
     return (
       <SavedSingleLegSquatReport
         patientName={patient.name}
+        patient={patient}
         metrics={report.metrics as Record<string, unknown>}
         observations={report.observations as Record<string, unknown>}
       />
@@ -293,6 +298,7 @@ function ReportBody({
     return (
       <SavedSitToStandReport
         patientName={patient.name}
+        patient={patient}
         metrics={report.metrics as Record<string, unknown>}
         observations={report.observations as Record<string, unknown>}
       />
@@ -303,6 +309,7 @@ function ReportBody({
     return (
       <SavedChairStand30sReport
         patientName={patient.name}
+        patient={patient}
         metrics={report.metrics as Record<string, unknown>}
         observations={report.observations as Record<string, unknown>}
       />
@@ -313,6 +320,7 @@ function ReportBody({
     return (
       <SavedSingleLegStanceReport
         patientName={patient.name}
+        patient={patient}
         metrics={report.metrics as Record<string, unknown>}
         observations={report.observations as Record<string, unknown>}
       />
@@ -323,6 +331,7 @@ function ReportBody({
     return (
       <SavedFourStageBalanceReport
         patientName={patient.name}
+        patient={patient}
         metrics={report.metrics as Record<string, unknown>}
         observations={report.observations as Record<string, unknown>}
       />

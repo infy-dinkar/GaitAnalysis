@@ -6,19 +6,23 @@ import { useMemo } from "react";
 import { PostureImageOverlay } from "@/components/posture/PostureImageOverlay";
 import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
 import { RelativeUnitsCaveat } from "@/components/posture/RelativeUnitsCaveat";
+import { PatientHeader } from "@/components/dashboard/PatientHeader";
 import {
   buildFrontFindings,
   buildSideFindings,
   type PostureFinding,
 } from "@/lib/posture/measurements";
 import type { PostureAnalysisResult } from "@/lib/posture/analyzer";
+import type { PatientDTO } from "@/lib/patients";
 
 interface Props {
   front: PostureAnalysisResult | null;
   side: PostureAnalysisResult | null;
+  patient?: PatientDTO | null;
+  patientName?: string | null;
 }
 
-export function PostureReport({ front, side }: Props) {
+export function PostureReport({ front, side, patient, patientName }: Props) {
   const frontFindings = useMemo<PostureFinding[]>(
     () => (front?.front ? buildFrontFindings(front.front) : []),
     [front],
@@ -41,6 +45,12 @@ export function PostureReport({ front, side }: Props) {
 
   return (
     <div className="space-y-10">
+      <PatientHeader
+        patient={patient ?? null}
+        fallbackName={patientName}
+        subtitle="Posture Assessment · static-photo screening"
+      />
+
       <div className="text-center">
         <h2 className="text-3xl font-semibold tracking-tight md:text-4xl">
           Posture Assessment

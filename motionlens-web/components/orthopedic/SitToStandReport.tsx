@@ -18,6 +18,8 @@ import {
   type SitToStandResult,
 } from "@/lib/orthopedic/sitToStand";
 import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
+import { PatientHeader } from "@/components/dashboard/PatientHeader";
+import type { PatientDTO } from "@/lib/patients";
 
 const PlotlyChart = dynamic(
   () => import("@/components/gait/PlotlyChart").then((m) => m.PlotlyChart),
@@ -26,11 +28,12 @@ const PlotlyChart = dynamic(
 
 interface Props {
   patientName: string | null;
+  patient?: PatientDTO | null;
   result: SitToStandResult;
   interpretation: string;
 }
 
-export function SitToStandReport({ patientName, result, interpretation }: Props) {
+export function SitToStandReport({ patientName, patient, result, interpretation }: Props) {
   const classTone = CLASSIFICATION_TONE[result.classification];
   const classLabel = CLASSIFICATION_LABEL[result.classification];
 
@@ -44,16 +47,19 @@ export function SitToStandReport({ patientName, result, interpretation }: Props)
 
   return (
     <div className="space-y-8">
+      <PatientHeader
+        patient={patient ?? null}
+        fallbackName={patientName}
+        subtitle={`5x Sit-to-Stand test · ${TARGET_REP_COUNT} reps`}
+      />
+
       <div className="text-center">
         <h2 className="text-3xl font-semibold tracking-tight md:text-4xl">
           5x Sit-to-Stand test
         </h2>
-        <p className="mt-2 text-sm text-muted">
-          {patientName ?? "Patient"} · {TARGET_REP_COUNT} reps
-        </p>
       </div>
 
-      <section className="rounded-card border border-border bg-surface/40 p-5">
+      <section className="rounded-card border border-border bg-surface p-5">
         <div className="flex flex-wrap items-baseline justify-between gap-3 border-b border-border pb-3">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">

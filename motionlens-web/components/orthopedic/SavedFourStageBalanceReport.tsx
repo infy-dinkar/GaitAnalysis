@@ -6,14 +6,16 @@ import {
   buildInterpretation,
   type SessionResult,
 } from "@/lib/orthopedic/fourStageBalance";
+import type { PatientDTO } from "@/lib/patients";
 
 interface Props {
   patientName: string | null;
+  patient?: PatientDTO | null;
   metrics: Record<string, unknown>;
   observations: Record<string, unknown>;
 }
 
-export function SavedFourStageBalanceReport({ patientName, metrics, observations }: Props) {
+export function SavedFourStageBalanceReport({ patientName, patient, metrics, observations }: Props) {
   const session = metrics.session as SessionResult | null | undefined;
   if (!session) {
     return (
@@ -30,6 +32,7 @@ export function SavedFourStageBalanceReport({ patientName, metrics, observations
   return (
     <FourStageBalanceReport
       patientName={patientName}
+      patient={patient}
       session={session}
       interpretation={interpretation}
     />

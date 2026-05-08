@@ -21,6 +21,8 @@ import {
   type TrendelenburgSideResult,
 } from "@/lib/orthopedic/trendelenburg";
 import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
+import { PatientHeader } from "@/components/dashboard/PatientHeader";
+import type { PatientDTO } from "@/lib/patients";
 
 const PlotlyChart = dynamic(
   () => import("@/components/gait/PlotlyChart").then((m) => m.PlotlyChart),
@@ -29,20 +31,24 @@ const PlotlyChart = dynamic(
 
 interface Props {
   patientName: string | null;
+  patient?: PatientDTO | null;
   result: TrendelenburgFullResult;
   interpretation: string;
 }
 
-export function TrendelenburgReport({ patientName, result, interpretation }: Props) {
+export function TrendelenburgReport({ patientName, patient, result, interpretation }: Props) {
   return (
     <div className="space-y-8">
+      <PatientHeader
+        patient={patient ?? null}
+        fallbackName={patientName}
+        subtitle={`Trendelenburg test · single-leg stance, ${TARGET_HOLD_SECONDS}-second hold per side`}
+      />
+
       <div className="text-center">
         <h2 className="text-3xl font-semibold tracking-tight md:text-4xl">
           Trendelenburg test
         </h2>
-        <p className="mt-2 text-sm text-muted">
-          {patientName ?? "Patient"} · single-leg stance, {TARGET_HOLD_SECONDS}-second hold per side
-        </p>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
@@ -128,7 +134,7 @@ function SideColumn({
   const leanSeries = result.samples.map((s) => s.trunk_lean_deg ?? null);
 
   return (
-    <section className="space-y-4 rounded-card border border-border bg-surface/40 p-5">
+    <section className="space-y-4 rounded-card border border-border bg-surface p-5">
       <div className="flex items-baseline justify-between gap-3 border-b border-border pb-3">
         <h3 className="text-sm font-semibold uppercase tracking-[0.12em] text-subtle">
           {label}

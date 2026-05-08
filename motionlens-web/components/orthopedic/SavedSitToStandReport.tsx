@@ -6,14 +6,16 @@ import {
   buildInterpretation,
   type SitToStandResult,
 } from "@/lib/orthopedic/sitToStand";
+import type { PatientDTO } from "@/lib/patients";
 
 interface Props {
   patientName: string | null;
+  patient?: PatientDTO | null;
   metrics: Record<string, unknown>;
   observations: Record<string, unknown>;
 }
 
-export function SavedSitToStandReport({ patientName, metrics, observations }: Props) {
+export function SavedSitToStandReport({ patientName, patient, metrics, observations }: Props) {
   const trial = metrics.trial as SitToStandResult | null | undefined;
   if (!trial) {
     return (
@@ -30,6 +32,7 @@ export function SavedSitToStandReport({ patientName, metrics, observations }: Pr
   return (
     <SitToStandReport
       patientName={patientName}
+      patient={patient}
       result={trial}
       interpretation={interpretation}
     />

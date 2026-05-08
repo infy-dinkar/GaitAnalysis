@@ -249,6 +249,7 @@ export function SitToStandCapture() {
       <div className="space-y-8">
         <SitToStandReport
           patientName={patient?.name ?? null}
+          patient={patient ?? null}
           result={result}
           interpretation={interpretation}
         />

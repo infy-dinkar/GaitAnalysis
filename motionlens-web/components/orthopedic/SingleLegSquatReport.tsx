@@ -23,6 +23,8 @@ import {
   type SingleLegSquatSideResult,
 } from "@/lib/orthopedic/singleLegSquat";
 import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
+import { PatientHeader } from "@/components/dashboard/PatientHeader";
+import type { PatientDTO } from "@/lib/patients";
 
 const PlotlyChart = dynamic(
   () => import("@/components/gait/PlotlyChart").then((m) => m.PlotlyChart),
@@ -31,20 +33,24 @@ const PlotlyChart = dynamic(
 
 interface Props {
   patientName: string | null;
+  patient?: PatientDTO | null;
   result: SingleLegSquatFullResult;
   interpretation: string;
 }
 
-export function SingleLegSquatReport({ patientName, result, interpretation }: Props) {
+export function SingleLegSquatReport({ patientName, patient, result, interpretation }: Props) {
   return (
     <div className="space-y-8">
+      <PatientHeader
+        patient={patient ?? null}
+        fallbackName={patientName}
+        subtitle={`Single-leg squat test · ${TARGET_REP_COUNT} reps per side`}
+      />
+
       <div className="text-center">
         <h2 className="text-3xl font-semibold tracking-tight md:text-4xl">
           Single-leg squat test
         </h2>
-        <p className="mt-2 text-sm text-muted">
-          {patientName ?? "Patient"} · {TARGET_REP_COUNT} reps per side
-        </p>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
@@ -120,7 +126,7 @@ function SideColumn({
   const leanSeries  = result.reps.map((r) => (r.trunk_lean_deg  !== null ? Math.abs(r.trunk_lean_deg)  : null));
 
   return (
-    <section className="space-y-4 rounded-card border border-border bg-surface/40 p-5">
+    <section className="space-y-4 rounded-card border border-border bg-surface p-5">
       <div className="flex flex-wrap items-baseline justify-between gap-3 border-b border-border pb-3">
         <h3 className="text-sm font-semibold uppercase tracking-[0.12em] text-subtle">{label}</h3>
         <div className="flex shrink-0 gap-2">

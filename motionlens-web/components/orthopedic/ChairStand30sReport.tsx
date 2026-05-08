@@ -16,6 +16,8 @@ import {
   type ChairStand30sResult,
 } from "@/lib/orthopedic/chairStand30s";
 import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
+import { PatientHeader } from "@/components/dashboard/PatientHeader";
+import type { PatientDTO } from "@/lib/patients";
 
 const PlotlyChart = dynamic(
   () => import("@/components/gait/PlotlyChart").then((m) => m.PlotlyChart),
@@ -24,11 +26,12 @@ const PlotlyChart = dynamic(
 
 interface Props {
   patientName: string | null;
+  patient?: PatientDTO | null;
   result: ChairStand30sResult;
   interpretation: string;
 }
 
-export function ChairStand30sReport({ patientName, result, interpretation }: Props) {
+export function ChairStand30sReport({ patientName, patient, result, interpretation }: Props) {
   const classTone = CLASSIFICATION_TONE[result.classification];
   const classLabel = CLASSIFICATION_LABEL[result.classification];
 
@@ -48,16 +51,19 @@ export function ChairStand30sReport({ patientName, result, interpretation }: Pro
 
   return (
     <div className="space-y-8">
+      <PatientHeader
+        patient={patient ?? null}
+        fallbackName={patientName}
+        subtitle={`30-Second Chair Stand · ${TRIAL_DURATION_SEC}-second trial`}
+      />
+
       <div className="text-center">
         <h2 className="text-3xl font-semibold tracking-tight md:text-4xl">
           30-Second Chair Stand
         </h2>
-        <p className="mt-2 text-sm text-muted">
-          {patientName ?? "Patient"} · {TRIAL_DURATION_SEC}-second trial
-        </p>
       </div>
 
-      <section className="rounded-card border border-border bg-surface/40 p-5">
+      <section className="rounded-card border border-border bg-surface p-5">
         <div className="flex flex-wrap items-baseline justify-between gap-3 border-b border-border pb-3">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">

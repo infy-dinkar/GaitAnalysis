@@ -6,14 +6,16 @@ import {
   buildInterpretation,
   type ChairStand30sResult,
 } from "@/lib/orthopedic/chairStand30s";
+import type { PatientDTO } from "@/lib/patients";
 
 interface Props {
   patientName: string | null;
+  patient?: PatientDTO | null;
   metrics: Record<string, unknown>;
   observations: Record<string, unknown>;
 }
 
-export function SavedChairStand30sReport({ patientName, metrics, observations }: Props) {
+export function SavedChairStand30sReport({ patientName, patient, metrics, observations }: Props) {
   const trial = metrics.trial as ChairStand30sResult | null | undefined;
   if (!trial) {
     return (
@@ -30,6 +32,7 @@ export function SavedChairStand30sReport({ patientName, metrics, observations }:
   return (
     <ChairStand30sReport
       patientName={patientName}
+      patient={patient}
       result={trial}
       interpretation={interpretation}
     />
