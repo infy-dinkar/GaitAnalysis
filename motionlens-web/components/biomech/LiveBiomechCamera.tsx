@@ -8,7 +8,9 @@ import type { LiveBiomechFrameDataDTO } from "@/lib/api";
 import { LM } from "@/lib/pose/landmarks";
 import {
   computeShoulderAngle,
+  computeShoulderRotationFromBaseline,
   type ShoulderMovementId,
+  type ShoulderRotationCalibration,
 } from "@/lib/biomech/shoulder";
 import {
   computeNeckAngle,
@@ -33,10 +35,15 @@ interface Props {
    *  rotation angle math switches from the legacy nose-offset formula
    *  to the calibrated arcsin(head-sphere) model. */
   neckRotationBaseline?: NeckRotationCalibration | null;
+  /** When set (only for shoulder external/internal rotation, after the
+   *  calibration phase), shoulder-rotation math switches from the
+   *  legacy forearm-vs-horizontal formula to the calibrated arcsin
+   *  model that uses the upper-arm length as the rotation reference. */
+  shoulderRotationBaseline?: ShoulderRotationCalibration | null;
   /** Fires every frame with the smoothed pixel-space keypoints used
    *  by the angle math. Lets the parent run its own pose-aware logic
-   *  (e.g. neck rotation calibration) without duplicating the EMA
-   *  smoothing or the detector wiring. */
+   *  (e.g. neck / shoulder rotation calibration) without duplicating
+   *  the EMA smoothing or the detector wiring. */
   onSmoothedKeypoints?: (keypoints: Keypoint[]) => void;
 }
 
@@ -147,6 +154,7 @@ export function LiveBiomechCamera({
   onResult,
   onError,
   neckRotationBaseline,
+  shoulderRotationBaseline,
   onSmoothedKeypoints,
 }: Props) {
   const { videoRef, active, error, start, stop } = useCamera();
@@ -164,6 +172,9 @@ export function LiveBiomechCamera({
   const neckRotationBaselineRef = useRef<NeckRotationCalibration | null>(
     neckRotationBaseline ?? null,
   );
+  const shoulderRotationBaselineRef = useRef<ShoulderRotationCalibration | null>(
+    shoulderRotationBaseline ?? null,
+  );
 
   // Per-keypoint EMA buffer to smooth jitter. Lower alpha = heavier
   // smoothing (more lag), higher = lighter (more jitter). 0.4 is a
@@ -178,6 +189,9 @@ export function LiveBiomechCamera({
   useEffect(() => {
     neckRotationBaselineRef.current = neckRotationBaseline ?? null;
   }, [neckRotationBaseline]);
+  useEffect(() => {
+    shoulderRotationBaselineRef.current = shoulderRotationBaseline ?? null;
+  }, [shoulderRotationBaseline]);
 
   // Skeleton drawing — direct canvas, no React state churn.
   const drawSkeleton = useCallback(
@@ -355,11 +369,32 @@ export function LiveBiomechCamera({
           const sideOrRight = side ?? "right";
           switch (bodyPart) {
             case "shoulder":
-              angle = computeShoulderAngle(
-                movement as ShoulderMovementId,
-                smoothedKps,
-                sideOrRight,
-              );
+              // Internal / external rotation: prefer the calibrated
+              // arcsin formula once the baseline has been locked.
+              // Other shoulder movements (flexion / extension /
+              // abduction / adduction) use the existing math
+              // unchanged. If we're in the rotation movement but the
+              // baseline isn't locked yet, fall back to the legacy
+              // formula so the camera still shows a live readout
+              // during calibration; the parent suppresses peak
+              // tracking until baseline is locked.
+              if (
+                (movement === "external_rotation" ||
+                  movement === "internal_rotation") &&
+                shoulderRotationBaselineRef.current
+              ) {
+                angle = computeShoulderRotationFromBaseline(
+                  smoothedKps,
+                  sideOrRight,
+                  shoulderRotationBaselineRef.current,
+                );
+              } else {
+                angle = computeShoulderAngle(
+                  movement as ShoulderMovementId,
+                  smoothedKps,
+                  sideOrRight,
+                );
+              }
               break;
             case "neck":
               // Rotation: prefer the calibrated arcsin formula once
