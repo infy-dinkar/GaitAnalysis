@@ -303,6 +303,7 @@ export function SingleLegStanceCapture() {
       <div className="space-y-8">
         <SingleLegStanceReport
           patientName={patient?.name ?? null}
+          patient={patient ?? null}
           session={session}
           interpretation={interpretation}
         />

@@ -2,8 +2,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { PlotlyChart } from "@/components/gait/PlotlyChart";
 import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
+import { PatientHeader } from "@/components/dashboard/PatientHeader";
 import { fmt } from "@/lib/utils";
 import { usePatientContext } from "@/hooks/usePatientContext";
+import type { PatientDTO } from "@/lib/patients";
 
 interface Props {
   bodyPart: "shoulder" | "neck" | "knee" | "hip" | "ankle";
@@ -17,6 +19,10 @@ interface Props {
   patientNameOverride?: string | null;
   patientIdOverride?: string | null;
   dateOverride?: string;
+  /** Full patient object — preferred over patientNameOverride. When
+   *  provided, the PatientHeader renders age / gender / height / weight
+   *  / contact / notes; falls back to the legacy minimal strip when not. */
+  patientOverride?: PatientDTO | null;
 }
 
 // Educational text — direct port of biomech_flow.py SHOULDER_EDU / NECK_EDU.
@@ -105,6 +111,7 @@ export function AssessmentReport({
   patientNameOverride,
   patientIdOverride,
   dateOverride,
+  patientOverride,
 }: Props) {
   // Patient identity comes from the doctor-flow context when the
   // assessment is launched from /dashboard/patients/{id}/analyze.
@@ -118,6 +125,15 @@ export function AssessmentReport({
       setSessionPatientId(getOrCreatePatientId());
     }
   }, [patientIdOverride]);
+
+  // Resolve full patient object for the rich header. Preference order:
+  //   1. patientOverride (saved-report viewer / explicit prop)
+  //   2. doctor-flow context (live capture)
+  //   3. null (anonymous)
+  const fullPatient: PatientDTO | null =
+    patientOverride !== undefined
+      ? patientOverride
+      : (doctorPatient as PatientDTO | null);
 
   const patient = patientNameOverride !== undefined
     ? (patientNameOverride ? { name: patientNameOverride, height_cm: 0 } : null)
@@ -229,18 +245,26 @@ export function AssessmentReport({
         Assessment Report
       </h2>
 
-      {/* ── Patient header strip ───────────────────────────────── */}
-      <div className="rounded-card border border-border bg-surface px-5 py-4 text-sm">
-        <span className="font-semibold text-foreground">
-          {patient?.name?.trim() || "Anonymous patient"}
-        </span>
-        <span className="text-muted"> · ID: </span>
-        <span className="tabular text-foreground">{patientId}</span>
-        <span className="text-muted"> · Date: </span>
-        <span className="tabular text-foreground">{dateStr}</span>
-        <span className="text-muted"> · Body part: </span>
-        <span className="font-semibold text-foreground">{bodyPartCap}</span>
-      </div>
+      {/* ── Patient header ─────────────────────────────────────── */}
+      {fullPatient ? (
+        <PatientHeader
+          patient={fullPatient}
+          subtitle={`ID: ${patientId} · Body part: ${bodyPartCap}`}
+          date={dateStr}
+        />
+      ) : (
+        <div className="rounded-card border border-border bg-surface px-5 py-4 text-sm">
+          <span className="font-semibold text-foreground">
+            {patient?.name?.trim() || "Anonymous patient"}
+          </span>
+          <span className="text-muted"> · ID: </span>
+          <span className="tabular text-foreground">{patientId}</span>
+          <span className="text-muted"> · Date: </span>
+          <span className="tabular text-foreground">{dateStr}</span>
+          <span className="text-muted"> · Body part: </span>
+          <span className="font-semibold text-foreground">{bodyPartCap}</span>
+        </div>
+      )}
 
       {/* ── Results table ──────────────────────────────────────── */}
       <section>

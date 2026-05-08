@@ -6,6 +6,7 @@
 import { useMemo } from "react";
 import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
 import { RelativeUnitsCaveat } from "@/components/posture/RelativeUnitsCaveat";
+import { PatientHeader } from "@/components/dashboard/PatientHeader";
 import {
   buildFrontFindings,
   buildSideFindings,
@@ -13,6 +14,7 @@ import {
   type FrontMeasurements,
   type SideMeasurements,
 } from "@/lib/posture/measurements";
+import type { PatientDTO } from "@/lib/patients";
 
 interface Props {
   front: FrontMeasurements | null;
@@ -21,6 +23,8 @@ interface Props {
    *  doctor saw at save time). Falls back to recomputing from metrics. */
   frontFindings?: PostureFinding[] | null;
   sideFindings?: PostureFinding[] | null;
+  patient?: PatientDTO | null;
+  patientName?: string | null;
 }
 
 export function SavedPostureReport({
@@ -28,6 +32,8 @@ export function SavedPostureReport({
   side,
   frontFindings,
   sideFindings,
+  patient,
+  patientName,
 }: Props) {
   const fFindings = useMemo<PostureFinding[]>(() => {
     if (frontFindings && frontFindings.length > 0) return frontFindings;
@@ -51,6 +57,12 @@ export function SavedPostureReport({
 
   return (
     <div className="space-y-10">
+      <PatientHeader
+        patient={patient ?? null}
+        fallbackName={patientName}
+        subtitle="Posture Assessment · static-photo screening"
+      />
+
       <div className="text-center">
         <h2 className="text-3xl font-semibold tracking-tight md:text-4xl">
           Posture Assessment

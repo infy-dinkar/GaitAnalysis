@@ -214,21 +214,24 @@ function ReportView({ id }: { id: string }) {
         {report.module === "biomech" && (
           <BiomechBody
             report={report}
+            patient={patient}
             patientName={patient?.name ?? null}
             patientCode={report.patient_id}
             isoDate={isoDate}
           />
         )}
-        {report.module === "posture" && <PostureBody report={report} />}
+        {report.module === "posture" && <PostureBody report={report} patient={patient} />}
         {report.module === "gait" && (
           <GaitBody
             report={report}
+            patient={patient}
             patientNameOverride={patient?.name ?? null}
           />
         )}
         {report.module === "trendelenburg" && (
           <SavedTrendelenburgReport
             patientName={patient?.name ?? null}
+            patient={patient}
             metrics={report.metrics as Record<string, unknown>}
             observations={report.observations as Record<string, unknown>}
           />
@@ -236,6 +239,7 @@ function ReportView({ id }: { id: string }) {
         {report.module === "single_leg_squat" && (
           <SavedSingleLegSquatReport
             patientName={patient?.name ?? null}
+            patient={patient}
             metrics={report.metrics as Record<string, unknown>}
             observations={report.observations as Record<string, unknown>}
           />
@@ -243,6 +247,7 @@ function ReportView({ id }: { id: string }) {
         {report.module === "sit_to_stand" && (
           <SavedSitToStandReport
             patientName={patient?.name ?? null}
+            patient={patient}
             metrics={report.metrics as Record<string, unknown>}
             observations={report.observations as Record<string, unknown>}
           />
@@ -250,6 +255,7 @@ function ReportView({ id }: { id: string }) {
         {report.module === "chair_stand_30s" && (
           <SavedChairStand30sReport
             patientName={patient?.name ?? null}
+            patient={patient}
             metrics={report.metrics as Record<string, unknown>}
             observations={report.observations as Record<string, unknown>}
           />
@@ -257,6 +263,7 @@ function ReportView({ id }: { id: string }) {
         {report.module === "single_leg_stance" && (
           <SavedSingleLegStanceReport
             patientName={patient?.name ?? null}
+            patient={patient}
             metrics={report.metrics as Record<string, unknown>}
             observations={report.observations as Record<string, unknown>}
           />
@@ -264,6 +271,7 @@ function ReportView({ id }: { id: string }) {
         {report.module === "four_stage_balance" && (
           <SavedFourStageBalanceReport
             patientName={patient?.name ?? null}
+            patient={patient}
             metrics={report.metrics as Record<string, unknown>}
             observations={report.observations as Record<string, unknown>}
           />
@@ -276,11 +284,13 @@ function ReportView({ id }: { id: string }) {
 // ─── Biomech body ─────────────────────────────────────────────────
 function BiomechBody({
   report,
+  patient,
   patientName,
   patientCode,
   isoDate,
 }: {
   report: ReportDTO;
+  patient: PatientDTO | null;
   patientName: string | null;
   patientCode: string | null;
   isoDate: string;
@@ -322,6 +332,7 @@ function BiomechBody({
         patientNameOverride={patientName}
         patientIdOverride={patientCode}
         dateOverride={isoDate}
+        patientOverride={patient}
       />
       {interpretation && (
         <section>
@@ -337,7 +348,13 @@ function BiomechBody({
 }
 
 // ─── Posture body ─────────────────────────────────────────────────
-function PostureBody({ report }: { report: ReportDTO }) {
+function PostureBody({
+  report,
+  patient,
+}: {
+  report: ReportDTO;
+  patient: PatientDTO | null;
+}) {
   const m = report.metrics as Record<string, unknown>;
   const front = (m.front as FrontMeasurements | null | undefined) ?? null;
   const side = (m.side as SideMeasurements | null | undefined) ?? null;
@@ -353,6 +370,8 @@ function PostureBody({ report }: { report: ReportDTO }) {
         side={side}
         frontFindings={frontFindings}
         sideFindings={sideFindings}
+        patient={patient}
+        patientName={patient?.name ?? null}
       />
       <BackLink patientId={report.patient_id} />
     </div>
@@ -362,9 +381,11 @@ function PostureBody({ report }: { report: ReportDTO }) {
 // ─── Gait body ────────────────────────────────────────────────────
 function GaitBody({
   report,
+  patient,
   patientNameOverride,
 }: {
   report: ReportDTO;
+  patient: PatientDTO | null;
   patientNameOverride: string | null;
 }) {
   const m = report.metrics as Record<string, unknown>;
@@ -406,7 +427,7 @@ function GaitBody({
 
   return (
     <div className="space-y-8">
-      <GaitResultsView data={data} patientNameOverride={patientNameOverride} />
+      <GaitResultsView data={data} patientNameOverride={patientNameOverride} patientOverride={patient} />
       <BackLink patientId={report.patient_id} />
     </div>
   );

@@ -18,6 +18,8 @@ import {
   type TrialResult,
 } from "@/lib/orthopedic/singleLegStance";
 import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
+import { PatientHeader } from "@/components/dashboard/PatientHeader";
+import type { PatientDTO } from "@/lib/patients";
 
 const PlotlyChart = dynamic(
   () => import("@/components/gait/PlotlyChart").then((m) => m.PlotlyChart),
@@ -26,24 +28,27 @@ const PlotlyChart = dynamic(
 
 interface Props {
   patientName: string | null;
+  patient?: PatientDTO | null;
   session: SessionResult;
   interpretation: string;
 }
 
-export function SingleLegStanceReport({ patientName, session, interpretation }: Props) {
+export function SingleLegStanceReport({ patientName, patient, session, interpretation }: Props) {
   const t = session.trials;
   const hasEyesClosed = !!t.left_closed || !!t.right_closed;
 
   return (
     <div className="space-y-8">
+      <PatientHeader
+        patient={patient ?? null}
+        fallbackName={patientName}
+        subtitle="Single-Leg Stance test · static balance assessment"
+      />
+
       <div className="text-center">
         <h2 className="text-3xl font-semibold tracking-tight md:text-4xl">
           Single-Leg Stance test
         </h2>
-        <p className="mt-2 text-sm text-muted">
-          {patientName ?? "Patient"} · age{" "}
-          {session.patient_age !== null ? session.patient_age : "—"}
-        </p>
       </div>
 
       <section>
@@ -160,7 +165,7 @@ function TrialCard({
     : <EyeOff className="h-3.5 w-3.5" />;
 
   return (
-    <section className="space-y-3 rounded-card border border-border bg-surface/40 p-5">
+    <section className="space-y-3 rounded-card border border-border bg-surface p-5">
       <div className="flex flex-wrap items-baseline justify-between gap-3 border-b border-border pb-3">
         <div>
           <p className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-subtle">

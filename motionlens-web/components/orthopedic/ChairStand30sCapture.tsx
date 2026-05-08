@@ -254,6 +254,7 @@ export function ChairStand30sCapture() {
       <div className="space-y-8">
         <ChairStand30sReport
           patientName={patient?.name ?? null}
+          patient={patient ?? null}
           result={result}
           interpretation={interpretation}
         />

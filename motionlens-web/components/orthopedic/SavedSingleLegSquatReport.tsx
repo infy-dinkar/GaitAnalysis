@@ -10,14 +10,16 @@ import {
   type SingleLegSquatFullResult,
   type SingleLegSquatSideResult,
 } from "@/lib/orthopedic/singleLegSquat";
+import type { PatientDTO } from "@/lib/patients";
 
 interface Props {
   patientName: string | null;
+  patient?: PatientDTO | null;
   metrics: Record<string, unknown>;
   observations: Record<string, unknown>;
 }
 
-export function SavedSingleLegSquatReport({ patientName, metrics, observations }: Props) {
+export function SavedSingleLegSquatReport({ patientName, patient, metrics, observations }: Props) {
   const result: SingleLegSquatFullResult = {
     left:  (metrics.left  as SingleLegSquatSideResult | null | undefined) ?? null,
     right: (metrics.right as SingleLegSquatSideResult | null | undefined) ?? null,
@@ -31,6 +33,7 @@ export function SavedSingleLegSquatReport({ patientName, metrics, observations }
   return (
     <SingleLegSquatReport
       patientName={patientName}
+      patient={patient}
       result={result}
       interpretation={interpretation}
     />

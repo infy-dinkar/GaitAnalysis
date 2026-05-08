@@ -16,7 +16,9 @@ import {
   hLineShape,
 } from "@/components/gait/PlotlyChart";
 import { fmt } from "@/lib/utils";
+import { PatientHeader } from "@/components/dashboard/PatientHeader";
 import type { GaitDataDTO, JointDetailDTO, PassSegmentDTO } from "@/lib/api";
+import type { PatientDTO } from "@/lib/patients";
 
 const COLOR_LEFT = "#2563EB";
 const COLOR_RIGHT = "#DC2626";
@@ -49,13 +51,24 @@ interface Props {
   data: GaitDataDTO;
   /** Optional override for the patient name shown in the calibration header. */
   patientNameOverride?: string | null;
+  /** Full patient object — when provided, renders a rich PatientHeader
+   *  above the existing calibration block so age / gender / weight /
+   *  contact / notes appear on the report. */
+  patientOverride?: PatientDTO | null;
 }
 
-export function GaitResultsView({ data, patientNameOverride }: Props) {
+export function GaitResultsView({ data, patientNameOverride, patientOverride }: Props) {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
 
   return (
     <div className="space-y-12">
+      {patientOverride && (
+        <PatientHeader
+          patient={patientOverride}
+          subtitle="Gait analysis · markerless 2D pose estimation"
+        />
+      )}
+
       <div>
         <h2 className="text-3xl font-semibold tracking-tight md:text-4xl">
           {patientNameOverride || data.patient_info.name || "Anonymous patient"}

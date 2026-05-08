@@ -302,6 +302,7 @@ export function SingleLegSquatCapture() {
       <div className="space-y-8">
         <SingleLegSquatReport
           patientName={patient?.name ?? null}
+          patient={patient ?? null}
           result={result}
           interpretation={interpretation}
         />
