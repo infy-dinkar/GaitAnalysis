@@ -16,15 +16,35 @@ function visible(kp: Keypoint | undefined): boolean {
   return !!kp && (kp.score ?? 0) >= VIS;
 }
 
-// Signed angle of a vector (vx, vy) from the horizontal axis (1, 0).
-// Positive = clockwise tilt in image coords (image y axis points down).
-function angleFromHorizontal(vx: number, vy: number): number {
-  return (Math.atan2(vy, vx) * 180) / Math.PI;
+// ─── Tilt-angle helpers ─────────────────────────────────────────
+//
+// These all return angles in (-90°, 90°] — the range humans expect
+// for a "tilt" reading. atan2 alone returns (-180°, 180°], which
+// flips to ±180° when the vector traverses the keypoints in the
+// "wrong" direction; that's how a perfectly level body part used to
+// read as -179°. By taking the absolute X (for horizontal-ish lines)
+// or absolute Y (for vertical-ish lines) before atan2, we always
+// land in the well-behaved tilt range.
+
+/** Tilt angle (degrees) of the LINE through `a` and `b` from
+ *  horizontal, signed in (-90°, 90°]. Positive = `b` is LOWER in the
+ *  image than `a`. (For frontal tilts: pass (left, right) so positive
+ *  means the right keypoint is lower.) */
+function lineTiltFromHorizontal(a: { x: number; y: number }, b: { x: number; y: number }): number {
+  const dx = Math.abs(b.x - a.x);  // always ≥ 0 — line direction agnostic
+  const dy = b.y - a.y;            // signed (image y points down)
+  if (dx < 1e-6) return dy > 0 ? 90 : dy < 0 ? -90 : 0;
+  return (Math.atan2(dy, dx) * 180) / Math.PI;
 }
 
-function angleFromVertical(vx: number, vy: number): number {
-  // Image y-axis points down, so vertical-down = (0, +1).
-  return (Math.atan2(vx, vy) * 180) / Math.PI;
+/** Tilt angle (degrees) of the LINE through `top` and `bottom` from
+ *  vertical, signed in (-90°, 90°]. Positive = `top` is to the RIGHT
+ *  of `bottom` in the image. */
+function lineTiltFromVertical(top: { x: number; y: number }, bottom: { x: number; y: number }): number {
+  const dx = top.x - bottom.x;          // signed
+  const dyAbs = Math.abs(top.y - bottom.y); // always ≥ 0
+  if (dyAbs < 1e-6) return dx > 0 ? 90 : dx < 0 ? -90 : 0;
+  return (Math.atan2(dx, dyAbs) * 180) / Math.PI;
 }
 
 // Reference body-height proxy: shoulder-midpoint to ankle-midpoint
@@ -69,37 +89,46 @@ export function computeFrontMeasurements(
   const lEar = keypoints[LM.LEFT_EAR];
   const rEar = keypoints[LM.RIGHT_EAR];
   if (visible(lEar) && visible(rEar)) {
-    result.headTilt = angleFromHorizontal(rEar.x - lEar.x, rEar.y - lEar.y);
+    // Sign convention: positive = patient's right ear is LOWER.
+    // lineTiltFromHorizontal(a, b) returns positive when b is lower
+    // than a, so we pass (left, right) to get "right-side-down" sign.
+    result.headTilt = lineTiltFromHorizontal(lEar, rEar);
   }
 
   const lSh = keypoints[LM.LEFT_SHOULDER];
   const rSh = keypoints[LM.RIGHT_SHOULDER];
   if (visible(lSh) && visible(rSh)) {
-    result.shoulderTilt = angleFromHorizontal(rSh.x - lSh.x, rSh.y - lSh.y);
+    // Same convention — positive = right shoulder is LOWER.
+    result.shoulderTilt = lineTiltFromHorizontal(lSh, rSh);
   }
 
   const lHip = keypoints[LM.LEFT_HIP];
   const rHip = keypoints[LM.RIGHT_HIP];
   if (visible(lHip) && visible(rHip)) {
     // Spec convention (Appendix B): positive = left-side-down.
-    // Vector points right→left so left-side-down (lHip.y > rHip.y)
-    // yields positive y component in image-y-down coords.
-    result.hipTilt = angleFromHorizontal(lHip.x - rHip.x, lHip.y - rHip.y);
+    // Pass (right, left) so the helper's "second arg lower → positive"
+    // maps to "left side lower → positive".
+    result.hipTilt = lineTiltFromHorizontal(rHip, lHip);
   }
 
-  // Knee alignment (Q-angle proxy) — angle of hip-knee-ankle from a
-  // straight vertical line. Large value = valgus/varus deviation.
+  // Knee alignment (Q-angle proxy) — interior angle of the
+  // hip-knee-ankle joint at the knee. 180° = perfectly straight
+  // leg, smaller = bent or laterally deviated (valgus / varus).
+  // The interior angle requires both vectors EMANATING from the
+  // knee — earlier code used (knee→hip) and (knee→ankle) traversed
+  // in the same direction (both downward), giving 0° for straight
+  // legs. The fix is to flip the thigh vector so it points up
+  // (knee→hip), then a straight leg gives 180° (antiparallel) and
+  // dev = 180 - interior reads ~0° for healthy alignment.
   const lKnee = keypoints[LM.LEFT_KNEE];
   const lAnk = keypoints[LM.LEFT_ANKLE];
   if (visible(lHip) && visible(lKnee) && visible(lAnk)) {
-    // Thigh vector (hip→knee) and shin vector (knee→ankle).
-    const thighX = lKnee.x - lHip.x;
-    const thighY = lKnee.y - lHip.y;
-    const shinX = lAnk.x - lKnee.x;
-    const shinY = lAnk.y - lKnee.y;
-    // Interior angle at the knee — 180° = perfectly straight leg.
-    const dot = thighX * shinX + thighY * shinY;
-    const mag = Math.hypot(thighX, thighY) * Math.hypot(shinX, shinY);
+    const upX = lHip.x - lKnee.x;       // knee → hip (going up)
+    const upY = lHip.y - lKnee.y;
+    const downX = lAnk.x - lKnee.x;     // knee → ankle (going down)
+    const downY = lAnk.y - lKnee.y;
+    const dot = upX * downX + upY * downY;
+    const mag = Math.hypot(upX, upY) * Math.hypot(downX, downY);
     if (mag > 0) {
       const interior =
         (Math.acos(Math.max(-1, Math.min(1, dot / mag))) * 180) / Math.PI;
@@ -109,12 +138,12 @@ export function computeFrontMeasurements(
   const rKnee = keypoints[LM.RIGHT_KNEE];
   const rAnk = keypoints[LM.RIGHT_ANKLE];
   if (visible(rHip) && visible(rKnee) && visible(rAnk)) {
-    const thighX = rKnee.x - rHip.x;
-    const thighY = rKnee.y - rHip.y;
-    const shinX = rAnk.x - rKnee.x;
-    const shinY = rAnk.y - rKnee.y;
-    const dot = thighX * shinX + thighY * shinY;
-    const mag = Math.hypot(thighX, thighY) * Math.hypot(shinX, shinY);
+    const upX = rHip.x - rKnee.x;
+    const upY = rHip.y - rKnee.y;
+    const downX = rAnk.x - rKnee.x;
+    const downY = rAnk.y - rKnee.y;
+    const dot = upX * downX + upY * downY;
+    const mag = Math.hypot(upX, upY) * Math.hypot(downX, downY);
     if (mag > 0) {
       const interior =
         (Math.acos(Math.max(-1, Math.min(1, dot / mag))) * 180) / Math.PI;
@@ -125,7 +154,8 @@ export function computeFrontMeasurements(
   // Spec convention (Appendix B): trunk lean (frontal) =
   // angle of (hip-midpoint to shoulder-midpoint) line vs vertical
   // in frontal view. Positive = lean to patient's RIGHT.
-  // (Patient's right = camera's left in mirror frontal view.)
+  // (Patient's right = camera's LEFT in mirror frontal view, so
+  // shoulder-mid sitting LEFT of hip-mid in image = lean to right.)
   if (visible(lSh) && visible(rSh) && visible(lHip) && visible(rHip)) {
     const hipMid = {
       x: (lHip.x + rHip.x) / 2,
@@ -135,12 +165,10 @@ export function computeFrontMeasurements(
       x: (lSh.x + rSh.x) / 2,
       y: (lSh.y + rSh.y) / 2,
     };
-    const vx = shoulderMid.x - hipMid.x;
-    const vy = shoulderMid.y - hipMid.y;
-    const magnitude = Math.abs(angleFromVertical(vx, vy));
-    // Patient's RIGHT = camera's LEFT = -x in image.
-    const sign = vx < 0 ? 1 : -1;
-    result.frontalTrunkLean = sign * magnitude;
+    // lineTiltFromVertical(top, bottom) returns positive when top is
+    // to the RIGHT of bottom in image. Negate to flip to patient's
+    // right (which is image left).
+    result.frontalTrunkLean = -lineTiltFromVertical(shoulderMid, hipMid);
   }
 
   return result;
@@ -250,8 +278,10 @@ export function computeSideMeasurements(
 
   // Spec convention (Appendix B): trunk lean (sagittal) =
   // angle of (hip-midpoint to shoulder-midpoint) line vs vertical.
-  // Positive = anatomical forward. Sign anchored via pickedSide.
-  // The same bilateral value is stored on each per-side block.
+  // Positive = anatomical forward. Sign anchored via pickedSide
+  // because "forward" vs "backward" depends on which side is facing
+  // the camera (left-side facing → patient-forward = +x in image;
+  // right-side facing → patient-forward = -x in image).
   let trunkLean: number | null = null;
   const lHipKp = keypoints[LM.LEFT_HIP];
   const rHipKp = keypoints[LM.RIGHT_HIP];
@@ -269,16 +299,19 @@ export function computeSideMeasurements(
       x: (lShKp.x + rShKp.x) / 2,
       y: (lShKp.y + rShKp.y) / 2,
     };
-    const vx = shoulderMid.x - hipMid.x;
-    const vy = shoulderMid.y - hipMid.y;
-    const magnitude = Math.abs(angleFromVertical(vx, vy));
-    let sign = 0;
+    // lineTiltFromVertical returns positive when shoulder is to the
+    // right of hip in image. Apply pickedSide-anchored sign so
+    // positive consistently maps to "anatomical forward".
+    const rawTilt = lineTiltFromVertical(shoulderMid, hipMid);
     if (pickedSide === "left") {
-      sign = vx > 0 ? 1 : -1;
+      // Left side of patient faces camera → patient's anterior is
+      // toward image +x, so positive rawTilt = forward.
+      trunkLean = rawTilt;
     } else if (pickedSide === "right") {
-      sign = vx < 0 ? 1 : -1;
+      // Right side of patient faces camera → anterior is toward
+      // image -x, so flip the sign.
+      trunkLean = -rawTilt;
     }
-    trunkLean = sign * magnitude;
   }
 
   const bodyH = bodyHeightPx(keypoints);
