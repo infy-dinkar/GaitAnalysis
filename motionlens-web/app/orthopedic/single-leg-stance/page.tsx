@@ -48,6 +48,9 @@ function Inner() {
 
           <div className="mt-16 rounded-card border border-border bg-surface p-5 text-sm text-muted">
             <p className="font-semibold text-foreground">Camera setup</p>
+            <p className="mt-2 text-sm font-medium text-foreground">
+              Stand facing the camera (front view).
+            </p>
             <ul className="mt-3 list-disc space-y-1.5 pl-5">
               <li>Patient stands facing the camera, full body in frame.</li>
               <li>Camera at hip height, 6+ feet (2 m) away.</li>

@@ -35,8 +35,27 @@ export const ASYMMETRY_FLAG_PCT = 30;
 const FOOT_TOUCHDOWN_RATIO = 0.05;
 
 // Lift-onset detection — lifted ankle must rise this much above
-// the stance ankle to count as a single-leg stance start.
-const LIFT_ONSET_RATIO = 0.10;
+// the stance ankle to count as a single-leg stance start. Lowered
+// from the original 0.10 because MoveNet ankle Y values jitter
+// frame-to-frame, and partial occlusions / back-of-camera views
+// reduce the score below the visibility threshold transiently —
+// a 10% threshold caused frequent false no-lift outcomes even when
+// the patient had lifted clearly.
+const LIFT_ONSET_RATIO = 0.06;
+
+// Knee-based fallback: if the knee Y difference is large enough,
+// we count it as a lift even when the ankle signal is missing or
+// noisy. Patient at 90° hip flexion always raises the knee well
+// above the planted-leg knee, so this catches the dominant test
+// posture even when MoveNet drops the ankle keypoint.
+const KNEE_LIFT_RATIO = 0.10;
+
+// Permissive visibility threshold used only by lift-onset detection.
+// The main VIS_THRESHOLD (0.3) is kept strict for sway / trunk-lean
+// metrics where false readings would corrupt the data, but for the
+// binary "is the leg lifted" question we accept lower-confidence
+// keypoints because the alternative (no detection) is worse.
+const LIFT_VIS_THRESHOLD = 0.2;
 
 // Arm-grab: shoulder→wrist vector that abducts > 45° from vertical
 // → patient reached for support → terminate. Matches PDF guidance.
@@ -111,16 +130,72 @@ export function computeTrunkLean(keypoints: Keypoint[]): number | null {
 // Auto-detect single-leg stance: lifted ankle is well above the
 // stance ankle. Returns the STANCE side (the leg still on the
 // ground). Null when no clear lift is seen.
+//
+// Uses two signals — ankle Y diff (primary) and knee Y diff
+// (fallback). The knee fallback catches lifts where MoveNet drops
+// the ankle keypoint (back-view, occlusion, or partial framing)
+// but still tracks the knee, which is centred on the body and
+// usually visible whenever the hip is.
 export function detectStanceSide(keypoints: Keypoint[]): Side | null {
-  const la = keypoints[LM.LEFT_ANKLE];
-  const ra = keypoints[LM.RIGHT_ANKLE];
-  if (!visible(la) || !visible(ra)) return null;
   const bodyH = computeBodyHeightPx(keypoints);
   if (!bodyH) return null;
-  const lift = Math.abs(la.y - ra.y);
-  if (lift < bodyH * LIFT_ONSET_RATIO) return null;
-  // Lower image-y = lifted; the OTHER side is the stance side.
-  return la.y < ra.y ? "right" : "left";
+
+  const la = keypoints[LM.LEFT_ANKLE];
+  const ra = keypoints[LM.RIGHT_ANKLE];
+
+  // Primary signal — ankle Y difference.
+  if (visibleLoose(la) && visibleLoose(ra)) {
+    const lift = Math.abs(la.y - ra.y);
+    if (lift >= bodyH * LIFT_ONSET_RATIO) {
+      // Lower image-y = lifted; the OTHER side is the stance side.
+      return la.y < ra.y ? "right" : "left";
+    }
+  }
+
+  // Fallback — knee Y difference. Triggers when ankles are missing
+  // or both at similar Y (common when the foot points down at 90°
+  // hip flexion: ankle stays roughly level but the knee rises).
+  const lk = keypoints[LM.LEFT_KNEE];
+  const rk = keypoints[LM.RIGHT_KNEE];
+  if (visibleLoose(lk) && visibleLoose(rk)) {
+    const kneeLift = Math.abs(lk.y - rk.y);
+    if (kneeLift >= bodyH * KNEE_LIFT_RATIO) {
+      return lk.y < rk.y ? "right" : "left";
+    }
+  }
+
+  return null;
+}
+
+// Binary "is one of the legs lifted?" — returns true when either
+// ankles or knees show enough vertical asymmetry to count as a
+// lift, regardless of which side. Used by the capture flow to
+// start the trial timer in cases where MoveNet's anatomical
+// left/right labelling can't be trusted (e.g. back-of-camera
+// orientation, where the labels often flip mid-stream). The
+// operator's clicked side is the source of truth for the report
+// label — this just answers "should we start the timer now?".
+export function isLegLifted(keypoints: Keypoint[]): boolean {
+  const bodyH = computeBodyHeightPx(keypoints);
+  if (!bodyH) return false;
+
+  const la = keypoints[LM.LEFT_ANKLE];
+  const ra = keypoints[LM.RIGHT_ANKLE];
+  if (visibleLoose(la) && visibleLoose(ra)) {
+    if (Math.abs(la.y - ra.y) >= bodyH * LIFT_ONSET_RATIO) return true;
+  }
+
+  const lk = keypoints[LM.LEFT_KNEE];
+  const rk = keypoints[LM.RIGHT_KNEE];
+  if (visibleLoose(lk) && visibleLoose(rk)) {
+    if (Math.abs(lk.y - rk.y) >= bodyH * KNEE_LIFT_RATIO) return true;
+  }
+
+  return false;
+}
+
+function visibleLoose(kp: Keypoint | undefined): boolean {
+  return !!kp && (kp.score ?? 0) >= LIFT_VIS_THRESHOLD;
 }
 
 // Foot-touchdown: lifted ankle has dropped close to the stance
@@ -249,7 +324,15 @@ export function summarizeTrial(args: {
     patientAge,
   } = args;
 
-  const holdSec = Math.max(0, (endedAtMs - startedAtMs) / 1000);
+  // When the trial never reached stance (no lift detected), the
+  // operator-side `startedAtMs` is the click-to-start time and the
+  // delta would represent the onset wait window — NOT a hold time.
+  // Force 0 in that case so the report doesn't display a misleading
+  // "held 8.0 s" alongside a "no leg lift detected" termination.
+  const holdSec =
+    termination === "no_lift_detected"
+      ? 0
+      : Math.max(0, (endedAtMs - startedAtMs) / 1000);
   const cap = condition === "eyes_open" ? MAX_EYES_OPEN_SEC : MAX_EYES_CLOSED_SEC;
   const norm = getSingleLegStanceNorm(patientAge, condition === "eyes_closed");
   const passed = holdSec >= norm.passThresholdSec;
