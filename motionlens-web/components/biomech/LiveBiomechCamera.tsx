@@ -10,7 +10,13 @@ import {
   computeShoulderAngle,
   type ShoulderMovementId,
 } from "@/lib/biomech/shoulder";
-import { computeNeckAngle, type NeckMovementId } from "@/lib/biomech/neck";
+import {
+  computeNeckAngle,
+  computeNeckRotationFromBaseline,
+  type NeckMovementId,
+  type NeckRotationCalibration,
+} from "@/lib/biomech/neck";
+import type { Keypoint } from "@tensorflow-models/pose-detection";
 import { computeKneeAngle, type KneeMovementId } from "@/lib/biomech/knee";
 import { computeHipAngle, type HipMovementId } from "@/lib/biomech/hip";
 import { computeAnkleAngle, type AnkleMovementId } from "@/lib/biomech/ankle";
@@ -23,6 +29,15 @@ interface Props {
   side?: "left" | "right";
   onResult: (data: LiveBiomechFrameDataDTO | null) => void;
   onError?: (msg: string) => void;
+  /** When set (only for neck rotation, after the calibration phase),
+   *  rotation angle math switches from the legacy nose-offset formula
+   *  to the calibrated arcsin(head-sphere) model. */
+  neckRotationBaseline?: NeckRotationCalibration | null;
+  /** Fires every frame with the smoothed pixel-space keypoints used
+   *  by the angle math. Lets the parent run its own pose-aware logic
+   *  (e.g. neck rotation calibration) without duplicating the EMA
+   *  smoothing or the detector wiring. */
+  onSmoothedKeypoints?: (keypoints: Keypoint[]) => void;
 }
 
 const LINE_COLOR = "#FFFFFF";
@@ -131,6 +146,8 @@ export function LiveBiomechCamera({
   side,
   onResult,
   onError,
+  neckRotationBaseline,
+  onSmoothedKeypoints,
 }: Props) {
   const { videoRef, active, error, start, stop } = useCamera();
   const { ready, error: poseError, detect } = usePoseDetection();
@@ -141,6 +158,12 @@ export function LiveBiomechCamera({
   const cancelledRef = useRef(false);
   const onResultRef = useRef(onResult);
   const onErrorRef = useRef(onError);
+  const onSmoothedKeypointsRef = useRef(onSmoothedKeypoints);
+  // Latest baseline kept in a ref so the rAF closure picks up live
+  // updates without re-binding the loop on every change.
+  const neckRotationBaselineRef = useRef<NeckRotationCalibration | null>(
+    neckRotationBaseline ?? null,
+  );
 
   // Per-keypoint EMA buffer to smooth jitter. Lower alpha = heavier
   // smoothing (more lag), higher = lighter (more jitter). 0.4 is a
@@ -151,6 +174,10 @@ export function LiveBiomechCamera({
 
   useEffect(() => { onResultRef.current = onResult; }, [onResult]);
   useEffect(() => { onErrorRef.current = onError; }, [onError]);
+  useEffect(() => { onSmoothedKeypointsRef.current = onSmoothedKeypoints; }, [onSmoothedKeypoints]);
+  useEffect(() => {
+    neckRotationBaselineRef.current = neckRotationBaseline ?? null;
+  }, [neckRotationBaseline]);
 
   // Skeleton drawing — direct canvas, no React state churn.
   const drawSkeleton = useCallback(
@@ -316,6 +343,13 @@ export function LiveBiomechCamera({
             visibility: kp.score,
           }));
 
+          // Surface smoothed keypoints to parent BEFORE the math
+          // dispatch — the parent (LiveAssessment) uses these for
+          // its own pose-aware logic, e.g. neck-rotation baseline
+          // calibration. Doing it once here avoids duplicating the
+          // EMA smoothing or the detector wiring on the parent side.
+          onSmoothedKeypointsRef.current?.(smoothedKps);
+
           // Math uses raw pixel coords — formulas are scale-invariant.
           let angle: number | null = null;
           const sideOrRight = side ?? "right";
@@ -328,10 +362,24 @@ export function LiveBiomechCamera({
               );
               break;
             case "neck":
-              angle = computeNeckAngle(
-                movement as NeckMovementId,
-                smoothedKps,
-              );
+              // Rotation: prefer the calibrated arcsin formula once
+              // the baseline has been locked. Until then, fall back
+              // to the legacy nose-offset formula so the camera still
+              // shows a live readout during calibration.
+              if (
+                movement === "rotation" &&
+                neckRotationBaselineRef.current
+              ) {
+                angle = computeNeckRotationFromBaseline(
+                  smoothedKps,
+                  neckRotationBaselineRef.current,
+                );
+              } else {
+                angle = computeNeckAngle(
+                  movement as NeckMovementId,
+                  smoothedKps,
+                );
+              }
               break;
             case "knee":
               angle = computeKneeAngle(
