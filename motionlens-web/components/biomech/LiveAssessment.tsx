@@ -22,6 +22,11 @@ import {
   isStableFacingForward,
   type NeckRotationCalibration,
 } from "@/lib/biomech/neck";
+import {
+  captureShoulderRotationBaseline,
+  isShoulderRotationNeutral,
+  type ShoulderRotationCalibration,
+} from "@/lib/biomech/shoulder";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveBiomechFrameDataDTO } from "@/lib/api";
 
@@ -61,13 +66,18 @@ export function LiveAssessment({
   side,
 }: LiveAssessmentProps) {
   const reportName = movementName ?? movementLabel.split(" · ").pop() ?? movementLabel;
-  // Neck rotation gets a calibration phase BEFORE measurement begins —
-  // operator faces the patient straight to the camera, system locks
-  // a per-patient zero-degree reference, and only then starts logging
-  // the peak angle. This avoids the legacy formula's two failure modes
-  // (anatomical asymmetry baked in as fake rotation, and over-estimation
-  // at large angles from the linear scaling).
+  // Calibration-phase movements: rotation tests where 2D pose
+  // estimation can't measure 3D rotation directly. We capture a
+  // per-patient zero-degree reference at neutral, then only start
+  // logging the peak angle once that baseline is locked. This avoids
+  // the legacy formulas' two failure modes (anatomical asymmetry
+  // baked in as fake rotation, and projected-vector saturation at
+  // large angles).
   const isNeckRotation = bodyPart === "neck" && movementId === "rotation";
+  const isShoulderRotation =
+    bodyPart === "shoulder" &&
+    (movementId === "external_rotation" || movementId === "internal_rotation");
+  const isCalibratedRotation = isNeckRotation || isShoulderRotation;
 
   const stateRef = useRef({
     current: null as number | null,
@@ -85,8 +95,18 @@ export function LiveAssessment({
   });
 
   const [baseline, setBaseline] = useState<NeckRotationCalibration | null>(null);
+  const [shoulderBaseline, setShoulderBaseline] =
+    useState<ShoulderRotationCalibration | null>(null);
   const [, setVersion] = useState(0);
   const [showResult, setShowResult] = useState(false);
+
+  // Single source of truth for "calibration done" — used by gating
+  // logic so the same code path handles both neck and shoulder.
+  const calibrationLocked = isNeckRotation
+    ? !!baseline
+    : isShoulderRotation
+      ? !!shoulderBaseline
+      : true;
 
   // Doctor-flow context (no-op when accessed publicly). Save happens
   // explicitly via the SaveToPatientButton inside the report view.
@@ -109,13 +129,13 @@ export function LiveAssessment({
     s.status = data.status as PostureStatus;
     s.apiError = null;
     if (data.status === "good" && data.current_angle !== null) {
-      // Suppress angle / peak tracking during the neck-rotation
-      // calibration phase. Until baseline is locked, the camera is
+      // Suppress angle / peak tracking during the calibration phase
+      // for rotation tests. Until baseline is locked, the camera is
       // running the legacy fallback formula whose readings are
-      // meaningless (and saturate to 120° if the patient rotates
-      // before facing forward) — surfacing them as Current / Peak
-      // pollutes the trial's actual peak measurement.
-      const inCalibration = isNeckRotation && !baseline;
+      // meaningless (and can saturate well past the anatomical max)
+      // — surfacing them as Current / Peak pollutes the trial's
+      // actual peak measurement.
+      const inCalibration = isCalibratedRotation && !calibrationLocked;
       if (inCalibration) {
         s.current = null;
         return;
@@ -131,39 +151,59 @@ export function LiveAssessment({
     } else {
       s.current = null;
     }
-  }, [isNeckRotation, baseline]);
+  }, [isCalibratedRotation, calibrationLocked]);
 
-  // Per-frame smoothed keypoints — used only by neck rotation's
-  // calibration phase. Detects "patient is stably facing the camera"
-  // and after CALIBRATION_STABLE_MS auto-snapshots the baseline.
-  // Other body parts / movements ignore this callback.
+  // Per-frame smoothed keypoints — used by calibration phases for
+  // neck rotation and shoulder external/internal rotation. Detects
+  // the "neutral pose" specific to the test (face camera straight
+  // for neck; tucked elbow with forearm pointing forward for
+  // shoulder), then after CALIBRATION_STABLE_MS auto-snapshots the
+  // baseline. Other body parts / movements ignore this callback.
   const onSmoothedKeypoints = useCallback(
     (kp: Keypoint[]) => {
-      if (!isNeckRotation) return;
-      if (baseline) return; // already calibrated
+      if (!isCalibratedRotation) return;
+      // Already calibrated — nothing to do.
+      if (isNeckRotation && baseline) return;
+      if (isShoulderRotation && shoulderBaseline) return;
+
       const s = stateRef.current;
-      const facing = isStableFacingForward(kp);
-      s.calibFacingForward = facing;
       const tNow = Date.now();
-      if (facing) {
+
+      // Pose check varies by movement; baseline capture varies too.
+      const sideOrRight = side ?? "right";
+      const inNeutral = isNeckRotation
+        ? isStableFacingForward(kp)
+        : isShoulderRotationNeutral(kp, sideOrRight);
+      s.calibFacingForward = inNeutral;
+
+      if (inNeutral) {
         if (s.calibStableSinceMs === null) s.calibStableSinceMs = tNow;
         if (tNow - s.calibStableSinceMs >= CALIBRATION_STABLE_MS) {
-          const cal = captureNeckRotationBaseline(kp);
-          if (cal) {
-            setBaseline(cal);
-            // Reset per-trial counters so the calibration window
-            // doesn't pollute the rotation peak.
-            s.peakSigned = null;
-            s.validFrames = 0;
-            s.totalFrames = 0;
-            s.current = null;
+          if (isNeckRotation) {
+            const cal = captureNeckRotationBaseline(kp);
+            if (cal) {
+              setBaseline(cal);
+              s.peakSigned = null;
+              s.validFrames = 0;
+              s.totalFrames = 0;
+              s.current = null;
+            }
+          } else if (isShoulderRotation) {
+            const cal = captureShoulderRotationBaseline(kp, sideOrRight);
+            if (cal) {
+              setShoulderBaseline(cal);
+              s.peakSigned = null;
+              s.validFrames = 0;
+              s.totalFrames = 0;
+              s.current = null;
+            }
           }
         }
       } else {
         s.calibStableSinceMs = null;
       }
     },
-    [isNeckRotation, baseline],
+    [isCalibratedRotation, isNeckRotation, isShoulderRotation, baseline, shoulderBaseline, side],
   );
 
   const onError = useCallback((msg: string) => {
@@ -186,9 +226,18 @@ export function LiveAssessment({
   function lockBaselineNow() {
     const kp = latestKpRef.current;
     if (!kp) return;
-    const cal = captureNeckRotationBaseline(kp);
-    if (!cal) return;
-    setBaseline(cal);
+    const sideOrRight = side ?? "right";
+    if (isNeckRotation) {
+      const cal = captureNeckRotationBaseline(kp);
+      if (!cal) return;
+      setBaseline(cal);
+    } else if (isShoulderRotation) {
+      const cal = captureShoulderRotationBaseline(kp, sideOrRight);
+      if (!cal) return;
+      setShoulderBaseline(cal);
+    } else {
+      return;
+    }
     const s = stateRef.current;
     s.peakSigned = null;
     s.validFrames = 0;
@@ -204,9 +253,11 @@ export function LiveAssessment({
     s.calibStableSinceMs = null;
     s.calibFacingForward = false;
     setShowResult(false);
-    // For neck rotation, "Reset Peak" also clears the calibration so
-    // the operator can re-baseline (e.g. patient shifted position).
+    // For calibrated-rotation tests, "Reset Peak" also clears the
+    // calibration so the operator can re-baseline (e.g. patient
+    // shifted position between attempts).
     if (isNeckRotation) setBaseline(null);
+    if (isShoulderRotation) setShoulderBaseline(null);
     setVersion((v) => v + 1);
   }
 
@@ -348,18 +399,19 @@ export function LiveAssessment({
             <span className="text-foreground">Show Analysis</span> at the peak.
           </p>
 
-          {/* Neck-rotation calibration banner. Only renders for the
-              neck rotation movement and only until the baseline is
-              locked. Once locked, the regular peak/measurement UI
-              takes over. */}
-          {isNeckRotation && !baseline && (
+          {/* Calibration banner. Renders for any rotation test that
+              uses a baseline-locked formula (neck + shoulder
+              ext/int). Hides automatically once baseline is locked. */}
+          {isCalibratedRotation && !calibrationLocked && (
             <div className="mt-5 rounded-card border border-accent/40 bg-accent/5 p-4">
               <p className="text-xs font-semibold uppercase tracking-[0.12em] text-accent">
                 Step 1 of 2 — Lock baseline
               </p>
               <p className="mt-2 text-sm text-foreground">
-                Patient: face the camera straight ahead with your head still.
-                The baseline auto-locks once you&apos;re stable for{" "}
+                {isNeckRotation
+                  ? "Patient: face the camera straight ahead with your head still."
+                  : "Patient: tuck the elbow against your side, bend it 90°, and point the forearm straight forward at the camera. Hold still."}
+                {" "}The baseline auto-locks once you&apos;re stable for{" "}
                 {(CALIBRATION_STABLE_MS / 1000).toFixed(1)} s.
               </p>
               <div className="mt-3 flex items-center gap-2 text-xs">
@@ -379,7 +431,9 @@ export function LiveAssessment({
                   />
                   {stateRef.current.calibFacingForward
                     ? "Holding steady…"
-                    : "Waiting for facing-forward pose"}
+                    : isNeckRotation
+                      ? "Waiting for facing-forward pose"
+                      : "Waiting for tucked-elbow pose"}
                 </span>
               </div>
               <div className="mt-3">
@@ -396,11 +450,16 @@ export function LiveAssessment({
             </div>
           )}
 
-          {isNeckRotation && baseline && (
+          {isCalibratedRotation && calibrationLocked && (
             <div className="mt-5 rounded-card border border-emerald-500/30 bg-emerald-500/5 p-3 text-xs">
               <p className="inline-flex items-center gap-1.5 font-medium text-foreground">
                 <Lock className="h-3.5 w-3.5 text-emerald-600" />
-                Step 2 of 2 — Baseline locked. Rotate the head toward the shoulder.
+                Step 2 of 2 — Baseline locked.
+                {isNeckRotation
+                  ? " Rotate the head toward the shoulder."
+                  : movementId === "external_rotation"
+                    ? " Rotate the forearm outward to the peak."
+                    : " Rotate the forearm inward to the peak."}
               </p>
             </div>
           )}
@@ -408,7 +467,7 @@ export function LiveAssessment({
           <div className="mt-5 flex gap-2">
             <Button
               onClick={() => setShowResult(true)}
-              disabled={!hasPeak || (isNeckRotation && !baseline)}
+              disabled={!hasPeak || (isCalibratedRotation && !calibrationLocked)}
               className="flex-1"
             >
               <Eye className="h-4 w-4" />
@@ -417,10 +476,10 @@ export function LiveAssessment({
             <Button
               variant="secondary"
               onClick={resetPeak}
-              disabled={!hasPeak && !(isNeckRotation && !!baseline)}
+              disabled={!hasPeak && !(isCalibratedRotation && calibrationLocked)}
             >
               <RotateCcw className="h-4 w-4" />
-              {isNeckRotation && baseline ? "Re-baseline" : "Reset Peak"}
+              {isCalibratedRotation && calibrationLocked ? "Re-baseline" : "Reset Peak"}
             </Button>
           </div>
         </div>
@@ -436,7 +495,8 @@ export function LiveAssessment({
           onResult={onResult}
           onError={onError}
           neckRotationBaseline={isNeckRotation ? baseline : null}
-          onSmoothedKeypoints={isNeckRotation ? onSmoothedKeypointsTracked : undefined}
+          shoulderRotationBaseline={isShoulderRotation ? shoulderBaseline : null}
+          onSmoothedKeypoints={isCalibratedRotation ? onSmoothedKeypointsTracked : undefined}
         />
         <p className="mt-3 text-xs text-subtle">
           Start the camera and perform the movement. The on-screen skeleton tracks
