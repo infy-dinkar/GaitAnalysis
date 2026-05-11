@@ -6,6 +6,7 @@ import { use as usePromise } from "react";
 import {
   ArmchairIcon,
   ArrowUpRight,
+  Clock,
   Footprints,
   Activity,
   Layers,
@@ -99,6 +100,15 @@ const MODULES = [
     icon: Layers,
     tone: "from-indigo-500/15 to-indigo-500/5",
     iconTone: "text-indigo-600",
+  },
+  {
+    href: "orthopedic/tug",
+    eyebrow: "Geriatric / fall-risk",
+    title: "Timed Up and Go (TUG)",
+    body: "Side-view video upload. Backend MediaPipe analysis decomposes the 3 m walk into 5 sub-phases — sit-to-stand, walk-out, turn, walk-back, stand-to-sit — with auto-flags for balance impairment.",
+    icon: Clock,
+    tone: "from-yellow-500/15 to-yellow-500/5",
+    iconTone: "text-yellow-600",
   },
 ];
 

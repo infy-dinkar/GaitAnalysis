@@ -64,6 +64,10 @@ from api_models import (
     LiveBiomechFrameResponse,
 )
 
+# ─── Timed Up and Go (TUG) — reuses the gait MediaPipe pipeline ───
+from tug_engine import analyze_tug
+from tug_models import TUGResponse
+
 # ─── Auth + database (Phase 1) ─────────────────────────────────────
 import db as db_module
 from auth_routes import router as auth_router
@@ -453,6 +457,153 @@ async def analyze_gait(
     except Exception as e:
         log.exception("gait analysis failed")
         return GaitResponse(success=False, data=None, error=f"Analysis failed: {e}")
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Timed Up and Go (TUG) — record-then-analyze
+# ══════════════════════════════════════════════════════════════════════
+# Reuses the gait module's MediaPipe BlazePose Full pipeline + the
+# same upload-validation gate (size, FPS, duration). Phase detection
+# and TUG-specific metrics live in tug_engine.py.
+@app.post("/api/analyze-tug", response_model=TUGResponse)
+async def analyze_tug_endpoint(
+    video: UploadFile = File(...),
+    patient_age: Optional[int] = Form(None),
+    recording_duration_ms: Optional[int] = Form(None),
+) -> TUGResponse:
+    """Run the TUG pipeline on an uploaded side-view clip.
+
+    `recording_duration_ms` is supplied by the live-record path on the
+    frontend — wall-clock time between MediaRecorder.start() and stop().
+    The WebM container produced by MediaRecorder often has missing
+    duration metadata, which makes cv2's CAP_PROP_FPS probe return 0;
+    in that case we use the client duration to compute FPS in
+    tug_engine._ensure_decodable_video.
+    """
+    tmp_path: str | None = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        # 1) File-size gate — same threshold as gait (100 MB)
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(contents, video.filename or "tug.mp4")
+        log.info(
+            "tug: file=%s size=%.2f MB age=%s recording_ms=%s",
+            video.filename, size_mb, patient_age, recording_duration_ms,
+        )
+
+        # 2) FPS + duration gate. cv2's CAP_PROP_FPS is sometimes 0
+        # for MediaRecorder-produced WebM. When that happens, fall
+        # back to the client-supplied recording duration. The engine
+        # will re-encode the file with a proper FPS header below.
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        # If header is broken AND we have a client duration, defer
+        # the FPS / duration validation to the engine — it'll count
+        # actual frames during the rewrite step and compute the
+        # effective FPS from there.
+        deferred_fps_check = (
+            probe_fps <= 0 and recording_duration_ms and recording_duration_ms > 0
+        )
+
+        if probe_fps <= 0 and not deferred_fps_check:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not determine video frame rate. "
+                    "If this was a live recording, please retry; otherwise "
+                    "upload a different file."
+                ),
+            )
+
+        fps_warning: Optional[str] = None
+        duration_warning: Optional[str] = None
+        duration_seconds: float = 0.0
+
+        if probe_fps > 0:
+            if probe_fps < MIN_REQUIRED_FPS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Video frame rate too low ({probe_fps:.1f} FPS). "
+                        f"Minimum {MIN_REQUIRED_FPS} FPS required for TUG analysis. "
+                        f"Recommended: {RECOMMENDED_FPS}+ FPS."
+                    ),
+                )
+            if probe_fps < RECOMMENDED_FPS:
+                fps_warning = (
+                    f"Note: Video is {probe_fps:.1f} FPS, below recommended "
+                    f"{RECOMMENDED_FPS} FPS — results may be less accurate."
+                )
+            if probe_total_frames <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not determine video length. Please upload a different file.",
+                )
+            duration_seconds = probe_total_frames / probe_fps
+        else:
+            # FPS was deferred — use client duration for the upper-/
+            # lower-bound checks against MAX/MIN_GAIT_DURATION_SEC.
+            duration_seconds = (recording_duration_ms or 0) / 1000.0
+
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video too long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed."
+                ),
+            )
+        if duration_seconds and duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = (
+                f"Video is short ({duration_seconds:.1f}s) — at least "
+                f"{MIN_GAIT_DURATION_SEC} seconds recommended for a complete TUG."
+            )
+
+        # 3) Validation passed — run the TUG pipeline (reuses gait
+        #    MediaPipe options).
+        pose_options = _build_gait_pose_options()
+        result = analyze_tug(
+            video_path=tmp_path,
+            pose_options=pose_options,
+            patient_age=patient_age,
+            recording_duration_ms=recording_duration_ms,
+        )
+
+        return TUGResponse(
+            success=True,
+            data=result,
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("tug validation: %s", e)
+        return TUGResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("tug analysis failed")
+        return TUGResponse(success=False, data=None, error=f"Analysis failed: {e}")
     finally:
         cleanup_temp_file(tmp_path)
 

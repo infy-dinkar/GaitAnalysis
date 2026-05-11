@@ -334,6 +334,7 @@ function moduleLabel(r: ReportSummaryDTO): string {
   if (r.module === "chair_stand_30s") return "30-Second Chair Stand";
   if (r.module === "single_leg_stance") return "Single-Leg Stance";
   if (r.module === "four_stage_balance") return "4-Stage Balance Test";
+  if (r.module === "tug") return "Timed Up and Go (TUG)";
   return "Biomechanics";
 }
 

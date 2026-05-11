@@ -6,6 +6,7 @@ import Link from "next/link";
 import {
   Activity,
   ArmchairIcon,
+  Clock,
   Download,
   Footprints,
   Layers,
@@ -69,6 +70,11 @@ const MODULE_META: Record<
     label: "4-Stage Balance Test",
     icon: Layers,
     tone: "bg-indigo-500/10 text-indigo-700 dark:text-indigo-400",
+  },
+  tug: {
+    label: "Timed Up and Go (TUG)",
+    icon: Clock,
+    tone: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400",
   },
 };
 
