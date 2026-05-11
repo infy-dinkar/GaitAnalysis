@@ -52,6 +52,7 @@ import {
   STAGE_HOLD_SEC,
   STAGE_INSTRUCTION,
   STAGE_LABEL,
+  STAGE_PROTOCOL,
   ankleMergeWarning,
   buildInterpretation,
   buildSession,
@@ -376,46 +377,93 @@ export function FourStageBalanceCapture() {
   void tick;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-10">
       {isDoctorFlow && <SaveStatusBanner patient={patient} saveStatus={null} />}
 
-      <div className="rounded-card border border-accent/30 bg-accent/5 p-4 text-sm">
-        <p className="font-medium text-foreground">4-Stage Balance Test</p>
-        <p className="mt-1 text-muted">
-          CDC fall-risk progression. Patient holds 4 progressively harder
-          static stances for {STAGE_HOLD_SEC} s each. Test stops at the
-          first stage the patient cannot complete — no retries, no skips.
-        </p>
-      </div>
-
-      {/* Sticky right-aligned camera dock — same convention as C5 / C3. */}
-      <div className="sticky top-20 z-20 ml-auto w-full max-w-md rounded-card bg-background/85 p-1 shadow-lg backdrop-blur supports-[backdrop-filter]:bg-background/65">
-        <FourStageBalanceLiveCamera onFrame={handleFrame} onError={setError} />
-      </div>
-
-      {/* Stage progression strip — always visible during the run. */}
+      {/* Stage progression strip — full-width, always visible. */}
       <StageProgressStrip
         currentStage={run?.stage ?? null}
         results={stageResults}
       />
 
-      {/* Idle state — start button. */}
-      {phase === "idle" && (
-        <div className="rounded-card border border-border bg-surface p-5">
-          <p className="text-sm font-medium text-foreground">Ready to begin?</p>
-          <p className="mt-1 text-xs text-muted">
-            Patient barefoot, level surface, no support within arm&apos;s
-            reach. The camera should be at hip height, ~2 m from the
-            patient. Start when you&apos;re both ready.
-          </p>
-          <div className="mt-4">
-            <Button onClick={startTest}>
-              <Play className="h-4 w-4" />
-              Start test
-            </Button>
-          </div>
-        </div>
-      )}
+      {/* ─── 2-column layout (instructions+status | camera) ─────── */}
+      <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
+        {/* LEFT — instructions + per-phase controls */}
+        <div className="space-y-5">
+          {/* Idle: full 4-stage protocol stacked vertically in the
+              narrower left column. */}
+          {phase === "idle" && (
+            <>
+              <div className="rounded-card border border-border bg-surface p-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+                  What the patient will do
+                </p>
+                <p className="mt-2 text-sm text-muted">
+                  The test progresses through 4 stages. Each stage must be
+                  held for {STAGE_HOLD_SEC} seconds before advancing. Hold
+                  your arms relaxed at your sides throughout.
+                </p>
+                <div className="mt-4 space-y-3">
+                  {([1, 2, 3, 4] as const).map((s) => {
+                    const p = STAGE_PROTOCOL[s];
+                    return (
+                      <div
+                        key={s}
+                        className="rounded-card border border-border bg-elevated p-4"
+                      >
+                        <div className="flex items-baseline justify-between gap-2">
+                          <div>
+                            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-accent">
+                              Stage {s}
+                            </p>
+                            <p className="mt-0.5 text-sm font-semibold text-foreground">
+                              {p.headline}
+                            </p>
+                          </div>
+                          <pre className="whitespace-pre text-lg leading-tight text-foreground">
+                            {p.visual}
+                          </pre>
+                        </div>
+                        <ol className="mt-3 space-y-1.5 text-xs leading-relaxed text-foreground">
+                          {p.steps.map((step, i) => (
+                            <li key={i} className="flex gap-2">
+                              <span className="tabular shrink-0 text-accent">
+                                {i + 1}.
+                              </span>
+                              <span>{step}</span>
+                            </li>
+                          ))}
+                        </ol>
+                        <p className="mt-3 rounded-md border border-border bg-surface px-3 py-2 text-[11px] leading-relaxed text-muted">
+                          <span className="font-semibold text-foreground">
+                            Why this stage:
+                          </span>{" "}
+                          {p.note}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="rounded-card border border-border bg-surface p-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+                  Ready to begin?
+                </p>
+                <p className="mt-2 text-sm text-muted">
+                  Patient barefoot, level surface, no support within
+                  arm&apos;s reach. The camera should be at hip height,
+                  ~2 m from the patient. Start when you&apos;re both ready.
+                </p>
+                <div className="mt-4">
+                  <Button onClick={startTest}>
+                    <Play className="h-4 w-4" />
+                    Start test
+                  </Button>
+                </div>
+              </div>
+            </>
+          )}
 
       {/* Running — preparing or holding. */}
       {phase === "running" && run && (run.stagePhase === "preparing" || run.stagePhase === "holding") && (
@@ -433,6 +481,27 @@ export function FourStageBalanceCapture() {
               </p>
             )}
           </div>
+          {/* Show the full stage instruction list during the preparing
+              phase so the patient (and operator) have the protocol in
+              front of them while getting into position — not just the
+              brief auto-detected coach line. */}
+          {run.stagePhase === "preparing" && (
+            <div className="mt-3 rounded-md border border-accent/20 bg-background/40 px-3 py-2 text-xs leading-relaxed">
+              <p className="font-semibold text-foreground">
+                {STAGE_PROTOCOL[run.stage].headline} — how to do it
+              </p>
+              <ol className="mt-1.5 space-y-1 text-muted">
+                {STAGE_PROTOCOL[run.stage].steps.map((step, i) => (
+                  <li key={i} className="flex gap-2">
+                    <span className="tabular shrink-0 text-accent">
+                      {i + 1}.
+                    </span>
+                    <span>{step}</span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
           {run.stagePhase === "holding" && (
             <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-elevated">
               <div
@@ -469,6 +538,26 @@ export function FourStageBalanceCapture() {
                 Get the patient into the next position, then advance when
                 they&apos;re ready.
               </p>
+              {/* Preview next-stage instructions inline so the operator
+                  knows exactly what to coach the patient into BEFORE
+                  clicking Advance. */}
+              <div className="mt-3 rounded-md border border-emerald-500/20 bg-background/40 p-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-emerald-700 dark:text-emerald-400">
+                  Next — {STAGE_PROTOCOL[(run.stage + 1) as StageIndex].headline}
+                </p>
+                <ol className="mt-2 space-y-1 text-xs leading-relaxed text-muted">
+                  {STAGE_PROTOCOL[(run.stage + 1) as StageIndex].steps.map(
+                    (step, i) => (
+                      <li key={i} className="flex gap-2">
+                        <span className="tabular shrink-0 text-emerald-700 dark:text-emerald-400">
+                          {i + 1}.
+                        </span>
+                        <span>{step}</span>
+                      </li>
+                    ),
+                  )}
+                </ol>
+              </div>
               <div className="mt-3 flex gap-2">
                 <Button onClick={advanceToNextStage}>
                   <ChevronRight className="h-4 w-4" />
@@ -522,21 +611,32 @@ export function FourStageBalanceCapture() {
         </div>
       )}
 
+          <p className="text-xs text-muted">
+            CDC fall-risk thresholds (PDF Test C4): unable to hold tandem
+            (stage 3) for {STAGE_HOLD_SEC} s = significantly elevated fall
+            risk. Single-leg (stage 4) &lt; 5 s for age &gt; 60 = high
+            fall risk.
+          </p>
+        </div>
+
+        {/* RIGHT — sticky camera */}
+        <div className="lg:sticky lg:top-28">
+          <FourStageBalanceLiveCamera onFrame={handleFrame} onError={setError} />
+          <p className="mt-3 text-xs text-subtle">
+            Start the camera and have the patient stand barefoot facing the
+            lens. The on-screen skeleton tracks foot, ankle, hip, and
+            shoulder positions in real time — keep the full body inside
+            the frame.
+          </p>
+        </div>
+      </div>
+
       {error && (
         <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
           <p className="text-foreground">{error}</p>
         </div>
       )}
-
-      <p className="text-xs text-muted">
-        CDC fall-risk thresholds (PDF Test C4): unable to hold tandem
-        (stage 3) for {STAGE_HOLD_SEC} s = significantly elevated fall
-        risk. Single-leg (stage 4) &lt; 5 s for age &gt; 60 = high
-        fall risk. Sway path length and 95% ellipse area are reported
-        in pixels (relative units — suitable for trend tracking within
-        the same patient).
-      </p>
     </div>
   );
 }

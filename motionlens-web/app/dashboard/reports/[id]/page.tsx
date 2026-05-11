@@ -359,6 +359,23 @@ function PostureBody({
   const front = (m.front as FrontMeasurements | null | undefined) ?? null;
   const side = (m.side as SideMeasurements | null | undefined) ?? null;
 
+  // Source photos persisted by PostureCapture. May be null for reports
+  // saved BEFORE the image-persistence schema landed — SavedPostureReport
+  // handles that case by falling back to findings-only rendering.
+  const frontImage =
+    (m.front_image as { data_url: string; width: number; height: number } | null | undefined)
+      ?? null;
+  const sideImage =
+    (m.side_image as { data_url: string; width: number; height: number } | null | undefined)
+      ?? null;
+
+  // Keypoint arrays live on report.keypoints, separated by view.
+  const kpRoot = (report.keypoints ?? {}) as Record<string, unknown>;
+  const frontKeypoints =
+    (kpRoot.front as Parameters<typeof SavedPostureReport>[0]["frontKeypoints"]) ?? null;
+  const sideKeypoints =
+    (kpRoot.side as Parameters<typeof SavedPostureReport>[0]["sideKeypoints"]) ?? null;
+
   const o = report.observations as Record<string, unknown>;
   const frontFindings = (o.front_findings as PostureFinding[] | undefined) ?? null;
   const sideFindings = (o.side_findings as PostureFinding[] | undefined) ?? null;
@@ -370,6 +387,10 @@ function PostureBody({
         side={side}
         frontFindings={frontFindings}
         sideFindings={sideFindings}
+        frontImage={frontImage}
+        sideImage={sideImage}
+        frontKeypoints={frontKeypoints}
+        sideKeypoints={sideKeypoints}
         patient={patient}
         patientName={patient?.name ?? null}
       />

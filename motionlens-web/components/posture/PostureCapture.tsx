@@ -4,7 +4,7 @@
 // MoveNet detector the live + biomech features use. After both views
 // are picked the user clicks "Run analysis" and gets a combined report.
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Image as ImageIcon, Play, RotateCcw, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import {
@@ -20,6 +20,48 @@ import {
   buildSideFindings,
 } from "@/lib/posture/measurements";
 
+// Compressed image data URL paired with its decoded pixel dimensions.
+// Stored alongside per-view metrics so the saved report can re-render
+// the annotated overlay without keeping the source file on disk.
+interface PersistedView {
+  dataUrl: string;
+  width: number;
+  height: number;
+}
+
+// Resize-and-encode a source image File to a JPEG data URL at most
+// `maxWidth` pixels wide. Keeps the saved-report payload manageable
+// (a 4000-px phone photo would otherwise serialise to ~3-5 MB of
+// base64 in Mongo); 800 px / 0.8 quality lands at ~50-150 KB per view.
+async function compressFileToDataUrl(
+  file: File,
+  maxWidth = 800,
+  quality = 0.8,
+): Promise<PersistedView> {
+  const imgUrl = URL.createObjectURL(file);
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error("Failed to load image for compression"));
+      el.src = imgUrl;
+    });
+    const scale = Math.min(1, maxWidth / img.naturalWidth);
+    const w = Math.round(img.naturalWidth * scale);
+    const h = Math.round(img.naturalHeight * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Canvas 2D context unavailable");
+    ctx.drawImage(img, 0, 0, w, h);
+    const dataUrl = canvas.toDataURL("image/jpeg", quality);
+    return { dataUrl, width: w, height: h };
+  } finally {
+    URL.revokeObjectURL(imgUrl);
+  }
+}
+
 export function PostureCapture() {
   const [frontFile, setFrontFile] = useState<File | null>(null);
   const [sideFile, setSideFile] = useState<File | null>(null);
@@ -28,9 +70,22 @@ export function PostureCapture() {
   const [front, setFront] = useState<PostureAnalysisResult | null>(null);
   const [side, setSide] = useState<PostureAnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Compressed image data URLs cached for the save payload — same
+  // image the analyzer ran on, but downscaled + JPEG-encoded so it's
+  // small enough to serialise into MongoDB.
+  const persistedRef = useRef<{ front: PersistedView | null; side: PersistedView | null }>({
+    front: null,
+    side: null,
+  });
 
   // Doctor-flow context — save is explicit via SaveToPatientButton.
   const { isDoctorFlow, patient } = usePatientContext();
+
+  useEffect(() => {
+    // Reset cached payload images whenever a file is removed / swapped.
+    if (!frontFile) persistedRef.current.front = null;
+    if (!sideFile) persistedRef.current.side = null;
+  }, [frontFile, sideFile]);
 
   const onPick = useCallback(
     (which: "front" | "side", f: File | null) => {
@@ -54,6 +109,15 @@ export function PostureCapture() {
     try {
       const frontResult = await analyzePostureImage(frontFile, "front");
       const sideResult = await analyzePostureImage(sideFile, "side");
+      // Compress the source images in parallel with the analysis
+      // results so the save payload has them ready by the time the
+      // doctor clicks Save.
+      const [frontPersist, sidePersist] = await Promise.all([
+        compressFileToDataUrl(frontFile),
+        compressFileToDataUrl(sideFile),
+      ]);
+      persistedRef.current.front = frontPersist;
+      persistedRef.current.side = sidePersist;
       setFront(frontResult);
       setSide(sideResult);
       setPhase("done");
@@ -91,23 +155,65 @@ export function PostureCapture() {
           buildPayload={() => {
             const frontFindings = front?.front ? buildFrontFindings(front.front) : [];
             const sideFindings = side?.side ? buildSideFindings(side.side) : [];
+            const fImg = persistedRef.current.front;
+            const sImg = persistedRef.current.side;
+
+            // Keypoints come out of the analyzer in ORIGINAL-image
+            // pixel space (e.g. a 4032×3024 phone photo's coordinates).
+            // The compressed source we persist alongside is ~800 px
+            // wide, so we scale the keypoints into the compressed
+            // image's coordinate space before saving — otherwise the
+            // SavedPostureReport overlay draws dots / lines / badges
+            // at the wrong positions when re-rendering.
+            const scaleKp = (
+              kps: typeof front extends infer T ? T extends { keypoints: infer K } ? K : null : null,
+              fromW: number | undefined,
+              toW: number | undefined,
+            ) => {
+              if (!kps || !fromW || !toW || fromW === 0) return kps;
+              const s = toW / fromW;
+              return (kps as Array<{ x: number; y: number; score?: number; name?: string }>).map((kp) => ({
+                ...kp,
+                x: kp.x * s,
+                y: kp.y * s,
+              }));
+            };
+            const frontKpScaled = scaleKp(front?.keypoints ?? null, front?.imageWidth, fImg?.width);
+            const sideKpScaled  = scaleKp(side?.keypoints  ?? null, side?.imageWidth,  sImg?.width);
+
             return {
               module: "posture",
               metrics: {
                 front: front?.front ?? {},
                 side: side?.side ?? {},
+                // Compressed source images so the saved-report viewer
+                // can re-render the annotated overlay. JPEG-encoded at
+                // ~800 px max width.
+                front_image: fImg
+                  ? {
+                      data_url: fImg.dataUrl,
+                      width: fImg.width,
+                      height: fImg.height,
+                    }
+                  : null,
+                side_image: sImg
+                  ? {
+                      data_url: sImg.dataUrl,
+                      width: sImg.width,
+                      height: sImg.height,
+                    }
+                  : null,
               },
               observations: {
                 front_findings: frontFindings,
                 side_findings: sideFindings,
               },
               // Spec Section 2 (a): persist the raw landmark stream as
-              // JSON. Photos are NOT uploaded — only the keypoint
-              // arrays the in-browser detector produced. ~1-2 KB per
-              // view × 2 views = well under 10 KB total.
+              // JSON, but in the COMPRESSED image's coordinate space
+              // so it aligns with the saved photo at render time.
               keypoints: {
-                front: front?.keypoints ?? null,
-                side: side?.keypoints ?? null,
+                front: frontKpScaled,
+                side: sideKpScaled,
               },
             };
           }}

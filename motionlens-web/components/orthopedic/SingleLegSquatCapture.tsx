@@ -339,149 +339,178 @@ export function SingleLegSquatCapture() {
   const cameraSquare = isCameraSquare(shoulderAngle);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-10">
       {isDoctorFlow && <SaveStatusBanner patient={patient} saveStatus={null} />}
 
-      <div className="rounded-card border border-accent/30 bg-accent/5 p-4 text-sm">
-        <p className="font-medium text-foreground">
-          Single-leg squat / step-down test
-        </p>
-        <p className="mt-1 text-muted">
-          Patient stands on the test leg with the contralateral leg lifted,
-          then performs {TARGET_REP_COUNT} squats to comfortable depth at
-          a steady tempo (~2 s down, 2 s up). The system auto-detects each
-          rep and captures KFPPA, pelvic drop, and trunk lean per rep.
-        </p>
-      </div>
-
-      {/* Sticky camera dock — capped to ~480 px wide so it doesn't
-          dominate the page, and pinned to the top of the viewport
-          (top-20 ≈ below Nav) so the operator can keep watching the
-          live skeleton while scrolling through controls / coaching. */}
-      <div className="sticky top-20 z-20 ml-auto w-full max-w-md rounded-card bg-background/85 p-1 shadow-lg backdrop-blur supports-[backdrop-filter]:bg-background/65">
-        <SingleLegSquatLiveCamera onFrame={handleFrame} onError={setError} />
-      </div>
-
-      {/* Camera-squareness gate */}
-      {phase !== "recording" && (
-        <div
-          className={`rounded-card border p-4 text-sm ${
-            cameraSquare
-              ? "border-emerald-500/30 bg-emerald-500/5"
-              : "border-amber-500/40 bg-amber-500/5"
-          }`}
-        >
-          <div className="flex items-center gap-2">
-            {cameraSquare ? (
-              <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-            ) : (
-              <AlertTriangle className="h-4 w-4 text-amber-600" />
-            )}
-            <span className="font-medium text-foreground">
-              Camera-squareness:{" "}
-              {shoulderAngle === null
-                ? "waiting for shoulders…"
-                : cameraSquare
-                  ? `square (${Math.abs(shoulderAngle).toFixed(1)}° tilt)`
-                  : `tilted ${Math.abs(shoulderAngle).toFixed(1)}° — must be ≤ ${SQUARENESS_TOLERANCE_DEG}°`}
-            </span>
+      {/* ─── 2-column layout (instructions+status | camera) ─────── */}
+      <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
+        {/* LEFT — instructions + controls */}
+        <div className="space-y-5">
+          <div className="rounded-card border border-border bg-surface p-5">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+              Movement instructions
+            </p>
+            <ol className="mt-3 space-y-2.5 text-sm text-foreground">
+              {[
+                "Stand facing the camera squarely — both shoulders level in frame.",
+                "Lift the non-test leg by bending the knee out to the side. Stand on the test leg only.",
+                "Squat down on the test leg to comfortable depth (thigh approaching horizontal).",
+                "Move smoothly — about 2 seconds down, 2 seconds up. Don't let the knee collapse inward.",
+                `Perform ${TARGET_REP_COUNT} squats in a row at this steady tempo.`,
+                "After completing the set, repeat on the other side.",
+              ].map((s, i) => (
+                <li key={i} className="flex gap-2.5">
+                  <span className="tabular shrink-0 text-accent">{i + 1}.</span>
+                  <span className="leading-relaxed">{s}</span>
+                </li>
+              ))}
+            </ol>
           </div>
-          {!cameraSquare && (
-            <p className="mt-1 text-xs text-muted">
-              Patient&apos;s shoulders should sit level relative to the camera. Adjust the camera height
-              or have the patient face the lens directly before starting.
-            </p>
-          )}
-        </div>
-      )}
 
-      {/* Recording panel */}
-      {phase === "recording" && recordingRef.current && (
-        <div className="rounded-card border border-accent/40 bg-accent/5 p-5">
-          <div className="flex items-center justify-between">
-            <p className="text-sm font-medium text-foreground">
-              Recording — {liveSide === "left" ? "Left" : "Right"}-leg squat
-            </p>
-            <p className="tabular text-2xl font-semibold text-accent">
-              {repsCaptured} / {TARGET_REP_COUNT}
-            </p>
-          </div>
-          <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-elevated">
+          {/* Camera-squareness gate */}
+          {phase !== "recording" && (
             <div
-              className="h-full bg-accent transition-all"
-              style={{ width: `${(repsCaptured / TARGET_REP_COUNT) * 100}%` }}
-            />
-          </div>
-          <p className="mt-3 text-xs text-muted">
-            {remainingSec.toFixed(0)} s remaining before timeout. Squat to comfortable depth
-            (thigh approaching horizontal). Trial auto-stops on the {TARGET_REP_COUNT}th rep
-            or after {TRIAL_TIMEOUT_SEC} s.
-          </p>
-          {coachMsg && (
-            <p className="mt-3 rounded-md border border-accent/30 bg-background/60 px-3 py-2 text-sm font-medium text-foreground">
-              {coachMsg}
-            </p>
-          )}
-          <div className="mt-3 flex justify-end">
-            <Button variant="ghost" size="sm" onClick={stopEarly}>
-              Stop early
-            </Button>
-          </div>
-        </div>
-      )}
-
-      {/* Side picker / start */}
-      {phase !== "recording" && (
-        <div className="rounded-card border border-border bg-surface p-5">
-          {sidesRemaining.length === 0 ? (
-            <p className="text-sm text-muted">Both sides recorded. Compiling the report…</p>
-          ) : armedSide ? (
-            <div className="space-y-3">
-              <p className="text-sm">
-                Ready to record:{" "}
+              className={`rounded-card border p-4 text-sm ${
+                cameraSquare
+                  ? "border-emerald-500/30 bg-emerald-500/5"
+                  : "border-amber-500/40 bg-amber-500/5"
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                {cameraSquare ? (
+                  <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                ) : (
+                  <AlertTriangle className="h-4 w-4 text-amber-600" />
+                )}
                 <span className="font-medium text-foreground">
-                  {armedSide === "left" ? "Left" : "Right"}-leg squat
+                  Camera-squareness:{" "}
+                  {shoulderAngle === null
+                    ? "waiting for shoulders…"
+                    : cameraSquare
+                      ? `square (${Math.abs(shoulderAngle).toFixed(1)}° tilt)`
+                      : `tilted ${Math.abs(shoulderAngle).toFixed(1)}° — must be ≤ ${SQUARENESS_TOLERANCE_DEG}°`}
                 </span>
-                .
-              </p>
-              <p className="text-xs text-muted">
-                Patient should be standing on the {armedSide} leg with the
-                contralateral knee lifted. Click <em>Start</em> when shoulders
-                are level — {TARGET_REP_COUNT} squats will be captured.
-              </p>
-              {coachMsg && (
-                <p className="rounded-md bg-background/40 px-3 py-2 text-sm text-foreground">
-                  {coachMsg}
-                </p>
-              )}
-              <div className="flex gap-2">
-                <Button onClick={startRecording} disabled={!cameraSquare}>
-                  <Play className="h-4 w-4" />
-                  Start ({armedSide})
-                </Button>
-                <Button variant="ghost" onClick={() => setArmedSide(null)}>Cancel</Button>
               </div>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <p className="text-sm font-medium">Choose which side to record next:</p>
-              <div className="flex flex-wrap gap-3">
-                {sidesRemaining.map((s) => (
-                  <Button key={s} onClick={() => arm(s)}>
-                    {s === "left" ? "Left" : "Right"}-leg squat
-                  </Button>
-                ))}
-              </div>
-              {completedSides.size > 0 && (
-                <p className="inline-flex items-center gap-1 text-xs text-emerald-600">
-                  <CheckCircle2 className="h-3.5 w-3.5" />
-                  {completedSides.size === 1 ? "1 side recorded" : "Both sides recorded"}
+              {!cameraSquare && (
+                <p className="mt-1 text-xs text-muted">
+                  Patient&apos;s shoulders should sit level relative to the camera. Adjust the camera height
+                  or have the patient face the lens directly before starting.
                 </p>
               )}
             </div>
           )}
+
+          <div className="rounded-card border border-border bg-surface p-5">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+              Live status
+            </p>
+
+            {/* Recording panel */}
+            {phase === "recording" && recordingRef.current && (
+              <div className="mt-3 space-y-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-medium text-foreground">
+                    Recording — {liveSide === "left" ? "Left" : "Right"}-leg squat
+                  </p>
+                  <p className="tabular text-2xl font-semibold text-accent">
+                    {repsCaptured} / {TARGET_REP_COUNT}
+                  </p>
+                </div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
+                  <div
+                    className="h-full bg-accent transition-all"
+                    style={{ width: `${(repsCaptured / TARGET_REP_COUNT) * 100}%` }}
+                  />
+                </div>
+                <p className="text-xs text-muted">
+                  {remainingSec.toFixed(0)} s remaining before timeout. Squat to comfortable depth
+                  (thigh approaching horizontal). Trial auto-stops on the {TARGET_REP_COUNT}th rep
+                  or after {TRIAL_TIMEOUT_SEC} s.
+                </p>
+                {coachMsg && (
+                  <p className="rounded-md border border-accent/30 bg-background/60 px-3 py-2 text-sm font-medium text-foreground">
+                    {coachMsg}
+                  </p>
+                )}
+                <div className="flex justify-end">
+                  <Button variant="ghost" size="sm" onClick={stopEarly}>
+                    Stop early
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* Side picker / start */}
+            {phase !== "recording" && (
+              <div className="mt-3">
+                {sidesRemaining.length === 0 ? (
+                  <p className="text-sm text-muted">Both sides recorded. Compiling the report…</p>
+                ) : armedSide ? (
+                  <div className="space-y-3">
+                    <p className="text-sm">
+                      Ready to record:{" "}
+                      <span className="font-medium text-foreground">
+                        {armedSide === "left" ? "Left" : "Right"}-leg squat
+                      </span>
+                      .
+                    </p>
+                    <p className="text-xs text-muted">
+                      Patient stands on the {armedSide} leg with the
+                      contralateral knee lifted. Click <em>Start</em> when shoulders
+                      are level — {TARGET_REP_COUNT} squats will be captured.
+                    </p>
+                    {coachMsg && (
+                      <p className="rounded-md bg-background/40 px-3 py-2 text-sm text-foreground">
+                        {coachMsg}
+                      </p>
+                    )}
+                    <div className="flex gap-2">
+                      <Button onClick={startRecording} disabled={!cameraSquare}>
+                        <Play className="h-4 w-4" />
+                        Start ({armedSide})
+                      </Button>
+                      <Button variant="ghost" onClick={() => setArmedSide(null)}>Cancel</Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <p className="text-sm font-medium text-foreground">Choose which side to record next:</p>
+                    <div className="flex flex-wrap gap-3">
+                      {sidesRemaining.map((s) => (
+                        <Button key={s} onClick={() => arm(s)}>
+                          {s === "left" ? "Left" : "Right"}-leg squat
+                        </Button>
+                      ))}
+                    </div>
+                    {completedSides.size > 0 && (
+                      <p className="inline-flex items-center gap-1 text-xs text-emerald-600">
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                        {completedSides.size === 1 ? "1 side recorded" : "Both sides recorded"}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <p className="mt-4 text-xs text-muted">
+              Cutoffs (PDF Test B1): KFPPA &lt;10° good, 10–15° borderline, &gt;15° valgus.
+              Pelvic drop &gt;{PELVIC_DROP_THRESHOLD_DEG}° = hip abductor insufficiency.
+              Trunk lateral lean &gt;{TRUNK_LEAN_THRESHOLD_DEG}° = compensatory pattern.
+            </p>
+          </div>
         </div>
-      )}
+
+        {/* RIGHT — sticky camera */}
+        <div className="lg:sticky lg:top-28">
+          <SingleLegSquatLiveCamera onFrame={handleFrame} onError={setError} />
+          <p className="mt-3 text-xs text-subtle">
+            Start the camera and have the patient stand facing the lens.
+            The on-screen skeleton tracks the test leg's knee, hip, and
+            trunk in real time — keep both shoulders inside the frame.
+          </p>
+        </div>
+      </div>
 
       {error && (
         <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
@@ -489,13 +518,6 @@ export function SingleLegSquatCapture() {
           <p className="text-foreground">{error}</p>
         </div>
       )}
-
-      {/* Light-touch reference — show thresholds the operator can glance at */}
-      <p className="text-xs text-muted">
-        Cutoffs (PDF Test B1): KFPPA &lt;10° good, 10–15° borderline, &gt;15° valgus.
-        Pelvic drop &gt;{PELVIC_DROP_THRESHOLD_DEG}° = hip abductor insufficiency.
-        Trunk lateral lean &gt;{TRUNK_LEAN_THRESHOLD_DEG}° = compensatory pattern.
-      </p>
     </div>
   );
 }

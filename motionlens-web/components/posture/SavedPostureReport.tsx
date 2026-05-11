@@ -1,12 +1,16 @@
 "use client";
 // Read-only posture report for the saved-report viewer.
-// Same findings tables as PostureReport, but rebuilt from saved metrics
-// (no annotated images — those were never persisted to the DB).
+// Renders the same annotated-image overlays + findings tables the
+// doctor saw at capture time. Image overlays only show when the saved
+// payload includes the compressed source photos (added in a later
+// schema revision); older posture reports gracefully fall back to
+// findings-only rendering.
 
 import { useMemo } from "react";
 import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
 import { RelativeUnitsCaveat } from "@/components/posture/RelativeUnitsCaveat";
 import { PatientHeader } from "@/components/dashboard/PatientHeader";
+import { PostureImageOverlay } from "@/components/posture/PostureImageOverlay";
 import {
   buildFrontFindings,
   buildSideFindings,
@@ -14,7 +18,17 @@ import {
   type FrontMeasurements,
   type SideMeasurements,
 } from "@/lib/posture/measurements";
+import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { PatientDTO } from "@/lib/patients";
+
+/** Compressed source-photo blob persisted into the report's `metrics`
+ *  field by PostureCapture. Width/height are the actual pixel
+ *  dimensions of the (resized) image so the overlay scales correctly. */
+export interface SavedPostureImage {
+  data_url: string;
+  width: number;
+  height: number;
+}
 
 interface Props {
   front: FrontMeasurements | null;
@@ -23,6 +37,12 @@ interface Props {
    *  doctor saw at save time). Falls back to recomputing from metrics. */
   frontFindings?: PostureFinding[] | null;
   sideFindings?: PostureFinding[] | null;
+  /** Saved source photo + landmarks for the front view. Both must be
+   *  present for the overlay to render. */
+  frontImage?: SavedPostureImage | null;
+  sideImage?: SavedPostureImage | null;
+  frontKeypoints?: Keypoint[] | null;
+  sideKeypoints?: Keypoint[] | null;
   patient?: PatientDTO | null;
   patientName?: string | null;
 }
@@ -32,6 +52,10 @@ export function SavedPostureReport({
   side,
   frontFindings,
   sideFindings,
+  frontImage,
+  sideImage,
+  frontKeypoints,
+  sideKeypoints,
   patient,
   patientName,
 }: Props) {
@@ -69,6 +93,45 @@ export function SavedPostureReport({
         </h2>
         <p className="mt-3 text-sm text-muted">{summary}</p>
       </div>
+
+      {/* ── Annotated images ─────────────────────────────────────
+          Only renders for reports saved AFTER images were added to
+          the payload schema. Legacy posture reports (findings-only)
+          skip this block and go straight to the findings tables. */}
+      {(frontImage || sideImage) && (
+        <div className="grid gap-6 md:grid-cols-2">
+          {frontImage && frontKeypoints && (
+            <div className="space-y-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+                Front view
+              </p>
+              <PostureImageOverlay
+                view="front"
+                imageUrl={frontImage.data_url}
+                imageWidth={frontImage.width}
+                imageHeight={frontImage.height}
+                keypoints={frontKeypoints}
+                front={front ?? undefined}
+              />
+            </div>
+          )}
+          {sideImage && sideKeypoints && (
+            <div className="space-y-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+                Side view
+              </p>
+              <PostureImageOverlay
+                view="side"
+                imageUrl={sideImage.data_url}
+                imageWidth={sideImage.width}
+                imageHeight={sideImage.height}
+                keypoints={sideKeypoints}
+                side={side ?? undefined}
+              />
+            </div>
+          )}
+        </div>
+      )}
 
       {fFindings.length > 0 && (
         <FindingsTable title="Front view findings" findings={fFindings} />

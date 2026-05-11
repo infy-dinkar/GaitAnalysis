@@ -517,10 +517,81 @@ export const STAGE_LABEL: Record<StageIndex, string> = {
 };
 
 export const STAGE_INSTRUCTION: Record<StageIndex, string> = {
-  1: "Stand with both feet next to each other, toes aligned.",
-  2: "Place the heel of one foot beside the big toe of the other (semi-tandem).",
-  3: "Place one foot directly in front of the other, heel-to-toe (tandem).",
-  4: "Lift one leg so the knee is at roughly 90° hip flexion.",
+  1: "Stand with both feet together — toes and heels lined up side by side. Look straight ahead, arms relaxed.",
+  2: "Move one foot slightly forward so its HEEL touches the SIDE of the big toe of the other foot (semi-tandem).",
+  3: "Place one foot directly in front of the other in a straight line — the HEEL of the front foot touches the TOES of the back foot (tandem / heel-to-toe).",
+  4: "Lift one leg off the ground — bend the knee so the lifted foot clears the floor by a few inches. Hold the position; do not let the lifted foot touch down.",
+};
+
+/** Detailed protocol text shown upfront before the test starts, so
+ *  the operator and patient know exactly what each stage involves.
+ *  Each entry has a short headline (what), step-by-step instructions
+ *  in plain language (how), and a unicode foot-position visual. */
+export const STAGE_PROTOCOL: Record<
+  StageIndex,
+  {
+    headline: string;
+    /** Plain-language step-by-step instructions for the patient. */
+    steps: string[];
+    /** "Why" context — what makes this stage harder than the previous. */
+    note: string;
+    /** Unicode/text foot-position visual. */
+    visual: string;
+  }
+> = {
+  1: {
+    headline: "Side-by-side stance",
+    steps: [
+      "Stand up straight with both feet next to each other.",
+      "The inside of one foot should touch the inside of the other — feet completely together.",
+      "Toes lined up at the front. Heels lined up at the back.",
+      "Arms hang down naturally at your sides. Don't hold on to anything.",
+      "Look straight ahead, eyes level. Don't look down at your feet.",
+      "Stand still and balanced for 10 seconds.",
+    ],
+    note: "This is the easiest position — wide base, both feet supporting you. If you struggle here, it means your basic standing balance is impaired.",
+    visual: "👣👣",
+  },
+  2: {
+    headline: "Semi-tandem stance",
+    steps: [
+      "Pick one foot to move forward (either side is fine).",
+      "Slide that foot forward by about half a foot's length.",
+      "The HEEL of the moved foot should now be next to the BIG TOE of the other foot — touching at the side.",
+      "Both feet still point straight forward. The feet are touching but staggered, like steps.",
+      "Arms relaxed at your sides. Look straight ahead.",
+      "Hold this position completely still for 10 seconds.",
+    ],
+    note: "Slightly harder than Stage 1 — your base of support is narrower (front-to-back instead of side-to-side), so you'll feel your balance work a bit more.",
+    visual: "👣\n 👣",
+  },
+  3: {
+    headline: "Tandem stance (heel-to-toe)",
+    steps: [
+      "Place one foot directly in front of the other — like walking on a tightrope.",
+      "The HEEL of the front foot must TOUCH the TOES (front) of the back foot.",
+      "Both feet in one single straight line. No gap between them.",
+      "Arms relaxed at your sides. You may feel wobbly — that's normal.",
+      "Look straight ahead, NOT at your feet. Looking down makes balance harder.",
+      "Hold completely still for 10 seconds. Don't step out, don't grab anything.",
+    ],
+    note: "This is the hardest two-foot position. If you cannot hold this for 10 seconds, the CDC considers it a sign of significantly elevated fall risk.",
+    visual: "👣\n👣",
+  },
+  4: {
+    headline: "Single-leg stance",
+    steps: [
+      "Choose which leg to stand on (your stronger / preferred leg is fine).",
+      "Lift the OTHER leg off the floor — bend the knee so the foot clears the ground by 3-4 inches.",
+      "Don't lift it too high. Just enough that the foot isn't touching the floor.",
+      "Stand on the supporting leg only. Both hands relaxed at your sides — do NOT grab anything.",
+      "Look straight ahead. Avoid looking at your feet.",
+      "Hold for as long as you can, up to 10 seconds.",
+      "The trial ends if the lifted foot touches down, if you reach for support, or if you hop.",
+    ],
+    note: "The final stage. For age over 60, holding this for less than 5 seconds suggests a high fall risk.",
+    visual: "👣 ⬆️",
+  },
 };
 
 export const CLASSIFICATION_LABEL: Record<SessionClassification, string> = {
