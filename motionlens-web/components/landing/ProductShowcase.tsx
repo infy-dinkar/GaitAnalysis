@@ -3,6 +3,7 @@ import {
   Activity,
   ArmchairIcon,
   ArrowUpRight,
+  Clock,
   Footprints,
   Layers,
   Move3d,
@@ -125,15 +126,26 @@ const PRODUCTS: ProductCard[] = [
     icon: Layers,
     iconTone: "text-indigo-500",
   },
+  {
+    href: "/orthopedic/tug",
+    eyebrow: "Geriatric / fall-risk",
+    title: "Timed Up and Go (TUG).",
+    body:
+      "Side-view 3 m walk. Backend MediaPipe decomposes the test into 5 sub-phases — sit-to-stand, walk-out, turn, walk-back, stand-to-sit — and flags balance impairment independently of total time.",
+    gradient:
+      "linear-gradient(135deg, rgba(234,179,8,0.20) 0%, rgba(250,204,21,0.10) 50%, rgba(28,28,33,0.0) 100%)",
+    icon: Clock,
+    iconTone: "text-yellow-500",
+  },
 ];
 
 export function ProductShowcase() {
   return (
     <Section id="modules" className="bg-dots">
       <div className="max-w-2xl">
-        <Badge>Nine modules</Badge>
+        <Badge>Ten modules</Badge>
         <h2 className="mt-5 text-3xl font-semibold tracking-tight md:text-5xl">
-          Movement, measured<br />nine ways.
+          Movement, measured<br />ten ways.
         </h2>
       </div>
 

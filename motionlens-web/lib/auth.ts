@@ -150,7 +150,19 @@ export async function authedFetch(
   const token = getToken();
   const headers = new Headers(init.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  if (init.body && !headers.has("Content-Type")) {
+  // Only default to JSON for plain bodies. FormData / Blob bodies must
+  // NOT carry a manually-set Content-Type — the browser has to
+  // auto-set `multipart/form-data; boundary=...` for multipart uploads
+  // (or the right MIME for blobs). Forcing application/json here was
+  // breaking the TUG video upload (FastAPI saw JSON content-type +
+  // multipart body, returned a 422 Pydantic error array that surfaced
+  // as `[object Object]` in the UI).
+  const body = init.body;
+  const isMultipartOrBinary =
+    (typeof FormData !== "undefined" && body instanceof FormData) ||
+    (typeof Blob !== "undefined" && body instanceof Blob) ||
+    (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams);
+  if (body && !headers.has("Content-Type") && !isMultipartOrBinary) {
     headers.set("Content-Type", "application/json");
   }
   return fetch(`${API_BASE_URL}${endpoint}`, { ...init, headers });
