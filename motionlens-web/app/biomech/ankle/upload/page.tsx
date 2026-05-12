@@ -7,7 +7,7 @@ import { Footer } from "@/components/layout/Footer";
 import { Section } from "@/components/ui/Section";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { ApiUploadAssessment } from "@/components/biomech/ApiUploadAssessment";
+import { AnkleCapture } from "@/components/biomech/AnkleCapture";
 import { ANKLE_MOVEMENTS, type AnkleMovementId } from "@/lib/biomech/ankle";
 
 function AnkleUploadInner() {
@@ -19,13 +19,13 @@ function AnkleUploadInner() {
     ANKLE_MOVEMENTS.find((m) => m.id === movementId) ?? ANKLE_MOVEMENTS[0];
 
   return (
-    <ApiUploadAssessment
-      bodyPart="ankle"
+    <AnkleCapture
       movementId={movement.id}
       movementLabel={`Ankle · ${movement.label}`}
       description={movement.description}
       target={movement.target}
       side={side}
+      initialMode="upload"
     />
   );
 }
@@ -43,8 +43,10 @@ export default function AnkleUploadPage() {
                 Ankle — video analysis
               </h1>
               <p className="mt-2 text-sm text-muted">
-                Pose detection runs entirely in your browser — your video never leaves
-                this device. The peak ankle ROM angle is computed locally.
+                Server-side MediaPipe BlazePose Full (33-keypoint model with
+                foot landmarks) computes the ankle joint angle from the
+                shin-foot vector. The video is processed once and discarded —
+                only the landmarks + peak angle are persisted.
               </p>
             </div>
             <Link href="/biomech/ankle">
