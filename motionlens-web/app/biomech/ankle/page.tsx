@@ -40,7 +40,10 @@ function AnkleSetupInner() {
               Configure the assessment<span className="text-accent">.</span>
             </h1>
             <p className="mt-5 text-lg text-muted">
-              Ankle dorsiflexion (toes up) and plantarflexion (toes down). Set up the patient, pick a movement, capture live or upload a clip.
+              Ankle dorsiflexion (toes up) and plantarflexion (toes down).
+              Server-side MediaPipe analysis with foot landmarks for an
+              accurate joint angle. Capture live from the camera or
+              upload a pre-recorded clip.
             </p>
           </div>
 
@@ -71,6 +74,11 @@ function AnkleSetupInner() {
               <h2 className="text-sm font-bold uppercase tracking-[0.12em] text-foreground">
                 Capture mode
               </h2>
+              {/* Both modes route to the SAME backend MediaPipe pipeline.
+                  The browser cannot do ankle math itself (MoveNet, 17 kp,
+                  has no foot_index landmark) — but it CAN record video
+                  via getUserMedia + MediaRecorder and ship the bytes to
+                  the server. */}
               <div className="mt-4 grid gap-4 md:grid-cols-2">
                 <Link
                   href={`/biomech/ankle/live?movement=${movement ?? ""}&side=${side ?? ""}${patientQS}`}
@@ -83,11 +91,14 @@ function AnkleSetupInner() {
                   <span className="flex h-11 w-11 items-center justify-center rounded-lg bg-accent/10 text-accent">
                     <Camera className="h-5 w-5" />
                   </span>
-                  <h3 className="mt-4 text-lg font-semibold">Live camera</h3>
+                  <h3 className="mt-4 text-lg font-semibold">Live recording</h3>
                   <p className="mt-2 text-sm text-muted">
-                    Use your webcam. Continuous capture with peak angle tracking.
+                    Record a short clip from your device camera. The video
+                    is uploaded once and analysed server-side; nothing is
+                    stored after the result is returned.
                   </p>
                 </Link>
+
                 <Link
                   href={`/biomech/ankle/upload?movement=${movement ?? ""}&side=${side ?? ""}${patientQS}`}
                   className={`rounded-card border p-6 transition ${
@@ -101,7 +112,8 @@ function AnkleSetupInner() {
                   </span>
                   <h3 className="mt-4 text-lg font-semibold">Video upload</h3>
                   <p className="mt-2 text-sm text-muted">
-                    Drop a pre-recorded video. Frame-by-frame analysis with full angle chart.
+                    Drop a pre-recorded video. Backend pose analysis with
+                    foot landmarks gives an accurate joint-angle reading.
                   </p>
                 </Link>
               </div>

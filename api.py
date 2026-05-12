@@ -68,6 +68,9 @@ from api_models import (
 from tug_engine import analyze_tug
 from tug_models import TUGResponse
 
+# ─── Ankle (dorsi/plantar) — reuses gait MediaPipe pipeline ──────
+from ankle_engine import analyze_ankle as analyze_ankle_engine
+
 # ─── Auth + database (Phase 1) ─────────────────────────────────────
 import db as db_module
 from auth_routes import router as auth_router
@@ -606,6 +609,131 @@ async def analyze_tug_endpoint(
         return TUGResponse(success=False, data=None, error=f"Analysis failed: {e}")
     finally:
         cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Ankle (dorsiflexion + plantarflexion) — backend MediaPipe
+# ══════════════════════════════════════════════════════════════════════
+# All ankle biomech goes through the backend MediaPipe pipeline because
+# the foot landmarks (heel + foot_index, MediaPipe kp 29-32) are
+# required for an accurate ankle-joint angle — MoveNet's 17-keypoint
+# set doesn't have them, so the previous browser-side pipeline could
+# only measure shin-from-vertical (returning ~90° for seated patients).
+# This endpoint reuses gait's pose pipeline + new shin/foot-vector
+# math in ankle_engine.py.
+@app.post("/api/analyze-ankle", response_model=BiomechResponse)
+async def analyze_ankle(
+    video: UploadFile = File(...),
+    movement_type: str = Form(...),    # "flexion" (dorsi) or "extension" (plantar)
+    side: str = Form("right"),         # "left" or "right"
+    patient_name: Optional[str] = Form(None),
+    recording_duration_ms: Optional[int] = Form(None),
+) -> BiomechResponse:
+    """Run the backend MediaPipe ankle pipeline on an uploaded clip.
+
+    `recording_duration_ms` is supplied by the live-record path on the
+    frontend. MediaRecorder-produced WebMs often have broken duration
+    headers, so we use TUG's `_ensure_decodable_video` helper to rewrite
+    the container with a proper FPS computed from frames/duration.
+    """
+    # Import locally to avoid a top-level cycle and to keep the helper
+    # owned by tug_engine (single source of truth for the WebM repair).
+    from tug_engine import _ensure_decodable_video
+
+    tmp_path: str | None = None
+    fixed_path_cleanup: str | None = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(contents, video.filename or "ankle.mp4")
+        log.info(
+            "ankle: file=%s size=%.2f MB movement=%s side=%s recording_ms=%s",
+            video.filename, size_mb, movement_type, side, recording_duration_ms,
+        )
+
+        # Repair MediaRecorder WebMs with broken duration headers BEFORE
+        # the cv2 FPS probe — otherwise the probe returns 0 and we'd
+        # reject otherwise-valid live recordings.
+        processed_path, fixed_path_cleanup = _ensure_decodable_video(
+            tmp_path, recording_duration_ms,
+        )
+
+        probe = cv2.VideoCapture(processed_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0 or probe_total_frames <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not read video metadata. "
+                    "If this was a live recording, please retry; otherwise "
+                    "upload a different file."
+                ),
+            )
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video frame rate too low ({probe_fps:.1f} FPS). "
+                    f"Minimum {MIN_REQUIRED_FPS} FPS required."
+                ),
+            )
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video too long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed."
+                ),
+            )
+
+        # Suppress unused warning for the patient name (kept on the
+        # API for parity with other biomech endpoints; not used by
+        # the report renderer because the patient header is set on
+        # the frontend from usePatientContext).
+        _ = patient_name
+
+        pose_options = _build_gait_pose_options()
+        result = analyze_ankle_engine(
+            video_path=processed_path,
+            pose_options=pose_options,
+            movement=movement_type,
+            side=side,
+        )
+        return BiomechResponse(success=True, data=result, error=None)
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("ankle validation: %s", e)
+        return BiomechResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("ankle analysis failed")
+        return BiomechResponse(success=False, data=None, error=f"Analysis failed: {e}")
+    finally:
+        cleanup_temp_file(tmp_path)
+        # _ensure_decodable_video returns a second path only when it
+        # actually wrote a repaired file — clean that up too.
+        if fixed_path_cleanup and fixed_path_cleanup != tmp_path:
+            cleanup_temp_file(fixed_path_cleanup)
 
 
 @app.post("/api/analyze-shoulder", response_model=BiomechResponse)
