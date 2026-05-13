@@ -144,59 +144,51 @@ def _classify_stage(
 
 
 def _body_height_px(ts: dict, i: int, vis_threshold: float) -> Optional[float]:
-    """Pixel span from the HIGHEST visible upper landmark to the
-    LOWEST visible lower landmark in the image.
+    """HIP-midpoint to ANKLE-midpoint vertical distance in pixels.
 
-    Why this changed: the previous version used shoulder Y minus
-    ankle Y. MediaPipe occasionally produces "shoulder" landmarks
-    with passing visibility scores but completely wrong positions
-    (e.g., placed near the hip / ankle level). That gave body
-    heights in the 16-103 pixel range for a properly-framed
-    full-body video where the real value should be 400-700 px.
-    All subsequent body-relative measurements then exploded.
+    Why pinned to hip-to-ankle (not shoulder-to-ankle):
+    MediaPipe's shoulder detection reliability varies across
+    platforms (different cv2 / ffmpeg / MediaPipe versions on
+    Linux production vs Windows dev). On one platform it's stable;
+    on the other it sometimes misses or misplaces shoulders. That
+    made the previous "max visible span" reference produce
+    dramatically different body-height values for the same video
+    on different platforms — same dy_heel_px ends up as different
+    dy_heel_n ratios → different stage classifications.
 
-    The new logic picks the HIGHEST visible top landmark (min Y in
-    image-down coords) from the upper-body candidates and the
-    LOWEST visible bottom landmark (max Y) from the foot
-    candidates. This produces a robust span:
-      - When shoulder is correctly placed → shoulder-to-ankle
-        distance (full body height).
-      - When shoulder is mis-placed but hip is correct → hip-to-
-        ankle distance (still a usable scale, just smaller).
-      - When all upper landmarks are mis-placed → returns a small
-        value but at least proportional to whatever IS detected,
-        so the classifier doesn't divide-by-microscopic.
+    Hips and ankles are detected consistently when the lower body
+    is in frame (which is a hard requirement for SPPB Balance
+    anyway). Pinning to hip-to-ankle gives a cross-platform-stable
+    scale. The stage thresholds (DY_STAGE1_MAX etc.) were tuned
+    against this scale and don't need re-tuning.
+
+    Falls back to heel/foot_index if ankles aren't both visible.
     """
-    UPPER_KEYS = ("left_shoulder", "right_shoulder", "left_hip", "right_hip")
-    LOWER_KEYS = (
-        "left_ankle", "right_ankle",
-        "left_heel", "right_heel",
-        "left_foot_index", "right_foot_index",
-    )
-
-    top_y: Optional[float] = None  # smallest Y = highest in image
-    for k in UPPER_KEYS:
-        if k not in ts:
-            continue
-        if ts[k]["vis"][i] < vis_threshold:
-            continue
-        y = float(ts[k]["y_px"][i])
-        if top_y is None or y < top_y:
-            top_y = y
-
-    bot_y: Optional[float] = None  # largest Y = lowest in image
-    for k in LOWER_KEYS:
-        if k not in ts:
-            continue
-        if ts[k]["vis"][i] < vis_threshold:
-            continue
-        y = float(ts[k]["y_px"][i])
-        if bot_y is None or y > bot_y:
-            bot_y = y
-
-    if top_y is None or bot_y is None:
+    # Hip midpoint
+    hip_ys: list[float] = []
+    for k in ("left_hip", "right_hip"):
+        if ts[k]["vis"][i] >= vis_threshold:
+            hip_ys.append(float(ts[k]["y_px"][i]))
+    if not hip_ys:
         return None
-    return abs(bot_y - top_y)
+    hip_y = sum(hip_ys) / len(hip_ys)
+
+    # Ankle midpoint (with foot-landmark fallback so we still have
+    # a reference when ankles are partially occluded).
+    foot_ys: list[float] = []
+    for k in ("left_ankle", "right_ankle"):
+        if ts[k]["vis"][i] >= vis_threshold:
+            foot_ys.append(float(ts[k]["y_px"][i]))
+    if not foot_ys:
+        for k in ("left_heel", "right_heel", "left_foot_index", "right_foot_index"):
+            if k in ts and ts[k]["vis"][i] >= vis_threshold:
+                foot_ys.append(float(ts[k]["y_px"][i]))
+    if not foot_ys:
+        return None
+    foot_y = sum(foot_ys) / len(foot_ys)
+
+    h = abs(foot_y - hip_y)
+    return h if h > 0 else None
 
 
 def _is_arm_grab(ts: dict, i: int) -> bool:
