@@ -331,6 +331,55 @@ async def health() -> HealthResponse:
     return HealthResponse()
 
 
+# Build-info endpoint — useful for confirming which commit the
+# deployed backend is actually running. Reads from git at startup
+# (if available) and falls back to an env var that CI/CD can set.
+import subprocess as _subprocess
+import os as _os
+
+def _get_build_info() -> dict:
+    info: dict = {}
+    # Try git directly first.
+    try:
+        sha = _subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=_subprocess.DEVNULL, text=True, timeout=2,
+        ).strip()
+        if sha:
+            info["commit"] = sha
+    except Exception:
+        pass
+    # Fall back to env var (set by hosting platforms — Render sets
+    # RENDER_GIT_COMMIT, Railway sets RAILWAY_GIT_COMMIT_SHA, etc.).
+    for env_key in (
+        "BACKEND_COMMIT_SHA",
+        "RENDER_GIT_COMMIT",
+        "RAILWAY_GIT_COMMIT_SHA",
+        "K_REVISION",       # Cloud Run
+        "SOURCE_VERSION",   # Heroku
+    ):
+        v = _os.environ.get(env_key)
+        if v:
+            info.setdefault("commit", v[:12])
+            info["source"] = env_key
+            break
+    if "commit" not in info:
+        info["commit"] = "unknown"
+    return info
+
+
+_BUILD_INFO = _get_build_info()
+
+
+@app.get("/api/version")
+async def version() -> dict:
+    """Returns the commit SHA the backend is running. Curl this to
+    confirm a deploy actually picked up new code:
+        curl https://your-backend.example.com/api/version
+    """
+    return _BUILD_INFO
+
+
 @app.post("/api/analyze-gait", response_model=GaitResponse)
 async def analyze_gait(
     video: UploadFile = File(...),
