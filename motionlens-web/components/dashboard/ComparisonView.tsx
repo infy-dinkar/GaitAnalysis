@@ -17,6 +17,7 @@ import { SavedChairStand30sReport } from "@/components/orthopedic/SavedChairStan
 import { SavedSingleLegStanceReport } from "@/components/orthopedic/SavedSingleLegStanceReport";
 import { SavedFourStageBalanceReport } from "@/components/orthopedic/SavedFourStageBalanceReport";
 import { SavedTUGReport } from "@/components/orthopedic/SavedTUGReport";
+import { SavedSPPBReport } from "@/components/orthopedic/SavedSPPBReport";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { formatIST } from "@/lib/format/datetime";
 import type { ReportDTO } from "@/lib/reports";
@@ -350,6 +351,17 @@ function ReportBody({
     );
   }
 
+  if (report.module === "sppb") {
+    return (
+      <SavedSPPBReport
+        patientName={patient.name}
+        patient={patient}
+        metrics={report.metrics as Record<string, unknown>}
+        observations={report.observations as Record<string, unknown>}
+      />
+    );
+  }
+
   return <Notice>Unsupported module: {report.module}</Notice>;
 }
 
@@ -384,7 +396,56 @@ function buildDeltaRows(left: ReportDTO, right: ReportDTO): DeltaRow[] {
   if (left.module === "single_leg_stance") return singleLegStanceDeltas(left, right);
   if (left.module === "four_stage_balance") return fourStageBalanceDeltas(left, right);
   if (left.module === "tug") return tugDeltas(left, right);
+  if (left.module === "sppb") return sppbDeltas(left, right);
   return [];
+}
+
+function sppbDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
+  const lr = ((left.metrics  as Record<string, unknown>).result ?? null) as Record<string, unknown> | null;
+  const rr = ((right.metrics as Record<string, unknown>).result ?? null) as Record<string, unknown> | null;
+  const rows: DeltaRow[] = [];
+  rows.push(deltaRow(
+    "Composite SPPB score",
+    pickNumber(lr, "total_score"),
+    pickNumber(rr, "total_score"),
+    " / 12",
+    "higher_is_better",
+  ));
+  const ls = lr?.balance as Record<string, unknown> | undefined;
+  const rs = rr?.balance as Record<string, unknown> | undefined;
+  rows.push(deltaRow(
+    "Balance score",
+    pickNumber(ls, "score"),
+    pickNumber(rs, "score"),
+    " / 4",
+    "higher_is_better",
+  ));
+  const lg = lr?.gait_speed as Record<string, unknown> | undefined;
+  const rg = rr?.gait_speed as Record<string, unknown> | undefined;
+  rows.push(deltaRow(
+    "Gait speed score",
+    pickNumber(lg, "score"),
+    pickNumber(rg, "score"),
+    " / 4",
+    "higher_is_better",
+  ));
+  rows.push(deltaRow(
+    "Walking speed",
+    pickNumber(lg, "speed_mps"),
+    pickNumber(rg, "speed_mps"),
+    " m/s",
+    "higher_is_better",
+  ));
+  const lc = lr?.chair_stand as Record<string, unknown> | undefined;
+  const rc = rr?.chair_stand as Record<string, unknown> | undefined;
+  rows.push(deltaRow(
+    "Chair stand score",
+    pickNumber(lc, "score"),
+    pickNumber(rc, "score"),
+    " / 4",
+    "higher_is_better",
+  ));
+  return rows.filter((r) => r.before !== null || r.after !== null);
 }
 
 function tugDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
@@ -783,6 +844,7 @@ function moduleHeading(r: ReportDTO): string {
   if (r.module === "single_leg_stance") return "Single-Leg Stance";
   if (r.module === "four_stage_balance") return "4-Stage Balance Test";
   if (r.module === "tug") return "Timed Up and Go (TUG)";
+  if (r.module === "sppb") return "SPPB (Short Physical Performance Battery)";
   const bp = r.body_part ? `${r.body_part.charAt(0).toUpperCase()}${r.body_part.slice(1)}` : "";
   const mv = r.movement ? `${r.movement.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}` : "";
   return [bp, mv].filter(Boolean).join(" · ") || "Biomechanics";

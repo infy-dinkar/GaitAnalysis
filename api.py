@@ -71,6 +71,9 @@ from tug_models import TUGResponse
 # ─── Ankle (dorsi/plantar) — reuses gait MediaPipe pipeline ──────
 from ankle_engine import analyze_ankle as analyze_ankle_engine
 
+# ─── SPPB Component 1 (Balance) — reuses gait MediaPipe pipeline ─
+from sppb_balance_engine import analyze_sppb_balance
+
 # ─── Auth + database (Phase 1) ─────────────────────────────────────
 import db as db_module
 from auth_routes import router as auth_router
@@ -732,6 +735,116 @@ async def analyze_ankle(
         cleanup_temp_file(tmp_path)
         # _ensure_decodable_video returns a second path only when it
         # actually wrote a repaired file — clean that up too.
+        if fixed_path_cleanup and fixed_path_cleanup != tmp_path:
+            cleanup_temp_file(fixed_path_cleanup)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# SPPB — Component 1 (Balance) — backend MediaPipe
+# ══════════════════════════════════════════════════════════════════════
+# Only Component 1 of the SPPB battery is processed server-side. The
+# spec calls for foot-precise stage detection (side-by-side, semi-
+# tandem, tandem) which needs heel + foot_index landmarks — MoveNet
+# doesn't provide those. Components 2 (gait speed) and 3 (chair
+# stand) of SPPB continue to use the existing MoveNet-based live
+# orchestrator path on the frontend, unchanged.
+#
+# Returns a JSON shape directly consumable by the frontend's
+# `buildBalanceComponent()` so the composite 0-12 SPPB scoring
+# continues to use the existing scorer.
+@app.post("/api/sppb/balance")
+async def analyze_sppb_balance_endpoint(
+    video: UploadFile = File(...),
+    recording_duration_ms: Optional[int] = Form(None),
+) -> dict:
+    """Run SPPB Balance analysis on an uploaded clip recording all
+    three stages in sequence.
+
+    `recording_duration_ms` is supplied by the frontend's MediaRecorder
+    path — WebM headers often lack a duration, which makes cv2's
+    CAP_PROP_FPS probe return 0. We use the same WebM-repair helper
+    TUG uses (tug_engine._ensure_decodable_video)."""
+    from tug_engine import _ensure_decodable_video
+
+    tmp_path: str | None = None
+    fixed_path_cleanup: str | None = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(contents, video.filename or "sppb_balance.mp4")
+        log.info(
+            "sppb_balance: file=%s size=%.2f MB recording_ms=%s",
+            video.filename, size_mb, recording_duration_ms,
+        )
+
+        # WebM-header repair before the cv2 probe so live-recorded
+        # MediaRecorder clips with missing duration don't fail validation.
+        processed_path, fixed_path_cleanup = _ensure_decodable_video(
+            tmp_path, recording_duration_ms,
+        )
+
+        probe = cv2.VideoCapture(processed_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0 or probe_total_frames <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not read video metadata. "
+                    "If this was a live recording, please retry."
+                ),
+            )
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video frame rate too low ({probe_fps:.1f} FPS). "
+                    f"Minimum {MIN_REQUIRED_FPS} FPS required."
+                ),
+            )
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"Video too long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed."
+                ),
+            )
+
+        pose_options = _build_gait_pose_options()
+        result = analyze_sppb_balance(
+            video_path=processed_path,
+            pose_options=pose_options,
+        )
+        return {"success": True, "data": result, "error": None}
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("sppb_balance validation: %s", e)
+        return {"success": False, "data": None, "error": str(e)}
+    except Exception as e:
+        log.exception("sppb_balance analysis failed")
+        return {"success": False, "data": None, "error": f"Analysis failed: {e}"}
+    finally:
+        cleanup_temp_file(tmp_path)
         if fixed_path_cleanup and fixed_path_cleanup != tmp_path:
             cleanup_temp_file(fixed_path_cleanup)
 

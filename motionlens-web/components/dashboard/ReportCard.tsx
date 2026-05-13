@@ -6,6 +6,7 @@ import Link from "next/link";
 import {
   Activity,
   ArmchairIcon,
+  Award,
   Clock,
   Download,
   Footprints,
@@ -75,6 +76,11 @@ const MODULE_META: Record<
     label: "Timed Up and Go (TUG)",
     icon: Clock,
     tone: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400",
+  },
+  sppb: {
+    label: "SPPB (Short Physical Performance Battery)",
+    icon: Award,
+    tone: "bg-purple-500/10 text-purple-700 dark:text-purple-400",
   },
 };
 

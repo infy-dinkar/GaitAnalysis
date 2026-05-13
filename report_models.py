@@ -32,6 +32,7 @@ class ReportCreate(BaseModel):
         "single_leg_stance",
         "four_stage_balance",
         "tug",
+        "sppb",
     ]
 
     # Biomech-specific (optional for other modules)
