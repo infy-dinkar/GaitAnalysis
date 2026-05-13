@@ -554,7 +554,10 @@ export function SPPBCapture() {
 
       <ProgressStrip phase={phase} />
 
-      {phase !== "setup" && phase !== "done" && (
+      {/* phase === "done" is handled by the early-return above, so by
+          the time we reach this render branch `phase` can never be
+          "done". Only "setup" needs to be excluded here. */}
+      {phase !== "setup" && (
         <ComponentSwitcher
           phase={phase}
           balanceStages={balanceStages}
