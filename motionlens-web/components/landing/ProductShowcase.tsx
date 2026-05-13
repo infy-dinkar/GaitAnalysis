@@ -3,6 +3,7 @@ import {
   Activity,
   ArmchairIcon,
   ArrowUpRight,
+  Award,
   Clock,
   Footprints,
   Layers,
@@ -137,15 +138,26 @@ const PRODUCTS: ProductCard[] = [
     icon: Clock,
     iconTone: "text-yellow-500",
   },
+  {
+    href: "/orthopedic/sppb",
+    eyebrow: "Geriatric flagship · composite",
+    title: "SPPB.",
+    body:
+      "Three-test composite session: balance stages + 4 m gait speed + 5x sit-to-stand → one 0-12 score that predicts falls, hospitalisation, and disability.",
+    gradient:
+      "linear-gradient(135deg, rgba(168,85,247,0.20) 0%, rgba(192,132,252,0.10) 50%, rgba(28,28,33,0.0) 100%)",
+    icon: Award,
+    iconTone: "text-purple-500",
+  },
 ];
 
 export function ProductShowcase() {
   return (
     <Section id="modules" className="bg-dots">
       <div className="max-w-2xl">
-        <Badge>Ten modules</Badge>
+        <Badge>Eleven modules</Badge>
         <h2 className="mt-5 text-3xl font-semibold tracking-tight md:text-5xl">
-          Movement, measured<br />ten ways.
+          Movement, measured<br />eleven ways.
         </h2>
       </div>
 

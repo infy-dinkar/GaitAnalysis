@@ -335,6 +335,7 @@ function moduleLabel(r: ReportSummaryDTO): string {
   if (r.module === "single_leg_stance") return "Single-Leg Stance";
   if (r.module === "four_stage_balance") return "4-Stage Balance Test";
   if (r.module === "tug") return "Timed Up and Go (TUG)";
+  if (r.module === "sppb") return "SPPB (Short Physical Performance Battery)";
   return "Biomechanics";
 }
 

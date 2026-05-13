@@ -545,20 +545,30 @@ def _ensure_decodable_video(
     recording_duration_ms: Optional[int],
 ) -> tuple[str, Optional[str]]:
     """Some MediaRecorder-produced WebM containers have broken or
-    missing duration metadata, which makes cv2's CAP_PROP_FPS probe
-    return 0 — even though the frames themselves are decodable. The
-    downstream gait `extract_poses` raises ValueError when that
-    happens, blocking the whole TUG pipeline.
+    missing duration metadata. There are TWO failure modes we need
+    to handle, not one:
 
-    This helper:
-      1. Probes the source file. If FPS reads cleanly, returns
-         (source_path, None) — no rewrite needed, no cleanup.
-      2. If FPS reads 0 AND the client supplied a recording duration,
-         counts the actual frames in a streaming pass, computes
-         FPS = frames / duration, and re-encodes the video into a
-         new MP4 file with a proper FPS header.
-      3. Returns (fixed_path, fixed_path) — caller MUST delete the
-         second path in a finally block to keep the temp dir clean.
+      A. cv2's CAP_PROP_FPS returns 0. Easy to detect — historically
+         the only case this helper covered.
+      B. cv2's CAP_PROP_FPS returns a plausible value (e.g. 30) but
+         the container is internally broken so only a small subset
+         of frames actually decode. cv2.CAP_PROP_FRAME_COUNT may
+         report a low number, or it may report a high number but
+         most frame reads fail. Symptoms downstream: extract_poses
+         produces far fewer time-series entries than expected and
+         the engine raises "Recording is too short". This is the
+         case the SPPB balance flow has been hitting.
+
+    Strategy:
+      1. Probe FPS + total_frames from the container.
+      2. If FPS == 0 → rewrite (case A).
+      3. If FPS > 0 AND we have a client recording duration, compare
+         the container-claimed duration (frames / fps) to the
+         client-reported duration. If they disagree by more than
+         ~30 %, the container is lying — rewrite (case B).
+      4. Rewrite path: stream-read all decodable frames, compute
+         effective FPS = decoded_frames / client_duration, write a
+         new MP4 with a clean header.
 
     Returns:
       tuple[str, Optional[str]] — (path_to_use, path_to_cleanup_or_None)
@@ -566,16 +576,40 @@ def _ensure_decodable_video(
     cap = cv2.VideoCapture(video_path)
     try:
         fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-        if fps > 0:
-            return video_path, None  # source is fine
+        total_frames_meta = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     finally:
         cap.release()
+
+    needs_rewrite = False
+    rewrite_reason = ""
+
+    if fps <= 0:
+        needs_rewrite = True
+        rewrite_reason = "cv2 reported FPS = 0"
+    elif recording_duration_ms and recording_duration_ms > 0 and total_frames_meta > 0:
+        container_duration_ms = (total_frames_meta / fps) * 1000.0
+        client_duration_ms = float(recording_duration_ms)
+        # If the container thinks the video is much shorter than the
+        # client says it actually is, the metadata is lying. 0.7
+        # threshold tolerates normal cv2 rounding (~3-5 % difference)
+        # but catches the "claims 1 s, actually 30 s" failure mode.
+        if container_duration_ms < client_duration_ms * 0.7:
+            needs_rewrite = True
+            rewrite_reason = (
+                f"container claims {container_duration_ms / 1000:.1f}s "
+                f"but client recorded {client_duration_ms / 1000:.1f}s"
+            )
+
+    if not needs_rewrite:
+        return video_path, None
 
     if not recording_duration_ms or recording_duration_ms <= 0:
         # No fallback duration available — let extract_poses raise the
         # original "could not determine frame rate" error so the user
         # sees an actionable message rather than us masking it.
         return video_path, None
+
+    log.info("video repair triggered: %s", rewrite_reason)
 
     # Re-open for streaming read.
     cap = cv2.VideoCapture(video_path)

@@ -6,6 +6,7 @@ import { use as usePromise } from "react";
 import {
   ArmchairIcon,
   ArrowUpRight,
+  Award,
   Clock,
   Footprints,
   Activity,
@@ -109,6 +110,15 @@ const MODULES = [
     icon: Clock,
     tone: "from-yellow-500/15 to-yellow-500/5",
     iconTone: "text-yellow-600",
+  },
+  {
+    href: "orthopedic/sppb",
+    eyebrow: "Geriatric flagship · composite",
+    title: "SPPB",
+    body: "Three-test composite: balance stages + 4 m gait speed + 5x sit-to-stand. One 0-12 score predicts falls, hospitalisation, and disability.",
+    icon: Award,
+    tone: "from-purple-500/15 to-purple-500/5",
+    iconTone: "text-purple-600",
   },
 ];
 

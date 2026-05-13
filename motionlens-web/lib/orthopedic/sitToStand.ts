@@ -35,6 +35,20 @@ export const FATIGUE_RATIO = 1.6;
 export const STAND_DELTA_FRAC = 0.20;
 export const SIT_DELTA_FRAC   = 0.08;
 
+// Knee-angle thresholds — RESERVED, currently inactive in the rep
+// state machine.
+//
+// We tried gating stand/sit transitions on knee angle to filter
+// partial-stand reps (hip lifts but knees stay bent), but MoveNet's
+// knee detection in side-view chair-stand setups is too noisy:
+// genuine full stands often computed as 140-148° (not the expected
+// 170°+) because of foreshortening and occasional landmark drift.
+// The gate rejected too many real reps in practice. Constants stay
+// here for the min-knee-per-rep diagnostic and in case a future
+// pose model warrants re-enabling the gate.
+export const STAND_KNEE_MIN_DEG = 150;
+export const SIT_KNEE_MAX_DEG   = 120;
+
 // Arm-uncrossing detection: tolerance (in shoulder→hip torso-height
 // fraction) for how far below the shoulder line the wrist is allowed
 // to drop before we flag the arms as uncrossed. 0.50 ≈ "wrist may
@@ -188,10 +202,25 @@ export function stepRepDetector(
 ): RepDetectionResult {
   if (hipMidY === null) return { completedRep: false, state: s.current };
 
+  // ── Baseline lock (single frame) ──────────────────────────
+  //
+  // Locks the seated reference on the very first frame the patient
+  // is detected in the camera. SPPB protocol has the patient seated
+  // and still BEFORE the operator clicks "Go", so the first frame
+  // is reliably a seated frame.
+  //
+  // An earlier version of this code accumulated samples over a
+  // 600 ms window and locked the median — it broke real reps in
+  // practice because the spec tells the patient to stand "as fast as
+  // possible" on "Go", so the 600 ms window captured mid-stand
+  // motion, the median landed at mid-cycle, and the stand-detect
+  // threshold ended up too aggressive for any subsequent rep to
+  // trigger.
   if (s.baselineY === null) {
     s.baselineY = hipMidY;
     return { completedRep: false, state: s.current };
   }
+
   if (kneeAngle !== null && kneeAngle < s.currentMinKneeAngle) {
     s.currentMinKneeAngle = kneeAngle;
   }
@@ -204,6 +233,15 @@ export function stepRepDetector(
 
   // Image-y-down: standing = SMALLER y (hip rises in the image),
   // sitting = larger y (back to baseline).
+  //
+  // Note: an earlier version of this code gated transitions on the
+  // knee angle as well (stand requires knee > 150°, sit requires
+  // knee < 120°). It rejected too many real reps in practice —
+  // MoveNet's knee landmark is jittery in lateral view and frontal
+  // foreshortening pushes computed angles ~10° below truth, so a
+  // genuine full stand often computed as 140-148°. The cross-check
+  // is gone for the state transitions; we still TRACK the min knee
+  // angle per rep (above) so the per-rep diagnostic is preserved.
   if (s.current === "sitting" && hipMidY < standThreshold) {
     s.current = "standing";
   } else if (s.current === "standing" && hipMidY > sitThreshold) {
