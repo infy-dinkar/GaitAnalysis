@@ -865,6 +865,50 @@ function BalanceResultPanel({
             </div>
           )}
 
+          {/* Foot-geometry measurements — useful when stage runs are
+              shorter than expected. The medians + threshold ranges tell
+              us whether the patient's actual stance geometry falls
+              inside the classifier's window or sits at the boundary. */}
+          {stagesPassed < 3 && diagnostics?.dx_heel_n && diagnostics.thresholds && (
+            <div className="mt-3 rounded-md border border-border/60 bg-background/60 p-3 text-[11px]">
+              <p className="font-semibold uppercase tracking-[0.12em] text-subtle">
+                Foot-geometry measurements (body-height fraction)
+              </p>
+              <table className="mt-2 w-full text-left tabular text-muted">
+                <thead className="text-[10px] uppercase tracking-[0.08em] text-subtle">
+                  <tr>
+                    <th className="py-1 font-medium">Measurement</th>
+                    <th className="py-1 font-medium">min</th>
+                    <th className="py-1 font-medium">median</th>
+                    <th className="py-1 font-medium">max</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td className="py-1 text-foreground">dx_heel</td>
+                    <td className="py-1">{diagnostics.dx_heel_n.min?.toFixed(3) ?? "—"}</td>
+                    <td className="py-1">{diagnostics.dx_heel_n.median?.toFixed(3) ?? "—"}</td>
+                    <td className="py-1">{diagnostics.dx_heel_n.max?.toFixed(3) ?? "—"}</td>
+                  </tr>
+                  <tr>
+                    <td className="py-1 text-foreground">dy_heel</td>
+                    <td className="py-1">{diagnostics.dy_heel_n?.min?.toFixed(3) ?? "—"}</td>
+                    <td className="py-1">{diagnostics.dy_heel_n?.median?.toFixed(3) ?? "—"}</td>
+                    <td className="py-1">{diagnostics.dy_heel_n?.max?.toFixed(3) ?? "—"}</td>
+                  </tr>
+                  {diagnostics.body_h_px && (
+                    <tr>
+                      <td className="py-1 text-foreground">body_h_px</td>
+                      <td className="py-1">{diagnostics.body_h_px.min?.toFixed(0) ?? "—"}</td>
+                      <td className="py-1">{diagnostics.body_h_px.median?.toFixed(0) ?? "—"}</td>
+                      <td className="py-1">{diagnostics.body_h_px.max?.toFixed(0) ?? "—"}</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+
           <div className="mt-3 flex flex-wrap gap-2">
             <Button onClick={onAdvance}>
               <ArrowRight className="h-4 w-4" />
