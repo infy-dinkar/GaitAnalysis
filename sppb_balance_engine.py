@@ -75,7 +75,7 @@ ARM_GRAB_DEG        = 45.0  # wrist abducts past 45° from straight-down
 # The dx_heel measurement still serves as a sanity gate: stances
 # wider than ~50 % of body height aren't SPPB-valid regardless of
 # dy_heel.
-DY_STAGE1_MAX     = 0.15   # ≤ this → likely Stage 1 (side-by-side)
+DY_STAGE1_MAX     = 0.12   # ≤ this → likely Stage 1 (side-by-side)
 DY_STAGE2_MAX     = 0.28   # (DY_STAGE1_MAX, this] → likely Stage 2
 DY_STAGE3_MAX     = 0.55   # (DY_STAGE2_MAX, this] → likely Stage 3
 DX_HEEL_VALID_MAX = 0.55   # heels wider than this → not an SPPB stance
@@ -87,12 +87,17 @@ DX_HEEL_VALID_MAX = 0.55   # heels wider than this → not an SPPB stance
 # a small neighbourhood.
 MIN_RUN_SEC          = 0.3   # ignore stage-runs shorter than this
 SMOOTH_WINDOW        = 3     # majority-vote over 3 frames
-TRANSITION_GRACE_SEC = 1.5   # tolerated gaps within a hold
+TRANSITION_GRACE_SEC = 0.7   # tolerated gaps within a hold
 # A run can absorb up to TRANSITION_GRACE_SEC of non-matching frames
-# without breaking. 1.5 s is enough to swallow brief stance wobble or
-# MediaPipe noise during a real hold, but short of the 2-3 s the
-# patient actually takes to transition from one stance to the next —
-# so genuine inter-stage transitions still terminate runs cleanly.
+# without breaking. 0.7 s is the sweet spot empirically:
+#   - long enough to absorb brief mid-hold MediaPipe misclassifications
+#     (typically 0.1-0.3 s of stray non-stage frames)
+#   - short enough that an actual stage transition (~2-3 s of the
+#     patient adjusting feet) breaks the run cleanly
+#   - prevents Stage 1's run from absorbing Stage 2's hold when
+#     boundary-noise Stage 1 classifications appear inside the
+#     Stage 2 window (which was making Stage 1 run for 20+ s on
+#     production with the old 1.5 s grace).
 
 
 # ─── Per-frame stage classifier ─────────────────────────────────
