@@ -111,20 +111,28 @@ def _classify_stage(
     """Classify a single frame's foot geometry into one of {1, 2, 3}
     or None for invalid / non-SPPB stance.
 
-    Strategy: dy_heel (vertical separation between heels in the
-    image) is the primary discriminator because it's robust to
-    patient body angle and works regardless of which foot is in
-    front. dx_heel acts as a sanity gate — stances wider than ~50 %
-    body height are not SPPB stances.
+    Two-dimensional discriminator using BOTH dx_heel (lateral heel
+    separation) and dy_heel (vertical heel separation in the image,
+    which is a proxy for depth offset).
 
-    Stage 1 (side-by-side):  dy_heel <= 0.10  (heels at same depth)
-    Stage 2 (semi-tandem):   0.10 < dy_heel <= 0.20
-    Stage 3 (tandem):        0.20 < dy_heel <= 0.45
+    Physical stance vs measurement:
+      Stage 1 (side-by-side)   feet apart laterally, NO depth offset
+                               → dx_heel: medium-to-wide, dy_heel: small
+      Stage 2 (semi-tandem)    feet aligned laterally, half-step depth
+                               → dx_heel: small, dy_heel: medium
+      Stage 3 (tandem)         feet aligned, full-foot depth offset
+                               → dx_heel: very small, dy_heel: large
+
+    Why both dimensions matter: dy_heel alone treated all "small-
+    depth" frames as Stage 1, so during a real Stage 2 hold whose
+    dy_heel sat around 0.10-0.12 (just under the Stage 1 ceiling),
+    the run-finder absorbed those frames into a giant Stage 1 run
+    spanning Stages 1 AND 2. Requiring dx_heel >= 0.10 for Stage 1
+    excludes any "feet aligned" frame from accidentally counting as
+    Stage 1 no matter how small its dy_heel is.
 
     Foot landmarks (fi_lx etc.) are accepted but ignored — kept in
-    the signature for backward compatibility with the existing
-    call site. Future refinements may bring them back as secondary
-    confirmation.
+    the signature for backward compatibility with the call site.
     """
     if body_h_px <= 0:
         return None
@@ -139,12 +147,30 @@ def _classify_stage(
     if dx_heel_n > DX_HEEL_VALID_MAX:
         return None
 
-    if dy_heel_n <= DY_STAGE1_MAX:
-        return 1
-    if dy_heel_n <= DY_STAGE2_MAX:
-        return 2
-    if dy_heel_n <= DY_STAGE3_MAX:
+    # ── Check Stage 3 first ── feet very aligned + significant depth
+    if dx_heel_n < 0.10 and dy_heel_n > 0.20:
         return 3
+
+    # ── Stage 2 ── feet close laterally + moderate depth
+    # The dx_heel < 0.13 gate is what stops a hip-width Stage 1 frame
+    # from accidentally classifying as Stage 2 when dy_heel noise
+    # pushes it past Stage 1's threshold.
+    if dx_heel_n < 0.13 and 0.08 <= dy_heel_n <= 0.28:
+        return 2
+
+    # ── Stage 1 (hip-width variant) ── feet visibly apart, small depth
+    if dx_heel_n >= 0.10 and dy_heel_n < 0.20:
+        return 1
+
+    # ── Stage 1 (touching variant) ── feet pressed together AND
+    # negligible depth offset. Some patients perform Stage 1 with
+    # feet touching rather than hip-width. The 0.05 dy ceiling is
+    # tighter than the Stage 2 dy floor (0.08) so brief small-dy
+    # frames during a Stage 2 hold cannot accidentally classify as
+    # Stage 1 here.
+    if dx_heel_n < 0.10 and dy_heel_n < 0.05:
+        return 1
+
     return None
 
 
