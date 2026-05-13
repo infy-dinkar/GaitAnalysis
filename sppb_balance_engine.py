@@ -147,15 +147,19 @@ def _classify_stage(
     if dx_heel_n > DX_HEEL_VALID_MAX:
         return None
 
-    # ── Check Stage 3 first ── feet very aligned + significant depth
-    if dx_heel_n < 0.10 and dy_heel_n > 0.20:
+    # ── Check Stage 3 first ── feet aligned + significant depth.
+    # Loosened dx ceiling to 0.13 and dy floor to 0.18 — real
+    # tandem stances rarely produce dx_heel < 0.10 because heels
+    # in image are still ~heel-width apart (the patient's feet are
+    # one-in-front-of-the-other but the BACK heel is offset
+    # laterally by ~half a foot-width from the front heel).
+    if dx_heel_n < 0.13 and dy_heel_n > 0.18:
         return 3
 
-    # ── Stage 2 ── feet close laterally + moderate depth
-    # The dx_heel < 0.13 gate is what stops a hip-width Stage 1 frame
-    # from accidentally classifying as Stage 2 when dy_heel noise
-    # pushes it past Stage 1's threshold.
-    if dx_heel_n < 0.13 and 0.08 <= dy_heel_n <= 0.28:
+    # ── Stage 2 ── feet close laterally + moderate depth.
+    # Cap dy at the Stage 3 floor (0.18) so frames in the
+    # tandem-depth range can't slip into Stage 2.
+    if dx_heel_n < 0.13 and 0.08 <= dy_heel_n <= 0.18:
         return 2
 
     # ── Stage 1 (hip-width variant) ── feet visibly apart, small depth
