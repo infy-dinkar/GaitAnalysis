@@ -148,18 +148,17 @@ def _classify_stage(
         return None
 
     # ── Check Stage 3 first ── feet aligned + significant depth.
-    # Loosened dx ceiling to 0.13 and dy floor to 0.18 — real
-    # tandem stances rarely produce dx_heel < 0.10 because heels
-    # in image are still ~heel-width apart (the patient's feet are
-    # one-in-front-of-the-other but the BACK heel is offset
-    # laterally by ~half a foot-width from the front heel).
-    if dx_heel_n < 0.13 and dy_heel_n > 0.18:
+    # Loosened dy floor to 0.14 because the patient's tandem hold
+    # has dy_heel oscillating around 0.15-0.25 — frames at the low
+    # end (0.14-0.18) previously got absorbed into Stage 2 and
+    # broke Stage 3's contiguous run.
+    if dx_heel_n < 0.13 and dy_heel_n > 0.14:
         return 3
 
     # ── Stage 2 ── feet close laterally + moderate depth.
-    # Cap dy at the Stage 3 floor (0.18) so frames in the
-    # tandem-depth range can't slip into Stage 2.
-    if dx_heel_n < 0.13 and 0.08 <= dy_heel_n <= 0.18:
+    # Cap dy at the Stage 3 floor (0.14) so tandem-depth frames
+    # always go to Stage 3.
+    if dx_heel_n < 0.13 and 0.08 <= dy_heel_n <= 0.14:
         return 2
 
     # ── Stage 1 (hip-width variant) ── feet visibly apart, small depth
