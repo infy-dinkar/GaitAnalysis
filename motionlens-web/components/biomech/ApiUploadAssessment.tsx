@@ -98,6 +98,7 @@ export function ApiUploadAssessment({
           measured={result.peak_magnitude}
           target={[result.reference_range[0], result.reference_range[1]]}
           side={side}
+          keyFrames={result.key_frames}
         />
 
         {/* Explicit "Save to patient history" — only shows in doctor flow */}

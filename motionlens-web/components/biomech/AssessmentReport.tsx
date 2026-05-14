@@ -7,6 +7,12 @@ import { fmt } from "@/lib/utils";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { PatientDTO } from "@/lib/patients";
 
+interface KeyFrame {
+  label: string;
+  frame_index: number;
+  image_data_url: string;
+}
+
 interface Props {
   bodyPart: "shoulder" | "neck" | "knee" | "hip" | "ankle";
   /** Just the movement name — e.g. "Lateral Flexion", "Flexion". */
@@ -23,6 +29,10 @@ interface Props {
    *  provided, the PatientHeader renders age / gender / height / weight
    *  / contact / notes; falls back to the legacy minimal strip when not. */
   patientOverride?: PatientDTO | null;
+  /** Annotated screenshots of the test's key moments. Optional;
+   *  empty / undefined just hides the section. Returned by the
+   *  backend MediaPipe path (ankle today). */
+  keyFrames?: KeyFrame[];
 }
 
 // Educational text — direct port of biomech_flow.py SHOULDER_EDU / NECK_EDU.
@@ -112,6 +122,7 @@ export function AssessmentReport({
   patientIdOverride,
   dateOverride,
   patientOverride,
+  keyFrames,
 }: Props) {
   // Patient identity comes from the doctor-flow context when the
   // assessment is launched from /dashboard/patients/{id}/analyze.
@@ -300,6 +311,24 @@ export function AssessmentReport({
           <PlotlyChart data={chartData} layout={chartLayout} height={220} />
         </div>
       </section>
+
+      {/* ── Annotated key frames (images only, no captions) ─────── */}
+      {keyFrames && keyFrames.length > 0 && (
+        <section>
+          <h3 className="text-base font-semibold tracking-tight">Key frames</h3>
+          <div className="mt-3 grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+            {keyFrames.map((kf) => (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                key={kf.frame_index}
+                src={kf.image_data_url}
+                alt={kf.label}
+                className="block w-full overflow-hidden rounded-card border border-border"
+              />
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* ── Clinical interpretation ────────────────────────────── */}
       <section>

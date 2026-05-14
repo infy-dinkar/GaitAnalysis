@@ -167,6 +167,13 @@ export function LiveBiomechCamera({
   const onResultRef = useRef(onResult);
   const onErrorRef = useRef(onError);
   const onSmoothedKeypointsRef = useRef(onSmoothedKeypoints);
+  // Most recent normalised keypoints + cached composite canvas — used
+  // by the window-level __biomechCapture helper that the parent
+  // (LiveAssessment) calls to grab a screenshot at the peak-ROM moment.
+  // Pattern mirrors FourStageBalanceLiveCamera so the report can show
+  // an annotated thumbnail (video frame + skeleton overlay).
+  const lastNormRef = useRef<Norm[] | null>(null);
+  const compositeCanvasRef = useRef<HTMLCanvasElement | null>(null);
   // Latest baseline kept in a ref so the rAF closure picks up live
   // updates without re-binding the loop on every change.
   const neckRotationBaselineRef = useRef<NeckRotationCalibration | null>(
@@ -440,6 +447,10 @@ export function LiveBiomechCamera({
           }
 
           drawSkeleton(norm);
+          // Cache the latest normalised landmarks so the capture
+          // helper (below) can re-draw the skeleton on the composite
+          // canvas when the parent requests a screenshot.
+          lastNormRef.current = norm;
 
           onResultRef.current({
             status: angle !== null ? "good" : "low_visibility",
@@ -461,6 +472,92 @@ export function LiveBiomechCamera({
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     };
   }, [active, ready, detect, bodyPart, movement, side, drawSkeleton, videoRef]);
+
+  // ── Frame capture helper ───────────────────────────────────────
+  // Compose a JPEG of the current camera frame + skeleton overlay.
+  // The parent calls this via window.__biomechCapture at key moments
+  // (initial pose, peak ROM) to embed annotated thumbnails in the
+  // report. Same pattern as FourStageBalanceLiveCamera.captureFrame.
+  const captureFrame = useCallback((): string | null => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) return null;
+    const targetW = Math.min(480, video.videoWidth);
+    const scale = targetW / video.videoWidth;
+    const cw = Math.round(video.videoWidth * scale);
+    const ch = Math.round(video.videoHeight * scale);
+
+    let comp = compositeCanvasRef.current;
+    if (!comp) {
+      comp = document.createElement("canvas");
+      compositeCanvasRef.current = comp;
+    }
+    comp.width = cw;
+    comp.height = ch;
+    const ctx = comp.getContext("2d");
+    if (!ctx) return null;
+
+    // Draw the camera frame mirrored to match the on-screen preview.
+    ctx.save();
+    ctx.translate(cw, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, 0, 0, cw, ch);
+    ctx.restore();
+
+    // Skeleton overlay on top of the composited frame.
+    const norm = lastNormRef.current;
+    if (norm) {
+      const px = (n: Norm) => ({ x: n.x * cw, y: n.y * ch });
+      const edges = RELEVANT_EDGES[bodyPart];
+      const dots = RELEVANT_DOTS[bodyPart];
+
+      ctx.strokeStyle = "#FFFFFF";
+      ctx.lineWidth = Math.max(1.5, cw * 0.0035);
+      ctx.shadowColor = "rgba(0,0,0,0.55)";
+      ctx.shadowBlur = 2;
+      for (const [a, b] of edges) {
+        const la = norm[a];
+        const lb = norm[b];
+        if (!la || !lb) continue;
+        if (la.visibility < OVERLAY_VIS_THRESHOLD) continue;
+        if (lb.visibility < OVERLAY_VIS_THRESHOLD) continue;
+        const A = px(la);
+        const B = px(lb);
+        ctx.beginPath();
+        ctx.moveTo(A.x, A.y);
+        ctx.lineTo(B.x, B.y);
+        ctx.stroke();
+      }
+      ctx.fillStyle = "#EF4444";
+      ctx.strokeStyle = "#FFFFFF";
+      ctx.lineWidth = Math.max(1, cw * 0.0025);
+      for (const i of dots) {
+        const lm = norm[i];
+        if (!lm || lm.visibility < OVERLAY_VIS_THRESHOLD) continue;
+        const p = px(lm);
+        const r = Math.max(3, cw * 0.005);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+      ctx.shadowBlur = 0;
+    }
+
+    return comp.toDataURL("image/jpeg", 0.78);
+  }, [bodyPart, videoRef]);
+
+  // Expose via window so the parent (LiveAssessment) can call it
+  // without prop-drilling. Cleaned up on unmount.
+  useEffect(() => {
+    (window as unknown as {
+      __biomechCapture?: () => string | null;
+    }).__biomechCapture = captureFrame;
+    return () => {
+      delete (window as unknown as {
+        __biomechCapture?: () => string | null;
+      }).__biomechCapture;
+    };
+  }, [captureFrame]);
 
   return (
     <div>

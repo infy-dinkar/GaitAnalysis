@@ -273,6 +273,7 @@ export function AnkleCapture({
           measured={result.peak_magnitude}
           target={[result.reference_range[0], result.reference_range[1]]}
           side={side}
+          keyFrames={result.key_frames}
         />
 
         <SaveToPatientButton
@@ -291,6 +292,10 @@ export function AnkleCapture({
               valid_frames: result.valid_frames,
               total_frames: result.total_frames,
               fps: result.fps,
+              // Persist key-frame thumbnails so the saved-report
+              // viewer can render them later (mirrors how TUG saves
+              // its annotated screenshots).
+              key_frames: result.key_frames ?? [],
             },
             observations: { interpretation: result.interpretation },
           })}

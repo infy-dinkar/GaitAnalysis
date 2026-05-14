@@ -342,6 +342,31 @@ function BiomechBody({
   const side = (report.side === "left" || report.side === "right") ? report.side : undefined;
   const interpretation = pickString(report.observations, "interpretation");
 
+  // Recover key-frame screenshots from saved metrics if present.
+  // Backend ankle analyses persist these so the saved-report viewer
+  // can show the same "Key frames" strip the original capture did.
+  const savedKeyFrames = (() => {
+    const raw = (m as Record<string, unknown>).key_frames;
+    if (!Array.isArray(raw)) return undefined;
+    const items: Array<{ label: string; frame_index: number; image_data_url: string }> = [];
+    for (const entry of raw) {
+      if (!entry || typeof entry !== "object") continue;
+      const e = entry as Record<string, unknown>;
+      const label = typeof e.label === "string" ? e.label : null;
+      const frameIdx =
+        typeof e.frame_index === "number"
+          ? e.frame_index
+          : typeof e.frame_index === "string"
+            ? parseInt(e.frame_index, 10)
+            : null;
+      const url = typeof e.image_data_url === "string" ? e.image_data_url : null;
+      if (label && frameIdx !== null && !Number.isNaN(frameIdx) && url) {
+        items.push({ label, frame_index: frameIdx, image_data_url: url });
+      }
+    }
+    return items.length > 0 ? items : undefined;
+  })();
+
   return (
     <div className="space-y-8">
       <AssessmentReport
@@ -355,6 +380,7 @@ function BiomechBody({
         patientIdOverride={patientCode}
         dateOverride={isoDate}
         patientOverride={patient}
+        keyFrames={savedKeyFrames}
       />
       {interpretation && (
         <section>
