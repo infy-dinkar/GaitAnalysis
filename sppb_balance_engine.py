@@ -147,20 +147,25 @@ def _classify_stage(
     if dx_heel_n > DX_HEEL_VALID_MAX:
         return None
 
-    # Fixed dx + dy classifier — reverted from the adaptive-tertile
-    # approach because the per-video percentile cuts were making
-    # Stage 1's boundary too generous on some videos, letting it
-    # absorb chunks of Stage 2. Production was running this
-    # classifier and getting cleaner 3-stage detection.
+    # Fixed dx + dy classifier with non-overlapping rule ranges.
+    # The earlier version had Stage 1 wide accepting dy < 0.20 with
+    # dx >= 0.10, which overlapped with Stage 2's natural geometry
+    # (dx 0.10-0.15, dy 0.08-0.14) — those Stage 2 hold frames
+    # whose dx was just above the Stage 2 ceiling of 0.13 fell
+    # through to Stage 1 wide and got absorbed there. Tightening
+    # Stage 1 wide's dy ceiling to 0.07 and bumping Stage 2's dx
+    # ceiling to 0.18 creates a clean partition.
     #
     # Stage 3: feet aligned + significant depth.
     if dx_heel_n < 0.13 and dy_heel_n > 0.14:
         return 3
-    # Stage 2: feet close laterally + moderate depth.
-    if dx_heel_n < 0.13 and 0.08 <= dy_heel_n <= 0.14:
+    # Stage 2: feet close-to-medium laterally + moderate depth.
+    if dx_heel_n < 0.18 and 0.07 <= dy_heel_n <= 0.14:
         return 2
-    # Stage 1 (hip-width): feet visibly apart, small depth.
-    if dx_heel_n >= 0.10 and dy_heel_n < 0.20:
+    # Stage 1 (hip-width): feet visibly apart, NEGLIGIBLE depth.
+    # dy ceiling now tight (0.07) so frames with even mild depth
+    # offset can't accidentally classify as Stage 1.
+    if dx_heel_n >= 0.10 and dy_heel_n < 0.07:
         return 1
     # Stage 1 (touching): feet pressed together, no depth offset.
     if dx_heel_n < 0.10 and dy_heel_n < 0.05:
