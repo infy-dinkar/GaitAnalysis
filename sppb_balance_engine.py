@@ -107,8 +107,6 @@ def _classify_stage(
     fi_lx: float,   fi_ly: float,
     fi_rx: float,   fi_ry: float,
     body_h_px: float,
-    dy_s1_max: float = 0.10,
-    dy_s2_max: float = 0.20,
 ) -> Optional[int]:
     """Classify a single frame's foot geometry into one of {1, 2, 3}
     or None for invalid / non-SPPB stance.
@@ -149,16 +147,25 @@ def _classify_stage(
     if dx_heel_n > DX_HEEL_VALID_MAX:
         return None
 
-    # dy is the primary discriminator. Each patient produces three
-    # dy bands (Stage 1: low, Stage 2: medium, Stage 3: high) — the
-    # caller passes thresholds derived from this video's own
-    # percentile cuts so the classifier auto-calibrates to whatever
-    # geometry the patient actually produced.
-    if dy_heel_n > dy_s2_max:
+    # Fixed dx + dy classifier — reverted from the adaptive-tertile
+    # approach because the per-video percentile cuts were making
+    # Stage 1's boundary too generous on some videos, letting it
+    # absorb chunks of Stage 2. Production was running this
+    # classifier and getting cleaner 3-stage detection.
+    #
+    # Stage 3: feet aligned + significant depth.
+    if dx_heel_n < 0.13 and dy_heel_n > 0.14:
         return 3
-    if dy_heel_n > dy_s1_max:
+    # Stage 2: feet close laterally + moderate depth.
+    if dx_heel_n < 0.13 and 0.08 <= dy_heel_n <= 0.14:
         return 2
-    return 1
+    # Stage 1 (hip-width): feet visibly apart, small depth.
+    if dx_heel_n >= 0.10 and dy_heel_n < 0.20:
+        return 1
+    # Stage 1 (touching): feet pressed together, no depth offset.
+    if dx_heel_n < 0.10 and dy_heel_n < 0.05:
+        return 1
+    return None
 
 
 def _body_height_px(ts: dict, i: int, vis_threshold: float) -> Optional[float]:
@@ -248,28 +255,16 @@ def _find_longest_run(
     tolerating up to `grace_frames` interleaved non-stage frames per
     contiguous run.
 
-    Returns (start_idx, end_idx) inclusive, or None. Both ends include
-    a grace window around the actual classified frames:
-      - LEADING: extends start backwards by up to `grace_frames`,
-        because the patient was already settling into the stance
-        before MediaPipe locked on (the first ~1 s of a hold is
-        often misclassified while pose detection stabilises).
-      - TRAILING: extends end forwards similarly — the patient is
-        still in the stance during those short gaps; we just
-        briefly lost detection.
+    Returns (start_idx, end_idx) inclusive, or None. `end_idx` includes
+    the trailing grace-period frames after the last in-stage frame —
+    semantically the patient is still IN the stance during those
+    short gaps (we just briefly lost MediaPipe detection), so they
+    count toward the hold duration.
 
-    Both extensions are bounded by neighbouring runs so a Stage 1
-    leading grace doesn't reach back into Stage 2 / 3 frames, and
-    a Stage 1 trailing grace doesn't bleed forward into the next
-    stage's frames.
+    A different stage's frames immediately end the run (no grace
+    extension across stages).
     """
     n = len(labels)
-    # Pre-compute the indices of each stage match to enable safe
-    # leading-grace extension that doesn't reach across other stages.
-    matches = [i for i, lab in enumerate(labels) if lab == stage]
-    if not matches:
-        return None
-
     best: Optional[tuple[int, int]] = None
     best_len = -1
 
@@ -285,32 +280,19 @@ def _find_longest_run(
         while j < n:
             if labels[j] == stage:
                 last_in_stage = j
+            elif labels[j] is not None:
+                # Hit a different stage — end the run, don't reach
+                # across stages even within the grace window.
+                break
             elif j - last_in_stage > grace_frames:
                 break
             j += 1
-
-        # Trailing grace: extend forwards by the grace window or
-        # until we'd hit the next non-stage span boundary.
+        # Include the trailing grace window as part of the hold.
         end_with_grace = min(j - 1, n - 1)
-
-        # Leading grace: extend backwards by the grace window. Don't
-        # reach into frames that already belong to a DIFFERENT stage
-        # (label != None and != stage) — those belong to another
-        # stance and shouldn't count toward this run.
-        start_with_grace = start
-        steps = 0
-        while steps < grace_frames and start_with_grace > 0:
-            prev = labels[start_with_grace - 1]
-            if prev is not None and prev != stage:
-                # Hit a different stage; stop extending.
-                break
-            start_with_grace -= 1
-            steps += 1
-
-        run_len = end_with_grace - start_with_grace + 1
+        run_len = end_with_grace - start + 1
         if run_len > best_len:
             best_len = run_len
-            best = (start_with_grace, end_with_grace)
+            best = (start, end_with_grace)
         i = j
     if best is None or best_len < int(fps * MIN_RUN_SEC):
         return None
@@ -507,45 +489,6 @@ def analyze_sppb_balance(
         stable_body_h = frame_h * 0.35  # ≈ hip-to-ankle for a body that fills 70% of the frame
         fallback_used = True
 
-    # ── Adaptive dy thresholds ──────────────────────────────────
-    # Even with a stable body_h reference, different patients produce
-    # different absolute dy_heel ranges. A patient with a deeper
-    # tandem stance produces dy=0.40, another's tandem barely
-    # produces dy=0.15. Hardcoded thresholds tuned for one don't
-    # fit the other.
-    #
-    # The video itself tells us the patient's range — they perform
-    # all three stages, so dy_heel naturally splits into three
-    # bands (low for Stage 1, medium for Stage 2, high for Stage 3).
-    # Using per-video percentile cuts makes the classifier
-    # auto-calibrate to whatever geometry the patient produced.
-    #
-    # Floors prevent degenerate cases: if a patient mostly stayed
-    # in one stance, the percentiles collapse and you'd get
-    # nonsensical 0.001/0.002 boundaries.
-    valid_dy_samples = [
-        abs(float(l_heel_ys[i]) - float(r_heel_ys[i])) / stable_body_h
-        for i in range(n)
-        if (
-            l_heel_v[i] >= FOOT_VIS_THRESHOLD
-            and r_heel_v[i] >= FOOT_VIS_THRESHOLD
-            and l_fi_v[i] >= FOOT_VIS_THRESHOLD
-            and r_fi_v[i] >= FOOT_VIS_THRESHOLD
-        )
-    ]
-    if valid_dy_samples:
-        sorted_dy = sorted(valid_dy_samples)
-        n_dy = len(sorted_dy)
-        dy_p33_raw = sorted_dy[n_dy // 3]
-        dy_p67_raw = sorted_dy[(2 * n_dy) // 3]
-        # Floors prevent collapsed-distribution failure modes.
-        adaptive_dy_s1_max = max(0.05, dy_p33_raw)
-        adaptive_dy_s2_max = max(adaptive_dy_s1_max + 0.04, dy_p67_raw)
-    else:
-        # Fall back to fixed thresholds if no usable samples (shouldn't
-        # happen given the visibility pre-flight, but defensive).
-        adaptive_dy_s1_max = 0.10
-        adaptive_dy_s2_max = 0.20
 
     # Second pass — classify using the locked reference.
     geometry_unmatched_count = 0
@@ -592,8 +535,6 @@ def analyze_sppb_balance(
             kx_l, ky_l, kx_r, ky_r,
             fx_l, fy_l, fx_r, fy_r,
             stable_body_h,
-            dy_s1_max=adaptive_dy_s1_max,
-            dy_s2_max=adaptive_dy_s2_max,
         )
         if stage is None:
             geometry_unmatched_count += 1
@@ -760,8 +701,6 @@ def analyze_sppb_balance(
             "body_h_px": _quartile_stats(body_h_samples),
             "stable_body_h_px": round(stable_body_h, 1),
             "body_h_fallback_used": fallback_used,
-            "adaptive_dy_s1_max": round(adaptive_dy_s1_max, 4),
-            "adaptive_dy_s2_max": round(adaptive_dy_s2_max, 4),
             "dx_heel_n": _quartile_stats(dx_heel_n_samples),
             "dy_heel_n": _quartile_stats(dy_heel_n_samples),
             "dx_tandem_n": _quartile_stats(dx_tandem_n_samples),
