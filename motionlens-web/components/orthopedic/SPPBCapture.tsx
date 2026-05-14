@@ -45,7 +45,7 @@ import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
 import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import { SPPBReport } from "@/components/orthopedic/SPPBReport";
-import { SPPBBalanceRecorder } from "@/components/orthopedic/SPPBBalanceRecorder";
+import { SPPBBalanceManualEntry } from "@/components/orthopedic/SPPBBalanceManualEntry";
 
 // ── Balance (Component 1) — types only ───────────────────────
 // Backend produces StageResult-shaped objects; we just need the
@@ -193,18 +193,16 @@ export function SPPBCapture() {
     setPhase("balance");
   }
 
-  // Called by SPPBBalanceRecorder once /api/sppb/balance returns. The
-  // payload is already the {1?: StageResult, 2?: StageResult,
-  // 3?: StageResult} shape buildBalanceComponent() expects. The
-  // diagnostics object goes into separate state so the result panel
-  // can surface "what the engine saw" when detection didn't fire.
+  // Called by SPPBBalanceManualEntry when the operator submits the
+  // per-stage hold times. The payload is already the {1?: StageResult,
+  // 2?: StageResult, 3?: StageResult} shape buildBalanceComponent()
+  // expects. Manual entry produces no engine diagnostics, so the
+  // diagnostics state stays null (the result panel's diagnostic blocks
+  // gracefully no-op when null).
   const onBalanceAnalyzed = useCallback(
-    (
-      stages: { 1?: StageResult; 2?: StageResult; 3?: StageResult },
-      diagnostics: SPPBBalanceDiagnostics | null,
-    ) => {
+    (stages: { 1?: StageResult; 2?: StageResult; 3?: StageResult }) => {
       setBalanceStages(stages);
-      setBalanceDiagnostics(diagnostics);
+      setBalanceDiagnostics(null);
     },
     [],
   );
@@ -722,7 +720,6 @@ function BalanceComponent({
   diagnostics: SPPBBalanceDiagnostics | null;
   onAnalyzed: (
     s: { 1?: StageResult; 2?: StageResult; 3?: StageResult },
-    d: SPPBBalanceDiagnostics | null,
   ) => void;
   onAdvance: () => void;
   onRestart: () => void;
@@ -734,11 +731,11 @@ function BalanceComponent({
     <div className="space-y-4">
       <ComponentHeader
         number={1}
-        title="Balance — record"
-        subtitle="3 stages × 10 s · backend pose analysis"
+        title="Balance — manual entry"
+        subtitle="3 stages × 10 s · clinician-timed (stopwatch)"
       />
 
-      {!haveResult && <SPPBBalanceRecorder onComplete={onAnalyzed} />}
+      {!haveResult && <SPPBBalanceManualEntry onComplete={onAnalyzed} />}
 
       {haveResult && (
         <BalanceResultPanel

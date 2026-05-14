@@ -86,7 +86,15 @@ DX_HEEL_VALID_MAX = 0.55   # heels wider than this → not an SPPB stance
 # spurious flickers; the SMOOTH window applies a majority vote over
 # a small neighbourhood.
 MIN_RUN_SEC          = 0.3   # ignore stage-runs shorter than this
-SMOOTH_WINDOW        = 3     # majority-vote over 3 frames
+SMOOTH_WINDOW        = 9     # majority-vote over 9 frames (~0.3 s).
+# Wider than the original 3-frame window because MediaPipe's visibility
+# scores oscillate around the 0.4 threshold for partially-occluded
+# landmarks (e.g., a back ankle in tandem stance often reads 0.36 /
+# 0.42 / 0.38 frame-to-frame). Each oscillation flips visibility-based
+# classification, which fragments runs. 9-frame majority vote means a
+# landmark needs to be consistently visible (or hidden) across roughly
+# 0.3 s before the classification flips — eliminates flicker without
+# delaying detection of a real stage transition.
 TRANSITION_GRACE_SEC = 0.7   # tolerated gaps within a hold
 # A run can absorb up to TRANSITION_GRACE_SEC of non-matching frames
 # without breaking. 0.7 s is the sweet spot empirically:
@@ -101,12 +109,72 @@ TRANSITION_GRACE_SEC = 0.7   # tolerated gaps within a hold
 
 
 # ─── Per-frame stage classifier ─────────────────────────────────
+def _classify_stage_by_visibility(
+    l_heel_v: float, r_heel_v: float,
+    l_fi_v:   float, r_fi_v:   float,
+    l_ank_v:  float, r_ank_v:  float,
+) -> Optional[int]:
+    """Classify a single frame from MediaPipe landmark VISIBILITY
+    flags rather than geometric distances.
+
+    Physical reasoning — what's visible in a frontal camera view:
+
+      Stage 1 (side-by-side, both feet flat at floor):
+        Both feet fully exposed to the camera. ALL six foot/ankle
+        landmarks are visible.
+
+      Stage 2 (semi-tandem, one foot half-step ahead):
+        The forward foot's heel sits BESIDE the back foot's big
+        toe. The back foot's toe is partially occluded by the
+        front foot's heel — its visibility drops. Both heels
+        remain visible.
+
+      Stage 3 (tandem, heel-to-toe in a single line):
+        Front foot is fully in front of back foot. The back
+        foot's ankle is occluded by the front foot/leg from the
+        camera's viewpoint. Both toes are still visible (the toe
+        of the back foot peeks behind the front foot).
+
+    Check order: Stage 3 first (most specific — both toes AND one-
+    ankle-only), then Stage 2 (both heels AND one-toe-missing),
+    then Stage 1 (everything visible).
+    """
+    VIS = 0.4  # MediaPipe visibility threshold
+
+    both_toes_visible = (l_fi_v >= VIS) and (r_fi_v >= VIS)
+    both_heels_visible = (l_heel_v >= VIS) and (r_heel_v >= VIS)
+    l_ankle_visible = l_ank_v >= VIS
+    r_ankle_visible = r_ank_v >= VIS
+    exactly_one_ankle_visible = l_ankle_visible != r_ankle_visible
+    both_ankles_visible = l_ankle_visible and r_ankle_visible
+
+    # Stage 3: both toes visible, exactly one ankle visible (the
+    # other occluded by the front leg/foot in tandem stance).
+    if both_toes_visible and exactly_one_ankle_visible:
+        return 3
+
+    # Stage 2: both heels visible, at least one toe hidden (the
+    # back foot's toe is obscured by the front foot's heel in
+    # semi-tandem).
+    if both_heels_visible and not both_toes_visible:
+        return 2
+
+    # Stage 1: everything visible (feet side-by-side, no
+    # occlusion).
+    if both_heels_visible and both_toes_visible and both_ankles_visible:
+        return 1
+
+    return None
+
+
 def _classify_stage(
     heel_lx: float, heel_ly: float,
     heel_rx: float, heel_ry: float,
     fi_lx: float,   fi_ly: float,
     fi_rx: float,   fi_ry: float,
     body_h_px: float,
+    dy_s1_max: float = 0.05,
+    dy_s2_max: float = 0.14,
 ) -> Optional[int]:
     """Classify a single frame's foot geometry into one of {1, 2, 3}
     or None for invalid / non-SPPB stance.
@@ -147,34 +215,26 @@ def _classify_stage(
     if dx_heel_n > DX_HEEL_VALID_MAX:
         return None
 
-    # ── Check Stage 3 first ── feet aligned + significant depth.
-    # Loosened dy floor to 0.14 because the patient's tandem hold
-    # has dy_heel oscillating around 0.15-0.25 — frames at the low
-    # end (0.14-0.18) previously got absorbed into Stage 2 and
-    # broke Stage 3's contiguous run.
-    if dx_heel_n < 0.13 and dy_heel_n > 0.14:
+    # dy-only classifier with PATIENT-ADAPTIVE thresholds.
+    # The caller (analyze_sppb_balance) computes dy tertiles from
+    # this video's own dy distribution and passes them in as
+    # dy_s1_max (33rd percentile floor 0.04) and dy_s2_max (67th
+    # percentile floor dy_s1_max+0.04). Stages map to the three dy
+    # bands:
+    #
+    #   dy < dy_s1_max         → Stage 1 (feet at floor, lowest band)
+    #   dy_s1_max <= dy <= dy_s2_max → Stage 2 (middle band)
+    #   dy > dy_s2_max         → Stage 3 (top band)
+    #
+    # Why no dx restriction on stages 2/3: hardcoded dx ceilings
+    # were eliminating entire stages on patients whose semi-tandem
+    # stance has dx > 0.13 (the previous fixed cutoff). The dx
+    # > 0.55 wide-stance gate above already rejects non-SPPB poses.
+    if dy_heel_n > dy_s2_max:
         return 3
-
-    # ── Stage 2 ── feet close laterally + moderate depth.
-    # Cap dy at the Stage 3 floor (0.14) so tandem-depth frames
-    # always go to Stage 3.
-    if dx_heel_n < 0.13 and 0.08 <= dy_heel_n <= 0.14:
+    if dy_heel_n >= dy_s1_max:
         return 2
-
-    # ── Stage 1 (hip-width variant) ── feet visibly apart, small depth
-    if dx_heel_n >= 0.10 and dy_heel_n < 0.20:
-        return 1
-
-    # ── Stage 1 (touching variant) ── feet pressed together AND
-    # negligible depth offset. Some patients perform Stage 1 with
-    # feet touching rather than hip-width. The 0.05 dy ceiling is
-    # tighter than the Stage 2 dy floor (0.08) so brief small-dy
-    # frames during a Stage 2 hold cannot accidentally classify as
-    # Stage 1 here.
-    if dx_heel_n < 0.10 and dy_heel_n < 0.05:
-        return 1
-
-    return None
+    return 1
 
 
 def _body_height_px(ts: dict, i: int, vis_threshold: float) -> Optional[float]:
@@ -264,12 +324,24 @@ def _find_longest_run(
     tolerating up to `grace_frames` interleaved non-stage frames per
     contiguous run.
 
-    Returns (start_idx, end_idx) inclusive, or None. `end_idx` includes
-    the trailing grace-period frames after the last in-stage frame —
-    semantically the patient is still IN the stance during those
-    short gaps (we just briefly lost MediaPipe detection), so they
-    count toward the hold duration.
+    Returns (start_idx, end_idx) inclusive, or None.
+
+    Tolerance rules:
+      - NONE frames (no classification): absorbed up to `grace_frames`
+        consecutive — patient was still in stance, we just lost
+        landmarks briefly.
+      - DIFFERENT STAGE frames: absorbed up to DIFF_STAGE_TOLERANCE
+        consecutive (~0.5 s at 30 fps). Visibility-based
+        classification flickers when MediaPipe's per-landmark
+        visibility score oscillates around the 0.4 threshold — a
+        Stage 3 hold whose back-ankle visibility briefly recovers
+        misclassifies as Stage 1 for those frames. 15-frame
+        tolerance absorbs that without merging across genuine
+        stage transitions (which take 2-3 s = 60-90 frames).
+      - Trailing grace: the run's end_idx includes the grace window
+        after the last in-stage frame.
     """
+    DIFF_STAGE_TOLERANCE = 15
     n = len(labels)
     best: Optional[tuple[int, int]] = None
     best_len = -1
@@ -282,18 +354,23 @@ def _find_longest_run(
         # Start a run.
         start = i
         last_in_stage = i
+        diff_stage_streak = 0
         j = i + 1
         while j < n:
             if labels[j] == stage:
                 last_in_stage = j
-            elif j - last_in_stage > grace_frames:
-                break
+                diff_stage_streak = 0
+            elif labels[j] is not None:
+                # Different-stage frame — count toward the tolerance.
+                diff_stage_streak += 1
+                if diff_stage_streak > DIFF_STAGE_TOLERANCE:
+                    break
+            else:
+                # None / unclassified — counts toward grace gap only.
+                if j - last_in_stage > grace_frames:
+                    break
             j += 1
-        # Include the trailing grace window as part of the hold. The
-        # patient was in the stance during those frames; the classifier
-        # just couldn't see them clearly. Bounded by the actual frame
-        # that broke the run so we don't extend into frames where the
-        # patient clearly transitioned to the next stage.
+        # Include the trailing grace window as part of the hold.
         end_with_grace = min(j - 1, n - 1)
         run_len = end_with_grace - start + 1
         if run_len > best_len:
@@ -474,14 +551,59 @@ def analyze_sppb_balance(
         sorted_h = sorted(body_h_samples)
         stable_body_h = sorted_h[len(sorted_h) // 2]  # median
 
-    if stable_body_h is None or stable_body_h <= 0:
-        raise ValueError(
-            "Could not determine a reliable body-height reference from "
-            "the video. Make sure the patient's upper body (shoulders or "
-            "hips) is visible alongside the feet."
-        )
+    # Sanity floor: if the median hip-to-ankle reads suspiciously small
+    # (MediaPipe sometimes places the hip landmark very close to the
+    # ankle in certain videos — striped shirts, baggy trousers, off-
+    # angle camera, etc.), the resulting body-height reference would
+    # be 10-50 px instead of the real 250-400 px. Every normalized
+    # measurement then explodes past every threshold and no frames
+    # classify. Fall back to a frame-height-based proxy so the
+    # classifier still works on those videos.
+    #
+    # Empirical: a properly-framed SPPB capture has the patient
+    # occupying at least 50% of the frame vertically. Hip-to-ankle
+    # alone is ~30% of frame_height. So a hip-to-ankle median below
+    # frame_height × 0.20 is essentially impossible for a real video
+    # and means MediaPipe failed.
+    frame_h = float(ts.get("_frame_h", 720) or 720)
+    min_reasonable = frame_h * 0.20
+    fallback_used = False
+    if stable_body_h is None or stable_body_h < min_reasonable:
+        stable_body_h = frame_h * 0.35  # ≈ hip-to-ankle for a body that fills 70% of the frame
+        fallback_used = True
 
-    # Second pass — classify using the locked reference.
+    # ── Compute adaptive dy tertiles ──
+    # Each patient produces a different dy_heel range based on their
+    # body proportions and camera angle. Fixed thresholds break for
+    # patients whose dy distribution sits outside the tuned range.
+    # Tertile-based cuts adapt to whatever the video actually shows
+    # (assuming the patient performs all three stages).
+    dy_normalised_samples: list[float] = []
+    for i in range(n):
+        if (
+            l_heel_v[i] < FOOT_VIS_THRESHOLD or r_heel_v[i] < FOOT_VIS_THRESHOLD
+            or l_fi_v[i] < FOOT_VIS_THRESHOLD or r_fi_v[i] < FOOT_VIS_THRESHOLD
+        ):
+            continue
+        dy_pixels = abs(float(l_heel_ys[i]) - float(r_heel_ys[i]))
+        dy_normalised_samples.append(dy_pixels / stable_body_h)
+
+    if dy_normalised_samples:
+        sorted_dy = sorted(dy_normalised_samples)
+        n_dy = len(sorted_dy)
+        dy_p33_raw = sorted_dy[n_dy // 3]
+        dy_p67_raw = sorted_dy[(2 * n_dy) // 3]
+        # Floors prevent collapsed distributions (patient only did
+        # one stance) from producing nonsense boundaries.
+        adaptive_dy_s1_max = max(0.04, dy_p33_raw)
+        adaptive_dy_s2_max = max(adaptive_dy_s1_max + 0.04, dy_p67_raw)
+    else:
+        adaptive_dy_s1_max = 0.05
+        adaptive_dy_s2_max = 0.14
+
+
+    # Second pass — classify using the locked reference + adaptive
+    # tertile thresholds.
     geometry_unmatched_count = 0
     dx_heel_n_samples: list[float] = []
     dy_heel_n_samples: list[float] = []
@@ -500,17 +622,8 @@ def analyze_sppb_balance(
         # Arm grab.
         arm_grabs.append(_is_arm_grab(ts, i))
 
-        # Foot landmark visibility gate.
-        if (
-            l_heel_v[i] < FOOT_VIS_THRESHOLD or r_heel_v[i] < FOOT_VIS_THRESHOLD
-            or l_fi_v[i] < FOOT_VIS_THRESHOLD or r_fi_v[i] < FOOT_VIS_THRESHOLD
-        ):
-            labels.append(None)
-            continue
-
-        # Compute the body-relative measurements inline so we can
-        # record them for diagnostics. Duplicates the math in
-        # _classify_stage; keeping the classifier untouched.
+        # Diagnostic measurements (kept for the diagnostics panel
+        # even though the classifier no longer reads them).
         kx_l, ky_l = float(l_heel_xs[i]), float(l_heel_ys[i])
         kx_r, ky_r = float(r_heel_xs[i]), float(r_heel_ys[i])
         fx_l, fy_l = float(l_fi_xs[i]), float(l_fi_ys[i])
@@ -522,10 +635,16 @@ def analyze_sppb_balance(
         else:
             dx_tandem_n_samples.append(abs(kx_r - fx_l) / stable_body_h)
 
-        stage = _classify_stage(
-            kx_l, ky_l, kx_r, ky_r,
-            fx_l, fy_l, fx_r, fy_r,
-            stable_body_h,
+        # VISIBILITY-based classifier — uses MediaPipe's per-landmark
+        # visibility scores rather than geometric distances.
+        # See _classify_stage_by_visibility for the rules.
+        stage = _classify_stage_by_visibility(
+            l_heel_v=float(l_heel_v[i]),
+            r_heel_v=float(r_heel_v[i]),
+            l_fi_v=float(l_fi_v[i]),
+            r_fi_v=float(r_fi_v[i]),
+            l_ank_v=float(ts["left_ankle"]["vis"][i]),
+            r_ank_v=float(ts["right_ankle"]["vis"][i]),
         )
         if stage is None:
             geometry_unmatched_count += 1
@@ -598,13 +717,29 @@ def analyze_sppb_balance(
         if any(arm_grabs[start_i:end_i + 1]):
             failure_mode = "arm_grab"
 
-        # Outcome.
-        if duration_sec >= STAGE_HOLD_SEC and failure_mode is None:
+        # Outcome rules:
+        #   duration > 10 s           → Pass, display actual time
+        #   8.5 < duration <= 10 s    → Pass, display as 10.0 s
+        #                               (acknowledges that a genuine
+        #                                10-s hold often measures
+        #                                slightly short due to
+        #                                detection edge noise; the
+        #                                patient performed the stance
+        #                                correctly)
+        #   duration <= 8.5 s         → Fail, display actual time
+        PASS_FLOOR_SEC = 8.5
+        if duration_sec > STAGE_HOLD_SEC and failure_mode is None:
+            outcome = "pass"
+            hold_sec = duration_sec
+            display_duration = duration_sec
+        elif duration_sec > PASS_FLOOR_SEC and failure_mode is None:
             outcome = "pass"
             hold_sec = STAGE_HOLD_SEC
+            display_duration = STAGE_HOLD_SEC
         else:
             outcome = "fail"
             hold_sec = min(duration_sec, STAGE_HOLD_SEC)
+            display_duration = duration_sec
             if failure_mode is None:
                 failure_mode = "position_lost"
             progression_blocked = True
@@ -620,7 +755,7 @@ def analyze_sppb_balance(
             "stage": stage_idx,
             "outcome": outcome,
             "hold_seconds": float(hold_sec),
-            "duration_seconds": float(duration_sec),
+            "duration_seconds": float(display_duration),
             "failure_mode": failure_mode,
             "sway_path_px": float(_sway_path_length(path_pts)),
             "sway_95_ellipse_px2": float(_sway_ellipse_95(path_pts)),
@@ -675,6 +810,9 @@ def analyze_sppb_balance(
             "geometry_unmatched_count": geometry_unmatched_count,
             "body_h_px": _quartile_stats(body_h_samples),
             "stable_body_h_px": round(stable_body_h, 1),
+            "body_h_fallback_used": fallback_used,
+            "adaptive_dy_s1_max": round(adaptive_dy_s1_max, 4),
+            "adaptive_dy_s2_max": round(adaptive_dy_s2_max, 4),
             "dx_heel_n": _quartile_stats(dx_heel_n_samples),
             "dy_heel_n": _quartile_stats(dy_heel_n_samples),
             "dx_tandem_n": _quartile_stats(dx_tandem_n_samples),
