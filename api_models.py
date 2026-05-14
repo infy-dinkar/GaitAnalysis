@@ -232,6 +232,17 @@ class GaitResponse(BaseModel):
 # ══════════════════════════════════════════════════════════════════════
 # BIOMECH (unchanged)
 # ══════════════════════════════════════════════════════════════════════
+class BiomechKeyFrame(BaseModel):
+    """Annotated key-frame screenshot — same pattern TUG uses for its
+    test-progress thumbnails. `label` is a short human-readable
+    description shown in the report caption (e.g. "Neutral position",
+    "Peak ROM"). `image_data_url` is a JPEG data URL ready for an
+    <img src=> tag."""
+    label: str
+    frame_index: int
+    image_data_url: str
+
+
 class BiomechData(BaseModel):
     body_part: str
     movement: str
@@ -246,6 +257,10 @@ class BiomechData(BaseModel):
     total_frames: int = 0
     fps: float = 0.0
     interpretation: str = ""
+    # Optional annotated screenshots of the test's key moments
+    # (e.g. neutral, peak ROM). Backend-processed body parts return
+    # 2-3 entries here; the live-frontend path leaves it empty.
+    key_frames: list[BiomechKeyFrame] = []
 
 
 class BiomechResponse(BaseModel):

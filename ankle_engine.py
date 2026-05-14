@@ -29,9 +29,11 @@ Sign / ROM convention:
 """
 from __future__ import annotations
 
+import base64
 import math
 from typing import Optional
 
+import cv2
 import numpy as np
 
 from gait_engine import (
@@ -39,6 +41,97 @@ from gait_engine import (
     build_time_series,
     extract_poses,
 )
+
+
+# ─── Key-frame helper ───────────────────────────────────────────
+# Mirrors tug_engine._grab_key_frame: seek to a specific frame in
+# the source video, draw a skeleton overlay, return a JPEG data URL.
+# Used for the report's "Key frames" thumbnail strip.
+def _grab_ankle_key_frame(
+    video_path: str,
+    frame_index: int,
+    keypoints_normalized: dict,
+    label: str,
+    side: str,
+) -> Optional[dict]:
+    if frame_index < 0:
+        return None
+    cap = cv2.VideoCapture(video_path)
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        ret, frame = cap.read()
+    finally:
+        cap.release()
+    if not ret or frame is None:
+        return None
+
+    h, w = frame.shape[:2]
+    # Resize so the embedded image isn't huge in MongoDB / JSON payload.
+    target_w = min(640, w)
+    if target_w < w:
+        scale = target_w / w
+        frame = cv2.resize(frame, (target_w, int(h * scale)))
+        h, w = frame.shape[:2]
+
+    # Skeleton overlay — emphasizes the side under test.
+    def _draw_dot(name: str) -> Optional[tuple[int, int]]:
+        frames = keypoints_normalized.get(name, [])
+        if frame_index >= len(frames):
+            return None
+        kp = frames[frame_index]
+        if kp is None:
+            return None
+        x_n, y_n, _vis = kp
+        px = int(x_n * w)
+        py = int(y_n * h)
+        emphasised = name.startswith(side)
+        # Brighter dot on the side being measured.
+        outer = (0, 0, 220) if emphasised else (150, 150, 150)
+        cv2.circle(frame, (px, py), 5, outer, -1)
+        cv2.circle(frame, (px, py), 7, (255, 255, 255), 1)
+        return (px, py)
+
+    # Ankle-relevant edges: shin (knee-ankle) and foot (ankle-foot_index).
+    # Also include the contralateral leg in grey for context.
+    edges = [
+        ("left_shoulder",  "right_shoulder"),
+        ("left_shoulder",  "left_hip"),
+        ("right_shoulder", "right_hip"),
+        ("left_hip",       "right_hip"),
+        ("left_hip",       "left_knee"),
+        ("left_knee",      "left_ankle"),
+        ("right_hip",      "right_knee"),
+        ("right_knee",     "right_ankle"),
+        ("left_ankle",     "left_heel"),
+        ("right_ankle",    "right_heel"),
+        ("left_heel",      "left_foot_index"),
+        ("right_heel",     "right_foot_index"),
+    ]
+    dot_pos: dict[str, tuple[int, int]] = {}
+    for name in LM:
+        p = _draw_dot(name)
+        if p:
+            dot_pos[name] = p
+    for a, b in edges:
+        if a in dot_pos and b in dot_pos:
+            on_side = a.startswith(side) and b.startswith(side)
+            line_colour = (255, 255, 255) if on_side else (180, 180, 180)
+            cv2.line(frame, dot_pos[a], dot_pos[b], line_colour, 2)
+
+    # No in-image text overlay. cv2.putText doesn't support Unicode
+    # (em-dash and °-sign render as garbled characters), and the
+    # figcaption rendered by the frontend already shows the label
+    # in clean HTML text below the image.
+
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 78])
+    if not ok:
+        return None
+    b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+    return {
+        "label": label,
+        "frame_index": int(frame_index),
+        "image_data_url": f"data:image/jpeg;base64,{b64}",
+    }
 
 
 VIS_THRESHOLD = 0.4         # knee + ankle (anchor landmarks, must be reliable)
@@ -200,6 +293,10 @@ def analyze_ankle(
     # ish reference — and changes by ≈ the actual foot rotation.
     finite_pairs: list[tuple[float, float, float, float, float, float]] = []
     rel_angles: list[float] = []
+    # Original frame indices for each entry in rel_angles — needed so
+    # we can map a peak / neutral position in the smoothed signal back
+    # to the actual video frame for the key-frame screenshot.
+    rel_frame_indices: list[int] = []
     for i in range(n):
         if vk[i] < VIS_THRESHOLD or va[i] < VIS_THRESHOLD or vf[i] < FOOT_VIS_THRESHOLD:
             continue
@@ -225,6 +322,7 @@ def analyze_ankle(
         while rel > 180.0:
             rel -= 360.0
         rel_angles.append(rel)
+        rel_frame_indices.append(i)
         finite_pairs.append((kxi, kyi, axi, ayi, fxi, fyi))
 
     if len(rel_angles) < 3:
@@ -300,6 +398,43 @@ def analyze_ankle(
         f"{ref_min:.0f}°-{ref_max:.0f}° normal range — {status}."
     )
 
+    # ── Key-frame thumbnails for the report ────────────────────
+    # Two screenshots: NEUTRAL position (start of trial, foot at the
+    # rest angle the patient began with) and PEAK ROM frame (the
+    # max-deflection frame on the smoothed signal). Both annotated
+    # with the skeleton overlay.
+    key_frames: list[dict] = []
+    if rel_frame_indices:
+        # Index in rel_smoothed of neutral (extension: min, flexion: max)
+        if movement == "extension":
+            neutral_idx_in_rel = int(np.argmin(rel_smoothed))
+            peak_idx_in_rel = int(np.argmax(rel_smoothed))
+            neutral_label = "Neutral — start"
+            peak_label = f"Peak plantarflexion ({peak_mag:.1f}°)"
+        else:
+            neutral_idx_in_rel = int(np.argmax(rel_smoothed))
+            peak_idx_in_rel = int(np.argmin(rel_smoothed))
+            neutral_label = "Neutral — start"
+            peak_label = f"Peak dorsiflexion ({peak_mag:.1f}°)"
+
+        # rel_frame_indices was indexed in lockstep with rel_angles,
+        # which is the input to the smoothing. The smoothed array has
+        # the same length, so this index maps correctly.
+        if 0 <= neutral_idx_in_rel < len(rel_frame_indices):
+            neutral_frame_idx = rel_frame_indices[neutral_idx_in_rel]
+            kf = _grab_ankle_key_frame(
+                video_path, neutral_frame_idx, raw, neutral_label, side,
+            )
+            if kf:
+                key_frames.append(kf)
+        if 0 <= peak_idx_in_rel < len(rel_frame_indices):
+            peak_frame_idx = rel_frame_indices[peak_idx_in_rel]
+            kf = _grab_ankle_key_frame(
+                video_path, peak_frame_idx, raw, peak_label, side,
+            )
+            if kf:
+                key_frames.append(kf)
+
     return {
         "body_part": "ankle",
         "movement": movement,
@@ -314,4 +449,5 @@ def analyze_ankle(
         "total_frames": n,
         "fps": float(fps),
         "interpretation": interpretation,
+        "key_frames": key_frames,
     }

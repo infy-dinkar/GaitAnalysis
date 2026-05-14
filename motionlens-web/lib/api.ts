@@ -169,6 +169,13 @@ export interface GaitDataDTO {
   observations: ObservationsDTO;
 }
 
+export interface BiomechKeyFrameDTO {
+  label: string;
+  frame_index: number;
+  /** JPEG data URL ready for an <img src="…"> tag. */
+  image_data_url: string;
+}
+
 export interface BiomechDataDTO {
   body_part: "shoulder" | "neck" | "knee" | "hip" | "ankle";
   movement: string;
@@ -183,6 +190,10 @@ export interface BiomechDataDTO {
   total_frames: number;
   fps: number;
   interpretation: string;
+  /** Annotated screenshots of test key moments (neutral, peak ROM).
+   *  Backend-processed body parts (ankle today) return 2-3 entries;
+   *  live-frontend body parts return an empty array. */
+  key_frames?: BiomechKeyFrameDTO[];
 }
 
 // ─── Live biomech (per-frame) ────────────────────────────────────────
