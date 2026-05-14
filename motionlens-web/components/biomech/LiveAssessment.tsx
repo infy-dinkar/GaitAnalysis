@@ -94,6 +94,26 @@ export function LiveAssessment({
     calibFacingForward: false as boolean,
   });
 
+  // Annotated-frame screenshots for the report. Captured on the
+  // composite canvas exposed by LiveBiomechCamera (via
+  // window.__biomechCapture).
+  //   - neutralUrl: first usable frame after movement starts → the
+  //     patient's neutral / starting position.
+  //   - peakUrl:    re-captured every time a new peak ROM is reached.
+  // Both reset on "Reset Peak" so a re-attempt starts fresh.
+  const keyFramesRef = useRef<{ neutralUrl: string | null; peakUrl: string | null }>({
+    neutralUrl: null,
+    peakUrl: null,
+  });
+
+  const grabBiomechFrame = useCallback((): string | null => {
+    if (typeof window === "undefined") return null;
+    const g = (window as unknown as {
+      __biomechCapture?: () => string | null;
+    }).__biomechCapture;
+    return g ? g() ?? null : null;
+  }, []);
+
   const [baseline, setBaseline] = useState<NeckRotationCalibration | null>(null);
   const [shoulderBaseline, setShoulderBaseline] =
     useState<ShoulderRotationCalibration | null>(null);
@@ -142,16 +162,24 @@ export function LiveAssessment({
       }
       s.current = data.current_angle;
       s.validFrames += 1;
+      // First usable frame after the start of measurement →
+      // capture the patient's neutral / starting position once.
+      if (keyFramesRef.current.neutralUrl === null) {
+        keyFramesRef.current.neutralUrl = grabBiomechFrame();
+      }
       if (
         s.peakSigned === null ||
         Math.abs(data.current_angle) > Math.abs(s.peakSigned)
       ) {
         s.peakSigned = data.current_angle;
+        // Re-grab the frame whenever a new peak ROM is achieved so
+        // the report shows the actual peak-position screenshot.
+        keyFramesRef.current.peakUrl = grabBiomechFrame();
       }
     } else {
       s.current = null;
     }
-  }, [isCalibratedRotation, calibrationLocked]);
+  }, [isCalibratedRotation, calibrationLocked, grabBiomechFrame]);
 
   // Per-frame smoothed keypoints — used by calibration phases for
   // neck rotation and shoulder external/internal rotation. Detects
@@ -252,6 +280,8 @@ export function LiveAssessment({
     s.totalFrames = 0;
     s.calibStableSinceMs = null;
     s.calibFacingForward = false;
+    keyFramesRef.current.neutralUrl = null;
+    keyFramesRef.current.peakUrl = null;
     setShowResult(false);
     // For calibrated-rotation tests, "Reset Peak" also clears the
     // calibration so the operator can re-baseline (e.g. patient
@@ -511,6 +541,31 @@ export function LiveAssessment({
   );
 
   if (showResult && hasPeak) {
+    // Assemble the keyFrames array for the report. Only include
+    // entries we actually captured (skip nulls so the section is
+    // hidden cleanly when capture fell through, e.g. very short
+    // attempts where the rAF loop hadn't yet stored a smoothed
+    // landmark snapshot).
+    const liveKeyFrames: Array<{
+      label: string;
+      frame_index: number;
+      image_data_url: string;
+    }> = [];
+    if (keyFramesRef.current.neutralUrl) {
+      liveKeyFrames.push({
+        label: "Neutral — start",
+        frame_index: 0,
+        image_data_url: keyFramesRef.current.neutralUrl,
+      });
+    }
+    if (keyFramesRef.current.peakUrl) {
+      liveKeyFrames.push({
+        label: `Peak ${reportName} (${peakMag.toFixed(1)}°)`,
+        frame_index: 1,
+        image_data_url: keyFramesRef.current.peakUrl,
+      });
+    }
+
     return (
       <div className="space-y-8">
         <AssessmentReport
@@ -520,6 +575,7 @@ export function LiveAssessment({
           measured={peakMag}
           target={target}
           side={side}
+          keyFrames={liveKeyFrames}
         />
 
         {/* Explicit save button — only renders in doctor flow */}
@@ -535,6 +591,9 @@ export function LiveAssessment({
               target,
               valid_frames: validFrames,
               total_frames: totalFrames,
+              // Persist annotated screenshots so the saved-report
+              // viewer can show the same key-frame strip later.
+              key_frames: liveKeyFrames,
             },
           })}
         />
