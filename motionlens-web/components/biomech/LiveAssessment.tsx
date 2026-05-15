@@ -29,6 +29,7 @@ import {
 } from "@/lib/biomech/shoulder";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveBiomechFrameDataDTO } from "@/lib/api";
+import { LM } from "@/lib/pose/landmarks";
 
 type PostureStatus = "idle" | "good" | "low_visibility" | "no_landmarks";
 
@@ -37,6 +38,134 @@ type PostureStatus = "idle" | "good" | "low_visibility" | "no_landmarks";
 // baseline is auto-locked. Operator can also click "Lock baseline"
 // at any time to skip the auto-detect.
 const CALIBRATION_STABLE_MS = 1500;
+
+// ── Peak-screenshot stability guards ──────────────────────────
+// Without these, the report's "peak ROM" thumbnail can end up showing
+// a noisy frame near recording end rather than the real peak. Three
+// issues conspire against the naive "capture on every new max" rule:
+//   1. Angle formulas (esp. shoulder/neck rotation projected vectors)
+//      saturate or jump near 90° when the limb crosses the camera
+//      plane — so a phantom peak fires as the patient lowers their
+//      arm at the end.
+//   2. MoveNet keypoint scores collapse when the patient disengages
+//      (steps away, drops the limb out of frame). Garbage-angle frames
+//      from these moments can exceed the legitimate peak.
+//   3. A single-frame spike was enough to overwrite the screenshot.
+// Guards:
+//   • PEAK_VIS_GATE — every primary joint must be at or above this
+//     visibility score for the frame to be considered.
+//   • PEAK_MAX_JUMP_DEG — single-frame angle jumps larger than this
+//     are physically implausible (limbs can't rotate that fast at
+//     30-60 FPS) and almost always indicate a formula glitch or a
+//     keypoint switch — those frames are dropped from peak tracking.
+//   • PEAK_HOLD_FRAMES + PEAK_HOLD_BAND_DEG — a new candidate peak
+//     must be held (within band) for N frames before it commits to
+//     peakSigned + peakUrl. Pure single-frame spikes can't reach the
+//     hold count and are filtered out cleanly.
+const PEAK_VIS_GATE = 0.55;
+const PEAK_MAX_JUMP_DEG = 25.0;
+const PEAK_HOLD_FRAMES = 5;
+const PEAK_HOLD_BAND_DEG = 3.0;
+
+// Joints whose visibility actually drives the angle formula for the
+// given (body part, movement) pair. We gate peak capture on the MIN
+// visibility across these — if even one is below threshold, the angle
+// reading isn't trustworthy enough to overwrite the peak screenshot.
+//
+// IMPORTANT: only include joints the formula *actually uses*. Earlier
+// versions of this gate over-asked (e.g. demanded wrist visibility for
+// shoulder extension, where the formula reads shoulder + elbow + hip
+// only). At extreme ROM the unused joint (wrist behind body for arm
+// extension, ankle out of frame for hip extension) drops below the
+// gate threshold even though the formula is happily producing valid
+// readings — and the peak update gets refused. Match the gate to the
+// formula's actual inputs and the problem goes away.
+function relevantJointIndices(
+  bodyPart: "shoulder" | "neck" | "knee" | "hip" | "ankle",
+  movementId: string,
+  side: "left" | "right" | undefined,
+): number[] {
+  const s = side === "left" ? "LEFT" : "RIGHT";
+  const L = LM as unknown as Record<string, number>;
+  switch (bodyPart) {
+    case "shoulder": {
+      // Rotation tests use wrist (forearm direction = wrist - elbow).
+      // Everything else (flex/ext/abd/add) uses shoulder + elbow + hip
+      // — wrist is irrelevant and shouldn't gate the peak.
+      const isRotation =
+        movementId === "external_rotation" || movementId === "internal_rotation";
+      if (isRotation) {
+        return [L[`${s}_SHOULDER`], L[`${s}_ELBOW`], L[`${s}_WRIST`]];
+      }
+      return [L[`${s}_SHOULDER`], L[`${s}_ELBOW`], L[`${s}_HIP`]];
+    }
+    case "neck":
+      return [LM.NOSE, LM.LEFT_EAR, LM.RIGHT_EAR, LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER];
+    case "knee":
+      // Knee angle = hip-knee-ankle on the test side, all 3 needed.
+      return [L[`${s}_HIP`], L[`${s}_KNEE`], L[`${s}_ANKLE`]];
+    case "hip": {
+      // Flex/ext use trunk (shoulder-hip) vs thigh (hip-knee); ankle
+      // not used. Rotation tests use shin (knee-ankle) so they need
+      // ankle but not shoulder.
+      const isRotation =
+        movementId === "external_rotation" || movementId === "internal_rotation";
+      if (isRotation) {
+        return [L[`${s}_HIP`], L[`${s}_KNEE`], L[`${s}_ANKLE`]];
+      }
+      return [L[`${s}_SHOULDER`], L[`${s}_HIP`], L[`${s}_KNEE`]];
+    }
+    case "ankle":
+      return [L[`${s}_KNEE`], L[`${s}_ANKLE`]];
+  }
+}
+
+// "Framing core" — the PROXIMAL joints that are reliably visible
+// whenever the patient is properly positioned (standing ~2 m back,
+// full limb in frame). Deliberately excludes joints that legitimately
+// drop to low confidence during the movement itself (wrist when the
+// forearm points at the camera for rotation, ankle when the leg
+// swings behind the body for hip extension). If even the framing
+// core isn't visible, it's a genuine setup problem — too close, out
+// of frame, or bad lighting — not a mid-movement occlusion. This
+// drives the actionable on-screen guidance.
+function framingCoreIndices(
+  bodyPart: "shoulder" | "neck" | "knee" | "hip" | "ankle",
+  side: "left" | "right" | undefined,
+): number[] {
+  const s = side === "left" ? "LEFT" : "RIGHT";
+  const L = LM as unknown as Record<string, number>;
+  switch (bodyPart) {
+    case "shoulder":
+      return [L[`${s}_SHOULDER`], L[`${s}_ELBOW`]];
+    case "neck":
+      return [LM.NOSE, LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER];
+    case "knee":
+      return [L[`${s}_HIP`], L[`${s}_KNEE`]];
+    case "hip":
+      return [L[`${s}_HIP`], L[`${s}_KNEE`]];
+    case "ankle":
+      return [L[`${s}_KNEE`], L[`${s}_ANKLE`]];
+  }
+}
+
+// Human-readable limb description for the "part of X out of frame"
+// guidance — keeps the message specific to the test being run.
+const LIMB_FRAMING_TEXT: Record<
+  "shoulder" | "neck" | "knee" | "hip" | "ankle",
+  string
+> = {
+  shoulder: "your whole arm (shoulder to wrist)",
+  neck: "your head and both shoulders",
+  knee: "your hip, knee and ankle",
+  hip: "your whole leg (hip to ankle)",
+  ankle: "your knee and ankle",
+};
+
+// A joint is considered "in frame at all" above this score. MoveNet
+// hallucinates out-of-frame joints with very low scores (~0.1), so
+// 0.25 cleanly separates "actually visible" from "not in shot".
+const FRAMING_VIS_FLOOR = 0.25;
 
 interface LiveAssessmentProps {
   bodyPart: "shoulder" | "neck" | "knee" | "hip" | "ankle";
@@ -92,6 +221,20 @@ export function LiveAssessment({
     // routes to the baseline-aware formula.
     calibStableSinceMs: null as number | null,
     calibFacingForward: false as boolean,
+    // Held-peak tracking. A candidate is the largest |angle| seen so
+    // far that's eligible for peak (passed the visibility + delta
+    // gates). It only commits to `peakSigned` + `keyFramesRef.peakUrl`
+    // once it has been held within ±PEAK_HOLD_BAND_DEG for at least
+    // PEAK_HOLD_FRAMES frames — this filters out single-frame angle
+    // spikes from formula saturation or keypoint dropouts.
+    peakCandidateSigned: null as number | null,
+    peakCandidateHeld: 0,
+    peakCandidateUrl: null as string | null,
+    prevAngleForDelta: null as number | null,
+    // Actionable framing guidance shown under the status line. Null
+    // when the subject is correctly framed; otherwise a specific
+    // sentence telling the operator exactly what to fix.
+    postureHint: null as string | null,
   });
 
   // Annotated-frame screenshots for the report. Captured on the
@@ -144,42 +287,149 @@ export function LiveAssessment({
     if (!data) {
       s.status = "no_landmarks";
       s.current = null;
+      s.prevAngleForDelta = null;
+      s.postureHint =
+        "No subject detected. Stand ~2 m (6 ft) from the camera, full upper body in frame, with good lighting.";
       return;
     }
     s.status = data.status as PostureStatus;
     s.apiError = null;
-    if (data.status === "good" && data.current_angle !== null) {
-      // Suppress angle / peak tracking during the calibration phase
-      // for rotation tests. Until baseline is locked, the camera is
-      // running the legacy fallback formula whose readings are
-      // meaningless (and can saturate well past the anatomical max)
-      // — surfacing them as Current / Peak pollutes the trial's
-      // actual peak measurement.
-      const inCalibration = isCalibratedRotation && !calibrationLocked;
-      if (inCalibration) {
-        s.current = null;
-        return;
+
+    // ── Actionable framing guidance ─────────────────────────
+    // Runs every frame regardless of phase so the operator always
+    // knows exactly why capture isn't working (the generic
+    // "landmarks below threshold" status is too vague to act on).
+    {
+      const core = framingCoreIndices(bodyPart, side);
+      let visibleCore = 0;
+      for (const i of core) {
+        if ((data.landmarks[i]?.visibility ?? 0) >= FRAMING_VIS_FLOOR) {
+          visibleCore += 1;
+        }
       }
-      s.current = data.current_angle;
-      s.validFrames += 1;
-      // First usable frame after the start of measurement →
-      // capture the patient's neutral / starting position once.
-      if (keyFramesRef.current.neutralUrl === null) {
-        keyFramesRef.current.neutralUrl = grabBiomechFrame();
+      if (visibleCore === 0) {
+        s.postureHint =
+          "Subject not in frame. Stand ~2 m (6 ft) back, facing the camera, full upper body visible.";
+      } else if (visibleCore < core.length) {
+        s.postureHint = `Step back to ~2 m so ${LIMB_FRAMING_TEXT[bodyPart]} stays fully in frame — you're too close or partly out of shot.`;
+      } else if (data.status !== "good") {
+        s.postureHint =
+          "Subject framed but the reading is unstable — improve lighting and face the camera squarely.";
+      } else {
+        s.postureHint = null;
       }
-      if (
-        s.peakSigned === null ||
-        Math.abs(data.current_angle) > Math.abs(s.peakSigned)
-      ) {
-        s.peakSigned = data.current_angle;
-        // Re-grab the frame whenever a new peak ROM is achieved so
-        // the report shows the actual peak-position screenshot.
-        keyFramesRef.current.peakUrl = grabBiomechFrame();
-      }
-    } else {
-      s.current = null;
     }
-  }, [isCalibratedRotation, calibrationLocked, grabBiomechFrame]);
+    if (data.status !== "good" || data.current_angle === null) {
+      // Lost the subject — clear delta tracking so when frames resume
+      // we don't fire a spurious jump-rejection on the first one.
+      s.current = null;
+      s.prevAngleForDelta = null;
+      return;
+    }
+
+    // Suppress angle / peak tracking during the calibration phase
+    // for rotation tests. Until baseline is locked, the camera is
+    // running the legacy fallback formula whose readings are
+    // meaningless (and can saturate well past the anatomical max)
+    // — surfacing them as Current / Peak pollutes the trial's
+    // actual peak measurement.
+    const inCalibration = isCalibratedRotation && !calibrationLocked;
+    if (inCalibration) {
+      s.current = null;
+      s.prevAngleForDelta = null;
+      return;
+    }
+
+    const angle = data.current_angle;
+    s.current = angle;
+    s.validFrames += 1;
+
+    // First usable frame after the start of measurement →
+    // capture the patient's neutral / starting position once.
+    if (keyFramesRef.current.neutralUrl === null) {
+      keyFramesRef.current.neutralUrl = grabBiomechFrame();
+    }
+
+    // ── Peak-screenshot gates ───────────────────────────────
+    // Gate 1: visibility — the primary joints driving this body
+    // part's angle math must all be confidently visible. When the
+    // patient disengages at end-of-trial, keypoint scores collapse
+    // and the angle formula can produce phantom highs; gating here
+    // stops those frames from rewriting the peak screenshot.
+    const relevant = relevantJointIndices(bodyPart, movementId, side);
+    let minVis = 1;
+    for (const i of relevant) {
+      const lm = data.landmarks[i];
+      const v = lm?.visibility ?? 0;
+      if (v < minVis) minVis = v;
+    }
+    const visOk = minVis >= PEAK_VIS_GATE;
+
+    // Gate 2: per-frame delta ceiling. A single frame whose angle
+    // changed by more than PEAK_MAX_JUMP_DEG is almost always a
+    // formula glitch (saturation near 90°, sign flip) or a keypoint
+    // switch — limbs physically can't rotate that fast between
+    // frames at 30-60 FPS. Drop it from peak consideration but keep
+    // updating `prevAngle` so the next frame's delta is measured
+    // from the current reading (we don't want to permanently shadow
+    // a legitimate fast movement).
+    const prev = s.prevAngleForDelta;
+    const deltaOk = prev === null || Math.abs(angle - prev) <= PEAK_MAX_JUMP_DEG;
+    s.prevAngleForDelta = angle;
+
+    if (!visOk || !deltaOk) return;
+
+    // ── Held-candidate confirmation ─────────────────────────
+    // Candidate is the largest |angle| seen in the current peak
+    // attempt. It only commits to `peakSigned` + `peakUrl` once it
+    // has been sustained (within band) for PEAK_HOLD_FRAMES frames.
+    const absA = Math.abs(angle);
+    const cand = s.peakCandidateSigned;
+
+    if (cand === null) {
+      s.peakCandidateSigned = angle;
+      s.peakCandidateHeld = 1;
+      s.peakCandidateUrl = grabBiomechFrame();
+    } else if (absA > Math.abs(cand)) {
+      // New higher candidate — reset hold counter and re-capture
+      // the screenshot at this fresh peak position.
+      s.peakCandidateSigned = angle;
+      s.peakCandidateHeld = 1;
+      s.peakCandidateUrl = grabBiomechFrame();
+    } else if (absA >= Math.abs(cand) - PEAK_HOLD_BAND_DEG) {
+      // Within band of candidate — patient is holding the peak.
+      s.peakCandidateHeld += 1;
+    } else {
+      // Dropped clearly below candidate (patient came down off
+      // peak). If the candidate was already held long enough, this
+      // is a strong signal that the previously-tracked peak was
+      // real — commit it before resetting the candidate to the new
+      // (lower) angle.
+      if (
+        s.peakCandidateHeld >= PEAK_HOLD_FRAMES &&
+        (s.peakSigned === null || Math.abs(cand) > Math.abs(s.peakSigned))
+      ) {
+        s.peakSigned = cand;
+        keyFramesRef.current.peakUrl = s.peakCandidateUrl;
+      }
+      s.peakCandidateSigned = angle;
+      s.peakCandidateHeld = 1;
+      s.peakCandidateUrl = grabBiomechFrame();
+    }
+
+    // Confirm in-place once the candidate has been held the full
+    // window — handles the common case where the patient holds at
+    // peak while the operator clicks "Show Analysis".
+    if (
+      s.peakCandidateHeld >= PEAK_HOLD_FRAMES &&
+      s.peakCandidateSigned !== null &&
+      (s.peakSigned === null ||
+        Math.abs(s.peakCandidateSigned) > Math.abs(s.peakSigned))
+    ) {
+      s.peakSigned = s.peakCandidateSigned;
+      keyFramesRef.current.peakUrl = s.peakCandidateUrl;
+    }
+  }, [isCalibratedRotation, calibrationLocked, grabBiomechFrame, bodyPart, movementId, side]);
 
   // Per-frame smoothed keypoints — used by calibration phases for
   // neck rotation and shoulder external/internal rotation. Detects
@@ -215,6 +465,10 @@ export function LiveAssessment({
               s.validFrames = 0;
               s.totalFrames = 0;
               s.current = null;
+              s.peakCandidateSigned = null;
+              s.peakCandidateHeld = 0;
+              s.peakCandidateUrl = null;
+              s.prevAngleForDelta = null;
             }
           } else if (isShoulderRotation) {
             const cal = captureShoulderRotationBaseline(kp, sideOrRight);
@@ -224,6 +478,10 @@ export function LiveAssessment({
               s.validFrames = 0;
               s.totalFrames = 0;
               s.current = null;
+              s.peakCandidateSigned = null;
+              s.peakCandidateHeld = 0;
+              s.peakCandidateUrl = null;
+              s.prevAngleForDelta = null;
             }
           }
         }
@@ -271,6 +529,10 @@ export function LiveAssessment({
     s.validFrames = 0;
     s.totalFrames = 0;
     s.current = null;
+    s.peakCandidateSigned = null;
+    s.peakCandidateHeld = 0;
+    s.peakCandidateUrl = null;
+    s.prevAngleForDelta = null;
   }
 
   function resetPeak() {
@@ -280,6 +542,11 @@ export function LiveAssessment({
     s.totalFrames = 0;
     s.calibStableSinceMs = null;
     s.calibFacingForward = false;
+    s.peakCandidateSigned = null;
+    s.peakCandidateHeld = 0;
+    s.peakCandidateUrl = null;
+    s.prevAngleForDelta = null;
+    s.postureHint = null;
     keyFramesRef.current.neutralUrl = null;
     keyFramesRef.current.peakUrl = null;
     setShowResult(false);
@@ -292,7 +559,7 @@ export function LiveAssessment({
   }
 
   // ── derived render values ────────────────────────────────────
-  const { current, peakSigned, validFrames, totalFrames, status, apiError } =
+  const { current, peakSigned, validFrames, totalFrames, status, apiError, postureHint } =
     stateRef.current;
   const peakMag = peakSigned !== null ? Math.abs(peakSigned) : 0;
   const hasPeak = peakMag > 0;
@@ -391,6 +658,15 @@ export function LiveAssessment({
             <sp.Icon className={`h-4 w-4 ${sp.color}`} />
             <span className={`text-sm ${sp.color}`}>{sp.text}</span>
           </div>
+
+          {/* Actionable framing guidance — only shown while the
+              subject isn't correctly positioned. Clears itself the
+              moment the framing core is visible and capture is good. */}
+          {postureHint && status !== "good" && (
+            <p className="mt-2 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-warning">
+              ↳ {postureHint}
+            </p>
+          )}
 
           {apiError && (
             <p className="mt-2 text-xs text-error">⚠ {apiError}</p>
