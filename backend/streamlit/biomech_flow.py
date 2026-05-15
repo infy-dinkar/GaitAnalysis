@@ -25,11 +25,11 @@ from datetime import date
 
 import streamlit as st
 
-from shoulder_engine import (
+from backend.engines.shoulder_engine import (
     SHOULDER_NORMAL_RANGES,
     compute_shoulder_angle,
 )
-from neck_engine import (
+from backend.engines.neck_engine import (
     NECK_NORMAL_RANGES,
     compute_neck_angle,
 )

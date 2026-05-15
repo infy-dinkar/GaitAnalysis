@@ -18,9 +18,9 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from auth_utils import get_current_doctor
-from db import get_db
-from report_models import (
+from backend.auth.utils import get_current_doctor
+from backend.db import get_db
+from backend.reports.models import (
     Report,
     ReportCreate,
     ReportDeleteResponse,

@@ -36,7 +36,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from gait_engine import (
+from backend.engines.gait_engine import (
     LM,
     build_time_series,
     extract_poses,

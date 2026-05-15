@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from tug_models import TUGClassification, TUGFlag
+from backend.engines.tug_models import TUGClassification, TUGFlag
 
 
 # ─── Total-time classification ───────────────────────────────────

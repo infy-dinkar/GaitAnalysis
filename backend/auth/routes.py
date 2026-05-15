@@ -19,19 +19,19 @@ from typing import Optional
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from auth_models import (
+from backend.auth.models import (
     AuthTokenResponse,
     DoctorLoginRequest,
     DoctorPublic,
     DoctorSignupRequest,
 )
-from auth_utils import (
+from backend.auth.utils import (
     create_access_token,
     get_current_doctor,
     hash_password,
     verify_password,
 )
-from db import get_db
+from backend.db import get_db
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 

@@ -41,3 +41,5 @@ _*.png
 # MediaPipe model file — downloaded inside Dockerfile at build time,
 # not needed in the repo. HF Spaces rejects this as a binary blob.
 *.task
+
+.early.coverage

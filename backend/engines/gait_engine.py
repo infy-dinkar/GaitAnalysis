@@ -40,7 +40,7 @@ import numpy as np
 import mediapipe as mp
 from scipy.signal import savgol_filter, find_peaks
 
-from gait_cycle import (
+from backend.engines.gait_cycle import (
     detect_heel_strikes,
     extract_cycles,
     stride_durations,

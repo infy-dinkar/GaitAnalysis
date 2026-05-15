@@ -22,13 +22,13 @@ import numpy as np
 
 # Engine references (READ-ONLY). gait_plots' normal_*_reference helpers
 # are PUBLIC functions used to expose the healthy-adult reference bands.
-from gait_plots import (
+from backend.engines.gait_plots import (
     normal_hip_reference,
     normal_knee_reference,
     normal_ankle_reference,
 )
 
-from api_models import (
+from backend.api.models import (
     AnkleTrajectoryTab,
     BiomechData,
     CycleSideBlock,
