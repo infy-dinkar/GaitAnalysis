@@ -120,6 +120,53 @@ function relevantJointIndices(
   }
 }
 
+// "Framing core" — the PROXIMAL joints that are reliably visible
+// whenever the patient is properly positioned (standing ~2 m back,
+// full limb in frame). Deliberately excludes joints that legitimately
+// drop to low confidence during the movement itself (wrist when the
+// forearm points at the camera for rotation, ankle when the leg
+// swings behind the body for hip extension). If even the framing
+// core isn't visible, it's a genuine setup problem — too close, out
+// of frame, or bad lighting — not a mid-movement occlusion. This
+// drives the actionable on-screen guidance.
+function framingCoreIndices(
+  bodyPart: "shoulder" | "neck" | "knee" | "hip" | "ankle",
+  side: "left" | "right" | undefined,
+): number[] {
+  const s = side === "left" ? "LEFT" : "RIGHT";
+  const L = LM as unknown as Record<string, number>;
+  switch (bodyPart) {
+    case "shoulder":
+      return [L[`${s}_SHOULDER`], L[`${s}_ELBOW`]];
+    case "neck":
+      return [LM.NOSE, LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER];
+    case "knee":
+      return [L[`${s}_HIP`], L[`${s}_KNEE`]];
+    case "hip":
+      return [L[`${s}_HIP`], L[`${s}_KNEE`]];
+    case "ankle":
+      return [L[`${s}_KNEE`], L[`${s}_ANKLE`]];
+  }
+}
+
+// Human-readable limb description for the "part of X out of frame"
+// guidance — keeps the message specific to the test being run.
+const LIMB_FRAMING_TEXT: Record<
+  "shoulder" | "neck" | "knee" | "hip" | "ankle",
+  string
+> = {
+  shoulder: "your whole arm (shoulder to wrist)",
+  neck: "your head and both shoulders",
+  knee: "your hip, knee and ankle",
+  hip: "your whole leg (hip to ankle)",
+  ankle: "your knee and ankle",
+};
+
+// A joint is considered "in frame at all" above this score. MoveNet
+// hallucinates out-of-frame joints with very low scores (~0.1), so
+// 0.25 cleanly separates "actually visible" from "not in shot".
+const FRAMING_VIS_FLOOR = 0.25;
+
 interface LiveAssessmentProps {
   bodyPart: "shoulder" | "neck" | "knee" | "hip" | "ankle";
   movementId: string;
@@ -184,6 +231,10 @@ export function LiveAssessment({
     peakCandidateHeld: 0,
     peakCandidateUrl: null as string | null,
     prevAngleForDelta: null as number | null,
+    // Actionable framing guidance shown under the status line. Null
+    // when the subject is correctly framed; otherwise a specific
+    // sentence telling the operator exactly what to fix.
+    postureHint: null as string | null,
   });
 
   // Annotated-frame screenshots for the report. Captured on the
@@ -237,10 +288,37 @@ export function LiveAssessment({
       s.status = "no_landmarks";
       s.current = null;
       s.prevAngleForDelta = null;
+      s.postureHint =
+        "No subject detected. Stand ~2 m (6 ft) from the camera, full upper body in frame, with good lighting.";
       return;
     }
     s.status = data.status as PostureStatus;
     s.apiError = null;
+
+    // ── Actionable framing guidance ─────────────────────────
+    // Runs every frame regardless of phase so the operator always
+    // knows exactly why capture isn't working (the generic
+    // "landmarks below threshold" status is too vague to act on).
+    {
+      const core = framingCoreIndices(bodyPart, side);
+      let visibleCore = 0;
+      for (const i of core) {
+        if ((data.landmarks[i]?.visibility ?? 0) >= FRAMING_VIS_FLOOR) {
+          visibleCore += 1;
+        }
+      }
+      if (visibleCore === 0) {
+        s.postureHint =
+          "Subject not in frame. Stand ~2 m (6 ft) back, facing the camera, full upper body visible.";
+      } else if (visibleCore < core.length) {
+        s.postureHint = `Step back to ~2 m so ${LIMB_FRAMING_TEXT[bodyPart]} stays fully in frame — you're too close or partly out of shot.`;
+      } else if (data.status !== "good") {
+        s.postureHint =
+          "Subject framed but the reading is unstable — improve lighting and face the camera squarely.";
+      } else {
+        s.postureHint = null;
+      }
+    }
     if (data.status !== "good" || data.current_angle === null) {
       // Lost the subject — clear delta tracking so when frames resume
       // we don't fire a spurious jump-rejection on the first one.
@@ -468,6 +546,7 @@ export function LiveAssessment({
     s.peakCandidateHeld = 0;
     s.peakCandidateUrl = null;
     s.prevAngleForDelta = null;
+    s.postureHint = null;
     keyFramesRef.current.neutralUrl = null;
     keyFramesRef.current.peakUrl = null;
     setShowResult(false);
@@ -480,7 +559,7 @@ export function LiveAssessment({
   }
 
   // ── derived render values ────────────────────────────────────
-  const { current, peakSigned, validFrames, totalFrames, status, apiError } =
+  const { current, peakSigned, validFrames, totalFrames, status, apiError, postureHint } =
     stateRef.current;
   const peakMag = peakSigned !== null ? Math.abs(peakSigned) : 0;
   const hasPeak = peakMag > 0;
@@ -579,6 +658,15 @@ export function LiveAssessment({
             <sp.Icon className={`h-4 w-4 ${sp.color}`} />
             <span className={`text-sm ${sp.color}`}>{sp.text}</span>
           </div>
+
+          {/* Actionable framing guidance — only shown while the
+              subject isn't correctly positioned. Clears itself the
+              moment the framing core is visible and capture is good. */}
+          {postureHint && status !== "good" && (
+            <p className="mt-2 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-warning">
+              ↳ {postureHint}
+            </p>
+          )}
 
           {apiError && (
             <p className="mt-2 text-xs text-error">⚠ {apiError}</p>
