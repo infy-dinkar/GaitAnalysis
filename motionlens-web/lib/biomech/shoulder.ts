@@ -166,12 +166,31 @@ export function isShoulderRotationNeutral(
   const s = keypoints[idx.shoulder];
   const e = keypoints[idx.elbow];
   const w = keypoints[idx.wrist];
-  for (const k of [s, e, w]) {
+  // Shoulder + elbow MUST be confidently visible. At the neutral pose
+  // (forearm aimed at the camera) the upper arm hangs vertically and
+  // both these joints are always cleanly in view, so demanding
+  // confidence here is correct.
+  for (const k of [s, e]) {
     if (!k || (k.score ?? 0) < VIS_THRESHOLD) return false;
   }
+  // The wrist deliberately does NOT get the visibility gate. The
+  // neutral pose IS "forearm pointing straight at the lens", which
+  // foreshortens the wrist to nearly a point — MoveNet routinely
+  // scores it well below VIS_THRESHOLD in exactly this pose. Requiring
+  // a confident wrist here is self-contradictory and was why baseline
+  // auto-lock never fired (the detector rejected the very pose it was
+  // waiting for). We still need a wrist *position* to measure the
+  // forearm projection, so the keypoint must at least exist.
+  if (!w) return false;
   const upperArmLen = Math.hypot(e.x - s.x, e.y - s.y);
   if (upperArmLen < MIN_UPPER_ARM_PX) return false;
   const forearmLen = Math.hypot(w.x - e.x, w.y - e.y);
+  // Short forearm projection = forearm aimed at the camera = neutral.
+  // This ratio check is itself the safeguard against a false lock:
+  // if the patient is holding the forearm out to the side, the
+  // projection is long and the ratio fails — so a non-neutral pose
+  // still can't slip through even though the wrist confidence gate
+  // was relaxed above.
   return forearmLen / upperArmLen <= SHOULDER_NEUTRAL_FOREARM_RATIO_MAX;
 }
 
