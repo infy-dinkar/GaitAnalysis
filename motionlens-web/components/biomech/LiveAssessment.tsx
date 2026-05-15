@@ -67,25 +67,54 @@ const PEAK_MAX_JUMP_DEG = 25.0;
 const PEAK_HOLD_FRAMES = 5;
 const PEAK_HOLD_BAND_DEG = 3.0;
 
-// Joints whose visibility actually drives the angle formula for each
-// body part / side. We gate peak capture on the MIN visibility across
-// these — if even one is below threshold, the angle reading is not
-// trustworthy enough to overwrite the peak screenshot.
+// Joints whose visibility actually drives the angle formula for the
+// given (body part, movement) pair. We gate peak capture on the MIN
+// visibility across these — if even one is below threshold, the angle
+// reading isn't trustworthy enough to overwrite the peak screenshot.
+//
+// IMPORTANT: only include joints the formula *actually uses*. Earlier
+// versions of this gate over-asked (e.g. demanded wrist visibility for
+// shoulder extension, where the formula reads shoulder + elbow + hip
+// only). At extreme ROM the unused joint (wrist behind body for arm
+// extension, ankle out of frame for hip extension) drops below the
+// gate threshold even though the formula is happily producing valid
+// readings — and the peak update gets refused. Match the gate to the
+// formula's actual inputs and the problem goes away.
 function relevantJointIndices(
   bodyPart: "shoulder" | "neck" | "knee" | "hip" | "ankle",
+  movementId: string,
   side: "left" | "right" | undefined,
 ): number[] {
   const s = side === "left" ? "LEFT" : "RIGHT";
   const L = LM as unknown as Record<string, number>;
   switch (bodyPart) {
-    case "shoulder":
-      return [L[`${s}_SHOULDER`], L[`${s}_ELBOW`], L[`${s}_WRIST`]];
+    case "shoulder": {
+      // Rotation tests use wrist (forearm direction = wrist - elbow).
+      // Everything else (flex/ext/abd/add) uses shoulder + elbow + hip
+      // — wrist is irrelevant and shouldn't gate the peak.
+      const isRotation =
+        movementId === "external_rotation" || movementId === "internal_rotation";
+      if (isRotation) {
+        return [L[`${s}_SHOULDER`], L[`${s}_ELBOW`], L[`${s}_WRIST`]];
+      }
+      return [L[`${s}_SHOULDER`], L[`${s}_ELBOW`], L[`${s}_HIP`]];
+    }
     case "neck":
       return [LM.NOSE, LM.LEFT_EAR, LM.RIGHT_EAR, LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER];
     case "knee":
+      // Knee angle = hip-knee-ankle on the test side, all 3 needed.
       return [L[`${s}_HIP`], L[`${s}_KNEE`], L[`${s}_ANKLE`]];
-    case "hip":
-      return [L[`${s}_SHOULDER`], L[`${s}_HIP`], L[`${s}_KNEE`], L[`${s}_ANKLE`]];
+    case "hip": {
+      // Flex/ext use trunk (shoulder-hip) vs thigh (hip-knee); ankle
+      // not used. Rotation tests use shin (knee-ankle) so they need
+      // ankle but not shoulder.
+      const isRotation =
+        movementId === "external_rotation" || movementId === "internal_rotation";
+      if (isRotation) {
+        return [L[`${s}_HIP`], L[`${s}_KNEE`], L[`${s}_ANKLE`]];
+      }
+      return [L[`${s}_SHOULDER`], L[`${s}_HIP`], L[`${s}_KNEE`]];
+    }
     case "ankle":
       return [L[`${s}_KNEE`], L[`${s}_ANKLE`]];
   }
@@ -249,7 +278,7 @@ export function LiveAssessment({
     // patient disengages at end-of-trial, keypoint scores collapse
     // and the angle formula can produce phantom highs; gating here
     // stops those frames from rewriting the peak screenshot.
-    const relevant = relevantJointIndices(bodyPart, side);
+    const relevant = relevantJointIndices(bodyPart, movementId, side);
     let minVis = 1;
     for (const i of relevant) {
       const lm = data.landmarks[i];
@@ -322,7 +351,7 @@ export function LiveAssessment({
       s.peakSigned = s.peakCandidateSigned;
       keyFramesRef.current.peakUrl = s.peakCandidateUrl;
     }
-  }, [isCalibratedRotation, calibrationLocked, grabBiomechFrame, bodyPart, side]);
+  }, [isCalibratedRotation, calibrationLocked, grabBiomechFrame, bodyPart, movementId, side]);
 
   // Per-frame smoothed keypoints — used by calibration phases for
   // neck rotation and shoulder external/internal rotation. Detects

@@ -192,10 +192,32 @@ export function captureShoulderRotationBaseline(
   return { R_upperArmLength: len, side };
 }
 
+/** Valid elbow flexion window (in degrees) for the rotation test pose.
+ *  Anatomically the patient is supposed to hold the elbow tucked at
+ *  the side, bent at ~90°. If the elbow is straighter than ~115° (arm
+ *  hanging by the side) or sharper than ~65° (over-bent), the geometry
+ *  the formula relies on is invalid: the forearm projection no longer
+ *  represents pure shoulder-axis rotation. We reject such frames so a
+ *  patient who simply lowers their arm doesn't get a phantom 90° peak
+ *  from the formula reading "forearm = full vertical = sin⁻¹(1)". */
+const ELBOW_FLEX_MIN_DEG = 65;
+const ELBOW_FLEX_MAX_DEG = 115;
+
 /** Calibrated rotation magnitude in degrees, capped at 90°.
- *  Returns null when wrist or elbow visibility drops (typical at the
- *  extreme of rotation when the wrist crosses behind the body). The
- *  upstream peak-tracker holds the last good value in that case. */
+ *
+ *  Returns null when:
+ *    • wrist / elbow / shoulder visibility drops, OR
+ *    • the elbow is not bent ≈90° (test pose violated — patient let
+ *      the arm hang straight, lifted the elbow, etc.), OR
+ *    • the live upper-arm scale is degenerate (zero pixel length).
+ *
+ *  Scale invariance: we normalise the forearm projection by the LIVE
+ *  shoulder→elbow length each frame, not the baseline value frozen at
+ *  calibration. That way, when the patient walks closer to the camera
+ *  (or further), both numerator and denominator grow together and the
+ *  ratio stays anchored to the true rotation angle. The baseline's
+ *  R_upperArmLength field is retained for diagnostics but no longer
+ *  drives the arcsin denominator. */
 export function computeShoulderRotationFromBaseline(
   keypoints: Keypoint[],
   side: "left" | "right",
@@ -203,15 +225,44 @@ export function computeShoulderRotationFromBaseline(
 ): number | null {
   if (baseline.side !== side) return null; // wrong-side baseline guard
   const idx = SIDE_INDICES[side];
+  const s = keypoints[idx.shoulder];
   const e = keypoints[idx.elbow];
   const w = keypoints[idx.wrist];
-  if (!e || !w) return null;
-  if ((e.score ?? 0) < VIS_THRESHOLD || (w.score ?? 0) < VIS_THRESHOLD) return null;
-  const forearmProjLen = Math.hypot(w.x - e.x, w.y - e.y);
-  // arcsin saturates at 1; clamp the ratio. If the patient over-rotates
-  // (somehow projecting longer than the upper-arm-length proxy
-  // suggests, e.g. anatomical forearm-longer-than-upper-arm), we cap
-  // at 90° rather than returning NaN.
-  const ratio = Math.max(0, Math.min(1, forearmProjLen / baseline.R_upperArmLength));
+  if (!s || !e || !w) return null;
+  if (
+    (s.score ?? 0) < VIS_THRESHOLD ||
+    (e.score ?? 0) < VIS_THRESHOLD ||
+    (w.score ?? 0) < VIS_THRESHOLD
+  ) {
+    return null;
+  }
+
+  // Live upper-arm length — used as the rotation reference each frame
+  // so changes in patient-to-camera distance scale numerator and
+  // denominator together.
+  const liveUpperArm = Math.hypot(s.x - e.x, s.y - e.y);
+  if (liveUpperArm < 1) return null;
+
+  // Elbow flexion check (Fix A). Inner angle at the elbow between
+  // shoulder→elbow and elbow→wrist vectors. ≈180° = arm straight,
+  // ≈90° = test pose, ≈0° = fully bent. We require the patient to be
+  // in roughly the ±25° window around 90°.
+  const ux = s.x - e.x, uy = s.y - e.y;       // upper arm (elbow → shoulder)
+  const fx = w.x - e.x, fy = w.y - e.y;       // forearm  (elbow → wrist)
+  const forearmProjLen = Math.hypot(fx, fy);
+  if (forearmProjLen < 1) return null;
+  const cosElbow = (ux * fx + uy * fy) / (liveUpperArm * forearmProjLen);
+  const elbowAngleDeg =
+    (Math.acos(Math.max(-1, Math.min(1, cosElbow))) * 180) / Math.PI;
+  if (elbowAngleDeg < ELBOW_FLEX_MIN_DEG || elbowAngleDeg > ELBOW_FLEX_MAX_DEG) {
+    return null;
+  }
+
+  // Scale-invariant rotation: ratio = forearm-projection / live-upper-arm.
+  // The upper-arm length is anatomically close to the forearm length
+  // (proxy assumption), and crucially it tracks camera distance in
+  // real time so the patient can move toward/away from the lens
+  // without inflating the ratio past 1.
+  const ratio = Math.max(0, Math.min(1, forearmProjLen / liveUpperArm));
   return (Math.asin(ratio) * 180) / Math.PI;
 }
