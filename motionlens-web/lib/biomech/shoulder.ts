@@ -166,31 +166,12 @@ export function isShoulderRotationNeutral(
   const s = keypoints[idx.shoulder];
   const e = keypoints[idx.elbow];
   const w = keypoints[idx.wrist];
-  // Shoulder + elbow MUST be confidently visible. At the neutral pose
-  // (forearm aimed at the camera) the upper arm hangs vertically and
-  // both these joints are always cleanly in view, so demanding
-  // confidence here is correct.
-  for (const k of [s, e]) {
+  for (const k of [s, e, w]) {
     if (!k || (k.score ?? 0) < VIS_THRESHOLD) return false;
   }
-  // The wrist deliberately does NOT get the visibility gate. The
-  // neutral pose IS "forearm pointing straight at the lens", which
-  // foreshortens the wrist to nearly a point — MoveNet routinely
-  // scores it well below VIS_THRESHOLD in exactly this pose. Requiring
-  // a confident wrist here is self-contradictory and was why baseline
-  // auto-lock never fired (the detector rejected the very pose it was
-  // waiting for). We still need a wrist *position* to measure the
-  // forearm projection, so the keypoint must at least exist.
-  if (!w) return false;
   const upperArmLen = Math.hypot(e.x - s.x, e.y - s.y);
   if (upperArmLen < MIN_UPPER_ARM_PX) return false;
   const forearmLen = Math.hypot(w.x - e.x, w.y - e.y);
-  // Short forearm projection = forearm aimed at the camera = neutral.
-  // This ratio check is itself the safeguard against a false lock:
-  // if the patient is holding the forearm out to the side, the
-  // projection is long and the ratio fails — so a non-neutral pose
-  // still can't slip through even though the wrist confidence gate
-  // was relaxed above.
   return forearmLen / upperArmLen <= SHOULDER_NEUTRAL_FOREARM_RATIO_MAX;
 }
 
@@ -211,32 +192,10 @@ export function captureShoulderRotationBaseline(
   return { R_upperArmLength: len, side };
 }
 
-/** Valid elbow flexion window (in degrees) for the rotation test pose.
- *  Anatomically the patient is supposed to hold the elbow tucked at
- *  the side, bent at ~90°. If the elbow is straighter than ~115° (arm
- *  hanging by the side) or sharper than ~65° (over-bent), the geometry
- *  the formula relies on is invalid: the forearm projection no longer
- *  represents pure shoulder-axis rotation. We reject such frames so a
- *  patient who simply lowers their arm doesn't get a phantom 90° peak
- *  from the formula reading "forearm = full vertical = sin⁻¹(1)". */
-const ELBOW_FLEX_MIN_DEG = 65;
-const ELBOW_FLEX_MAX_DEG = 115;
-
 /** Calibrated rotation magnitude in degrees, capped at 90°.
- *
- *  Returns null when:
- *    • wrist / elbow / shoulder visibility drops, OR
- *    • the elbow is not bent ≈90° (test pose violated — patient let
- *      the arm hang straight, lifted the elbow, etc.), OR
- *    • the live upper-arm scale is degenerate (zero pixel length).
- *
- *  Scale invariance: we normalise the forearm projection by the LIVE
- *  shoulder→elbow length each frame, not the baseline value frozen at
- *  calibration. That way, when the patient walks closer to the camera
- *  (or further), both numerator and denominator grow together and the
- *  ratio stays anchored to the true rotation angle. The baseline's
- *  R_upperArmLength field is retained for diagnostics but no longer
- *  drives the arcsin denominator. */
+ *  Returns null when wrist or elbow visibility drops (typical at the
+ *  extreme of rotation when the wrist crosses behind the body). The
+ *  upstream peak-tracker holds the last good value in that case. */
 export function computeShoulderRotationFromBaseline(
   keypoints: Keypoint[],
   side: "left" | "right",
@@ -244,44 +203,15 @@ export function computeShoulderRotationFromBaseline(
 ): number | null {
   if (baseline.side !== side) return null; // wrong-side baseline guard
   const idx = SIDE_INDICES[side];
-  const s = keypoints[idx.shoulder];
   const e = keypoints[idx.elbow];
   const w = keypoints[idx.wrist];
-  if (!s || !e || !w) return null;
-  if (
-    (s.score ?? 0) < VIS_THRESHOLD ||
-    (e.score ?? 0) < VIS_THRESHOLD ||
-    (w.score ?? 0) < VIS_THRESHOLD
-  ) {
-    return null;
-  }
-
-  // Live upper-arm length — used as the rotation reference each frame
-  // so changes in patient-to-camera distance scale numerator and
-  // denominator together.
-  const liveUpperArm = Math.hypot(s.x - e.x, s.y - e.y);
-  if (liveUpperArm < 1) return null;
-
-  // Elbow flexion check (Fix A). Inner angle at the elbow between
-  // shoulder→elbow and elbow→wrist vectors. ≈180° = arm straight,
-  // ≈90° = test pose, ≈0° = fully bent. We require the patient to be
-  // in roughly the ±25° window around 90°.
-  const ux = s.x - e.x, uy = s.y - e.y;       // upper arm (elbow → shoulder)
-  const fx = w.x - e.x, fy = w.y - e.y;       // forearm  (elbow → wrist)
-  const forearmProjLen = Math.hypot(fx, fy);
-  if (forearmProjLen < 1) return null;
-  const cosElbow = (ux * fx + uy * fy) / (liveUpperArm * forearmProjLen);
-  const elbowAngleDeg =
-    (Math.acos(Math.max(-1, Math.min(1, cosElbow))) * 180) / Math.PI;
-  if (elbowAngleDeg < ELBOW_FLEX_MIN_DEG || elbowAngleDeg > ELBOW_FLEX_MAX_DEG) {
-    return null;
-  }
-
-  // Scale-invariant rotation: ratio = forearm-projection / live-upper-arm.
-  // The upper-arm length is anatomically close to the forearm length
-  // (proxy assumption), and crucially it tracks camera distance in
-  // real time so the patient can move toward/away from the lens
-  // without inflating the ratio past 1.
-  const ratio = Math.max(0, Math.min(1, forearmProjLen / liveUpperArm));
+  if (!e || !w) return null;
+  if ((e.score ?? 0) < VIS_THRESHOLD || (w.score ?? 0) < VIS_THRESHOLD) return null;
+  const forearmProjLen = Math.hypot(w.x - e.x, w.y - e.y);
+  // arcsin saturates at 1; clamp the ratio. If the patient over-rotates
+  // (somehow projecting longer than the upper-arm-length proxy
+  // suggests, e.g. anatomical forearm-longer-than-upper-arm), we cap
+  // at 90° rather than returning NaN.
+  const ratio = Math.max(0, Math.min(1, forearmProjLen / baseline.R_upperArmLength));
   return (Math.asin(ratio) * 180) / Math.PI;
 }
