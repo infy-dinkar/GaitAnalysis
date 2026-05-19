@@ -522,10 +522,16 @@ export function LiveBiomechCamera({
     ctx.drawImage(video, 0, 0, cw, ch);
     ctx.restore();
 
-    // Skeleton overlay on top of the composited frame.
+    // Skeleton overlay on top of the composited frame. The video
+    // above was drawn mirrored (selfie style) to match the on-screen
+    // preview, but the landmark coordinates from the detector are in
+    // un-mirrored image space. Mirror the skeleton x-coords here so
+    // the saved key-frame thumbnail has the skeleton on the correct
+    // side of the body (joints line up with the patient's actual
+    // limbs in the photo).
     const norm = lastNormRef.current;
     if (norm) {
-      const px = (n: Norm) => ({ x: n.x * cw, y: n.y * ch });
+      const px = (n: Norm) => ({ x: cw - n.x * cw, y: n.y * ch });
       const edges = RELEVANT_EDGES[bodyPart];
       const dots = RELEVANT_DOTS[bodyPart];
 

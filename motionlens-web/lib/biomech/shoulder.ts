@@ -238,6 +238,18 @@ export function captureShoulderRotationBaseline(
   return { R_upperArmLength: len, side };
 }
 
+/** Typical anatomical ratio of forearm length to upper-arm length in
+ *  adults. The arcsin formula uses upper-arm pixel length as a proxy
+ *  for forearm length (we can't measure forearm directly at neutral
+ *  because the forearm is pointing at the camera and projects to
+ *  near zero). Most adults' forearms are ~88% as long as their
+ *  upper arms; using the upper-arm length as-is therefore makes
+ *  full ROM read low (the projection ratio caps around 0.85-0.90,
+ *  so asin returns 58°-65° even when the patient is actually at
+ *  90° rotation). Scaling the denominator by this constant brings
+ *  the output much closer to the patient's true peak rotation. */
+const FOREARM_TO_UPPER_ARM_PROXY = 0.88;
+
 /** Calibrated rotation magnitude in degrees, capped at 90°.
  *  Returns null when wrist or elbow visibility drops (typical at the
  *  extreme of rotation when the wrist crosses behind the body). The
@@ -254,11 +266,12 @@ export function computeShoulderRotationFromBaseline(
   if (!e || !w) return null;
   if ((e.score ?? 0) < VIS_THRESHOLD || (w.score ?? 0) < VIS_THRESHOLD) return null;
   const forearmProjLen = Math.hypot(w.x - e.x, w.y - e.y);
-  // arcsin saturates at 1; clamp the ratio. If the patient over-rotates
-  // (somehow projecting longer than the upper-arm-length proxy
-  // suggests, e.g. anatomical forearm-longer-than-upper-arm), we cap
-  // at 90° rather than returning NaN.
-  const ratio = Math.max(0, Math.min(1, forearmProjLen / baseline.R_upperArmLength));
+  // arcsin saturates at 1; clamp the ratio. The
+  // FOREARM_TO_UPPER_ARM_PROXY factor compensates for the upper-arm
+  // proxy being anatomically longer than the actual forearm, so full
+  // ROM reads close to 90° instead of 56°-65°.
+  const effectiveRef = baseline.R_upperArmLength * FOREARM_TO_UPPER_ARM_PROXY;
+  const ratio = Math.max(0, Math.min(1, forearmProjLen / effectiveRef));
   return (Math.asin(ratio) * 180) / Math.PI;
 }
 
