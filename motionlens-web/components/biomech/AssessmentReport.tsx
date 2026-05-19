@@ -137,10 +137,16 @@ export function AssessmentReport({
   secondaryMeasured,
   secondaryTarget,
 }: Props) {
-  const hasSecondary =
-    !!secondaryMovementName &&
+  // Merged tests always render BOTH direction rows (so the operator
+  // gets a clear "Internal Rotation: Not detected" line when only
+  // external was performed, instead of a silently single-row report
+  // titled with the combined name). Driven by secondaryMovementName +
+  // secondaryTarget being set; the measured value can be missing.
+  const hasSecondary = !!secondaryMovementName && !!secondaryTarget;
+  const hasSecondaryValue =
+    hasSecondary &&
     typeof secondaryMeasured === "number" &&
-    !!secondaryTarget;
+    secondaryMeasured > 0;
   // Patient identity comes from the doctor-flow context when the
   // assessment is launched from /dashboard/patients/{id}/analyze.
   // Outside the doctor flow we just render the report with no patient
@@ -176,10 +182,10 @@ export function AssessmentReport({
   const { status, pct } = useMemo(() => classify(measured, target), [measured, target]);
   const secondaryStatus = useMemo(
     () =>
-      hasSecondary && secondaryTarget && typeof secondaryMeasured === "number"
+      hasSecondaryValue && secondaryTarget && typeof secondaryMeasured === "number"
         ? classify(secondaryMeasured, secondaryTarget)
         : null,
-    [hasSecondary, secondaryMeasured, secondaryTarget],
+    [hasSecondaryValue, secondaryMeasured, secondaryTarget],
   );
 
   const today = new Date();
@@ -221,8 +227,11 @@ export function AssessmentReport({
     const yLabels = hasSecondary && secondaryMovementName
       ? [secondaryMovementName, movementName]
       : [movementName];
-    const measuredXs = hasSecondary && typeof secondaryMeasured === "number"
-      ? [secondaryMeasured, measured]
+    // For merged tests, render the secondary bar at 0 when the
+    // direction wasn't detected — keeps the chart's two-row layout
+    // and aligns visually with the "Not detected" row in the table.
+    const measuredXs = hasSecondary
+      ? [hasSecondaryValue && typeof secondaryMeasured === "number" ? secondaryMeasured : 0, measured]
       : [measured];
 
     const lowB = secondaryTarget?.[0] ?? 0;
@@ -309,14 +318,14 @@ export function AssessmentReport({
   const interpSentence =
     `${movementName}${side ? ` (${sideLabel})` : ""} measured ${measured.toFixed(1)}°, ` +
     `which is ${Math.round(pct)}% of the ${rangeStr} normal range — ${status}.`;
-  const interpSentenceB =
-    hasSecondary &&
-    secondaryStatus &&
-    typeof secondaryMeasured === "number" &&
-    secondaryMovementName
+  const interpSentenceB = hasSecondary && secondaryMovementName
+    ? hasSecondaryValue &&
+      secondaryStatus &&
+      typeof secondaryMeasured === "number"
       ? `${secondaryMovementName}${side ? ` (${sideLabel})` : ""} measured ${secondaryMeasured.toFixed(1)}°, ` +
         `which is ${Math.round(secondaryStatus.pct)}% of the ${secondaryRangeStr} normal range — ${secondaryStatus.status}.`
-      : null;
+      : `${secondaryMovementName}${side ? ` (${sideLabel})` : ""} was not detected in this trial — perform that direction and re-record to capture it.`
+    : null;
 
   const interpStyles =
     status === "good"
@@ -374,20 +383,20 @@ export function AssessmentReport({
                 </td>
                 <td className="px-5 py-4 text-right tabular text-muted">{rangeStr}</td>
               </tr>
-              {hasSecondary &&
-                typeof secondaryMeasured === "number" &&
-                secondaryMovementName && (
-                  <tr className="border-t border-border/60">
-                    <td className="px-5 py-4 text-foreground">{secondaryMovementName}</td>
-                    <td className="px-5 py-4 text-center text-muted">{sideLabel}</td>
-                    <td className="px-5 py-4 text-right tabular text-foreground">
-                      {fmt(secondaryMeasured, 1)}°
-                    </td>
-                    <td className="px-5 py-4 text-right tabular text-muted">
-                      {secondaryRangeStr}
-                    </td>
-                  </tr>
-                )}
+              {hasSecondary && secondaryMovementName && (
+                <tr className="border-t border-border/60">
+                  <td className="px-5 py-4 text-foreground">{secondaryMovementName}</td>
+                  <td className="px-5 py-4 text-center text-muted">{sideLabel}</td>
+                  <td className="px-5 py-4 text-right tabular text-foreground">
+                    {hasSecondaryValue && typeof secondaryMeasured === "number"
+                      ? `${fmt(secondaryMeasured, 1)}°`
+                      : <span className="italic text-subtle">Not detected</span>}
+                  </td>
+                  <td className="px-5 py-4 text-right tabular text-muted">
+                    {secondaryRangeStr}
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>

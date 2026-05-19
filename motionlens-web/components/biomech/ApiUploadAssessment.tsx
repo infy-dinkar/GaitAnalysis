@@ -90,16 +90,21 @@ export function ApiUploadAssessment({
   // ── DONE: full Assessment Report ────────────────────────────
   if (result && phase === "done") {
     // Merged movements (shoulder rotation / abduction_adduction)
-    // return two peaks per recording. The DTO carries the secondary
-    // direction's value + range + label so the report can render a
-    // second row, a second chart bar, and a second interpretation
-    // sentence. When the response has no secondary fields the report
-    // falls back to the existing single-direction layout.
-    const hasSecondary =
+    // return two peaks per recording. The DTO carries label + target
+    // for the secondary direction whenever the test is merged — even
+    // if the patient didn't actually perform that direction, the
+    // analyser sets primary_label / secondary_label / secondary_*
+    // metadata so the report can render two rows ("Not detected" in
+    // the missing one) rather than silently collapsing to a single
+    // row with the combined merged label.
+    const isMerged =
+      !!result.primary_label &&
+      !!result.secondary_label &&
+      !!result.secondary_reference_range;
+    const hasSecondaryValue =
+      isMerged &&
       typeof result.secondary_peak_magnitude === "number" &&
-      result.secondary_peak_magnitude > 0 &&
-      !!result.secondary_reference_range &&
-      !!result.secondary_label;
+      result.secondary_peak_magnitude > 0;
 
     return (
       <div className="space-y-8">
@@ -111,9 +116,11 @@ export function ApiUploadAssessment({
           target={[result.reference_range[0], result.reference_range[1]]}
           side={side}
           keyFrames={result.key_frames}
-          secondaryMovementName={hasSecondary ? result.secondary_label : undefined}
-          secondaryMeasured={hasSecondary ? result.secondary_peak_magnitude : undefined}
-          secondaryTarget={hasSecondary ? result.secondary_reference_range : undefined}
+          secondaryMovementName={isMerged ? result.secondary_label : undefined}
+          secondaryMeasured={
+            hasSecondaryValue ? result.secondary_peak_magnitude : undefined
+          }
+          secondaryTarget={isMerged ? result.secondary_reference_range : undefined}
         />
 
         {/* Explicit "Save to patient history" — only shows in doctor flow */}
@@ -134,9 +141,10 @@ export function ApiUploadAssessment({
               total_frames: result.total_frames,
               fps: result.fps,
               // For merged tests, persist the secondary direction
-              // alongside the primary so saved reports can render
-              // both rows when re-opened later.
-              ...(hasSecondary
+              // (label + range always; measured value may be missing
+              // when the patient didn't perform that direction) so
+              // saved reports can render both rows when re-opened.
+              ...(isMerged
                 ? {
                     secondary_peak_angle: result.secondary_peak_angle,
                     secondary_peak_magnitude: result.secondary_peak_magnitude,
