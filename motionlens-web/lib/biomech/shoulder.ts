@@ -293,7 +293,11 @@ function bodyCentreX(keypoints: Keypoint[]): { centreX: number; shoulderWidth: n
   if (!ls || !rs) return null;
   if ((ls.score ?? 0) < VIS_THRESHOLD || (rs.score ?? 0) < VIS_THRESHOLD) return null;
   const shoulderWidth = Math.abs(rs.x - ls.x);
-  if (shoulderWidth < 1) return null;
+  // Tiny epsilon — caller may pass either pixel-space or normalised
+  // [0,1] coordinates. The downstream math is scale-invariant
+  // (ratios), so all this check needs to guard against is a literal
+  // div-by-zero / patient turned exactly 90° to the camera.
+  if (shoulderWidth < 1e-4) return null;
   return { centreX: (ls.x + rs.x) / 2, shoulderWidth };
 }
 
