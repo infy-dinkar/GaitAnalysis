@@ -772,7 +772,7 @@ async function analyzeMergedKneeVideo(
 
   const meta = KNEE_MOVEMENTS.find((m) => m.id === movement);
   const primaryTarget: [number, number] = meta?.target ?? [125, 145];
-  const secondaryTarget: [number, number] = meta?.secondaryTarget ?? [0, 5];
+  const secondaryTarget: [number, number] = meta?.secondaryTarget ?? [0, 10];
   const primaryLabel = meta?.primaryLabel ?? "Flexion";
   const secondaryLabel = meta?.secondaryLabel ?? "Extension";
 

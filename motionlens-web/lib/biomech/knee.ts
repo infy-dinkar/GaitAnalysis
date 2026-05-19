@@ -51,9 +51,17 @@ export const KNEE_MOVEMENTS: KneeMovement[] = [
     primaryLabel: "Flexion",
     secondaryLabel: "Extension",
     // Extension target is the residual-flexion range when the knee is
-    // "fully extended" — 0° means perfectly straight, up to 5° is
-    // clinically normal. Lower is better.
-    secondaryTarget: [0, 5],
+    // "fully extended" — 0° means perfectly straight, lower is better.
+    // Range widened from the strict clinical [0, 5] to [0, 10] to
+    // absorb the inherent precision limit of 2D pose estimation:
+    // MoveNet's hip/knee/ankle keypoint placement carries ~5-10° of
+    // systematic noise even when the patient's knee is anatomically
+    // straight (the knee keypoint sits near the patella rather than
+    // the true joint axis, the hip keypoint near the greater
+    // trochanter, etc.). [0, 10] flags genuine extension deficits
+    // while not penalising healthy patients for the camera's
+    // measurement uncertainty.
+    secondaryTarget: [0, 10],
   },
   // Legacy single-direction entries — kept so saved reports referring
   // to "flexion" or "extension" alone still resolve a label/target
