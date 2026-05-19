@@ -194,6 +194,18 @@ export interface BiomechDataDTO {
    *  Backend-processed body parts (ankle today) return 2-3 entries;
    *  live-frontend body parts return an empty array. */
   key_frames?: BiomechKeyFrameDTO[];
+  // ── Merged-test secondary direction (optional) ──────────────────
+  // Populated only for merged movements that capture two directions
+  // in one trial (shoulder "rotation" = external+internal,
+  // "abduction_adduction" = abduction+adduction). When set, the
+  // report renders a second results row, a second chart bar, and a
+  // second interpretation sentence. peak_* fields above refer to the
+  // primary direction.
+  secondary_peak_angle?: number | null;
+  secondary_peak_magnitude?: number;
+  secondary_reference_range?: [number, number];
+  primary_label?: string;
+  secondary_label?: string;
 }
 
 // ─── Live biomech (per-frame) ────────────────────────────────────────

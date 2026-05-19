@@ -24,9 +24,15 @@
 import { authedFetch } from "@/lib/auth";
 import { getDetector } from "@/lib/pose/detector";
 import {
+  captureShoulderRotationBaseline,
   computeShoulderAngle,
+  computeShoulderRotationFromBaseline,
+  detectShoulderAbAdDirection,
+  detectShoulderRotationDirection,
+  isShoulderRotationNeutral,
   SHOULDER_MOVEMENTS,
   type ShoulderMovementId,
+  type ShoulderRotationCalibration,
 } from "@/lib/biomech/shoulder";
 import {
   computeNeckAngle,
@@ -49,6 +55,8 @@ import {
 // getTargetRange below for defensive parity with the other body parts,
 // imported directly there.
 import { ANKLE_MOVEMENTS } from "@/lib/biomech/ankle";
+import { LM } from "@/lib/pose/landmarks";
+import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { BiomechDataDTO } from "@/lib/api";
 
 type BodyPart = "shoulder" | "neck" | "knee" | "hip" | "ankle";
@@ -77,6 +85,26 @@ export async function analyzeBiomechVideo(
   // MediaPipe setup + new shin/foot-vector math in ankle_engine.py.
   if (bodyPart === "ankle") {
     return analyzeAnkleBackend(file, movement, side ?? "right", onProgress);
+  }
+
+  // ── Merged shoulder movements → dedicated dual-direction analyser ──
+  // The shoulder "rotation" (external + internal) and
+  // "abduction_adduction" (abduction + adduction) tests bundle two
+  // directions into one trial. Direction is detected per frame from
+  // joint geometry, and two parallel peak trackers run side-by-side
+  // — the same logic the live mode uses. The merged analyser returns
+  // an extended BiomechDataDTO carrying both peaks + three key-frame
+  // thumbnails (neutral, primary peak, secondary peak).
+  if (
+    bodyPart === "shoulder" &&
+    (movement === "rotation" || movement === "abduction_adduction")
+  ) {
+    return analyzeMergedShoulderVideo({
+      file,
+      movement,
+      side: side ?? "right",
+      onProgress,
+    });
   }
 
   const detector = await getDetector();
@@ -405,6 +433,391 @@ export async function analyzeAnkleBlob(
     throw new Error(wrapper.error ?? "Ankle analysis failed.");
   }
   return wrapper.data;
+}
+
+// ─── Merged shoulder video analyser ─────────────────────────────
+// Handles the "rotation" and "abduction_adduction" merged tests for
+// uploaded videos. Direction-aware peak tracking with two parallel
+// slots, plus per-direction key-frame screenshots (neutral, primary
+// peak, secondary peak) composited from the source video + a
+// skeleton overlay.
+//
+// For rotation, the formula needs a calibration baseline (the
+// patient's upper-arm pixel length while the forearm is pointed at
+// the camera). We auto-detect it from early frames using the same
+// isShoulderRotationNeutral check the live mode uses — once enough
+// consecutive frames satisfy "neutral pose", we snapshot the
+// baseline and switch to the calibrated arcsin formula. For
+// abduction_adduction, no calibration is required (the magnitude
+// formula is direction-symmetric).
+
+interface MergedShoulderOpts {
+  file: File;
+  movement: "rotation" | "abduction_adduction";
+  side: "left" | "right";
+  onProgress?: (fraction: number) => void;
+}
+
+const MERGED_BASELINE_STABLE_FRAMES = 5;
+
+async function analyzeMergedShoulderVideo(
+  opts: MergedShoulderOpts,
+): Promise<BiomechDataDTO> {
+  const { file, movement, side, onProgress } = opts;
+  const isRotation = movement === "rotation";
+
+  // Look up labels + target ranges from the metadata table so the
+  // response matches the chooser configuration.
+  const meta = SHOULDER_MOVEMENTS.find((m) => m.id === movement);
+  const primaryTarget: [number, number] = meta?.target ?? [70, 90];
+  const secondaryTarget: [number, number] =
+    meta?.secondaryTarget ?? (isRotation ? [60, 80] : [30, 50]);
+  const primaryLabel = meta?.primaryLabel ?? (isRotation ? "External Rotation" : "Abduction");
+  const secondaryLabel = meta?.secondaryLabel ?? (isRotation ? "Internal Rotation" : "Adduction");
+
+  const detector = await getDetector();
+
+  const url = URL.createObjectURL(file);
+  const video = document.createElement("video");
+  video.src = url;
+  video.muted = true;
+  video.playsInline = true;
+  video.crossOrigin = "anonymous";
+
+  await new Promise<void>((resolve, reject) => {
+    video.onloadedmetadata = () => resolve();
+    video.onerror = () =>
+      reject(new Error("Could not load video. Format may not be supported."));
+  });
+
+  video.currentTime = 0;
+  await new Promise<void>((resolve) => {
+    video.onseeked = () => resolve();
+  });
+
+  const duration = video.duration;
+  if (!isFinite(duration) || duration <= 0) {
+    URL.revokeObjectURL(url);
+    throw new Error("Video duration is invalid.");
+  }
+
+  // Per-frame state
+  let baseline: ShoulderRotationCalibration | null = null;
+  let baselineStable = 0;
+  let peakPrimarySigned: number | null = null;
+  let peakSecondarySigned: number | null = null;
+  let neutralUrl: string | null = null;
+  let peakPrimaryUrl: string | null = null;
+  let peakSecondaryUrl: string | null = null;
+  let totalFrames = 0;
+  let validFrames = 0;
+  let measuredFps = 30;
+
+  // Composite canvas reused for each captured screenshot.
+  const compCanvas = document.createElement("canvas");
+
+  // Run one detection on the currently-displayed video frame and
+  // apply the merged-test bookkeeping (baseline detection, direction
+  // routing, dual peak update, key-frame capture). Returns `null` on
+  // any failure so the iteration loop can keep going.
+  const processCurrentFrame = async (): Promise<void> => {
+    totalFrames += 1;
+    let poses;
+    try {
+      poses = await detector.estimatePoses(video, { flipHorizontal: false });
+    } catch {
+      return;
+    }
+    const pose = poses[0];
+    if (!pose) return;
+    const kps = pose.keypoints;
+
+    // ── Baseline calibration (rotation only) ─────────────────
+    if (isRotation && !baseline) {
+      if (isShoulderRotationNeutral(kps, side)) {
+        baselineStable += 1;
+        if (baselineStable >= MERGED_BASELINE_STABLE_FRAMES) {
+          baseline = captureShoulderRotationBaseline(kps, side);
+        }
+      } else {
+        baselineStable = 0;
+      }
+      // Don't process angle/peak until baseline locked.
+      return;
+    }
+
+    // ── Per-frame angle ──────────────────────────────────────
+    let angle: number | null;
+    if (isRotation && baseline) {
+      angle = computeShoulderRotationFromBaseline(kps, side, baseline);
+    } else if (!isRotation) {
+      // ab/ad: magnitude formula is direction-symmetric. Reuse the
+      // legacy "abduction" branch (trunk-down vs arm angle).
+      angle = computeShoulderAngle(
+        "abduction" as ShoulderMovementId,
+        kps,
+        side,
+      );
+    } else {
+      angle = null;
+    }
+    if (angle === null || isNaN(angle)) return;
+    validFrames += 1;
+
+    // First usable frame → neutral screenshot.
+    if (!neutralUrl) {
+      neutralUrl = captureCompositeFrame(compCanvas, video, kps);
+    }
+
+    // ── Direction routing ────────────────────────────────────
+    let direction: "primary" | "secondary" | null = null;
+    if (isRotation) {
+      const r = detectShoulderRotationDirection(kps, side);
+      if (r === "external") direction = "primary";
+      else if (r === "internal") direction = "secondary";
+    } else {
+      const a = detectShoulderAbAdDirection(kps, side);
+      if (a === "abduction") direction = "primary";
+      else if (a === "adduction") direction = "secondary";
+    }
+    if (!direction) return; // deadband — don't touch either peak
+
+    const absA = Math.abs(angle);
+    if (direction === "primary") {
+      if (peakPrimarySigned === null || absA > Math.abs(peakPrimarySigned)) {
+        peakPrimarySigned = angle;
+        peakPrimaryUrl = captureCompositeFrame(compCanvas, video, kps);
+      }
+    } else {
+      if (peakSecondarySigned === null || absA > Math.abs(peakSecondarySigned)) {
+        peakSecondarySigned = angle;
+        peakSecondaryUrl = captureCompositeFrame(compCanvas, video, kps);
+      }
+    }
+  };
+
+  const supportsRVFC = typeof video.requestVideoFrameCallback === "function";
+
+  if (supportsRVFC) {
+    video.playbackRate = 4;
+    let firstMediaTime: number | null = null;
+    let lastMediaTime = 0;
+
+    await new Promise<void>((resolve, reject) => {
+      let resolved = false;
+      let stallTimer: ReturnType<typeof setTimeout> | null = null;
+      const STALL_MS = 1500;
+
+      const finish = () => {
+        if (resolved) return;
+        resolved = true;
+        if (stallTimer) clearTimeout(stallTimer);
+        const span = lastMediaTime - (firstMediaTime ?? 0);
+        if (span > 0) measuredFps = totalFrames / span;
+        resolve();
+      };
+
+      const armStallTimer = () => {
+        if (stallTimer) clearTimeout(stallTimer);
+        stallTimer = setTimeout(finish, STALL_MS);
+      };
+
+      const onFrame: VideoFrameRequestCallback = async (_now, metadata) => {
+        if (resolved) return;
+        if (firstMediaTime === null) firstMediaTime = metadata.mediaTime;
+        lastMediaTime = metadata.mediaTime;
+
+        await processCurrentFrame();
+        onProgress?.(Math.min(1, metadata.mediaTime / duration));
+
+        const nearEnd =
+          metadata.mediaTime >= Math.max(duration - 0.1, duration * 0.98);
+        if (video.ended || nearEnd) {
+          finish();
+          return;
+        }
+
+        armStallTimer();
+        video.requestVideoFrameCallback(onFrame);
+      };
+
+      video.addEventListener("ended", finish, { once: true });
+      armStallTimer();
+      video.requestVideoFrameCallback(onFrame);
+      video.play().catch((e) => {
+        if (!resolved) reject(e);
+      });
+    });
+    video.pause();
+  } else {
+    measuredFps = SAMPLE_FPS_FALLBACK;
+    const sampleCount = Math.max(1, Math.floor(duration * SAMPLE_FPS_FALLBACK));
+    for (let i = 0; i < sampleCount; i++) {
+      const t = i / SAMPLE_FPS_FALLBACK;
+      video.currentTime = t;
+      await new Promise<void>((resolve) => {
+        video.onseeked = () => resolve();
+      });
+      await processCurrentFrame();
+      onProgress?.((i + 1) / sampleCount);
+      if (i % 4 === 0) {
+        await new Promise<void>((r) => setTimeout(r, 0));
+      }
+    }
+  }
+
+  URL.revokeObjectURL(url);
+
+  // ── Build result DTO ─────────────────────────────────────
+  const peakAMag =
+    peakPrimarySigned !== null ? Math.abs(peakPrimarySigned) : 0;
+  const peakBMag =
+    peakSecondarySigned !== null ? Math.abs(peakSecondarySigned) : 0;
+  const targetUpper = primaryTarget[1];
+  const percentage = targetUpper > 0 ? (peakAMag / targetUpper) * 100 : 0;
+  const status: "good" | "fair" | "poor" =
+    percentage >= 90 ? "good" : percentage >= 75 ? "fair" : "poor";
+
+  const keyFrames: { label: string; frame_index: number; image_data_url: string }[] = [];
+  if (neutralUrl) {
+    keyFrames.push({
+      label: "Neutral — start",
+      frame_index: 0,
+      image_data_url: neutralUrl,
+    });
+  }
+  if (peakPrimaryUrl && peakAMag > 0) {
+    keyFrames.push({
+      label: `${primaryLabel} (${peakAMag.toFixed(1)}°)`,
+      frame_index: 1,
+      image_data_url: peakPrimaryUrl,
+    });
+  }
+  if (peakSecondaryUrl && peakBMag > 0) {
+    keyFrames.push({
+      label: `${secondaryLabel} (${peakBMag.toFixed(1)}°)`,
+      frame_index: 2,
+      image_data_url: peakSecondaryUrl,
+    });
+  }
+
+  const interpretation =
+    `${primaryLabel} (${side}) measured ${peakAMag.toFixed(1)}°` +
+    ` against the ${primaryTarget[0]}°–${primaryTarget[1]}° normal range. ` +
+    (peakBMag > 0
+      ? `${secondaryLabel} measured ${peakBMag.toFixed(1)}°` +
+        ` against the ${secondaryTarget[0]}°–${secondaryTarget[1]}° normal range.`
+      : `${secondaryLabel} direction was not detected in this recording.`);
+
+  return {
+    body_part: "shoulder",
+    movement,
+    side,
+    peak_angle: peakPrimarySigned,
+    peak_magnitude: peakAMag,
+    reference_range: primaryTarget,
+    target: targetUpper,
+    percentage,
+    status,
+    valid_frames: validFrames,
+    total_frames: totalFrames,
+    fps: measuredFps,
+    interpretation,
+    key_frames: keyFrames,
+    secondary_peak_angle: peakSecondarySigned,
+    secondary_peak_magnitude: peakBMag,
+    secondary_reference_range: secondaryTarget,
+    primary_label: primaryLabel,
+    secondary_label: secondaryLabel,
+  };
+}
+
+// Composite the current video frame + a skeleton overlay onto a
+// reusable canvas and return a JPEG data URL. Used for the merged
+// test's three key-frame thumbnails (neutral + per-direction peaks).
+// The video is drawn as-is (uploaded videos aren't mirrored like the
+// live selfie preview), so MoveNet's pixel-space keypoints can be
+// scaled directly to canvas coords without any flip.
+function captureCompositeFrame(
+  canvas: HTMLCanvasElement,
+  video: HTMLVideoElement,
+  keypoints: Keypoint[],
+): string | null {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  if (!vw || !vh) return null;
+  const targetW = Math.min(480, vw);
+  const scale = targetW / vw;
+  const cw = Math.round(vw * scale);
+  const ch = Math.round(vh * scale);
+  canvas.width = cw;
+  canvas.height = ch;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.drawImage(video, 0, 0, cw, ch);
+
+  const VIS = 0.35;
+  const px = (i: number): { x: number; y: number; score: number } | null => {
+    const k = keypoints[i];
+    if (!k) return null;
+    const score = k.score ?? 0;
+    if (score < VIS) return null;
+    return { x: (k.x / vw) * cw, y: (k.y / vh) * ch, score };
+  };
+
+  // Full-body skeleton edges + dots — same set the live capture uses.
+  const edges: [number, number][] = [
+    [LM.LEFT_SHOULDER, LM.LEFT_ELBOW],
+    [LM.LEFT_ELBOW, LM.LEFT_WRIST],
+    [LM.RIGHT_SHOULDER, LM.RIGHT_ELBOW],
+    [LM.RIGHT_ELBOW, LM.RIGHT_WRIST],
+    [LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER],
+    [LM.LEFT_SHOULDER, LM.LEFT_HIP],
+    [LM.RIGHT_SHOULDER, LM.RIGHT_HIP],
+    [LM.LEFT_HIP, LM.RIGHT_HIP],
+    [LM.LEFT_HIP, LM.LEFT_KNEE],
+    [LM.LEFT_KNEE, LM.LEFT_ANKLE],
+    [LM.RIGHT_HIP, LM.RIGHT_KNEE],
+    [LM.RIGHT_KNEE, LM.RIGHT_ANKLE],
+  ];
+  const dots = [
+    LM.NOSE,
+    LM.LEFT_EAR, LM.RIGHT_EAR,
+    LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER,
+    LM.LEFT_ELBOW, LM.RIGHT_ELBOW,
+    LM.LEFT_WRIST, LM.RIGHT_WRIST,
+    LM.LEFT_HIP, LM.RIGHT_HIP,
+    LM.LEFT_KNEE, LM.RIGHT_KNEE,
+    LM.LEFT_ANKLE, LM.RIGHT_ANKLE,
+  ];
+
+  ctx.strokeStyle = "#FFFFFF";
+  ctx.lineWidth = Math.max(1.5, cw * 0.0035);
+  ctx.shadowColor = "rgba(0,0,0,0.55)";
+  ctx.shadowBlur = 2;
+  for (const [a, b] of edges) {
+    const A = px(a);
+    const B = px(b);
+    if (!A || !B) continue;
+    ctx.beginPath();
+    ctx.moveTo(A.x, A.y);
+    ctx.lineTo(B.x, B.y);
+    ctx.stroke();
+  }
+  ctx.fillStyle = "#EF4444";
+  ctx.strokeStyle = "#FFFFFF";
+  ctx.lineWidth = Math.max(1, cw * 0.0025);
+  for (const i of dots) {
+    const P = px(i);
+    if (!P) continue;
+    const r = Math.max(3, cw * 0.005);
+    ctx.beginPath();
+    ctx.arc(P.x, P.y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.shadowBlur = 0;
+  return canvas.toDataURL("image/jpeg", 0.78);
 }
 
 function formatAnkleError(detail: unknown, status: number): string {
