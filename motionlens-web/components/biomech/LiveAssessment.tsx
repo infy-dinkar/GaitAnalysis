@@ -1061,8 +1061,16 @@ export function LiveAssessment({
           target={target}
           side={side}
           keyFrames={liveKeyFrames}
+          /* For merged tests we ALWAYS pass the secondary props so
+             the report renders two rows, two chart bars, and two
+             interpretation sentences. The measured value is
+             undefined when the patient didn't perform that
+             direction — the report shows "Not detected" for it
+             instead of silently collapsing to a single row. */
           secondaryMovementName={isMergedMovement ? secondaryLabel : undefined}
-          secondaryMeasured={isMergedMovement && hasPeakB ? peakMagB : undefined}
+          secondaryMeasured={
+            isMergedMovement && hasPeakB ? peakMagB : undefined
+          }
           secondaryTarget={isMergedMovement ? secondaryTarget : undefined}
         />
 
