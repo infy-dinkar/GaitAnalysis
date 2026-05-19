@@ -1085,16 +1085,24 @@ export function LiveAssessment({
               peak_magnitude: peakMag,
               peak_signed: peakSigned,
               target,
-              // Persist the secondary-direction peak alongside the
-              // primary one for merged movements so saved reports
-              // can show both rows when re-rendered later.
-              ...(isMergedMovement && hasPeakB
+              // Persist merged-test metadata for the saved-report
+              // viewer. Labels + secondary target are saved whenever
+              // the test is merged, so the viewer can render the
+              // dual-row layout (with "Not detected" placeholder for
+              // a missing direction) even when only one direction
+              // was actually captured. The numeric secondary peak is
+              // saved only when it was actually measured.
+              ...(isMergedMovement
                 ? {
-                    secondary_peak_magnitude: peakMagB,
-                    secondary_peak_signed: peakSignedB,
-                    secondary_target: secondaryTarget,
-                    secondary_label: secondaryLabel,
                     primary_label: primaryLabel,
+                    secondary_label: secondaryLabel,
+                    secondary_target: secondaryTarget,
+                    ...(hasPeakB
+                      ? {
+                          secondary_peak_magnitude: peakMagB,
+                          secondary_peak_signed: peakSignedB,
+                        }
+                      : {}),
                   }
                 : {}),
               valid_frames: validFrames,

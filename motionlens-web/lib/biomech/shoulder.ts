@@ -292,9 +292,11 @@ export type ShoulderAbAdDirection = "abduction" | "adduction";
 
 /** Minimum lateral offset (as a fraction of shoulder width) before
  *  a direction is committed. Tighter = more responsive but flips on
- *  noise; looser = stable but laggy at small ROMs. 0.05 ≈ 5% of
- *  shoulder width — works well for both rotation and abduction. */
-const DIRECTION_DEADBAND_FRAC = 0.05;
+ *  noise; looser = stable but laggy at small ROMs. 0.03 ≈ 3% of
+ *  shoulder width — keeps natural-ROM adduction (which is anatomically
+ *  only 30–50°, so the elbow's medial drift is modest) inside the
+ *  detection zone while still excluding pure-noise frames. */
+const DIRECTION_DEADBAND_FRAC = 0.03;
 
 /** Body's vertical centreline x-coordinate in image space, derived
  *  from the midpoint of the two shoulders. Returns null when either
@@ -338,24 +340,35 @@ export function detectShoulderRotationDirection(
   return ratio > 0 ? "external" : "internal";
 }
 
+/** Elbow-above-shoulder threshold (in shoulder-width units) above
+ *  which the y-axis alone is enough to classify the motion as
+ *  abduction, regardless of how noisy the x-axis signal is. Set
+ *  permissively (0.20 ≈ elbow clearly above shoulder) so it only
+ *  fires for the genuine overhead end of the abduction arc — small
+ *  upward drifts during adduction (e.g. the elbow rising slightly
+ *  as the arm sweeps across the chest) don't accidentally trigger
+ *  the override and lose the adduction label. */
+const ABDUCTION_OVERHEAD_FRAC = 0.20;
+
 /** Detect abduction vs adduction from the elbow's position relative
- *  to the BODY CENTRELINE. Abduction = elbow still on the test side
- *  of centre (arm at side, raised laterally, or overhead — the elbow
- *  is always between the test-side edge and body centre). Adduction =
- *  the elbow has crossed PAST body centre toward the opposite side
- *  (arm coming across the chest).
+ *  to the test-side SHOULDER, with a y-axis override for the
+ *  overhead portion of the abduction arc.
  *
- *  Earlier versions of this helper measured the elbow's lateral
- *  offset from the test-side SHOULDER, not from the centreline. That
- *  worked for mid-range abduction (arm horizontal out) but broke at
- *  the overhead end of the motion: when the patient's arm is
- *  vertical above the shoulder, elbow.x ≈ shoulder.x and tiny
- *  keypoint jitter flipped the sign of (e.x - s.x), classifying
- *  overhead-abduction frames as "adduction" with magnitudes up to
- *  180° — well above the anatomical adduction limit of ~50°. Using
- *  the centreline as the reference fixes this: the elbow stays
- *  unambiguously on the test side until the arm actually swings
- *  across the body, so noise can't induce a false flip. */
+ *  Rules:
+ *    • Elbow above shoulder (anywhere on the upper abduction arc):
+ *      always classified as abduction. This is the critical override
+ *      — at the overhead end of the abduction motion elbow.x ≈
+ *      shoulder.x and pure x-axis classification flipped on keypoint
+ *      noise, producing phantom 180° "adduction" peaks.
+ *    • Otherwise: use the elbow's lateral offset from the shoulder.
+ *      Outward (away from body) → abduction. Inward (medial, toward
+ *      midline) → adduction. The anatomical adduction range is only
+ *      ~30-50° so the elbow barely crosses past the shoulder; we
+ *      cannot wait for it to cross the body centreline (it doesn't
+ *      get that far in a normal adduction).
+ *    • Near neutral (arm hanging straight at side): both dx and dy
+ *      are small → deadband → null. Direction isn't classified and
+ *      no peak slot is updated. */
 export function detectShoulderAbAdDirection(
   keypoints: Keypoint[],
   side: "left" | "right",
@@ -372,13 +385,23 @@ export function detectShoulderAbAdDirection(
   // for left and right sides regardless of camera mirroring.
   const outwardSign = Math.sign(s.x - body.centreX);
   if (outwardSign === 0) return null;
-  // Elbow's position relative to the body centreline, in the
-  // outward direction. >0 = test side (abduction region), <0 = has
-  // crossed to opposite side (adduction region).
-  const elbowFromCentre = (e.x - body.centreX) * outwardSign;
-  const ratio = elbowFromCentre / body.shoulderWidth;
-  if (Math.abs(ratio) < DIRECTION_DEADBAND_FRAC) return null;
-  return ratio > 0 ? "abduction" : "adduction";
+
+  // Image y axis grows DOWNWARD, so (s.y - e.y) > 0 means the elbow
+  // is above the shoulder on screen.
+  const dyRatio = (s.y - e.y) / body.shoulderWidth;
+  if (dyRatio > ABDUCTION_OVERHEAD_FRAC) {
+    // Y-axis override: elbow clearly above shoulder = somewhere on
+    // the abduction arc (60°–180°). Skip the x check entirely so
+    // noise at the overhead end can't flip the label to adduction.
+    return "abduction";
+  }
+
+  // At-or-below shoulder height: use x position relative to the
+  // test-side shoulder. Outward = away from body = abduction.
+  // Medial = elbow has drifted toward the body midline = adduction.
+  const dxRatio = ((e.x - s.x) * outwardSign) / body.shoulderWidth;
+  if (Math.abs(dxRatio) < DIRECTION_DEADBAND_FRAC) return null;
+  return dxRatio > 0 ? "abduction" : "adduction";
 }
 
 /** Magnitude + direction for the merged Rotation test. Magnitude

@@ -324,7 +324,6 @@ function BiomechBody({
   }
 
   const meta = resolveMovement(bodyPart, report.movement);
-  const movementName = meta?.label ?? report.movement;
 
   // The saved metrics shape varies between live capture and upload analysis.
   const m = report.metrics as Record<string, unknown>;
@@ -341,6 +340,43 @@ function BiomechBody({
 
   const side = (report.side === "left" || report.side === "right") ? report.side : undefined;
   const interpretation = pickString(report.observations, "interpretation");
+
+  // ── Merged-test detection + secondary-direction extraction ────
+  // For shoulder "rotation" and "abduction_adduction" the saved
+  // payload carries primary_label / secondary_label / secondary_*
+  // fields so the report can render two rows + two chart bars + two
+  // interpretation sentences (same UX the live "Show Analysis" view
+  // gives). The legacy "Abduction + Adduction" single-row label
+  // appeared because the saved viewer used to ignore those fields.
+  //
+  // We fall back to the movement metadata for older saved records
+  // that pre-date merged-test support — so even those render with
+  // the primary direction's label rather than the combined chooser
+  // label.
+  const primaryLabelSaved = pickString(m, "primary_label");
+  const secondaryLabelSaved = pickString(m, "secondary_label");
+  const secondaryTargetSaved =
+    pickRange(m, "secondary_reference_range") ?? pickRange(m, "secondary_target");
+  const secondaryMeasuredSaved = pickNumber(m, "secondary_peak_magnitude");
+
+  const isMerged =
+    !!primaryLabelSaved ||
+    !!secondaryLabelSaved ||
+    !!meta?.merged;
+
+  const movementName = isMerged
+    ? (primaryLabelSaved ?? meta?.primaryLabel ?? meta?.label ?? report.movement)
+    : (meta?.label ?? report.movement);
+  const secondaryMovementName = isMerged
+    ? (secondaryLabelSaved ?? meta?.secondaryLabel ?? undefined)
+    : undefined;
+  const secondaryTarget = isMerged
+    ? (secondaryTargetSaved ?? meta?.secondaryTarget ?? undefined)
+    : undefined;
+  const secondaryMeasured =
+    isMerged && typeof secondaryMeasuredSaved === "number" && secondaryMeasuredSaved > 0
+      ? secondaryMeasuredSaved
+      : undefined;
 
   // Recover key-frame screenshots from saved metrics if present.
   // Backend ankle analyses persist these so the saved-report viewer
@@ -381,6 +417,9 @@ function BiomechBody({
         dateOverride={isoDate}
         patientOverride={patient}
         keyFrames={savedKeyFrames}
+        secondaryMovementName={secondaryMovementName}
+        secondaryMeasured={secondaryMeasured}
+        secondaryTarget={secondaryTarget}
       />
       {interpretation && (
         <section>
