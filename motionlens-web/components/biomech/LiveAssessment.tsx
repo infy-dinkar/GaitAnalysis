@@ -235,11 +235,22 @@ export function LiveAssessment({
   // Merged movements bundle two directions in one recording session.
   // The state machine grows a secondary peak slot, the UI renders a
   // dual readout, and the report receives two measured values.
+  //
+  // Shoulder merged tests route per-frame by spatial direction (see
+  // detectShoulderRotationDirection / detectShoulderAbAdDirection).
+  // Knee merged (flexion + extension) is different: the angle metric
+  // itself is bidirectional — max(angle) = peak flexion, min(angle)
+  // = peak extension (residual flexion at the straightest position).
+  // No direction routing needed; primary slot tracks the MAX, the
+  // secondary slot tracks the MIN over the trial.
   const isMergedShoulderRotation =
     !!merged && bodyPart === "shoulder" && movementId === "rotation";
   const isMergedShoulderAbAd =
     !!merged && bodyPart === "shoulder" && movementId === "abduction_adduction";
-  const isMergedMovement = isMergedShoulderRotation || isMergedShoulderAbAd;
+  const isMergedKneeFE =
+    !!merged && bodyPart === "knee" && movementId === "flexion_extension";
+  const isMergedMovement =
+    isMergedShoulderRotation || isMergedShoulderAbAd || isMergedKneeFE;
 
   const stateRef = useRef({
     current: null as number | null,
@@ -404,16 +415,14 @@ export function LiveAssessment({
     s.current = angle;
 
     // ── Direction routing (merged movements only) ──────────
-    // For merged tests we run two parallel peak trackers — one per
-    // direction (external/internal for rotation, abduction/adduction
-    // for ab/ad). The frame's direction comes from joint positions
-    // relative to the body's vertical centreline. Inside the
-    // deadband (near neutral) direction is "undetermined" and we
-    // don't update either peak — the live "Current" still displays
-    // but no peak commit fires from a frame whose direction isn't
-    // confidently classifiable.
+    // Shoulder merged tests route per-frame by spatial direction. Knee
+    // merged (flexion + extension) doesn't route — its primary slot
+    // tracks the running MAX (peak flexion) and the secondary slot
+    // tracks the running MIN (peak extension / residual flexion),
+    // both updated every valid frame. Direction is decided spatially
+    // for shoulder, temporally (angle rising vs falling) for knee.
     let slot: "primary" | "secondary" = "primary";
-    if (isMergedMovement) {
+    if (isMergedShoulderRotation || isMergedShoulderAbAd) {
       const kpsForDir: Keypoint[] = data.landmarks.map((l) => ({
         x: l.x,
         y: l.y,
@@ -433,6 +442,16 @@ export function LiveAssessment({
       s.currentDirection = dir;
       if (!dir) return; // deadband — show Current but don't update peaks
       slot = dir;
+    } else if (isMergedKneeFE) {
+      // Temporal direction tag only — doesn't gate peak updates,
+      // both slots will update unconditionally below.
+      const prevA = s.prevAngleForDelta;
+      if (prevA !== null) {
+        const trend = angle - prevA;
+        if (trend > 0.5) s.currentDirection = "primary";       // flexing
+        else if (trend < -0.5) s.currentDirection = "secondary"; // extending
+        // else keep previous direction so the tag doesn't flicker
+      }
     } else {
       s.currentDirection = null;
     }
@@ -473,6 +492,73 @@ export function LiveAssessment({
     else s.prevAngleForDeltaB = angle;
 
     if (!visOk || !deltaOk) return;
+
+    // ── Knee merged: parallel max + min tracking ────────────
+    // Both peaks update on every gated frame. Primary slot tracks
+    // the running MAX angle (peak flexion); secondary slot tracks
+    // the running MIN angle (peak extension / residual flexion at
+    // the patient's straightest position). The min-tracking branch
+    // mirrors the held-candidate algorithm but with inverted
+    // comparisons — a "new lower" candidate replaces a higher one.
+    if (isMergedKneeFE) {
+      // Primary slot — track MAX (peak flexion).
+      {
+        let cs = s.peakCandidateSigned;
+        let ch = s.peakCandidateHeld;
+        let cu = s.peakCandidateUrl;
+        let cp = s.peakSigned;
+        let cpu = keyFramesRef.current.peakUrl;
+        if (cs === null) {
+          cs = angle; ch = 1; cu = grabBiomechFrame();
+        } else if (angle > cs) {
+          cs = angle; ch += 1; cu = grabBiomechFrame();
+        } else if (angle >= cs - PEAK_HOLD_BAND_DEG) {
+          ch += 1;
+        } else {
+          if (ch >= PEAK_HOLD_FRAMES && (cp === null || cs > cp)) {
+            cp = cs; cpu = cu;
+          }
+          cs = angle; ch = 1; cu = grabBiomechFrame();
+        }
+        if (ch >= PEAK_HOLD_FRAMES && cs !== null && (cp === null || cs > cp)) {
+          cp = cs; cpu = cu;
+        }
+        s.peakCandidateSigned = cs;
+        s.peakCandidateHeld = ch;
+        s.peakCandidateUrl = cu;
+        s.peakSigned = cp;
+        keyFramesRef.current.peakUrl = cpu;
+      }
+      // Secondary slot — track MIN (peak extension).
+      {
+        let cs = s.peakCandidateSignedB;
+        let ch = s.peakCandidateHeldB;
+        let cu = s.peakCandidateUrlB;
+        let cp = s.peakSignedB;
+        let cpu = keyFramesRef.current.peakUrlB;
+        if (cs === null) {
+          cs = angle; ch = 1; cu = grabBiomechFrame();
+        } else if (angle < cs) {
+          cs = angle; ch += 1; cu = grabBiomechFrame();
+        } else if (angle <= cs + PEAK_HOLD_BAND_DEG) {
+          ch += 1;
+        } else {
+          if (ch >= PEAK_HOLD_FRAMES && (cp === null || cs < cp)) {
+            cp = cs; cpu = cu;
+          }
+          cs = angle; ch = 1; cu = grabBiomechFrame();
+        }
+        if (ch >= PEAK_HOLD_FRAMES && cs !== null && (cp === null || cs < cp)) {
+          cp = cs; cpu = cu;
+        }
+        s.peakCandidateSignedB = cs;
+        s.peakCandidateHeldB = ch;
+        s.peakCandidateUrlB = cu;
+        s.peakSignedB = cp;
+        keyFramesRef.current.peakUrlB = cpu;
+      }
+      return;
+    }
 
     // ── Held-candidate confirmation ─────────────────────────
     // Same algorithm as before, just operating on whichever slot
@@ -567,6 +653,7 @@ export function LiveAssessment({
     isMergedMovement,
     isMergedShoulderRotation,
     isMergedShoulderAbAd,
+    isMergedKneeFE,
   ]);
 
   // Clears every per-trial peak-tracking field on the state ref —
@@ -705,10 +792,16 @@ export function LiveAssessment({
     postureHint,
     currentDirection,
   } = stateRef.current;
+  // For knee merged, the secondary peak is the MIN angle reached
+  // (residual flexion at full extension). A value of 0° is a
+  // legitimate measurement — it means the knee straightened
+  // perfectly — so we can't filter it out with the usual `> 0`
+  // shoulder convention. Derive "has captured a peak" from the
+  // signed peak being non-null instead.
   const peakMag = peakSigned !== null ? Math.abs(peakSigned) : 0;
   const peakMagB = peakSignedB !== null ? Math.abs(peakSignedB) : 0;
-  const hasPeak = peakMag > 0;
-  const hasPeakB = peakMagB > 0;
+  const hasPeak = peakSigned !== null;
+  const hasPeakB = peakSignedB !== null;
   const hasAnyPeak = hasPeak || (isMergedMovement && hasPeakB);
 
   const instructions = getInstructions(bodyPart, movementId);

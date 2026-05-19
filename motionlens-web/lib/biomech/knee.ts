@@ -5,27 +5,73 @@
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import { LM } from "@/lib/pose/landmarks";
 
-export type KneeMovementId = "flexion" | "extension";
+export type KneeMovementId = "flexion" | "extension" | "flexion_extension";
 
 export interface KneeMovement {
-  id: KneeMovementId;
+  id: string;
   label: string;
   description: string;
+  /** Primary direction's normal range. For the merged
+   *  flexion_extension test this is the flexion range (peak bend);
+   *  for the legacy single tests it's just the test's normal range. */
   target: [number, number];
+  /** True for the merged test that captures BOTH flexion and
+   *  extension in a single recording. Live and upload modes
+   *  track min + max knee angle simultaneously when this is set. */
+  merged?: boolean;
+  /** Display label for the primary direction in the merged dual
+   *  readout / report. */
+  primaryLabel?: string;
+  /** Display label for the secondary direction. */
+  secondaryLabel?: string;
+  /** Normal range for the secondary direction. Required when merged.
+   *  For knee extension this is the "residual flexion at full
+   *  extension" range — lower is better (0° = perfectly straight).
+   *  AssessmentReport.classify treats in-range as "good" regardless
+   *  of which way is anatomically better. */
+  secondaryTarget?: [number, number];
+  /** Hidden from the movement chooser. Legacy single-direction entries
+   *  are kept in the metadata table so saved reports referencing them
+   *  still resolve labels / targets without breaking, but they no
+   *  longer appear when starting a new trial. */
+  hidden?: boolean;
 }
 
 export const KNEE_MOVEMENTS: KneeMovement[] = [
+  // Combined Flexion + Extension. One recording captures both peaks:
+  // the maximum knee bend (flexion) and the residual flexion at the
+  // patient's straightest position (extension deficit).
+  {
+    id: "flexion_extension",
+    label: "Flexion + Extension",
+    description:
+      "Bend the knee fully (peak flexion), then straighten it back to fully extended (peak extension). One session captures both ends of the ROM.",
+    target: [125, 145],
+    merged: true,
+    primaryLabel: "Flexion",
+    secondaryLabel: "Extension",
+    // Extension target is the residual-flexion range when the knee is
+    // "fully extended" — 0° means perfectly straight, up to 5° is
+    // clinically normal. Lower is better.
+    secondaryTarget: [0, 5],
+  },
+  // Legacy single-direction entries — kept so saved reports referring
+  // to "flexion" or "extension" alone still resolve a label/target
+  // from this table. Hidden from the chooser since the merged entry
+  // above is the new default.
   {
     id: "flexion",
     label: "Flexion",
     description: "Bend the knee — bringing the heel toward the buttock",
     target: [125, 145],
+    hidden: true,
   },
   {
     id: "extension",
     label: "Extension",
     description: "Straighten a bent knee back to a fully extended leg",
     target: [125, 145],
+    hidden: true,
   },
 ];
 

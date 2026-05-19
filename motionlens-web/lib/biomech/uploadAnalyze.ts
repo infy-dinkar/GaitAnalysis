@@ -107,6 +107,20 @@ export async function analyzeBiomechVideo(
     });
   }
 
+  // ── Merged knee flexion + extension → min/max analyser ──
+  // Knee "flexion_extension" captures the full knee ROM in one
+  // recording. The angle metric (180° - interior knee angle, range
+  // 0-140°) is bidirectional: max-of-trial = peak flexion (most
+  // bent), min-of-trial = peak extension (most straight). No
+  // direction routing — both peaks update on every gated frame.
+  if (bodyPart === "knee" && movement === "flexion_extension") {
+    return analyzeMergedKneeVideo({
+      file,
+      side: side ?? "right",
+      onProgress,
+    });
+  }
+
   const detector = await getDetector();
 
   // ── Set up off-screen video element ───────────────────────────────
@@ -726,6 +740,244 @@ async function analyzeMergedShoulderVideo(
     key_frames: keyFrames,
     secondary_peak_angle: peakSecondarySigned,
     secondary_peak_magnitude: peakBMag,
+    secondary_reference_range: secondaryTarget,
+    primary_label: primaryLabel,
+    secondary_label: secondaryLabel,
+  };
+}
+
+// ─── Merged knee video analyser ─────────────────────────────────
+// Knee "flexion_extension" — captures both ends of the knee ROM in
+// one recording. The angle metric is the existing
+// computeKneeAngle output (180° - interior_knee_angle); we track
+// its running MAX (flexion peak, e.g. 130°) and MIN (extension
+// peak / residual flexion at the patient's straightest position,
+// e.g. 2°) over the trial. No baseline calibration needed — the
+// formula returns a directly-interpretable value.
+//
+// Three composite key-frame thumbnails are produced: neutral
+// (first usable frame), peak flexion, and peak extension.
+
+interface MergedKneeOpts {
+  file: File;
+  side: "left" | "right";
+  onProgress?: (fraction: number) => void;
+}
+
+async function analyzeMergedKneeVideo(
+  opts: MergedKneeOpts,
+): Promise<BiomechDataDTO> {
+  const { file, side, onProgress } = opts;
+  const movement = "flexion_extension";
+
+  const meta = KNEE_MOVEMENTS.find((m) => m.id === movement);
+  const primaryTarget: [number, number] = meta?.target ?? [125, 145];
+  const secondaryTarget: [number, number] = meta?.secondaryTarget ?? [0, 5];
+  const primaryLabel = meta?.primaryLabel ?? "Flexion";
+  const secondaryLabel = meta?.secondaryLabel ?? "Extension";
+
+  const detector = await getDetector();
+
+  const url = URL.createObjectURL(file);
+  const video = document.createElement("video");
+  video.src = url;
+  video.muted = true;
+  video.playsInline = true;
+  video.crossOrigin = "anonymous";
+
+  await new Promise<void>((resolve, reject) => {
+    video.onloadedmetadata = () => resolve();
+    video.onerror = () =>
+      reject(new Error("Could not load video. Format may not be supported."));
+  });
+
+  video.currentTime = 0;
+  await new Promise<void>((resolve) => {
+    video.onseeked = () => resolve();
+  });
+
+  const duration = video.duration;
+  if (!isFinite(duration) || duration <= 0) {
+    URL.revokeObjectURL(url);
+    throw new Error("Video duration is invalid.");
+  }
+
+  // Per-trial min/max state.
+  let peakFlex: number | null = null;   // max angle seen
+  let peakExt: number | null = null;    // min angle seen
+  let neutralUrl: string | null = null;
+  let peakFlexUrl: string | null = null;
+  let peakExtUrl: string | null = null;
+  let totalFrames = 0;
+  let validFrames = 0;
+  let measuredFps = 30;
+
+  const compCanvas = document.createElement("canvas");
+
+  const processCurrentFrame = async (): Promise<void> => {
+    totalFrames += 1;
+    let poses;
+    try {
+      poses = await detector.estimatePoses(video, { flipHorizontal: false });
+    } catch {
+      return;
+    }
+    const pose = poses[0];
+    if (!pose) return;
+    const kps = pose.keypoints;
+
+    const angle = computeKneeAngle(
+      "flexion" as KneeMovementId,
+      kps,
+      side,
+    );
+    if (angle === null || isNaN(angle)) return;
+    validFrames += 1;
+
+    if (!neutralUrl) {
+      neutralUrl = captureCompositeFrame(compCanvas, video, kps);
+    }
+
+    // MAX-tracking for flexion peak.
+    if (peakFlex === null || angle > peakFlex) {
+      peakFlex = angle;
+      peakFlexUrl = captureCompositeFrame(compCanvas, video, kps);
+    }
+    // MIN-tracking for extension peak.
+    if (peakExt === null || angle < peakExt) {
+      peakExt = angle;
+      peakExtUrl = captureCompositeFrame(compCanvas, video, kps);
+    }
+  };
+
+  const supportsRVFC = typeof video.requestVideoFrameCallback === "function";
+
+  if (supportsRVFC) {
+    video.playbackRate = 4;
+    let firstMediaTime: number | null = null;
+    let lastMediaTime = 0;
+    await new Promise<void>((resolve, reject) => {
+      let resolved = false;
+      let stallTimer: ReturnType<typeof setTimeout> | null = null;
+      const STALL_MS = 1500;
+      const finish = () => {
+        if (resolved) return;
+        resolved = true;
+        if (stallTimer) clearTimeout(stallTimer);
+        const span = lastMediaTime - (firstMediaTime ?? 0);
+        if (span > 0) measuredFps = totalFrames / span;
+        resolve();
+      };
+      const armStall = () => {
+        if (stallTimer) clearTimeout(stallTimer);
+        stallTimer = setTimeout(finish, STALL_MS);
+      };
+      const onFrame: VideoFrameRequestCallback = async (_now, metadata) => {
+        if (resolved) return;
+        if (firstMediaTime === null) firstMediaTime = metadata.mediaTime;
+        lastMediaTime = metadata.mediaTime;
+        await processCurrentFrame();
+        onProgress?.(Math.min(1, metadata.mediaTime / duration));
+        const nearEnd =
+          metadata.mediaTime >= Math.max(duration - 0.1, duration * 0.98);
+        if (video.ended || nearEnd) {
+          finish();
+          return;
+        }
+        armStall();
+        video.requestVideoFrameCallback(onFrame);
+      };
+      video.addEventListener("ended", finish, { once: true });
+      armStall();
+      video.requestVideoFrameCallback(onFrame);
+      video.play().catch((e) => {
+        if (!resolved) reject(e);
+      });
+    });
+    video.pause();
+  } else {
+    measuredFps = SAMPLE_FPS_FALLBACK;
+    const sampleCount = Math.max(1, Math.floor(duration * SAMPLE_FPS_FALLBACK));
+    for (let i = 0; i < sampleCount; i++) {
+      const t = i / SAMPLE_FPS_FALLBACK;
+      video.currentTime = t;
+      await new Promise<void>((resolve) => {
+        video.onseeked = () => resolve();
+      });
+      await processCurrentFrame();
+      onProgress?.((i + 1) / sampleCount);
+      if (i % 4 === 0) await new Promise<void>((r) => setTimeout(r, 0));
+    }
+  }
+
+  URL.revokeObjectURL(url);
+
+  const flexMag = peakFlex ?? 0;
+  const extMag = peakExt ?? 0;
+  const targetUpper = primaryTarget[1];
+  const percentage = targetUpper > 0 ? (flexMag / targetUpper) * 100 : 0;
+  // Range-based classification — matches the AssessmentReport
+  // classify rewrite: in-range = good, near-range = fair, else poor.
+  const inRange = (v: number, r: [number, number]) => v >= r[0] && v <= r[1];
+  const status: "good" | "fair" | "poor" = inRange(flexMag, primaryTarget)
+    ? "good"
+    : Math.min(
+        Math.abs(flexMag - primaryTarget[0]),
+        Math.abs(flexMag - primaryTarget[1]),
+      ) /
+        Math.max(1, primaryTarget[1] - primaryTarget[0]) <=
+      0.30
+      ? "fair"
+      : "poor";
+
+  const keyFrames: { label: string; frame_index: number; image_data_url: string }[] = [];
+  if (neutralUrl) {
+    keyFrames.push({
+      label: "Neutral — start",
+      frame_index: 0,
+      image_data_url: neutralUrl,
+    });
+  }
+  if (peakFlexUrl && peakFlex !== null) {
+    keyFrames.push({
+      label: `${primaryLabel} (${flexMag.toFixed(1)}°)`,
+      frame_index: 1,
+      image_data_url: peakFlexUrl,
+    });
+  }
+  if (peakExtUrl && peakExt !== null) {
+    keyFrames.push({
+      label: `${secondaryLabel} (${extMag.toFixed(1)}°)`,
+      frame_index: 2,
+      image_data_url: peakExtUrl,
+    });
+  }
+
+  const interpretation =
+    `${primaryLabel} (${side}) measured ${flexMag.toFixed(1)}°` +
+    ` against the ${primaryTarget[0]}°–${primaryTarget[1]}° normal range. ` +
+    (peakExt !== null
+      ? `${secondaryLabel} measured ${extMag.toFixed(1)}°` +
+        ` against the ${secondaryTarget[0]}°–${secondaryTarget[1]}° normal range.`
+      : `${secondaryLabel} direction was not detected in this recording.`);
+
+  return {
+    body_part: "knee",
+    movement,
+    side,
+    peak_angle: peakFlex,
+    peak_magnitude: flexMag,
+    reference_range: primaryTarget,
+    target: targetUpper,
+    percentage,
+    status,
+    valid_frames: validFrames,
+    total_frames: totalFrames,
+    fps: measuredFps,
+    interpretation,
+    key_frames: keyFrames,
+    secondary_peak_angle: peakExt,
+    secondary_peak_magnitude: extMag,
     secondary_reference_range: secondaryTarget,
     primary_label: primaryLabel,
     secondary_label: secondaryLabel,

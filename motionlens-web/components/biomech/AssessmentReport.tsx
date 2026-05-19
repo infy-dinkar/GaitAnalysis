@@ -109,16 +109,42 @@ function getOrCreatePatientId(): string {
   }
 }
 
-/** Mirrors biomech_flow._classify in the Streamlit app. */
+/** Range-aware classification used across body parts.
+ *
+ *  Previous version measured "% of upper bound" which only worked for
+ *  movements where higher is better (shoulder flexion, knee flexion,
+ *  etc.). It produced clinically wrong labels in two cases:
+ *
+ *    1. Knee extension's secondary target [0, 5]: 2° residual flexion
+ *       is in range (good) but `(2/5)*100 = 40%` => previously "poor".
+ *    2. Mid-range shoulder rotation (e.g. 75° vs [70, 90]): in range
+ *       but `(75/90)*100 = 83%` => previously "fair" instead of "good".
+ *
+ *  Now: in-range = "good"; outside the range, fair/poor scale with
+ *  how far away the value is from the nearest range edge, relative to
+ *  the range width. Works for both higher-is-better and lower-is-
+ *  better tests because the criterion is just "land inside the
+ *  clinical normal band". `pct` is kept in the legacy 0-100 scale
+ *  for backwards compatibility with the interpretation sentence. */
 function classify(measured: number, target: [number, number]) {
-  // Use the upper bound as the canonical target when the range is wide,
-  // matching SHOULDER_NORMAL_RANGES["flexion"]["target"] = 180 type values.
-  const t = target[1];
-  if (t <= 0) return { status: "poor" as const, pct: 0 };
-  const pct = (measured / t) * 100;
-  if (pct >= 90) return { status: "good" as const, pct };
-  if (pct >= 75) return { status: "fair" as const, pct };
-  return { status: "poor" as const, pct };
+  const [lo, hi] = target;
+  if (hi <= 0 && lo <= 0) return { status: "poor" as const, pct: 0 };
+  // Legacy-style percentage (kept for the interpretation line).
+  const denom = hi > 0 ? hi : 1;
+  const legacyPct = (measured / denom) * 100;
+  if (measured >= lo && measured <= hi) {
+    return { status: "good" as const, pct: Math.round(legacyPct) };
+  }
+  // Outside the range — distance to nearest edge, scaled by the
+  // range's own width so "fair" is "within ~30% of the band width
+  // outside it".
+  const rangeWidth = Math.max(1, hi - lo);
+  const dist = measured < lo ? lo - measured : measured - hi;
+  const distFrac = dist / rangeWidth;
+  if (distFrac <= 0.30) {
+    return { status: "fair" as const, pct: Math.round(legacyPct) };
+  }
+  return { status: "poor" as const, pct: Math.round(legacyPct) };
 }
 
 export function AssessmentReport({
@@ -142,11 +168,15 @@ export function AssessmentReport({
   // external was performed, instead of a silently single-row report
   // titled with the combined name). Driven by secondaryMovementName +
   // secondaryTarget being set; the measured value can be missing.
+  //
+  // A measured value of 0 is a legitimate reading (e.g. knee
+  // extension peak = 0° means perfect knee straightening), so the
+  // "captured vs missing" check is type-based, not value-based. The
+  // upstream component is responsible for passing `undefined` when
+  // the secondary direction wasn't actually captured.
   const hasSecondary = !!secondaryMovementName && !!secondaryTarget;
   const hasSecondaryValue =
-    hasSecondary &&
-    typeof secondaryMeasured === "number" &&
-    secondaryMeasured > 0;
+    hasSecondary && typeof secondaryMeasured === "number";
   // Patient identity comes from the doctor-flow context when the
   // assessment is launched from /dashboard/patients/{id}/analyze.
   // Outside the doctor flow we just render the report with no patient
