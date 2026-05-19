@@ -24,6 +24,8 @@ import {
 } from "@/lib/biomech/neck";
 import {
   captureShoulderRotationBaseline,
+  detectShoulderAbAdDirection,
+  detectShoulderRotationDirection,
   isShoulderRotationNeutral,
   type ShoulderRotationCalibration,
 } from "@/lib/biomech/shoulder";
@@ -177,6 +179,19 @@ interface LiveAssessmentProps {
   description: string;
   target: [number, number];
   side?: "left" | "right";
+  /** Merged movements bundle two directions in one recording session
+   *  (rotation = external + internal, abduction_adduction = both). When
+   *  set, the live engine detects direction per frame and tracks a
+   *  separate peak for each. */
+  merged?: boolean;
+  /** Display label for the primary (target) direction in merged mode.
+   *  Example: "External Rotation". */
+  primaryLabel?: string;
+  /** Display label for the secondary direction in merged mode.
+   *  Example: "Internal Rotation". */
+  secondaryLabel?: string;
+  /** Normal range for the secondary direction. Required when merged. */
+  secondaryTarget?: [number, number];
 }
 
 /**
@@ -193,6 +208,10 @@ export function LiveAssessment({
   description,
   target,
   side,
+  merged,
+  primaryLabel,
+  secondaryLabel,
+  secondaryTarget,
 }: LiveAssessmentProps) {
   const reportName = movementName ?? movementLabel.split(" · ").pop() ?? movementLabel;
   // Calibration-phase movements: rotation tests where 2D pose
@@ -203,10 +222,24 @@ export function LiveAssessment({
   // baked in as fake rotation, and projected-vector saturation at
   // large angles).
   const isNeckRotation = bodyPart === "neck" && movementId === "rotation";
+  // Shoulder rotation tests — covers the legacy single-direction IDs
+  // AND the merged "rotation" ID (which is essentially both directions
+  // in one trial; the same baseline-locked formula applies).
   const isShoulderRotation =
     bodyPart === "shoulder" &&
-    (movementId === "external_rotation" || movementId === "internal_rotation");
+    (movementId === "external_rotation" ||
+      movementId === "internal_rotation" ||
+      movementId === "rotation");
   const isCalibratedRotation = isNeckRotation || isShoulderRotation;
+
+  // Merged movements bundle two directions in one recording session.
+  // The state machine grows a secondary peak slot, the UI renders a
+  // dual readout, and the report receives two measured values.
+  const isMergedShoulderRotation =
+    !!merged && bodyPart === "shoulder" && movementId === "rotation";
+  const isMergedShoulderAbAd =
+    !!merged && bodyPart === "shoulder" && movementId === "abduction_adduction";
+  const isMergedMovement = isMergedShoulderRotation || isMergedShoulderAbAd;
 
   const stateRef = useRef({
     current: null as number | null,
@@ -235,6 +268,21 @@ export function LiveAssessment({
     // when the subject is correctly framed; otherwise a specific
     // sentence telling the operator exactly what to fix.
     postureHint: null as string | null,
+    // ── Secondary direction slot (used only when isMergedMovement) ─
+    // Mirrors the primary peak fields above. The primary slot tracks
+    // the test's "A" direction (external rotation, abduction); this
+    // slot tracks "B" (internal rotation, adduction). Both peaks are
+    // independently held-and-confirmed by the same candidate state
+    // machine, just on different fields. For non-merged movements
+    // these remain at their initial values (peakSignedB stays null).
+    peakSignedB: null as number | null,
+    peakCandidateSignedB: null as number | null,
+    peakCandidateHeldB: 0,
+    peakCandidateUrlB: null as string | null,
+    prevAngleForDeltaB: null as number | null,
+    // Last detected direction (for the live "Current" readout tag in
+    // merged mode). null = inside the deadband / undetermined.
+    currentDirection: null as "primary" | "secondary" | null,
   });
 
   // Annotated-frame screenshots for the report. Captured on the
@@ -244,9 +292,17 @@ export function LiveAssessment({
   //     patient's neutral / starting position.
   //   - peakUrl:    re-captured every time a new peak ROM is reached.
   // Both reset on "Reset Peak" so a re-attempt starts fresh.
-  const keyFramesRef = useRef<{ neutralUrl: string | null; peakUrl: string | null }>({
+  const keyFramesRef = useRef<{
+    neutralUrl: string | null;
+    /** Primary-direction peak screenshot (also the only peak for
+     *  single-direction tests). */
+    peakUrl: string | null;
+    /** Secondary-direction peak screenshot (merged movements only). */
+    peakUrlB: string | null;
+  }>({
     neutralUrl: null,
     peakUrl: null,
+    peakUrlB: null,
   });
 
   const grabBiomechFrame = useCallback((): string | null => {
@@ -324,6 +380,8 @@ export function LiveAssessment({
       // we don't fire a spurious jump-rejection on the first one.
       s.current = null;
       s.prevAngleForDelta = null;
+      s.prevAngleForDeltaB = null;
+      s.currentDirection = null;
       return;
     }
 
@@ -337,11 +395,48 @@ export function LiveAssessment({
     if (inCalibration) {
       s.current = null;
       s.prevAngleForDelta = null;
+      s.prevAngleForDeltaB = null;
+      s.currentDirection = null;
       return;
     }
 
     const angle = data.current_angle;
     s.current = angle;
+
+    // ── Direction routing (merged movements only) ──────────
+    // For merged tests we run two parallel peak trackers — one per
+    // direction (external/internal for rotation, abduction/adduction
+    // for ab/ad). The frame's direction comes from joint positions
+    // relative to the body's vertical centreline. Inside the
+    // deadband (near neutral) direction is "undetermined" and we
+    // don't update either peak — the live "Current" still displays
+    // but no peak commit fires from a frame whose direction isn't
+    // confidently classifiable.
+    let slot: "primary" | "secondary" = "primary";
+    if (isMergedMovement) {
+      const kpsForDir: Keypoint[] = data.landmarks.map((l) => ({
+        x: l.x,
+        y: l.y,
+        score: l.visibility,
+      }));
+      const sideOrRight = side ?? "right";
+      let dir: "primary" | "secondary" | null = null;
+      if (isMergedShoulderRotation) {
+        const r = detectShoulderRotationDirection(kpsForDir, sideOrRight);
+        if (r === "external") dir = "primary";
+        else if (r === "internal") dir = "secondary";
+      } else if (isMergedShoulderAbAd) {
+        const a = detectShoulderAbAdDirection(kpsForDir, sideOrRight);
+        if (a === "abduction") dir = "primary";
+        else if (a === "adduction") dir = "secondary";
+      }
+      s.currentDirection = dir;
+      if (!dir) return; // deadband — show Current but don't update peaks
+      slot = dir;
+    } else {
+      s.currentDirection = null;
+    }
+
     s.validFrames += 1;
 
     // First usable frame after the start of measurement →
@@ -350,12 +445,12 @@ export function LiveAssessment({
       keyFramesRef.current.neutralUrl = grabBiomechFrame();
     }
 
-    // ── Peak-screenshot gates ───────────────────────────────
-    // Gate 1: visibility — the primary joints driving this body
-    // part's angle math must all be confidently visible. When the
-    // patient disengages at end-of-trial, keypoint scores collapse
-    // and the angle formula can produce phantom highs; gating here
-    // stops those frames from rewriting the peak screenshot.
+    // ── Peak-screenshot gates (visibility + delta) ──────────
+    // Gate 1: visibility — only frames whose math-driving joints are
+    // all confidently visible can update a peak. When the patient
+    // disengages at end-of-trial keypoint scores collapse and the
+    // angle formula can produce phantom highs; gating here stops
+    // those frames from rewriting the peak screenshot.
     const relevant = relevantJointIndices(bodyPart, movementId, side);
     let minVis = 1;
     for (const i of relevant) {
@@ -365,71 +460,130 @@ export function LiveAssessment({
     }
     const visOk = minVis >= PEAK_VIS_GATE;
 
-    // Gate 2: per-frame delta ceiling. A single frame whose angle
-    // changed by more than PEAK_MAX_JUMP_DEG is almost always a
-    // formula glitch (saturation near 90°, sign flip) or a keypoint
-    // switch — limbs physically can't rotate that fast between
-    // frames at 30-60 FPS. Drop it from peak consideration but keep
-    // updating `prevAngle` so the next frame's delta is measured
-    // from the current reading (we don't want to permanently shadow
-    // a legitimate fast movement).
-    const prev = s.prevAngleForDelta;
-    const deltaOk = prev === null || Math.abs(angle - prev) <= PEAK_MAX_JUMP_DEG;
-    s.prevAngleForDelta = angle;
+    // Gate 2: per-frame delta ceiling. Per-slot prev tracking so
+    // merged movements don't fire spurious jump-rejections when the
+    // patient transitions from one direction's peak back through
+    // neutral to the other direction.
+    const prevForDelta =
+      slot === "primary" ? s.prevAngleForDelta : s.prevAngleForDeltaB;
+    const deltaOk =
+      prevForDelta === null ||
+      Math.abs(angle - prevForDelta) <= PEAK_MAX_JUMP_DEG;
+    if (slot === "primary") s.prevAngleForDelta = angle;
+    else s.prevAngleForDeltaB = angle;
 
     if (!visOk || !deltaOk) return;
 
     // ── Held-candidate confirmation ─────────────────────────
-    // Candidate is the largest |angle| seen in the current peak
-    // attempt. It only commits to `peakSigned` + `peakUrl` once it
-    // has been sustained (within band) for PEAK_HOLD_FRAMES frames.
+    // Same algorithm as before, just operating on whichever slot
+    // this frame's direction routes to. For non-merged movements
+    // slot is always "primary" and the secondary fields stay null.
     const absA = Math.abs(angle);
-    const cand = s.peakCandidateSigned;
 
-    if (cand === null) {
-      s.peakCandidateSigned = angle;
-      s.peakCandidateHeld = 1;
-      s.peakCandidateUrl = grabBiomechFrame();
-    } else if (absA > Math.abs(cand)) {
-      // New higher candidate — reset hold counter and re-capture
-      // the screenshot at this fresh peak position.
-      s.peakCandidateSigned = angle;
-      s.peakCandidateHeld = 1;
-      s.peakCandidateUrl = grabBiomechFrame();
-    } else if (absA >= Math.abs(cand) - PEAK_HOLD_BAND_DEG) {
-      // Within band of candidate — patient is holding the peak.
-      s.peakCandidateHeld += 1;
+    // Read current slot fields into locals, then write back when we
+    // mutate. Keeps the candidate-logic block readable while still
+    // letting one block service both slots.
+    let candSigned =
+      slot === "primary" ? s.peakCandidateSigned : s.peakCandidateSignedB;
+    let candHeld =
+      slot === "primary" ? s.peakCandidateHeld : s.peakCandidateHeldB;
+    let candUrl =
+      slot === "primary" ? s.peakCandidateUrl : s.peakCandidateUrlB;
+    let confirmedPeak =
+      slot === "primary" ? s.peakSigned : s.peakSignedB;
+    let confirmedUrl =
+      slot === "primary"
+        ? keyFramesRef.current.peakUrl
+        : keyFramesRef.current.peakUrlB;
+
+    if (candSigned === null) {
+      candSigned = angle;
+      candHeld = 1;
+      candUrl = grabBiomechFrame();
+    } else if (absA > Math.abs(candSigned)) {
+      // New higher candidate — reset hold counter, re-capture frame.
+      candSigned = angle;
+      candHeld = 1;
+      candUrl = grabBiomechFrame();
+    } else if (absA >= Math.abs(candSigned) - PEAK_HOLD_BAND_DEG) {
+      // Within band — patient is holding near the candidate peak.
+      candHeld += 1;
     } else {
-      // Dropped clearly below candidate (patient came down off
-      // peak). If the candidate was already held long enough, this
-      // is a strong signal that the previously-tracked peak was
-      // real — commit it before resetting the candidate to the new
-      // (lower) angle.
+      // Dropped clearly below candidate. If it was held long enough,
+      // commit retroactively before resetting to the lower reading.
       if (
-        s.peakCandidateHeld >= PEAK_HOLD_FRAMES &&
-        (s.peakSigned === null || Math.abs(cand) > Math.abs(s.peakSigned))
+        candHeld >= PEAK_HOLD_FRAMES &&
+        (confirmedPeak === null || Math.abs(candSigned) > Math.abs(confirmedPeak))
       ) {
-        s.peakSigned = cand;
-        keyFramesRef.current.peakUrl = s.peakCandidateUrl;
+        confirmedPeak = candSigned;
+        confirmedUrl = candUrl;
       }
-      s.peakCandidateSigned = angle;
-      s.peakCandidateHeld = 1;
-      s.peakCandidateUrl = grabBiomechFrame();
+      candSigned = angle;
+      candHeld = 1;
+      candUrl = grabBiomechFrame();
     }
 
-    // Confirm in-place once the candidate has been held the full
-    // window — handles the common case where the patient holds at
-    // peak while the operator clicks "Show Analysis".
+    // In-place confirm once held long enough — handles the patient-
+    // holds-at-peak case while the operator decides to click Show
+    // Analysis.
     if (
-      s.peakCandidateHeld >= PEAK_HOLD_FRAMES &&
-      s.peakCandidateSigned !== null &&
-      (s.peakSigned === null ||
-        Math.abs(s.peakCandidateSigned) > Math.abs(s.peakSigned))
+      candHeld >= PEAK_HOLD_FRAMES &&
+      candSigned !== null &&
+      (confirmedPeak === null || Math.abs(candSigned) > Math.abs(confirmedPeak))
     ) {
-      s.peakSigned = s.peakCandidateSigned;
-      keyFramesRef.current.peakUrl = s.peakCandidateUrl;
+      confirmedPeak = candSigned;
+      confirmedUrl = candUrl;
     }
-  }, [isCalibratedRotation, calibrationLocked, grabBiomechFrame, bodyPart, movementId, side]);
+
+    // Write back to the slot.
+    if (slot === "primary") {
+      s.peakCandidateSigned = candSigned;
+      s.peakCandidateHeld = candHeld;
+      s.peakCandidateUrl = candUrl;
+      s.peakSigned = confirmedPeak;
+      keyFramesRef.current.peakUrl = confirmedUrl;
+    } else {
+      s.peakCandidateSignedB = candSigned;
+      s.peakCandidateHeldB = candHeld;
+      s.peakCandidateUrlB = candUrl;
+      s.peakSignedB = confirmedPeak;
+      keyFramesRef.current.peakUrlB = confirmedUrl;
+    }
+  }, [
+    isCalibratedRotation,
+    calibrationLocked,
+    grabBiomechFrame,
+    bodyPart,
+    movementId,
+    side,
+    isMergedMovement,
+    isMergedShoulderRotation,
+    isMergedShoulderAbAd,
+  ]);
+
+  // Clears every per-trial peak-tracking field on the state ref —
+  // both the primary slot AND the secondary slot for merged
+  // movements. Used by calibration-lock callbacks (so a freshly
+  // locked baseline starts a clean trial) and by the Reset Peak
+  // button. The keyFramesRef screenshots are NOT touched here; they
+  // are reset separately in resetPeak so calibration-lock keeps the
+  // earlier neutral screenshot when re-baselining.
+  const resetPeakState = (s: typeof stateRef.current) => {
+    s.peakSigned = null;
+    s.peakCandidateSigned = null;
+    s.peakCandidateHeld = 0;
+    s.peakCandidateUrl = null;
+    s.prevAngleForDelta = null;
+    s.peakSignedB = null;
+    s.peakCandidateSignedB = null;
+    s.peakCandidateHeldB = 0;
+    s.peakCandidateUrlB = null;
+    s.prevAngleForDeltaB = null;
+    s.currentDirection = null;
+    s.validFrames = 0;
+    s.totalFrames = 0;
+    s.current = null;
+  };
 
   // Per-frame smoothed keypoints — used by calibration phases for
   // neck rotation and shoulder external/internal rotation. Detects
@@ -461,27 +615,13 @@ export function LiveAssessment({
             const cal = captureNeckRotationBaseline(kp);
             if (cal) {
               setBaseline(cal);
-              s.peakSigned = null;
-              s.validFrames = 0;
-              s.totalFrames = 0;
-              s.current = null;
-              s.peakCandidateSigned = null;
-              s.peakCandidateHeld = 0;
-              s.peakCandidateUrl = null;
-              s.prevAngleForDelta = null;
+              resetPeakState(s);
             }
           } else if (isShoulderRotation) {
             const cal = captureShoulderRotationBaseline(kp, sideOrRight);
             if (cal) {
               setShoulderBaseline(cal);
-              s.peakSigned = null;
-              s.validFrames = 0;
-              s.totalFrames = 0;
-              s.current = null;
-              s.peakCandidateSigned = null;
-              s.peakCandidateHeld = 0;
-              s.peakCandidateUrl = null;
-              s.prevAngleForDelta = null;
+              resetPeakState(s);
             }
           }
         }
@@ -524,31 +664,18 @@ export function LiveAssessment({
     } else {
       return;
     }
-    const s = stateRef.current;
-    s.peakSigned = null;
-    s.validFrames = 0;
-    s.totalFrames = 0;
-    s.current = null;
-    s.peakCandidateSigned = null;
-    s.peakCandidateHeld = 0;
-    s.peakCandidateUrl = null;
-    s.prevAngleForDelta = null;
+    resetPeakState(stateRef.current);
   }
 
   function resetPeak() {
     const s = stateRef.current;
-    s.peakSigned = null;
-    s.validFrames = 0;
-    s.totalFrames = 0;
+    resetPeakState(s);
     s.calibStableSinceMs = null;
     s.calibFacingForward = false;
-    s.peakCandidateSigned = null;
-    s.peakCandidateHeld = 0;
-    s.peakCandidateUrl = null;
-    s.prevAngleForDelta = null;
     s.postureHint = null;
     keyFramesRef.current.neutralUrl = null;
     keyFramesRef.current.peakUrl = null;
+    keyFramesRef.current.peakUrlB = null;
     setShowResult(false);
     // For calibrated-rotation tests, "Reset Peak" also clears the
     // calibration so the operator can re-baseline (e.g. patient
@@ -559,10 +686,22 @@ export function LiveAssessment({
   }
 
   // ── derived render values ────────────────────────────────────
-  const { current, peakSigned, validFrames, totalFrames, status, apiError, postureHint } =
-    stateRef.current;
+  const {
+    current,
+    peakSigned,
+    peakSignedB,
+    validFrames,
+    totalFrames,
+    status,
+    apiError,
+    postureHint,
+    currentDirection,
+  } = stateRef.current;
   const peakMag = peakSigned !== null ? Math.abs(peakSigned) : 0;
+  const peakMagB = peakSignedB !== null ? Math.abs(peakSignedB) : 0;
   const hasPeak = peakMag > 0;
+  const hasPeakB = peakMagB > 0;
+  const hasAnyPeak = hasPeak || (isMergedMovement && hasPeakB);
 
   const instructions = getInstructions(bodyPart, movementId);
 
@@ -680,29 +819,80 @@ export function LiveAssessment({
               <p className="mt-1 tabular text-3xl font-semibold leading-none text-foreground">
                 {current !== null ? `${fmt(current, 1)}°` : "—"}
               </p>
+              {isMergedMovement && currentDirection && (
+                <p className="mt-1 text-[10px] uppercase tracking-[0.1em] text-accent">
+                  {currentDirection === "primary"
+                    ? primaryLabel ?? "Primary"
+                    : secondaryLabel ?? "Secondary"}
+                </p>
+              )}
             </div>
-            <div>
-              <p className="text-xs uppercase tracking-[0.12em] text-subtle">Peak</p>
-              <p className="mt-1 tabular text-3xl font-semibold leading-none text-accent">
-                {hasPeak ? `${fmt(peakMag, 1)}°` : "—"}
-              </p>
-            </div>
-            <div>
-              <p className="text-xs uppercase tracking-[0.12em] text-subtle">Frames</p>
-              <p className="mt-1 tabular text-2xl font-semibold leading-none text-foreground">
-                {validFrames}
-                <span className="text-sm text-subtle">/{totalFrames}</span>
-              </p>
-            </div>
+            {isMergedMovement ? (
+              <>
+                <div>
+                  <p className="text-xs uppercase tracking-[0.12em] text-subtle">
+                    {primaryLabel ?? "Peak A"}
+                  </p>
+                  <p className="mt-1 tabular text-2xl font-semibold leading-none text-accent">
+                    {hasPeak ? `${fmt(peakMag, 1)}°` : "—"}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs uppercase tracking-[0.12em] text-subtle">
+                    {secondaryLabel ?? "Peak B"}
+                  </p>
+                  <p className="mt-1 tabular text-2xl font-semibold leading-none text-accent">
+                    {hasPeakB ? `${fmt(peakMagB, 1)}°` : "—"}
+                  </p>
+                </div>
+              </>
+            ) : (
+              <>
+                <div>
+                  <p className="text-xs uppercase tracking-[0.12em] text-subtle">Peak</p>
+                  <p className="mt-1 tabular text-3xl font-semibold leading-none text-accent">
+                    {hasPeak ? `${fmt(peakMag, 1)}°` : "—"}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs uppercase tracking-[0.12em] text-subtle">Frames</p>
+                  <p className="mt-1 tabular text-2xl font-semibold leading-none text-foreground">
+                    {validFrames}
+                    <span className="text-sm text-subtle">/{totalFrames}</span>
+                  </p>
+                </div>
+              </>
+            )}
           </div>
 
           <p className="mt-5 text-xs text-muted">
-            Target range:{" "}
-            <span className="tabular text-foreground">
-              {target[0]}°–{target[1]}°
-            </span>
-            . Capture is continuous — perform the movement, then click{" "}
-            <span className="text-foreground">Show Analysis</span> at the peak.
+            {isMergedMovement ? (
+              <>
+                Targets:{" "}
+                <span className="tabular text-foreground">
+                  {primaryLabel ?? "A"} {target[0]}°–{target[1]}°
+                </span>
+                {secondaryTarget && (
+                  <>
+                    {" · "}
+                    <span className="tabular text-foreground">
+                      {secondaryLabel ?? "B"} {secondaryTarget[0]}°–{secondaryTarget[1]}°
+                    </span>
+                  </>
+                )}
+                . Perform both directions in one go, then click{" "}
+                <span className="text-foreground">Show Analysis</span>.
+              </>
+            ) : (
+              <>
+                Target range:{" "}
+                <span className="tabular text-foreground">
+                  {target[0]}°–{target[1]}°
+                </span>
+                . Capture is continuous — perform the movement, then click{" "}
+                <span className="text-foreground">Show Analysis</span> at the peak.
+              </>
+            )}
           </p>
 
           {/* Calibration banner. Renders for any rotation test that
@@ -763,9 +953,11 @@ export function LiveAssessment({
                 Step 2 of 2 — Baseline locked.
                 {isNeckRotation
                   ? " Rotate the head toward the shoulder."
-                  : movementId === "external_rotation"
-                    ? " Rotate the forearm outward to the peak."
-                    : " Rotate the forearm inward to the peak."}
+                  : movementId === "rotation"
+                    ? " Rotate the forearm outward, return to centre, then inward — both peaks are captured."
+                    : movementId === "external_rotation"
+                      ? " Rotate the forearm outward to the peak."
+                      : " Rotate the forearm inward to the peak."}
               </p>
             </div>
           )}
@@ -773,7 +965,7 @@ export function LiveAssessment({
           <div className="mt-5 flex gap-2">
             <Button
               onClick={() => setShowResult(true)}
-              disabled={!hasPeak || (isCalibratedRotation && !calibrationLocked)}
+              disabled={!hasAnyPeak || (isCalibratedRotation && !calibrationLocked)}
               className="flex-1"
             >
               <Eye className="h-4 w-4" />
@@ -782,7 +974,7 @@ export function LiveAssessment({
             <Button
               variant="secondary"
               onClick={resetPeak}
-              disabled={!hasPeak && !(isCalibratedRotation && calibrationLocked)}
+              disabled={!hasAnyPeak && !(isCalibratedRotation && calibrationLocked)}
             >
               <RotateCcw className="h-4 w-4" />
               {isCalibratedRotation && calibrationLocked ? "Re-baseline" : "Reset Peak"}
@@ -816,7 +1008,7 @@ export function LiveAssessment({
     </div>
   );
 
-  if (showResult && hasPeak) {
+  if (showResult && hasAnyPeak) {
     // Assemble the keyFrames array for the report. Only include
     // entries we actually captured (skip nulls so the section is
     // hidden cleanly when capture fell through, e.g. very short
@@ -834,11 +1026,20 @@ export function LiveAssessment({
         image_data_url: keyFramesRef.current.neutralUrl,
       });
     }
-    if (keyFramesRef.current.peakUrl) {
+    if (keyFramesRef.current.peakUrl && hasPeak) {
       liveKeyFrames.push({
-        label: `Peak ${reportName} (${peakMag.toFixed(1)}°)`,
+        label: isMergedMovement
+          ? `${primaryLabel ?? "Peak A"} (${peakMag.toFixed(1)}°)`
+          : `Peak ${reportName} (${peakMag.toFixed(1)}°)`,
         frame_index: 1,
         image_data_url: keyFramesRef.current.peakUrl,
+      });
+    }
+    if (isMergedMovement && keyFramesRef.current.peakUrlB && hasPeakB) {
+      liveKeyFrames.push({
+        label: `${secondaryLabel ?? "Peak B"} (${peakMagB.toFixed(1)}°)`,
+        frame_index: 2,
+        image_data_url: keyFramesRef.current.peakUrlB,
       });
     }
 
@@ -846,12 +1047,15 @@ export function LiveAssessment({
       <div className="space-y-8">
         <AssessmentReport
           bodyPart={bodyPart}
-          movementName={reportName}
+          movementName={isMergedMovement ? (primaryLabel ?? reportName) : reportName}
           movementId={movementId}
           measured={peakMag}
           target={target}
           side={side}
           keyFrames={liveKeyFrames}
+          secondaryMovementName={isMergedMovement ? secondaryLabel : undefined}
+          secondaryMeasured={isMergedMovement && hasPeakB ? peakMagB : undefined}
+          secondaryTarget={isMergedMovement ? secondaryTarget : undefined}
         />
 
         {/* Explicit save button — only renders in doctor flow */}
@@ -865,6 +1069,18 @@ export function LiveAssessment({
               peak_magnitude: peakMag,
               peak_signed: peakSigned,
               target,
+              // Persist the secondary-direction peak alongside the
+              // primary one for merged movements so saved reports
+              // can show both rows when re-rendered later.
+              ...(isMergedMovement && hasPeakB
+                ? {
+                    secondary_peak_magnitude: peakMagB,
+                    secondary_peak_signed: peakSignedB,
+                    secondary_target: secondaryTarget,
+                    secondary_label: secondaryLabel,
+                    primary_label: primaryLabel,
+                  }
+                : {}),
               valid_frames: validFrames,
               total_frames: totalFrames,
               // Persist annotated screenshots so the saved-report

@@ -51,7 +51,7 @@ function ShoulderSetupInner() {
               </h2>
               <div className="mt-4">
                 <MovementGrid
-                  options={SHOULDER_MOVEMENTS}
+                  options={SHOULDER_MOVEMENTS.filter((m) => !m.hidden)}
                   selected={movement}
                   onSelect={setMovement}
                 />

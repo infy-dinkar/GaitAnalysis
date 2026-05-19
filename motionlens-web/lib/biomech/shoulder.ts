@@ -16,25 +16,71 @@ export type ShoulderMovementId =
   | "internal_rotation";
 
 export interface ShoulderMovement {
-  id: ShoulderMovementId;
+  id: string;
   label: string;
   description: string;
+  /** Primary direction's normal range (for merged movements this is
+   *  the "A" direction — external for rotation, abduction for
+   *  abduction/adduction). For single-direction movements this is
+   *  simply the movement's normal range. */
   target: [number, number];
+  /** True when this movement bundles two directions captured in a
+   *  single recording session (rotation = external + internal,
+   *  abduction_adduction = abduction + adduction). LiveAssessment
+   *  switches to a dual-peak state machine when this is set. */
+  merged?: boolean;
+  /** Display label for the primary direction in the dual-readout UI.
+   *  Only meaningful when merged === true. */
+  primaryLabel?: string;
+  /** Display label for the secondary direction in the dual-readout UI. */
+  secondaryLabel?: string;
+  /** Normal range for the secondary direction. Required when merged. */
+  secondaryTarget?: [number, number];
+  /** Hidden from the movement chooser. Kept in the lookup table so
+   *  legacy saved reports referencing the old (now-merged) directional
+   *  IDs can still resolve labels / targets without breaking. */
+  hidden?: boolean;
 }
 
 export const SHOULDER_MOVEMENTS: ShoulderMovement[] = [
-  { id: "flexion",            label: "Flexion",            description: "Lift the arm forward and overhead",          target: [150, 180] },
-  { id: "extension",          label: "Extension",          description: "Move the arm backward behind the body",       target: [45, 60] },
-  { id: "abduction",          label: "Abduction",          description: "Lift the arm sideways away from the body",    target: [150, 180] },
-  { id: "adduction",          label: "Adduction",          description: "Bring the arm across the chest",              target: [30, 50] },
-  // Rotation targets adjusted to clinical reality. The previous 80-90 /
-  // 70-90 ranges were the theoretical anatomical maxima; in practice
-  // most healthy adults peak at 70-85° (external) and 60-75° (internal)
-  // with the elbow tucked at 90°. The calibrated arcsin formula now
-  // returns true projected rotation, so the previous targets would
-  // false-flag healthy patients as "below normal".
-  { id: "external_rotation",  label: "External Rotation",  description: "Rotate the forearm outward (elbow at 90°)",  target: [70, 90] },
-  { id: "internal_rotation",  label: "Internal Rotation",  description: "Rotate the forearm inward (elbow at 90°)",   target: [60, 80] },
+  { id: "flexion",   label: "Flexion",   description: "Lift the arm forward and overhead",     target: [150, 180] },
+  { id: "extension", label: "Extension", description: "Move the arm backward behind the body", target: [45, 60] },
+  // Combined Abduction + Adduction. One recording captures both
+  // directions; the live engine detects which way the elbow is
+  // travelling and tracks a separate peak for each.
+  {
+    id: "abduction_adduction",
+    label: "Abduction + Adduction",
+    description:
+      "Lift the arm sideways away from the body (abduction), then bring it across the chest (adduction). One session captures both peaks.",
+    target: [150, 180],
+    merged: true,
+    primaryLabel: "Abduction",
+    secondaryLabel: "Adduction",
+    secondaryTarget: [30, 50],
+  },
+  // Combined External + Internal Rotation. Patient rotates outward,
+  // returns to neutral, then rotates inward. Both peaks are captured
+  // in the same trial.
+  {
+    id: "rotation",
+    label: "Rotation (External + Internal)",
+    description:
+      "With elbow tucked at the side and bent 90°, rotate the forearm outward (external) and inward (internal). One session captures both peaks.",
+    target: [70, 90],
+    merged: true,
+    primaryLabel: "External Rotation",
+    secondaryLabel: "Internal Rotation",
+    secondaryTarget: [60, 80],
+  },
+  // Legacy single-direction entries — kept in the lookup table so
+  // saved reports that referenced these IDs still resolve their label
+  // / target, but hidden from the chooser since the merged versions
+  // above replace them in the UI flow.
+  { id: "abduction",         label: "Abduction",         description: "Lift the arm sideways away from the body", target: [150, 180], hidden: true },
+  { id: "adduction",         label: "Adduction",         description: "Bring the arm across the chest",            target: [30, 50],  hidden: true },
+  { id: "external_rotation", label: "External Rotation", description: "Rotate the forearm outward (elbow at 90°)", target: [70, 90],  hidden: true },
+  { id: "internal_rotation", label: "Internal Rotation", description: "Rotate the forearm inward (elbow at 90°)",  target: [60, 80],  hidden: true },
 ];
 
 // BlazePose-tfjs scores are lower than MediaPipe's `visibility` field —
@@ -214,4 +260,124 @@ export function computeShoulderRotationFromBaseline(
   // at 90° rather than returning NaN.
   const ratio = Math.max(0, Math.min(1, forearmProjLen / baseline.R_upperArmLength));
   return (Math.asin(ratio) * 180) / Math.PI;
+}
+
+// ─── Direction detection for merged (dual-direction) movements ──
+//
+// The "rotation" and "abduction_adduction" merged tests record both
+// directions in one session. Magnitude is what the existing formulas
+// already return; direction is detected from joint positions relative
+// to the body's vertical centreline (midpoint of the two shoulders).
+//
+// Deadband: near neutral, the lateral signal is tiny and direction
+// flips on noise. We require a minimum offset (as a fraction of
+// shoulder width) before committing to a direction — otherwise return
+// null so the caller doesn't touch either peak.
+
+export type ShoulderRotationDirection = "external" | "internal";
+export type ShoulderAbAdDirection = "abduction" | "adduction";
+
+/** Minimum lateral offset (as a fraction of shoulder width) before
+ *  a direction is committed. Tighter = more responsive but flips on
+ *  noise; looser = stable but laggy at small ROMs. 0.05 ≈ 5% of
+ *  shoulder width — works well for both rotation and abduction. */
+const DIRECTION_DEADBAND_FRAC = 0.05;
+
+/** Body's vertical centreline x-coordinate in image space, derived
+ *  from the midpoint of the two shoulders. Returns null when either
+ *  shoulder isn't reliably visible or the shoulders are nearly on
+ *  top of each other (patient turned away from camera). */
+function bodyCentreX(keypoints: Keypoint[]): { centreX: number; shoulderWidth: number } | null {
+  const ls = keypoints[LM.LEFT_SHOULDER];
+  const rs = keypoints[LM.RIGHT_SHOULDER];
+  if (!ls || !rs) return null;
+  if ((ls.score ?? 0) < VIS_THRESHOLD || (rs.score ?? 0) < VIS_THRESHOLD) return null;
+  const shoulderWidth = Math.abs(rs.x - ls.x);
+  if (shoulderWidth < 1) return null;
+  return { centreX: (ls.x + rs.x) / 2, shoulderWidth };
+}
+
+/** Detect external vs internal rotation from wrist position relative
+ *  to the elbow's distance from the body centreline. External =
+ *  wrist swings further OUT (more lateral) than the elbow. Internal
+ *  = wrist crosses INWARD (less lateral, or past the centreline).
+ *  Returns null if visibility is insufficient or the lateral signal
+ *  is within the deadband (near neutral pose). */
+export function detectShoulderRotationDirection(
+  keypoints: Keypoint[],
+  side: "left" | "right",
+): ShoulderRotationDirection | null {
+  const idx = SIDE_INDICES[side];
+  const e = keypoints[idx.elbow];
+  const w = keypoints[idx.wrist];
+  if (!e || !w) return null;
+  if ((e.score ?? 0) < VIS_THRESHOLD || (w.score ?? 0) < VIS_THRESHOLD) return null;
+  const body = bodyCentreX(keypoints);
+  if (!body) return null;
+  const elbowLateral = Math.abs(e.x - body.centreX);
+  const wristLateral = Math.abs(w.x - body.centreX);
+  const ratio = (wristLateral - elbowLateral) / body.shoulderWidth;
+  if (Math.abs(ratio) < DIRECTION_DEADBAND_FRAC) return null;
+  return ratio > 0 ? "external" : "internal";
+}
+
+/** Detect abduction vs adduction from the elbow's position relative
+ *  to the test-side shoulder along the lateral axis. Abduction =
+ *  elbow drifts further OUTWARD (away from body centre on the test
+ *  side). Adduction = elbow drifts INWARD (across body centre).
+ *  Direction is normalised by the side so left and right tests behave
+ *  the same. Returns null on insufficient visibility / within
+ *  deadband. */
+export function detectShoulderAbAdDirection(
+  keypoints: Keypoint[],
+  side: "left" | "right",
+): ShoulderAbAdDirection | null {
+  const idx = SIDE_INDICES[side];
+  const s = keypoints[idx.shoulder];
+  const e = keypoints[idx.elbow];
+  if (!s || !e) return null;
+  if ((s.score ?? 0) < VIS_THRESHOLD || (e.score ?? 0) < VIS_THRESHOLD) return null;
+  const body = bodyCentreX(keypoints);
+  if (!body) return null;
+  // Outward unit direction in image x — points from body centre toward
+  // the test-side shoulder. Multiplying by this lets the same formula
+  // work for left and right sides regardless of camera-mirroring.
+  const outwardSign = Math.sign(s.x - body.centreX);
+  if (outwardSign === 0) return null;
+  const elbowOutward = (e.x - s.x) * outwardSign;
+  const ratio = elbowOutward / body.shoulderWidth;
+  if (Math.abs(ratio) < DIRECTION_DEADBAND_FRAC) return null;
+  return ratio > 0 ? "abduction" : "adduction";
+}
+
+/** Magnitude + direction for the merged Rotation test. Magnitude
+ *  reuses computeShoulderRotationFromBaseline; direction is detected
+ *  geometrically. Returns null when either signal is unavailable. */
+export function computeShoulderRotationWithDirection(
+  keypoints: Keypoint[],
+  side: "left" | "right",
+  baseline: ShoulderRotationCalibration,
+): { magnitude: number; direction: ShoulderRotationDirection } | null {
+  const direction = detectShoulderRotationDirection(keypoints, side);
+  if (!direction) return null;
+  const magnitude = computeShoulderRotationFromBaseline(keypoints, side, baseline);
+  if (magnitude === null) return null;
+  return { magnitude, direction };
+}
+
+/** Magnitude + direction for the merged Abduction/Adduction test.
+ *  Magnitude reuses computeShoulderAngle("abduction"); direction is
+ *  detected geometrically. */
+export function computeShoulderAbAdWithDirection(
+  keypoints: Keypoint[],
+  side: "left" | "right",
+): { magnitude: number; direction: ShoulderAbAdDirection } | null {
+  const direction = detectShoulderAbAdDirection(keypoints, side);
+  if (!direction) return null;
+  // computeShoulderAngle returns Math.abs(angleBetween(...)) for the
+  // abduction/adduction branch — the same magnitude regardless of
+  // which direction the arm went, which is exactly what we want here.
+  const magnitude = computeShoulderAngle("abduction", keypoints, side);
+  if (magnitude === null) return null;
+  return { magnitude, direction };
 }

@@ -48,6 +48,26 @@ export const MOVEMENT_INSTRUCTIONS: Record<Key, string[]> = {
     "Hold the furthest comfortable point for 2 seconds. Don't let the elbow lift away from your side.",
     "Slowly bring the forearm back to the front-facing starting position.",
   ],
+  // Merged combined movements: both directions captured in a single
+  // recording session. The on-screen current readout shows which
+  // direction the live engine has detected, and peaks for the two
+  // directions are tracked independently.
+  "shoulder.rotation": [
+    "Stand about 6 feet (2 metres) from the camera, facing the camera straight on so it sees the whole upper body.",
+    "Bend the elbow to 90° (right angle) and tuck the upper arm against your side. Forearm should point straight forward — this is the calibration / starting pose. Hold still until the baseline locks.",
+    "Once the baseline is locked, slowly rotate the forearm OUTWARD — away from the body, like opening a door. Hold the furthest comfortable point for 2 seconds.",
+    "Slowly bring the forearm back to the front-facing starting position.",
+    "Now slowly rotate the forearm INWARD — across the front of your stomach. Hold the furthest comfortable point for 2 seconds, then return to centre.",
+    "Click Show Analysis. The report will show separate peak values and screenshots for both external and internal rotation.",
+  ],
+  "shoulder.abduction_adduction": [
+    "Stand about 6 feet (2 metres) from the camera, facing the camera straight on so it sees both arms and your full torso.",
+    "Let the arm hang at your side with the palm facing your body and the elbow straight — this is the starting position.",
+    "ABDUCTION: Slowly lift the arm out to the side, like making a snow-angel, until it's overhead or feels tight. Hold the highest point for 2 seconds, then lower slowly back to your side.",
+    "ADDUCTION: From the same starting position, slowly bring the arm across the front of your chest toward the opposite shoulder. Hold the furthest reach for 2 seconds.",
+    "Return the arm to your side. Click Show Analysis. The report will show separate peak values and screenshots for both directions.",
+    "Keep the trunk upright throughout — don't tilt sideways or twist to gain extra range.",
+  ],
 
   // ── Neck (4 movements — engine has no per-side parameter) ─────
   "neck.flexion": [
