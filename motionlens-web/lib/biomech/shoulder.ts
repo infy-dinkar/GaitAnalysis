@@ -292,9 +292,11 @@ export type ShoulderAbAdDirection = "abduction" | "adduction";
 
 /** Minimum lateral offset (as a fraction of shoulder width) before
  *  a direction is committed. Tighter = more responsive but flips on
- *  noise; looser = stable but laggy at small ROMs. 0.05 ≈ 5% of
- *  shoulder width — works well for both rotation and abduction. */
-const DIRECTION_DEADBAND_FRAC = 0.05;
+ *  noise; looser = stable but laggy at small ROMs. 0.03 ≈ 3% of
+ *  shoulder width — keeps natural-ROM adduction (which is anatomically
+ *  only 30–50°, so the elbow's medial drift is modest) inside the
+ *  detection zone while still excluding pure-noise frames. */
+const DIRECTION_DEADBAND_FRAC = 0.03;
 
 /** Body's vertical centreline x-coordinate in image space, derived
  *  from the midpoint of the two shoulders. Returns null when either
@@ -340,12 +342,13 @@ export function detectShoulderRotationDirection(
 
 /** Elbow-above-shoulder threshold (in shoulder-width units) above
  *  which the y-axis alone is enough to classify the motion as
- *  abduction, regardless of how noisy the x-axis signal is. The
- *  test arc 0°→90°→180° lifts the elbow progressively higher, and
- *  any frame with the elbow clearly above the shoulder is by
- *  definition somewhere on that arc — never in the adduction range
- *  (which keeps the elbow at or below shoulder height). */
-const ABDUCTION_OVERHEAD_FRAC = 0.10;
+ *  abduction, regardless of how noisy the x-axis signal is. Set
+ *  permissively (0.20 ≈ elbow clearly above shoulder) so it only
+ *  fires for the genuine overhead end of the abduction arc — small
+ *  upward drifts during adduction (e.g. the elbow rising slightly
+ *  as the arm sweeps across the chest) don't accidentally trigger
+ *  the override and lose the adduction label. */
+const ABDUCTION_OVERHEAD_FRAC = 0.20;
 
 /** Detect abduction vs adduction from the elbow's position relative
  *  to the test-side SHOULDER, with a y-axis override for the
