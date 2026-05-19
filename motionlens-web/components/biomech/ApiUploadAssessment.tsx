@@ -89,16 +89,31 @@ export function ApiUploadAssessment({
 
   // ── DONE: full Assessment Report ────────────────────────────
   if (result && phase === "done") {
+    // Merged movements (shoulder rotation / abduction_adduction)
+    // return two peaks per recording. The DTO carries the secondary
+    // direction's value + range + label so the report can render a
+    // second row, a second chart bar, and a second interpretation
+    // sentence. When the response has no secondary fields the report
+    // falls back to the existing single-direction layout.
+    const hasSecondary =
+      typeof result.secondary_peak_magnitude === "number" &&
+      result.secondary_peak_magnitude > 0 &&
+      !!result.secondary_reference_range &&
+      !!result.secondary_label;
+
     return (
       <div className="space-y-8">
         <AssessmentReport
           bodyPart={bodyPart}
-          movementName={reportName}
+          movementName={result.primary_label ?? reportName}
           movementId={movementId}
           measured={result.peak_magnitude}
           target={[result.reference_range[0], result.reference_range[1]]}
           side={side}
           keyFrames={result.key_frames}
+          secondaryMovementName={hasSecondary ? result.secondary_label : undefined}
+          secondaryMeasured={hasSecondary ? result.secondary_peak_magnitude : undefined}
+          secondaryTarget={hasSecondary ? result.secondary_reference_range : undefined}
         />
 
         {/* Explicit "Save to patient history" — only shows in doctor flow */}
@@ -118,6 +133,24 @@ export function ApiUploadAssessment({
               valid_frames: result.valid_frames,
               total_frames: result.total_frames,
               fps: result.fps,
+              // For merged tests, persist the secondary direction
+              // alongside the primary so saved reports can render
+              // both rows when re-opened later.
+              ...(hasSecondary
+                ? {
+                    secondary_peak_angle: result.secondary_peak_angle,
+                    secondary_peak_magnitude: result.secondary_peak_magnitude,
+                    secondary_reference_range: result.secondary_reference_range,
+                    primary_label: result.primary_label,
+                    secondary_label: result.secondary_label,
+                  }
+                : {}),
+              // Persist annotated key-frame screenshots so the
+              // saved-report viewer can show the same thumbnail
+              // strip the live result page shows.
+              ...(result.key_frames && result.key_frames.length > 0
+                ? { key_frames: result.key_frames }
+                : {}),
             },
             observations: { interpretation: result.interpretation },
             video_filename: file?.name,
