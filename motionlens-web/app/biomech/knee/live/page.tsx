@@ -8,14 +8,11 @@ import { Section } from "@/components/ui/Section";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { LiveAssessment } from "@/components/biomech/LiveAssessment";
-import {
-  KNEE_MOVEMENTS,
-  type KneeMovementId,
-} from "@/lib/biomech/knee";
+import { KNEE_MOVEMENTS } from "@/lib/biomech/knee";
 
 function KneeLiveInner() {
   const params = useSearchParams();
-  const movementId = (params.get("movement") as KneeMovementId) || "flexion";
+  const movementId = params.get("movement") || "flexion_extension";
   const sideParam = params.get("side");
   const side: "left" | "right" = sideParam === "left" ? "left" : "right";
   const movement = KNEE_MOVEMENTS.find((m) => m.id === movementId) ?? KNEE_MOVEMENTS[0];
@@ -28,6 +25,10 @@ function KneeLiveInner() {
       description={movement.description}
       target={movement.target}
       side={side}
+      merged={movement.merged}
+      primaryLabel={movement.primaryLabel}
+      secondaryLabel={movement.secondaryLabel}
+      secondaryTarget={movement.secondaryTarget}
     />
   );
 }

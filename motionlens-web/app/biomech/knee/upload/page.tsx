@@ -8,11 +8,11 @@ import { Section } from "@/components/ui/Section";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ApiUploadAssessment } from "@/components/biomech/ApiUploadAssessment";
-import { KNEE_MOVEMENTS, type KneeMovementId } from "@/lib/biomech/knee";
+import { KNEE_MOVEMENTS } from "@/lib/biomech/knee";
 
 function KneeUploadInner() {
   const params = useSearchParams();
-  const movementId = (params.get("movement") as KneeMovementId) || "flexion";
+  const movementId = params.get("movement") || "flexion_extension";
   const sideParam = params.get("side");
   const side: "left" | "right" = sideParam === "left" ? "left" : "right";
   const movement =

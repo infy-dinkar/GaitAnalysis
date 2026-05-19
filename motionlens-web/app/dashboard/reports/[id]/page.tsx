@@ -373,8 +373,12 @@ function BiomechBody({
   const secondaryTarget = isMerged
     ? (secondaryTargetSaved ?? meta?.secondaryTarget ?? undefined)
     : undefined;
+  // 0 is a legitimate measurement (knee extension at full straight),
+  // so the captured-vs-missing distinction is type-based not value-
+  // based. pickNumber returns null for missing fields, a number for
+  // present (including 0).
   const secondaryMeasured =
-    isMerged && typeof secondaryMeasuredSaved === "number" && secondaryMeasuredSaved > 0
+    isMerged && typeof secondaryMeasuredSaved === "number"
       ? secondaryMeasuredSaved
       : undefined;
 

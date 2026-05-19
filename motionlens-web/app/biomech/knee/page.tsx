@@ -51,7 +51,7 @@ function KneeSetupInner() {
               </h2>
               <div className="mt-4">
                 <MovementGrid
-                  options={KNEE_MOVEMENTS}
+                  options={KNEE_MOVEMENTS.filter((m) => !m.hidden)}
                   selected={movement}
                   onSelect={setMovement}
                 />

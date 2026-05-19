@@ -101,10 +101,12 @@ export function ApiUploadAssessment({
       !!result.primary_label &&
       !!result.secondary_label &&
       !!result.secondary_reference_range;
+    // A peak of 0 is a legitimate reading (knee extension perfectly
+    // straightened, for example). Treat "captured" as type-based,
+    // not value-based — the analyser omits the field entirely when
+    // the direction wasn't recorded.
     const hasSecondaryValue =
-      isMerged &&
-      typeof result.secondary_peak_magnitude === "number" &&
-      result.secondary_peak_magnitude > 0;
+      isMerged && typeof result.secondary_peak_magnitude === "number";
 
     return (
       <div className="space-y-8">

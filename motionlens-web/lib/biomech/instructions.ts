@@ -114,6 +114,17 @@ export const MOVEMENT_INSTRUCTIONS: Record<Key, string[]> = {
     "Hold the straightest position for 2 seconds.",
     "Lower the leg slowly back to the bent starting position. Avoid locking the knee aggressively.",
   ],
+  // Merged Flexion + Extension: one recording captures both ends of
+  // knee ROM. Primary peak = peak flexion (most bent); secondary =
+  // peak extension (most straight / residual flexion).
+  "knee.flexion_extension": [
+    "Stand or sit about 6 feet (2 metres) from the camera, turned so the camera sees the SIDE of the leg you're testing. The hip, knee, and ankle should all be visible.",
+    "Start with the leg fully extended (knee as straight as you can comfortably get it). Hold this starting position still for ~2 seconds — this captures the EXTENSION peak.",
+    "Slowly bend the knee, bringing your heel toward the buttock as far as comfortable. Keep the thigh roughly stationary — only the lower leg moves.",
+    "Hold the most-bent position for ~2 seconds — this captures the FLEXION peak.",
+    "Slowly straighten the leg back to fully extended. Don't push past pain — pain-free range only.",
+    "Click Show Analysis. The report will show separate Flexion and Extension peak values, normal ranges for each, and screenshots of both moments.",
+  ],
 
   // ── Hip ──────────────────────────────────────────────────────
   "hip.flexion": [
