@@ -15,7 +15,10 @@ interface KeyFrame {
 
 interface Props {
   bodyPart: "shoulder" | "neck" | "knee" | "hip" | "ankle";
-  /** Just the movement name — e.g. "Lateral Flexion", "Flexion". */
+  /** Just the movement name — e.g. "Lateral Flexion", "Flexion".
+   *  For merged movements this is the PRIMARY direction's label
+   *  (e.g. "External Rotation"); secondaryMovementName carries the
+   *  other direction. */
   movementName: string;
   movementId: string;
   measured: number;
@@ -33,6 +36,13 @@ interface Props {
    *  empty / undefined just hides the section. Returned by the
    *  backend MediaPipe path (ankle today). */
   keyFrames?: KeyFrame[];
+  /** Secondary-direction label for merged movements (e.g.
+   *  "Internal Rotation"). When set, the report renders an extra
+   *  results row, an extra chart bar, and an extra interpretation
+   *  sentence for the secondary direction. */
+  secondaryMovementName?: string;
+  secondaryMeasured?: number;
+  secondaryTarget?: [number, number];
 }
 
 // Educational text — direct port of biomech_flow.py SHOULDER_EDU / NECK_EDU.
@@ -123,7 +133,14 @@ export function AssessmentReport({
   dateOverride,
   patientOverride,
   keyFrames,
+  secondaryMovementName,
+  secondaryMeasured,
+  secondaryTarget,
 }: Props) {
+  const hasSecondary =
+    !!secondaryMovementName &&
+    typeof secondaryMeasured === "number" &&
+    !!secondaryTarget;
   // Patient identity comes from the doctor-flow context when the
   // assessment is launched from /dashboard/patients/{id}/analyze.
   // Outside the doctor flow we just render the report with no patient
@@ -157,6 +174,13 @@ export function AssessmentReport({
     : sessionPatientId;
 
   const { status, pct } = useMemo(() => classify(measured, target), [measured, target]);
+  const secondaryStatus = useMemo(
+    () =>
+      hasSecondary && secondaryTarget && typeof secondaryMeasured === "number"
+        ? classify(secondaryMeasured, secondaryTarget)
+        : null,
+    [hasSecondary, secondaryMeasured, secondaryTarget],
+  );
 
   const today = new Date();
   const dateStr = dateOverride
@@ -165,6 +189,12 @@ export function AssessmentReport({
   const sideLabel = side ? side.charAt(0).toUpperCase() + side.slice(1) : "—";
   const rangeStr =
     target[0] === target[1] ? `${target[0]}°` : `${target[0]}°–${target[1]}°`;
+  const secondaryRangeStr =
+    secondaryTarget
+      ? secondaryTarget[0] === secondaryTarget[1]
+        ? `${secondaryTarget[0]}°`
+        : `${secondaryTarget[0]}°–${secondaryTarget[1]}°`
+      : "";
   const bodyPartCap = bodyPart.charAt(0).toUpperCase() + bodyPart.slice(1);
   const eduText =
     bodyPart === "shoulder"
@@ -178,6 +208,9 @@ export function AssessmentReport({
             : ANKLE_EDU;
 
   // ── Plotly chart: Normal range band + Measured bar (matches biomech_flow.py) ──
+  // For merged movements (secondaryMeasured present) we render a second
+  // pair of bars on a second y-row so both directions are visible side
+  // by side, each compared to its own normal range band.
   const chartData = useMemo(() => {
     const low = target[0];
     const high = target[1];
@@ -185,39 +218,73 @@ export function AssessmentReport({
     const bandStart = collapsed ? Math.max(0, low - 1) : low;
     const bandLength = collapsed ? 2 : high - low;
 
+    const yLabels = hasSecondary && secondaryMovementName
+      ? [secondaryMovementName, movementName]
+      : [movementName];
+    const measuredXs = hasSecondary && typeof secondaryMeasured === "number"
+      ? [secondaryMeasured, measured]
+      : [measured];
+
+    const lowB = secondaryTarget?.[0] ?? 0;
+    const highB = secondaryTarget?.[1] ?? 0;
+    const collapsedB = lowB === highB;
+    const bandStartB = collapsedB ? Math.max(0, lowB - 1) : lowB;
+    const bandLengthB = collapsedB ? 2 : highB - lowB;
+
+    const rangeBands = hasSecondary
+      ? [bandLengthB, bandLength]
+      : [bandLength];
+    const rangeBases = hasSecondary
+      ? [bandStartB, bandStart]
+      : [bandStart];
+    const rangeTexts = hasSecondary
+      ? [collapsedB ? `target ${lowB}°` : secondaryRangeStr,
+         collapsed ? `target ${low}°` : rangeStr]
+      : [collapsed ? `target ${low}°` : rangeStr];
+
     return [
       {
         type: "bar" as const,
         orientation: "h" as const,
         name: "Normal range",
-        y: [movementName],
-        x: [bandLength],
-        base: [bandStart],
+        y: yLabels,
+        x: rangeBands,
+        base: rangeBases,
         marker: {
           color: "rgba(234,88,12,0.30)",
           line: { color: "#EA580C", width: 1.5 },
         },
-        text: [collapsed ? `target ${low}°` : rangeStr],
+        text: rangeTexts,
         textposition: "inside" as const,
         textfont: { color: "#0F172A", size: 12 },
-        hovertemplate: `<b>${movementName}</b><br>Normal: ${rangeStr}<extra></extra>`,
+        hovertemplate: `<b>%{y}</b><br>Normal: %{text}<extra></extra>`,
       },
       {
         type: "bar" as const,
         orientation: "h" as const,
         name: "Measured",
-        y: [movementName],
-        x: [measured],
+        y: yLabels,
+        x: measuredXs,
         marker: { color: "#2563EB" },
-        text: [`${measured.toFixed(1)}°`],
+        text: measuredXs.map((v) => `${v.toFixed(1)}°`),
         textposition: "outside" as const,
         textfont: { color: "#0F172A", size: 12 },
-        hovertemplate: `<b>${movementName}</b><br>Measured: %{x:.1f}°<extra></extra>`,
+        hovertemplate: `<b>%{y}</b><br>Measured: %{x:.1f}°<extra></extra>`,
       },
     ];
-  }, [movementName, target, measured, rangeStr]);
+  }, [
+    movementName, target, measured, rangeStr,
+    hasSecondary, secondaryMovementName, secondaryMeasured, secondaryTarget, secondaryRangeStr,
+  ]);
 
-  const xMax = Math.max(measured, target[1], 1) * 1.15;
+  const xMax =
+    Math.max(
+      measured,
+      target[1],
+      hasSecondary && typeof secondaryMeasured === "number" ? secondaryMeasured : 0,
+      hasSecondary && secondaryTarget ? secondaryTarget[1] : 0,
+      1,
+    ) * 1.15;
 
   const chartLayout = {
     barmode: "group" as const,
@@ -242,6 +309,14 @@ export function AssessmentReport({
   const interpSentence =
     `${movementName}${side ? ` (${sideLabel})` : ""} measured ${measured.toFixed(1)}°, ` +
     `which is ${Math.round(pct)}% of the ${rangeStr} normal range — ${status}.`;
+  const interpSentenceB =
+    hasSecondary &&
+    secondaryStatus &&
+    typeof secondaryMeasured === "number" &&
+    secondaryMovementName
+      ? `${secondaryMovementName}${side ? ` (${sideLabel})` : ""} measured ${secondaryMeasured.toFixed(1)}°, ` +
+        `which is ${Math.round(secondaryStatus.pct)}% of the ${secondaryRangeStr} normal range — ${secondaryStatus.status}.`
+      : null;
 
   const interpStyles =
     status === "good"
@@ -299,6 +374,20 @@ export function AssessmentReport({
                 </td>
                 <td className="px-5 py-4 text-right tabular text-muted">{rangeStr}</td>
               </tr>
+              {hasSecondary &&
+                typeof secondaryMeasured === "number" &&
+                secondaryMovementName && (
+                  <tr className="border-t border-border/60">
+                    <td className="px-5 py-4 text-foreground">{secondaryMovementName}</td>
+                    <td className="px-5 py-4 text-center text-muted">{sideLabel}</td>
+                    <td className="px-5 py-4 text-right tabular text-foreground">
+                      {fmt(secondaryMeasured, 1)}°
+                    </td>
+                    <td className="px-5 py-4 text-right tabular text-muted">
+                      {secondaryRangeStr}
+                    </td>
+                  </tr>
+                )}
             </tbody>
           </table>
         </div>
@@ -335,6 +424,11 @@ export function AssessmentReport({
         <h3 className="text-base font-semibold tracking-tight">Clinical interpretation</h3>
         <div className={`mt-3 rounded-card border p-5 ${interpStyles}`}>
           <p className="text-sm leading-relaxed text-foreground">{interpSentence}</p>
+          {interpSentenceB && (
+            <p className="mt-2 border-t border-border/40 pt-2 text-sm leading-relaxed text-foreground">
+              {interpSentenceB}
+            </p>
+          )}
         </div>
       </section>
 

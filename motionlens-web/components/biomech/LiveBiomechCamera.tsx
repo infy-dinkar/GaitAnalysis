@@ -376,24 +376,43 @@ export function LiveBiomechCamera({
           const sideOrRight = side ?? "right";
           switch (bodyPart) {
             case "shoulder":
-              // Internal / external rotation: prefer the calibrated
-              // arcsin formula once the baseline has been locked.
-              // Other shoulder movements (flexion / extension /
-              // abduction / adduction) use the existing math
-              // unchanged. If we're in the rotation movement but the
-              // baseline isn't locked yet, fall back to the legacy
-              // formula so the camera still shows a live readout
-              // during calibration; the parent suppresses peak
-              // tracking until baseline is locked.
+              // Rotation tests (both directional and merged
+              // "rotation"): prefer the calibrated arcsin formula
+              // once the baseline has been locked. Other movements
+              // (flexion / extension) and the merged
+              // "abduction_adduction" use the existing magnitude
+              // formulas. Direction routing for merged tests happens
+              // in the parent (LiveAssessment) based on landmarks.
               if (
                 (movement === "external_rotation" ||
-                  movement === "internal_rotation") &&
+                  movement === "internal_rotation" ||
+                  movement === "rotation") &&
                 shoulderRotationBaselineRef.current
               ) {
                 angle = computeShoulderRotationFromBaseline(
                   smoothedKps,
                   sideOrRight,
                   shoulderRotationBaselineRef.current,
+                );
+              } else if (movement === "abduction_adduction") {
+                // Merged abduction + adduction shares the same
+                // magnitude formula as the legacy "abduction"
+                // (Math.abs of the trunk-vs-arm angle); direction
+                // determines which peak the parent updates.
+                angle = computeShoulderAngle(
+                  "abduction" as ShoulderMovementId,
+                  smoothedKps,
+                  sideOrRight,
+                );
+              } else if (movement === "rotation") {
+                // Merged rotation, baseline not yet locked — use the
+                // legacy magnitude formula so the camera still shows
+                // a live readout during calibration. Parent
+                // suppresses peak tracking until baseline locks.
+                angle = computeShoulderAngle(
+                  "external_rotation" as ShoulderMovementId,
+                  smoothedKps,
+                  sideOrRight,
                 );
               } else {
                 angle = computeShoulderAngle(
@@ -503,10 +522,16 @@ export function LiveBiomechCamera({
     ctx.drawImage(video, 0, 0, cw, ch);
     ctx.restore();
 
-    // Skeleton overlay on top of the composited frame.
+    // Skeleton overlay on top of the composited frame. The video
+    // above was drawn mirrored (selfie style) to match the on-screen
+    // preview, but the landmark coordinates from the detector are in
+    // un-mirrored image space. Mirror the skeleton x-coords here so
+    // the saved key-frame thumbnail has the skeleton on the correct
+    // side of the body (joints line up with the patient's actual
+    // limbs in the photo).
     const norm = lastNormRef.current;
     if (norm) {
-      const px = (n: Norm) => ({ x: n.x * cw, y: n.y * ch });
+      const px = (n: Norm) => ({ x: cw - n.x * cw, y: n.y * ch });
       const edges = RELEVANT_EDGES[bodyPart];
       const dots = RELEVANT_DOTS[bodyPart];
 
