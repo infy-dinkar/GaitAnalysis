@@ -501,9 +501,17 @@ export function LiveAssessment({
       candHeld = 1;
       candUrl = grabBiomechFrame();
     } else if (absA > Math.abs(candSigned)) {
-      // New higher candidate — reset hold counter, re-capture frame.
+      // New higher candidate. The previous "reset to 1" behaviour
+      // never let smooth continuous rotation (where every frame is a
+      // new higher angle) accumulate enough hold to commit the peak —
+      // the counter perpetually reset, in-place confirm never fired,
+      // and the user saw a peak readout stuck at "—". The visibility
+      // and delta gates above already filter out single-frame spikes,
+      // so any frame that reaches this branch is part of a real,
+      // gated trajectory. Increment the counter instead of resetting,
+      // and re-capture the screenshot at the new high.
       candSigned = angle;
-      candHeld = 1;
+      candHeld += 1;
       candUrl = grabBiomechFrame();
     } else if (absA >= Math.abs(candSigned) - PEAK_HOLD_BAND_DEG) {
       // Within band — patient is holding near the candidate peak.
