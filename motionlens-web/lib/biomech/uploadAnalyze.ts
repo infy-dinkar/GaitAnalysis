@@ -73,6 +73,57 @@ interface AnalyzeOpts {
 
 const SAMPLE_FPS_FALLBACK = 15; // seek-mode sample rate (10-sec video → 150 samples)
 
+/** Per-keypoint EMA smoothing factor. Same value LiveBiomechCamera
+ *  uses in live mode (0.4). Lower = heavier smoothing, more lag;
+ *  higher = lighter, more per-frame jitter. 0.4 is the live-tested
+ *  sweet spot that visibly steadies the skeleton without feeling
+ *  laggy at 30-60 FPS. */
+const SMOOTH_ALPHA = 0.4;
+
+/** Build a stateful keypoint-smoothing function for a single video
+ *  analysis pass. Returns a callback that takes raw MoveNet
+ *  keypoints and returns the EMA-smoothed version. Carries an
+ *  internal buffer of the running smoothed values across frames.
+ *
+ *  Live capture (LiveBiomechCamera) does this in its rAF loop and
+ *  feeds smoothed keypoints into every downstream math (angle
+ *  compute, direction detection). Upload mode used to feed raw
+ *  per-frame keypoints straight through, which made profile-view
+ *  measurements (knee flexion test, shoulder flex/ext) noticeably
+ *  noisier — single-frame ankle / wrist visibility drops at peak
+ *  ROM caused the formula to return null and the peak to be
+ *  recorded against a lower mid-motion value. Smoothing in upload
+ *  mode brings the two pipelines to byte-similar behaviour. */
+function createKeypointSmoother(): (raw: Keypoint[]) => Keypoint[] {
+  let buffer: Keypoint[] | null = null;
+  return (raw: Keypoint[]): Keypoint[] => {
+    if (!buffer || buffer.length !== raw.length) {
+      // First frame, or detector returned a different keypoint
+      // count — re-seed from the current frame.
+      buffer = raw.map((k) => ({ ...k }));
+      return buffer;
+    }
+    for (let i = 0; i < raw.length; i++) {
+      const r = raw[i];
+      const b = buffer[i];
+      b.x = SMOOTH_ALPHA * r.x + (1 - SMOOTH_ALPHA) * b.x;
+      b.y = SMOOTH_ALPHA * r.y + (1 - SMOOTH_ALPHA) * b.y;
+      // Score: keep the higher of (current frame's raw score) and
+      // (slightly-decayed smoothed score). This is the key trick
+      // for sustaining visibility through occlusion blips: when a
+      // single frame's keypoint score collapses (the patient's
+      // ankle disappears behind the standing leg for one frame
+      // during knee flexion), the smoothed score holds steady so
+      // the formula doesn't return null and the peak measurement
+      // doesn't get lost.
+      const decayed = (b.score ?? 0) * 0.9;
+      const rawScore = r.score ?? 0;
+      b.score = Math.max(rawScore, decayed);
+    }
+    return buffer;
+  };
+}
+
 export async function analyzeBiomechVideo(
   opts: AnalyzeOpts,
 ): Promise<BiomechDataDTO> {
@@ -560,6 +611,11 @@ async function analyzeMergedShoulderVideo(
   // Composite canvas reused for each captured screenshot.
   const compCanvas = document.createElement("canvas");
 
+  // Per-trial keypoint smoother — matches LiveBiomechCamera's EMA
+  // smoothing pass so the upload pipeline isn't more noise-vulnerable
+  // than live mode.
+  const smoother = createKeypointSmoother();
+
   // Run one detection on the currently-displayed video frame and
   // apply the merged-test bookkeeping (baseline detection, direction
   // routing, dual peak update, key-frame capture). Returns `null` on
@@ -574,7 +630,7 @@ async function analyzeMergedShoulderVideo(
     }
     const pose = poses[0];
     if (!pose) return;
-    const kps = pose.keypoints;
+    const kps = smoother(pose.keypoints);
 
     // ── Baseline calibration (rotation only) ─────────────────
     if (isRotation && !baseline) {
@@ -855,6 +911,13 @@ async function analyzeMergedKneeVideo(
   let peakFlex: number | null = null;   // max angle seen
   let peakExt: number | null = null;    // min angle seen
   let neutralUrl: string | null = null;
+  // Magnitude associated with the currently-saved neutralUrl. We
+  // keep updating it whenever a frame closer to true "knee straight"
+  // (lowest flexion-from-straight reading) shows up, so the saved
+  // neutral screenshot is the patient's genuine resting pose and not
+  // whatever happened to be the first valid frame (which may be
+  // mid-motion if the video starts with the patient already moving).
+  let neutralMag = Infinity;
   let peakFlexUrl: string | null = null;
   let peakExtUrl: string | null = null;
   let totalFrames = 0;
@@ -862,6 +925,14 @@ async function analyzeMergedKneeVideo(
   let measuredFps = 30;
 
   const compCanvas = document.createElement("canvas");
+
+  // Per-trial keypoint smoother — same EMA behaviour LiveBiomechCamera
+  // uses in live mode. Without this, single-frame visibility drops on
+  // the test-side ankle / hip (common in profile-view knee flexion
+  // where the lifted leg can briefly occlude its own keypoints)
+  // returned a null angle from computeKneeAngle and the actual peak
+  // never got recorded against the candidate slot.
+  const smoother = createKeypointSmoother();
 
   const processCurrentFrame = async (): Promise<void> => {
     totalFrames += 1;
@@ -873,7 +944,7 @@ async function analyzeMergedKneeVideo(
     }
     const pose = poses[0];
     if (!pose) return;
-    const kps = pose.keypoints;
+    const kps = smoother(pose.keypoints);
 
     const angle = computeKneeAngle(
       "flexion" as KneeMovementId,
@@ -883,7 +954,11 @@ async function analyzeMergedKneeVideo(
     if (angle === null || isNaN(angle)) return;
     validFrames += 1;
 
-    if (!neutralUrl) {
+    // Neutral screenshot = lowest flexion-from-straight reading
+    // seen so far. For knee tests this is the patient's "most
+    // straight" pose — also functions as the extension reference.
+    if (angle < neutralMag) {
+      neutralMag = angle;
       neutralUrl = captureCompositeFrame(compCanvas, video, kps);
     }
 
