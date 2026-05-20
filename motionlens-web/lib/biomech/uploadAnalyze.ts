@@ -611,6 +611,18 @@ async function analyzeMergedShoulderVideo(
   // Composite canvas reused for each captured screenshot.
   const compCanvas = document.createElement("canvas");
 
+  // Frame-snapshot canvas. At the start of every onFrame fire we
+  // synchronously draw the current video frame into this buffer and
+  // run the rest of the analysis (pose detection + key-frame capture)
+  // against the buffer instead of the live <video>. The live video
+  // keeps playing (at 4× speed in the rVFC path) during the async
+  // detector.estimatePoses call, so without snapshotting, the
+  // keypoints and the saved screenshot would be drawn from different
+  // frames — the captured peak photo would show a frame several
+  // moments after the analysed pose. The buffer locks the frame.
+  const frameBuffer = document.createElement("canvas");
+  const frameBufferCtx = frameBuffer.getContext("2d");
+
   // Per-trial keypoint smoother — matches LiveBiomechCamera's EMA
   // smoothing pass so the upload pipeline isn't more noise-vulnerable
   // than live mode.
@@ -622,9 +634,23 @@ async function analyzeMergedShoulderVideo(
   // any failure so the iteration loop can keep going.
   const processCurrentFrame = async (): Promise<void> => {
     totalFrames += 1;
+    // Snapshot the current video frame into the buffer canvas
+    // BEFORE any awaits. The video element may advance during the
+    // pose-detection call (esp. at 4× playback) and we want the
+    // detected keypoints + the saved screenshot to come from the
+    // same locked frame.
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    if (!vw || !vh || !frameBufferCtx) return;
+    if (frameBuffer.width !== vw || frameBuffer.height !== vh) {
+      frameBuffer.width = vw;
+      frameBuffer.height = vh;
+    }
+    frameBufferCtx.drawImage(video, 0, 0, vw, vh);
+
     let poses;
     try {
-      poses = await detector.estimatePoses(video, { flipHorizontal: false });
+      poses = await detector.estimatePoses(frameBuffer, { flipHorizontal: false });
     } catch {
       return;
     }
@@ -681,7 +707,7 @@ async function analyzeMergedShoulderVideo(
     const absForNeutral = Math.abs(angle);
     if (absForNeutral < neutralMag) {
       neutralMag = absForNeutral;
-      neutralUrl = captureCompositeFrame(compCanvas, video, kps);
+      neutralUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
     }
 
     // ── Direction routing ────────────────────────────────────
@@ -705,12 +731,12 @@ async function analyzeMergedShoulderVideo(
     if (direction === "primary") {
       if (peakPrimarySigned === null || absA > Math.abs(peakPrimarySigned)) {
         peakPrimarySigned = angle;
-        peakPrimaryUrl = captureCompositeFrame(compCanvas, video, kps);
+        peakPrimaryUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
       }
     } else {
       if (peakSecondarySigned === null || absA > Math.abs(peakSecondarySigned)) {
         peakSecondarySigned = angle;
-        peakSecondaryUrl = captureCompositeFrame(compCanvas, video, kps);
+        peakSecondaryUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
       }
     }
   };
@@ -926,6 +952,15 @@ async function analyzeMergedKneeVideo(
 
   const compCanvas = document.createElement("canvas");
 
+  // Frame-snapshot canvas. Locks the frame at the start of each
+  // analysis cycle so the pose detection + the saved key-frame
+  // screenshot both reflect the SAME moment — the video element
+  // would otherwise advance several frames during the async pose-
+  // detection await (4× playback in the rVFC path) and the saved
+  // peak photo would not match the keypoints it was scored against.
+  const frameBuffer = document.createElement("canvas");
+  const frameBufferCtx = frameBuffer.getContext("2d");
+
   // Per-trial keypoint smoother — same EMA behaviour LiveBiomechCamera
   // uses in live mode. Without this, single-frame visibility drops on
   // the test-side ankle / hip (common in profile-view knee flexion
@@ -936,9 +971,20 @@ async function analyzeMergedKneeVideo(
 
   const processCurrentFrame = async (): Promise<void> => {
     totalFrames += 1;
+    // Snapshot first — before any awaits — so the buffer holds the
+    // exact frame we score and screenshot.
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    if (!vw || !vh || !frameBufferCtx) return;
+    if (frameBuffer.width !== vw || frameBuffer.height !== vh) {
+      frameBuffer.width = vw;
+      frameBuffer.height = vh;
+    }
+    frameBufferCtx.drawImage(video, 0, 0, vw, vh);
+
     let poses;
     try {
-      poses = await detector.estimatePoses(video, { flipHorizontal: false });
+      poses = await detector.estimatePoses(frameBuffer, { flipHorizontal: false });
     } catch {
       return;
     }
@@ -959,18 +1005,18 @@ async function analyzeMergedKneeVideo(
     // straight" pose — also functions as the extension reference.
     if (angle < neutralMag) {
       neutralMag = angle;
-      neutralUrl = captureCompositeFrame(compCanvas, video, kps);
+      neutralUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
     }
 
     // MAX-tracking for flexion peak.
     if (peakFlex === null || angle > peakFlex) {
       peakFlex = angle;
-      peakFlexUrl = captureCompositeFrame(compCanvas, video, kps);
+      peakFlexUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
     }
     // MIN-tracking for extension peak.
     if (peakExt === null || angle < peakExt) {
       peakExt = angle;
-      peakExtUrl = captureCompositeFrame(compCanvas, video, kps);
+      peakExtUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
     }
   };
 
@@ -1116,11 +1162,11 @@ async function analyzeMergedKneeVideo(
 // scaled directly to canvas coords without any flip.
 function captureCompositeFrame(
   canvas: HTMLCanvasElement,
-  video: HTMLVideoElement,
+  source: HTMLCanvasElement,
   keypoints: Keypoint[],
 ): string | null {
-  const vw = video.videoWidth;
-  const vh = video.videoHeight;
+  const vw = source.width;
+  const vh = source.height;
   if (!vw || !vh) return null;
   const targetW = Math.min(480, vw);
   const scale = targetW / vw;
@@ -1130,7 +1176,7 @@ function captureCompositeFrame(
   canvas.height = ch;
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
-  ctx.drawImage(video, 0, 0, cw, ch);
+  ctx.drawImage(source, 0, 0, cw, ch);
 
   const VIS = 0.35;
   const px = (i: number): { x: number; y: number; score: number } | null => {
