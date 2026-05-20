@@ -313,6 +313,18 @@ export type ShoulderFlexExtDirection = "flexion" | "extension";
  *  small magnitude is the natural neutral-pose deadband. */
 const FLEXEXT_DEADBAND_DEG = 5;
 
+/** Anatomical maximum for shoulder extension (degrees). Past this
+ *  threshold a frame can only be on the flexion arc — extension
+ *  doesn't physically reach 75°+. We use it as a sanity override
+ *  on the sign-based classifier: at the overhead end of the flexion
+ *  arc (elbow.x ≈ shoulder.x, signedAngle close to ±180°) tiny
+ *  keypoint jitter can flip the angle's sign and route an overhead
+ *  frame into the extension slot, producing the implausible "180°
+ *  extension" peak users saw on uploaded videos. Magnitudes above
+ *  this cutoff are always classified as flexion regardless of the
+ *  signed value. */
+const FLEXEXT_EXTENSION_ANATOMICAL_MAX_DEG = 75;
+
 /** Detect shoulder FLEXION (arm forward) vs EXTENSION (arm backward)
  *  from the signed angle between the trunk and arm vectors, then
  *  normalised by the patient's facing direction (inferred from the
@@ -366,6 +378,14 @@ export function detectShoulderFlexExtDirection(
   const adjusted = signedAngle * facingSign;
 
   if (Math.abs(adjusted) < FLEXEXT_DEADBAND_DEG) return null;
+  // Anatomical override: any magnitude past ~75° must be on the
+  // flexion arc (extension physically can't reach that range). At
+  // the overhead end of flexion (elbow ≈ above shoulder) the signed
+  // angle approaches ±180° and tiny keypoint jitter can flip its
+  // sign, which in upload mode (no EMA smoothing) was routing
+  // overhead frames into the extension slot and producing
+  // implausible 170°+ "extension" peaks.
+  if (Math.abs(adjusted) > FLEXEXT_EXTENSION_ANATOMICAL_MAX_DEG) return "flexion";
   return adjusted > 0 ? "flexion" : "extension";
 }
 

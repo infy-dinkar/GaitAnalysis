@@ -544,6 +544,13 @@ async function analyzeMergedShoulderVideo(
   let peakPrimarySigned: number | null = null;
   let peakSecondarySigned: number | null = null;
   let neutralUrl: string | null = null;
+  // Magnitude associated with the currently-saved neutralUrl. We
+  // keep updating neutralUrl whenever a lower-magnitude (i.e. more
+  // genuinely "at rest") frame appears, so the final neutral
+  // screenshot reflects the patient's true resting pose rather than
+  // whatever happened to be the first valid frame (which could be
+  // mid-motion if the video starts with the patient already moving).
+  let neutralMag = Infinity;
   let peakPrimaryUrl: string | null = null;
   let peakSecondaryUrl: string | null = null;
   let totalFrames = 0;
@@ -610,8 +617,14 @@ async function analyzeMergedShoulderVideo(
     if (angle === null || isNaN(angle)) return;
     validFrames += 1;
 
-    // First usable frame → neutral screenshot.
-    if (!neutralUrl) {
+    // Neutral screenshot — track the LOWEST-magnitude frame seen so
+    // far rather than just the first valid frame. This way if the
+    // video opens with the patient already mid-motion, the saved
+    // neutral image will still be the genuine at-rest pose (when
+    // the magnitude returns near zero between repetitions).
+    const absForNeutral = Math.abs(angle);
+    if (absForNeutral < neutralMag) {
+      neutralMag = absForNeutral;
       neutralUrl = captureCompositeFrame(compCanvas, video, kps);
     }
 
