@@ -104,7 +104,17 @@ function relevantJointIndices(
       return [L[`${s}_SHOULDER`], L[`${s}_ELBOW`], L[`${s}_HIP`]];
     }
     case "neck":
-      return [LM.NOSE, LM.LEFT_EAR, LM.RIGHT_EAR, LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER];
+      // Only the reliably-visible joints — nose + both shoulders —
+      // gate the peak update. Ears are USED by the neck formulas
+      // (lateral flexion, flex/ext, rotation) but their per-frame
+      // visibility drops at extreme tilts (the tilt-side ear can
+      // dip below the peak-gate threshold even though it's still
+      // detected well above the formula's own VIS_THRESHOLD=0.15).
+      // Including them in the peak gate stalled peak updates at
+      // the very moment the patient hit their maximum tilt. The
+      // formula's internal visibility check already ensures ears
+      // are detected at the basic confidence level the math needs.
+      return [LM.NOSE, LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER];
     case "knee":
       // Knee angle = hip-knee-ankle on the test side, all 3 needed.
       return [L[`${s}_HIP`], L[`${s}_KNEE`], L[`${s}_ANKLE`]];
