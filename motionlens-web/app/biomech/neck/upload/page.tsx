@@ -8,11 +8,11 @@ import { Section } from "@/components/ui/Section";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ApiUploadAssessment } from "@/components/biomech/ApiUploadAssessment";
-import { NECK_MOVEMENTS, type NeckMovementId } from "@/lib/biomech/neck";
+import { NECK_MOVEMENTS } from "@/lib/biomech/neck";
 
 function NeckUploadInner() {
   const params = useSearchParams();
-  const movementId = (params.get("movement") as NeckMovementId) || "flexion";
+  const movementId = params.get("movement") || "flexion_extension";
   const movement =
     NECK_MOVEMENTS.find((m) => m.id === movementId) ?? NECK_MOVEMENTS[0];
 

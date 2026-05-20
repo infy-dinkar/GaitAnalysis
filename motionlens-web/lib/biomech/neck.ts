@@ -9,21 +9,56 @@ import { LM } from "@/lib/pose/landmarks";
 export type NeckMovementId =
   | "flexion"
   | "extension"
+  | "flexion_extension"
   | "lateral_flexion"
   | "rotation";
 
 export interface NeckMovement {
-  id: NeckMovementId;
+  id: string;
   label: string;
   description: string;
   target: [number, number];
+  /** True for merged tests that capture two directions in one
+   *  recording (flexion_extension = flexion + extension). Live and
+   *  upload modes detect direction per frame and track separate
+   *  peaks. */
+  merged?: boolean;
+  primaryLabel?: string;
+  secondaryLabel?: string;
+  /** Normal range for the secondary direction (extension target
+   *  when merged is flexion+extension). */
+  secondaryTarget?: [number, number];
+  /** Hidden from the movement chooser. Legacy single-direction
+   *  entries stay in the metadata table so saved reports referring
+   *  to "flexion" / "extension" alone resolve labels + targets,
+   *  but they no longer appear when starting a new trial. */
+  hidden?: boolean;
 }
 
 export const NECK_MOVEMENTS: NeckMovement[] = [
-  { id: "flexion",         label: "Flexion",         description: "Tilt the head forward, chin to chest",   target: [45, 80] },
-  { id: "extension",       label: "Extension",       description: "Tilt the head backward",                  target: [50, 70] },
+  // Combined Flexion + Extension. Patient in lateral view (camera
+  // sees one side of the head). One recording captures forward
+  // tilt (chin to chest) and backward tilt (head back). Direction
+  // is detected per frame from the signed neck-vs-vertical angle
+  // normalised by the patient's facing direction.
+  {
+    id: "flexion_extension",
+    label: "Flexion + Extension",
+    description:
+      "Tilt the head forward (chin to chest, flexion) then backward (extension). One recording captures both peaks.",
+    target: [45, 80],
+    merged: true,
+    primaryLabel: "Flexion",
+    secondaryLabel: "Extension",
+    secondaryTarget: [50, 70],
+  },
   { id: "lateral_flexion", label: "Lateral Flexion", description: "Tilt the ear toward either shoulder",   target: [20, 45] },
   { id: "rotation",        label: "Rotation",        description: "Turn the head to either side",            target: [70, 90] },
+  // Legacy single-direction entries — kept so saved reports
+  // referring to them still resolve labels + targets, but hidden
+  // from the chooser since the merged version above replaces them.
+  { id: "flexion",   label: "Flexion",   description: "Tilt the head forward, chin to chest", target: [45, 80], hidden: true },
+  { id: "extension", label: "Extension", description: "Tilt the head backward",                target: [50, 70], hidden: true },
 ];
 
 // BlazePose-tfjs scores are lower than MediaPipe's `visibility` field —
@@ -62,15 +97,49 @@ export function computeNeckAngle(
   if (
     movement === "flexion" ||
     movement === "extension" ||
-    movement === "lateral_flexion"
+    movement === "flexion_extension"
   ) {
-    // angle of (shoulder_mid → ear_mid) from upward vertical
+    // Head-orientation angle from the ear→nose vector. The legacy
+    // shoulder_mid → ear_mid formula only captured the CERVICAL
+    // spine portion of flex/ext (~25° max anatomically), but
+    // clinically full neck flexion (45-80°) and extension (50-70°)
+    // include the atlanto-occipital joint + head-on-neck pitch as
+    // well. Tracking the face direction via ear→nose captures the
+    // combined motion.
+    //
+    // Sign convention:
+    //   positive = nose pointing below ear (flexion / chin-down)
+    //   negative = nose pointing above ear (extension / head-back)
+    //
+    // |faceVecX| in the atan2 denominator makes the sign depend only
+    // on the vertical component — so the same formula works for
+    // patients facing image-left OR image-right (the lateral
+    // orientation cancels out).
+    //
+    // 10° baseline subtraction approximates the typical neutral
+    // pose where the nose sits slightly below the ear-axis (the
+    // ear-tragus to nose-tip line points roughly horizontal but
+    // with a small downward bias). Patients with a flatter face
+    // profile may read slightly higher, those with a longer nose
+    // slightly lower — but the per-frame variation from this is
+    // small compared to actual flex/ext motion.
+    const faceVecX = nose.x - earMidX;
+    const faceVecY = nose.y - earMidY;
+    if (Math.hypot(faceVecX, faceVecY) < 1e-4) return null;
+    const tiltDeg = (Math.atan2(faceVecY, Math.abs(faceVecX)) * 180) / Math.PI;
+    const NEUTRAL_TILT_BASELINE = 10;
+    return tiltDeg - NEUTRAL_TILT_BASELINE;
+  }
+
+  if (movement === "lateral_flexion") {
+    // Lateral flexion stays on the cervical-spine formula — the
+    // ear→nose approach only measures sagittal (forward/back) tilt.
     const neckVecX = earMidX - shldrMidX;
     const neckVecY = earMidY - shldrMidY;
     const verticalX = 0;
     const verticalY = -1;
     const raw = angleBetween(verticalX, verticalY, neckVecX, neckVecY);
-    return movement === "lateral_flexion" ? Math.abs(raw) : raw;
+    return Math.abs(raw);
   }
 
   // rotation — nose offset relative to ear midline, ratio × 90°.
@@ -83,6 +152,32 @@ export function computeNeckAngle(
   if (earWidth < 1e-3) return 0;
   const offsetRatio = (nose.x - earMidX) / (earWidth / 2);
   return Math.min(Math.abs(offsetRatio * 90), 120);
+}
+
+// ─── Direction detection for merged flexion + extension ─────────
+
+export type NeckFlexExtDirection = "flexion" | "extension";
+
+/** Minimum signed-angle magnitude before direction commits. Below
+ *  this the head is too close to neutral for a reliable
+ *  classification. Same role the corresponding constant plays in
+ *  the shoulder flex/ext detector. */
+const NECK_FLEXEXT_DEADBAND_DEG = 5;
+
+/** Detect neck FLEXION (chin to chest) vs EXTENSION (head back) from
+ *  the sign of the ear→nose tilt angle. Delegates to computeNeckAngle
+ *  so the direction always matches the magnitude the rest of the
+ *  pipeline displays. The angle's sign is already symmetric for both
+ *  lateral orientations (the formula uses |faceVecX| in its atan2
+ *  denominator), so no extra facing-direction normalisation is
+ *  needed here. */
+export function detectNeckFlexExtDirection(
+  keypoints: Keypoint[],
+): NeckFlexExtDirection | null {
+  const angle = computeNeckAngle("flexion", keypoints);
+  if (angle === null || Number.isNaN(angle)) return null;
+  if (Math.abs(angle) < NECK_FLEXEXT_DEADBAND_DEG) return null;
+  return angle > 0 ? "flexion" : "extension";
 }
 
 // ─── Calibrated rotation (baseline-locked) ──────────────────────

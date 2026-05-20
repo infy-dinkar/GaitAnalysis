@@ -49,7 +49,7 @@ function NeckSetupInner() {
               </h2>
               <div className="mt-4">
                 <MovementGrid
-                  options={NECK_MOVEMENTS}
+                  options={NECK_MOVEMENTS.filter((m) => !m.hidden)}
                   selected={movement}
                   onSelect={setMovement}
                 />

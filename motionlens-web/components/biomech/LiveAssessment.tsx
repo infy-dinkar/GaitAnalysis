@@ -19,6 +19,7 @@ import { getInstructions } from "@/lib/biomech/instructions";
 import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
 import {
   captureNeckRotationBaseline,
+  detectNeckFlexExtDirection,
   isStableFacingForward,
   type NeckRotationCalibration,
 } from "@/lib/biomech/neck";
@@ -252,11 +253,14 @@ export function LiveAssessment({
     !!merged && bodyPart === "shoulder" && movementId === "flexion_extension";
   const isMergedKneeFE =
     !!merged && bodyPart === "knee" && movementId === "flexion_extension";
+  const isMergedNeckFE =
+    !!merged && bodyPart === "neck" && movementId === "flexion_extension";
   const isMergedMovement =
     isMergedShoulderRotation ||
     isMergedShoulderAbAd ||
     isMergedShoulderFlexExt ||
-    isMergedKneeFE;
+    isMergedKneeFE ||
+    isMergedNeckFE;
 
   const stateRef = useRef({
     current: null as number | null,
@@ -428,7 +432,12 @@ export function LiveAssessment({
     // both updated every valid frame. Direction is decided spatially
     // for shoulder, temporally (angle rising vs falling) for knee.
     let slot: "primary" | "secondary" = "primary";
-    if (isMergedShoulderRotation || isMergedShoulderAbAd || isMergedShoulderFlexExt) {
+    if (
+      isMergedShoulderRotation ||
+      isMergedShoulderAbAd ||
+      isMergedShoulderFlexExt ||
+      isMergedNeckFE
+    ) {
       const kpsForDir: Keypoint[] = data.landmarks.map((l) => ({
         x: l.x,
         y: l.y,
@@ -446,6 +455,10 @@ export function LiveAssessment({
         else if (a === "adduction") dir = "secondary";
       } else if (isMergedShoulderFlexExt) {
         const fe = detectShoulderFlexExtDirection(kpsForDir, sideOrRight);
+        if (fe === "flexion") dir = "primary";
+        else if (fe === "extension") dir = "secondary";
+      } else if (isMergedNeckFE) {
+        const fe = detectNeckFlexExtDirection(kpsForDir);
         if (fe === "flexion") dir = "primary";
         else if (fe === "extension") dir = "secondary";
       }
@@ -665,6 +678,7 @@ export function LiveAssessment({
     isMergedShoulderAbAd,
     isMergedShoulderFlexExt,
     isMergedKneeFE,
+    isMergedNeckFE,
   ]);
 
   // Clears every per-trial peak-tracking field on the state ref —
@@ -929,7 +943,14 @@ export function LiveAssessment({
                 Current
               </p>
               <p className="mt-1 tabular text-3xl font-semibold leading-none text-foreground">
-                {current !== null ? `${fmt(current, 1)}°` : "—"}
+                {/* Show magnitude only — some movement formulas return
+                    signed values where the sign just encodes direction
+                    (e.g. neck flex/ext is positive for one orientation,
+                    negative for the other; shoulder rotation is signed
+                    in the calibrated formula). The operator-facing
+                    Current readout should always read as a positive
+                    angle; direction is conveyed by the tag below. */}
+                {current !== null ? `${fmt(Math.abs(current), 1)}°` : "—"}
               </p>
               {isMergedMovement && currentDirection && (
                 <p className="mt-1 text-[10px] uppercase tracking-[0.1em] text-accent">
