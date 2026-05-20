@@ -73,6 +73,57 @@ interface AnalyzeOpts {
 
 const SAMPLE_FPS_FALLBACK = 15; // seek-mode sample rate (10-sec video → 150 samples)
 
+/** Score-sustenance decay per frame. The smoother below keeps the
+ *  higher of (current raw score) and (previous smoothed score *
+ *  this factor). Closer to 1 = visibility holds longer through
+ *  occlusion blips; closer to 0 = score follows raw more tightly.
+ *  0.9 sustains a brief 1-2 frame visibility drop without making
+ *  long-term occlusions look indefinitely visible. */
+const SCORE_DECAY = 0.9;
+
+/** Build a stateful keypoint helper for one video analysis pass.
+ *  The output preserves RAW positions (no position-smoothing lag)
+ *  but applies an EMA-max on confidence scores so brief
+ *  one-or-two-frame visibility drops don't reject peak-ROM frames.
+ *
+ *  Why not EMA-smooth positions like LiveBiomechCamera does?
+ *  Smoothing positions inevitably lags brief peaks — a knee
+ *  flexion that's only at maximum bend for a few frames gets
+ *  damped to a lower reading, and the upload report shows e.g. 61°
+ *  for a video where the patient genuinely reaches 90°. Live mode
+ *  compensates for this lag with a held-candidate confirmation
+ *  algorithm that survives brief noise frames; the upload pipeline
+ *  uses simple min/max tracking, so it needs the true per-frame
+ *  positions to find the real peak. The score side of the smoother
+ *  still helps — without it, single-frame ankle / wrist occlusions
+ *  rejected legitimate peak frames as low-visibility. */
+function createKeypointSmoother(): (raw: Keypoint[]) => Keypoint[] {
+  let scoreBuffer: number[] | null = null;
+  return (raw: Keypoint[]): Keypoint[] => {
+    if (!scoreBuffer || scoreBuffer.length !== raw.length) {
+      // First frame, or detector returned a different keypoint
+      // count — seed scores and pass positions through.
+      scoreBuffer = raw.map((k) => k.score ?? 0);
+      return raw;
+    }
+    const out: Keypoint[] = new Array(raw.length);
+    for (let i = 0; i < raw.length; i++) {
+      const r = raw[i];
+      const decayed = scoreBuffer[i] * SCORE_DECAY;
+      const rawScore = r.score ?? 0;
+      const newScore = Math.max(rawScore, decayed);
+      scoreBuffer[i] = newScore;
+      out[i] = {
+        x: r.x,
+        y: r.y,
+        score: newScore,
+        name: r.name,
+      };
+    }
+    return out;
+  };
+}
+
 export async function analyzeBiomechVideo(
   opts: AnalyzeOpts,
 ): Promise<BiomechDataDTO> {
@@ -560,21 +611,52 @@ async function analyzeMergedShoulderVideo(
   // Composite canvas reused for each captured screenshot.
   const compCanvas = document.createElement("canvas");
 
+  // Frame-snapshot canvas. At the start of every onFrame fire we
+  // synchronously draw the current video frame into this buffer and
+  // run the rest of the analysis (pose detection + key-frame capture)
+  // against the buffer instead of the live <video>. The live video
+  // keeps playing (at 4× speed in the rVFC path) during the async
+  // detector.estimatePoses call, so without snapshotting, the
+  // keypoints and the saved screenshot would be drawn from different
+  // frames — the captured peak photo would show a frame several
+  // moments after the analysed pose. The buffer locks the frame.
+  const frameBuffer = document.createElement("canvas");
+  const frameBufferCtx = frameBuffer.getContext("2d");
+
+  // Per-trial keypoint smoother — matches LiveBiomechCamera's EMA
+  // smoothing pass so the upload pipeline isn't more noise-vulnerable
+  // than live mode.
+  const smoother = createKeypointSmoother();
+
   // Run one detection on the currently-displayed video frame and
   // apply the merged-test bookkeeping (baseline detection, direction
   // routing, dual peak update, key-frame capture). Returns `null` on
   // any failure so the iteration loop can keep going.
   const processCurrentFrame = async (): Promise<void> => {
     totalFrames += 1;
+    // Snapshot the current video frame into the buffer canvas
+    // BEFORE any awaits. The video element may advance during the
+    // pose-detection call (esp. at 4× playback) and we want the
+    // detected keypoints + the saved screenshot to come from the
+    // same locked frame.
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    if (!vw || !vh || !frameBufferCtx) return;
+    if (frameBuffer.width !== vw || frameBuffer.height !== vh) {
+      frameBuffer.width = vw;
+      frameBuffer.height = vh;
+    }
+    frameBufferCtx.drawImage(video, 0, 0, vw, vh);
+
     let poses;
     try {
-      poses = await detector.estimatePoses(video, { flipHorizontal: false });
+      poses = await detector.estimatePoses(frameBuffer, { flipHorizontal: false });
     } catch {
       return;
     }
     const pose = poses[0];
     if (!pose) return;
-    const kps = pose.keypoints;
+    const kps = smoother(pose.keypoints);
 
     // ── Baseline calibration (rotation only) ─────────────────
     if (isRotation && !baseline) {
@@ -625,7 +707,7 @@ async function analyzeMergedShoulderVideo(
     const absForNeutral = Math.abs(angle);
     if (absForNeutral < neutralMag) {
       neutralMag = absForNeutral;
-      neutralUrl = captureCompositeFrame(compCanvas, video, kps);
+      neutralUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
     }
 
     // ── Direction routing ────────────────────────────────────
@@ -649,12 +731,12 @@ async function analyzeMergedShoulderVideo(
     if (direction === "primary") {
       if (peakPrimarySigned === null || absA > Math.abs(peakPrimarySigned)) {
         peakPrimarySigned = angle;
-        peakPrimaryUrl = captureCompositeFrame(compCanvas, video, kps);
+        peakPrimaryUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
       }
     } else {
       if (peakSecondarySigned === null || absA > Math.abs(peakSecondarySigned)) {
         peakSecondarySigned = angle;
-        peakSecondaryUrl = captureCompositeFrame(compCanvas, video, kps);
+        peakSecondaryUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
       }
     }
   };
@@ -855,6 +937,13 @@ async function analyzeMergedKneeVideo(
   let peakFlex: number | null = null;   // max angle seen
   let peakExt: number | null = null;    // min angle seen
   let neutralUrl: string | null = null;
+  // Magnitude associated with the currently-saved neutralUrl. We
+  // keep updating it whenever a frame closer to true "knee straight"
+  // (lowest flexion-from-straight reading) shows up, so the saved
+  // neutral screenshot is the patient's genuine resting pose and not
+  // whatever happened to be the first valid frame (which may be
+  // mid-motion if the video starts with the patient already moving).
+  let neutralMag = Infinity;
   let peakFlexUrl: string | null = null;
   let peakExtUrl: string | null = null;
   let totalFrames = 0;
@@ -863,17 +952,45 @@ async function analyzeMergedKneeVideo(
 
   const compCanvas = document.createElement("canvas");
 
+  // Frame-snapshot canvas. Locks the frame at the start of each
+  // analysis cycle so the pose detection + the saved key-frame
+  // screenshot both reflect the SAME moment — the video element
+  // would otherwise advance several frames during the async pose-
+  // detection await (4× playback in the rVFC path) and the saved
+  // peak photo would not match the keypoints it was scored against.
+  const frameBuffer = document.createElement("canvas");
+  const frameBufferCtx = frameBuffer.getContext("2d");
+
+  // Per-trial keypoint smoother — same EMA behaviour LiveBiomechCamera
+  // uses in live mode. Without this, single-frame visibility drops on
+  // the test-side ankle / hip (common in profile-view knee flexion
+  // where the lifted leg can briefly occlude its own keypoints)
+  // returned a null angle from computeKneeAngle and the actual peak
+  // never got recorded against the candidate slot.
+  const smoother = createKeypointSmoother();
+
   const processCurrentFrame = async (): Promise<void> => {
     totalFrames += 1;
+    // Snapshot first — before any awaits — so the buffer holds the
+    // exact frame we score and screenshot.
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    if (!vw || !vh || !frameBufferCtx) return;
+    if (frameBuffer.width !== vw || frameBuffer.height !== vh) {
+      frameBuffer.width = vw;
+      frameBuffer.height = vh;
+    }
+    frameBufferCtx.drawImage(video, 0, 0, vw, vh);
+
     let poses;
     try {
-      poses = await detector.estimatePoses(video, { flipHorizontal: false });
+      poses = await detector.estimatePoses(frameBuffer, { flipHorizontal: false });
     } catch {
       return;
     }
     const pose = poses[0];
     if (!pose) return;
-    const kps = pose.keypoints;
+    const kps = smoother(pose.keypoints);
 
     const angle = computeKneeAngle(
       "flexion" as KneeMovementId,
@@ -883,19 +1000,23 @@ async function analyzeMergedKneeVideo(
     if (angle === null || isNaN(angle)) return;
     validFrames += 1;
 
-    if (!neutralUrl) {
-      neutralUrl = captureCompositeFrame(compCanvas, video, kps);
+    // Neutral screenshot = lowest flexion-from-straight reading
+    // seen so far. For knee tests this is the patient's "most
+    // straight" pose — also functions as the extension reference.
+    if (angle < neutralMag) {
+      neutralMag = angle;
+      neutralUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
     }
 
     // MAX-tracking for flexion peak.
     if (peakFlex === null || angle > peakFlex) {
       peakFlex = angle;
-      peakFlexUrl = captureCompositeFrame(compCanvas, video, kps);
+      peakFlexUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
     }
     // MIN-tracking for extension peak.
     if (peakExt === null || angle < peakExt) {
       peakExt = angle;
-      peakExtUrl = captureCompositeFrame(compCanvas, video, kps);
+      peakExtUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
     }
   };
 
@@ -1041,11 +1162,11 @@ async function analyzeMergedKneeVideo(
 // scaled directly to canvas coords without any flip.
 function captureCompositeFrame(
   canvas: HTMLCanvasElement,
-  video: HTMLVideoElement,
+  source: HTMLCanvasElement,
   keypoints: Keypoint[],
 ): string | null {
-  const vw = video.videoWidth;
-  const vh = video.videoHeight;
+  const vw = source.width;
+  const vh = source.height;
   if (!vw || !vh) return null;
   const targetW = Math.min(480, vw);
   const scale = targetW / vw;
@@ -1055,7 +1176,7 @@ function captureCompositeFrame(
   canvas.height = ch;
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
-  ctx.drawImage(video, 0, 0, cw, ch);
+  ctx.drawImage(source, 0, 0, cw, ch);
 
   const VIS = 0.35;
   const px = (i: number): { x: number; y: number; score: number } | null => {
