@@ -28,6 +28,7 @@ import {
   computeShoulderAngle,
   computeShoulderRotationFromBaseline,
   detectShoulderAbAdDirection,
+  detectShoulderFlexExtDirection,
   detectShoulderRotationDirection,
   isShoulderRotationNeutral,
   SHOULDER_MOVEMENTS,
@@ -97,7 +98,9 @@ export async function analyzeBiomechVideo(
   // thumbnails (neutral, primary peak, secondary peak).
   if (
     bodyPart === "shoulder" &&
-    (movement === "rotation" || movement === "abduction_adduction")
+    (movement === "rotation" ||
+      movement === "abduction_adduction" ||
+      movement === "flexion_extension")
   ) {
     return analyzeMergedShoulderVideo({
       file,
@@ -467,7 +470,7 @@ export async function analyzeAnkleBlob(
 
 interface MergedShoulderOpts {
   file: File;
-  movement: "rotation" | "abduction_adduction";
+  movement: "rotation" | "abduction_adduction" | "flexion_extension";
   side: "left" | "right";
   onProgress?: (fraction: number) => void;
 }
@@ -479,15 +482,35 @@ async function analyzeMergedShoulderVideo(
 ): Promise<BiomechDataDTO> {
   const { file, movement, side, onProgress } = opts;
   const isRotation = movement === "rotation";
+  const isFlexExt = movement === "flexion_extension";
 
   // Look up labels + target ranges from the metadata table so the
   // response matches the chooser configuration.
   const meta = SHOULDER_MOVEMENTS.find((m) => m.id === movement);
-  const primaryTarget: [number, number] = meta?.target ?? [70, 90];
-  const secondaryTarget: [number, number] =
-    meta?.secondaryTarget ?? (isRotation ? [60, 80] : [30, 50]);
-  const primaryLabel = meta?.primaryLabel ?? (isRotation ? "External Rotation" : "Abduction");
-  const secondaryLabel = meta?.secondaryLabel ?? (isRotation ? "Internal Rotation" : "Adduction");
+  const fallbackPrimary: [number, number] = isRotation
+    ? [70, 90]
+    : isFlexExt
+      ? [150, 180]
+      : [150, 180];
+  const fallbackSecondary: [number, number] = isRotation
+    ? [60, 80]
+    : isFlexExt
+      ? [45, 60]
+      : [30, 50];
+  const fallbackPrimaryLabel = isRotation
+    ? "External Rotation"
+    : isFlexExt
+      ? "Flexion"
+      : "Abduction";
+  const fallbackSecondaryLabel = isRotation
+    ? "Internal Rotation"
+    : isFlexExt
+      ? "Extension"
+      : "Adduction";
+  const primaryTarget: [number, number] = meta?.target ?? fallbackPrimary;
+  const secondaryTarget: [number, number] = meta?.secondaryTarget ?? fallbackSecondary;
+  const primaryLabel = meta?.primaryLabel ?? fallbackPrimaryLabel;
+  const secondaryLabel = meta?.secondaryLabel ?? fallbackSecondaryLabel;
 
   const detector = await getDetector();
 
@@ -521,6 +544,13 @@ async function analyzeMergedShoulderVideo(
   let peakPrimarySigned: number | null = null;
   let peakSecondarySigned: number | null = null;
   let neutralUrl: string | null = null;
+  // Magnitude associated with the currently-saved neutralUrl. We
+  // keep updating neutralUrl whenever a lower-magnitude (i.e. more
+  // genuinely "at rest") frame appears, so the final neutral
+  // screenshot reflects the patient's true resting pose rather than
+  // whatever happened to be the first valid frame (which could be
+  // mid-motion if the video starts with the patient already moving).
+  let neutralMag = Infinity;
   let peakPrimaryUrl: string | null = null;
   let peakSecondaryUrl: string | null = null;
   let totalFrames = 0;
@@ -564,6 +594,15 @@ async function analyzeMergedShoulderVideo(
     let angle: number | null;
     if (isRotation && baseline) {
       angle = computeShoulderRotationFromBaseline(kps, side, baseline);
+    } else if (isFlexExt) {
+      // Flex/Ext: reuse legacy "flexion" formula (signed angle
+      // between trunk-down and arm; magnitude is what we display,
+      // direction is determined separately below).
+      angle = computeShoulderAngle(
+        "flexion" as ShoulderMovementId,
+        kps,
+        side,
+      );
     } else if (!isRotation) {
       // ab/ad: magnitude formula is direction-symmetric. Reuse the
       // legacy "abduction" branch (trunk-down vs arm angle).
@@ -578,8 +617,14 @@ async function analyzeMergedShoulderVideo(
     if (angle === null || isNaN(angle)) return;
     validFrames += 1;
 
-    // First usable frame → neutral screenshot.
-    if (!neutralUrl) {
+    // Neutral screenshot — track the LOWEST-magnitude frame seen so
+    // far rather than just the first valid frame. This way if the
+    // video opens with the patient already mid-motion, the saved
+    // neutral image will still be the genuine at-rest pose (when
+    // the magnitude returns near zero between repetitions).
+    const absForNeutral = Math.abs(angle);
+    if (absForNeutral < neutralMag) {
+      neutralMag = absForNeutral;
       neutralUrl = captureCompositeFrame(compCanvas, video, kps);
     }
 
@@ -589,6 +634,10 @@ async function analyzeMergedShoulderVideo(
       const r = detectShoulderRotationDirection(kps, side);
       if (r === "external") direction = "primary";
       else if (r === "internal") direction = "secondary";
+    } else if (isFlexExt) {
+      const fe = detectShoulderFlexExtDirection(kps, side);
+      if (fe === "flexion") direction = "primary";
+      else if (fe === "extension") direction = "secondary";
     } else {
       const a = detectShoulderAbAdDirection(kps, side);
       if (a === "abduction") direction = "primary";

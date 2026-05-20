@@ -25,6 +25,7 @@ import {
 import {
   captureShoulderRotationBaseline,
   detectShoulderAbAdDirection,
+  detectShoulderFlexExtDirection,
   detectShoulderRotationDirection,
   isShoulderRotationNeutral,
   type ShoulderRotationCalibration,
@@ -247,10 +248,15 @@ export function LiveAssessment({
     !!merged && bodyPart === "shoulder" && movementId === "rotation";
   const isMergedShoulderAbAd =
     !!merged && bodyPart === "shoulder" && movementId === "abduction_adduction";
+  const isMergedShoulderFlexExt =
+    !!merged && bodyPart === "shoulder" && movementId === "flexion_extension";
   const isMergedKneeFE =
     !!merged && bodyPart === "knee" && movementId === "flexion_extension";
   const isMergedMovement =
-    isMergedShoulderRotation || isMergedShoulderAbAd || isMergedKneeFE;
+    isMergedShoulderRotation ||
+    isMergedShoulderAbAd ||
+    isMergedShoulderFlexExt ||
+    isMergedKneeFE;
 
   const stateRef = useRef({
     current: null as number | null,
@@ -422,7 +428,7 @@ export function LiveAssessment({
     // both updated every valid frame. Direction is decided spatially
     // for shoulder, temporally (angle rising vs falling) for knee.
     let slot: "primary" | "secondary" = "primary";
-    if (isMergedShoulderRotation || isMergedShoulderAbAd) {
+    if (isMergedShoulderRotation || isMergedShoulderAbAd || isMergedShoulderFlexExt) {
       const kpsForDir: Keypoint[] = data.landmarks.map((l) => ({
         x: l.x,
         y: l.y,
@@ -438,6 +444,10 @@ export function LiveAssessment({
         const a = detectShoulderAbAdDirection(kpsForDir, sideOrRight);
         if (a === "abduction") dir = "primary";
         else if (a === "adduction") dir = "secondary";
+      } else if (isMergedShoulderFlexExt) {
+        const fe = detectShoulderFlexExtDirection(kpsForDir, sideOrRight);
+        if (fe === "flexion") dir = "primary";
+        else if (fe === "extension") dir = "secondary";
       }
       s.currentDirection = dir;
       if (!dir) return; // deadband — show Current but don't update peaks
@@ -653,6 +663,7 @@ export function LiveAssessment({
     isMergedMovement,
     isMergedShoulderRotation,
     isMergedShoulderAbAd,
+    isMergedShoulderFlexExt,
     isMergedKneeFE,
   ]);
 

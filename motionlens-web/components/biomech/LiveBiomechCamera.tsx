@@ -404,6 +404,18 @@ export function LiveBiomechCamera({
                   smoothedKps,
                   sideOrRight,
                 );
+              } else if (movement === "flexion_extension") {
+                // Merged flexion + extension uses the signed
+                // arm-vs-trunk angle (same formula as legacy
+                // "flexion"). The parent reads its absolute value
+                // for peak magnitude and routes the slot using the
+                // facing-normalised sign from
+                // detectShoulderFlexExtDirection.
+                angle = computeShoulderAngle(
+                  "flexion" as ShoulderMovementId,
+                  smoothedKps,
+                  sideOrRight,
+                );
               } else if (movement === "rotation") {
                 // Merged rotation, baseline not yet locked — use the
                 // legacy magnitude formula so the camera still shows
