@@ -43,8 +43,22 @@ export interface ShoulderMovement {
 }
 
 export const SHOULDER_MOVEMENTS: ShoulderMovement[] = [
-  { id: "flexion",   label: "Flexion",   description: "Lift the arm forward and overhead",     target: [150, 180] },
-  { id: "extension", label: "Extension", description: "Move the arm backward behind the body", target: [45, 60] },
+  // Combined Flexion + Extension. Patient is in lateral view (test
+  // side toward camera). One recording captures the forward-overhead
+  // arc (flexion) and the backward-behind-body arc (extension); the
+  // live engine detects direction per frame from the signed
+  // arm-vs-trunk angle, normalised by the patient's facing direction.
+  {
+    id: "flexion_extension",
+    label: "Flexion + Extension",
+    description:
+      "Lift the arm forward and overhead (flexion), then move it backward behind the body (extension). One session captures both peaks.",
+    target: [150, 180],
+    merged: true,
+    primaryLabel: "Flexion",
+    secondaryLabel: "Extension",
+    secondaryTarget: [45, 60],
+  },
   // Combined Abduction + Adduction. One recording captures both
   // directions; the live engine detects which way the elbow is
   // travelling and tracks a separate peak for each.
@@ -77,10 +91,12 @@ export const SHOULDER_MOVEMENTS: ShoulderMovement[] = [
   // saved reports that referenced these IDs still resolve their label
   // / target, but hidden from the chooser since the merged versions
   // above replace them in the UI flow.
-  { id: "abduction",         label: "Abduction",         description: "Lift the arm sideways away from the body", target: [150, 180], hidden: true },
-  { id: "adduction",         label: "Adduction",         description: "Bring the arm across the chest",            target: [30, 50],  hidden: true },
-  { id: "external_rotation", label: "External Rotation", description: "Rotate the forearm outward (elbow at 90°)", target: [70, 90],  hidden: true },
-  { id: "internal_rotation", label: "Internal Rotation", description: "Rotate the forearm inward (elbow at 90°)",  target: [60, 80],  hidden: true },
+  { id: "flexion",           label: "Flexion",           description: "Lift the arm forward and overhead",          target: [150, 180], hidden: true },
+  { id: "extension",         label: "Extension",         description: "Move the arm backward behind the body",       target: [45, 60],   hidden: true },
+  { id: "abduction",         label: "Abduction",         description: "Lift the arm sideways away from the body",   target: [150, 180], hidden: true },
+  { id: "adduction",         label: "Adduction",         description: "Bring the arm across the chest",              target: [30, 50],   hidden: true },
+  { id: "external_rotation", label: "External Rotation", description: "Rotate the forearm outward (elbow at 90°)",  target: [70, 90],   hidden: true },
+  { id: "internal_rotation", label: "Internal Rotation", description: "Rotate the forearm inward (elbow at 90°)",   target: [60, 80],   hidden: true },
 ];
 
 // BlazePose-tfjs scores are lower than MediaPipe's `visibility` field —
@@ -289,6 +305,69 @@ export function computeShoulderRotationFromBaseline(
 
 export type ShoulderRotationDirection = "external" | "internal";
 export type ShoulderAbAdDirection = "abduction" | "adduction";
+export type ShoulderFlexExtDirection = "flexion" | "extension";
+
+/** Minimum signed-angle magnitude (degrees) before a flexion vs
+ *  extension classification is committed. The shoulderFlexionExtension
+ *  formula returns ~0° when the arm hangs straight at the side, so a
+ *  small magnitude is the natural neutral-pose deadband. */
+const FLEXEXT_DEADBAND_DEG = 5;
+
+/** Detect shoulder FLEXION (arm forward) vs EXTENSION (arm backward)
+ *  from the signed angle between the trunk and arm vectors, then
+ *  normalised by the patient's facing direction (inferred from the
+ *  nose position relative to the test-side shoulder). The test runs
+ *  in lateral view, so nose.x is offset toward the patient's face
+ *  ("front"). Using that offset's sign as the facing direction lets
+ *  the same logic classify both lateral orientations (patient facing
+ *  image-left OR image-right). */
+export function detectShoulderFlexExtDirection(
+  keypoints: Keypoint[],
+  side: "left" | "right",
+): ShoulderFlexExtDirection | null {
+  const idx = SIDE_INDICES[side];
+  const s = keypoints[idx.shoulder];
+  const e = keypoints[idx.elbow];
+  const h = keypoints[idx.hip];
+  const nose = keypoints[LM.NOSE];
+  if (!s || !e || !h || !nose) return null;
+  if (
+    (s.score ?? 0) < VIS_THRESHOLD ||
+    (e.score ?? 0) < VIS_THRESHOLD ||
+    (h.score ?? 0) < VIS_THRESHOLD ||
+    (nose.score ?? 0) < VIS_THRESHOLD
+  ) {
+    return null;
+  }
+
+  // Facing direction: nose horizontal offset from the test-side
+  // shoulder. In lateral view the nose sits in front of the shoulder
+  // axis, so the sign of (nose.x - shoulder.x) cleanly distinguishes
+  // image-left-facing from image-right-facing setups. Scale by upper-
+  // arm length (a reliable, mostly camera-invariant unit) — if the
+  // offset is too small the patient is in a near-frontal view and
+  // sagittal flexion/extension can't be measured reliably.
+  const upperArmLen = Math.hypot(e.x - s.x, e.y - s.y);
+  if (upperArmLen < 1e-4) return null;
+  const facingDx = nose.x - s.x;
+  if (Math.abs(facingDx) / upperArmLen < 0.10) return null;
+  const facingSign = Math.sign(facingDx);
+
+  // Signed arm-vs-trunk angle (same as shoulderFlexionExtension).
+  // Positive sign on the unadjusted value corresponds to "arm forward"
+  // for a patient facing image-right; multiplying by facingSign
+  // normalises to "positive = flexion" regardless of which lateral
+  // orientation the camera is on.
+  const tx = h.x - s.x, ty = h.y - s.y;
+  const ax = e.x - s.x, ay = e.y - s.y;
+  const cross = tx * ay - ty * ax;
+  const dot = tx * ax + ty * ay;
+  const signedAngle = -(Math.atan2(cross, dot) * 180) / Math.PI;
+  const adjusted = signedAngle * facingSign;
+
+  if (Math.abs(adjusted) < FLEXEXT_DEADBAND_DEG) return null;
+  return adjusted > 0 ? "flexion" : "extension";
+}
 
 /** Minimum lateral offset (as a fraction of shoulder width) before
  *  a direction is committed. Tighter = more responsive but flips on

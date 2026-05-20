@@ -60,6 +60,14 @@ export const MOVEMENT_INSTRUCTIONS: Record<Key, string[]> = {
     "Now slowly rotate the forearm INWARD — across the front of your stomach. Hold the furthest comfortable point for 2 seconds, then return to centre.",
     "Click Show Analysis. The report will show separate peak values and screenshots for both external and internal rotation.",
   ],
+  "shoulder.flexion_extension": [
+    "Stand about 6 feet (2 metres) from the camera, turned so the camera sees your SIDE — the test-side shoulder should point straight at the lens. Both arms hanging at the sides as the starting position.",
+    "FLEXION: keeping the elbow straight, slowly raise the test arm forward and up overhead, like you're reaching for the ceiling. Move smoothly — no jerks. Hold the highest comfortable point for ~2 seconds.",
+    "Slowly lower the arm back to your side along the same path.",
+    "EXTENSION: keeping the elbow straight, slowly move the same arm backward behind your body — like reaching for something behind you. Don't lean forward to cheat the movement. Hold the furthest comfortable point for ~2 seconds.",
+    "Slowly bring the arm back to your side. Click Show Analysis — the report shows separate Flexion and Extension peak values, normal ranges for each, and screenshots of both moments.",
+    "Keep your shoulders relaxed throughout — don't shrug; don't arch your lower back to gain extra range.",
+  ],
   "shoulder.abduction_adduction": [
     "Stand about 6 feet (2 metres) from the camera, facing the camera straight on so it sees both arms and your full torso.",
     "Let the arm hang at your side with the palm facing your body and the elbow straight — this is the starting position.",
