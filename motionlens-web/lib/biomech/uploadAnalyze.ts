@@ -38,6 +38,7 @@ import {
 import {
   computeNeckAngle,
   detectNeckFlexExtDirection,
+  detectNeckLateralDirection,
   NECK_MOVEMENTS,
   type NeckMovementId,
 } from "@/lib/biomech/neck";
@@ -176,15 +177,20 @@ export async function analyzeBiomechVideo(
     });
   }
 
-  // ── Merged neck flexion + extension → direction-aware analyser ──
-  // Neck "flexion_extension" captures forward tilt (chin to chest)
-  // and backward tilt (head back) in one recording. Direction is
-  // detected per frame from the signed neck-vs-vertical angle
-  // normalised by the patient's facing direction (nose offset from
-  // ear midline in the lateral view).
-  if (bodyPart === "neck" && movement === "flexion_extension") {
+  // ── Merged neck tests → direction-aware analyser ──
+  // Neck "flexion_extension" captures forward (chin to chest) and
+  // backward (head back) tilt in one recording. Neck
+  // "lateral_flexion" captures right + left ear-to-shoulder tilt
+  // in one recording. Both share the same direction-routing flow
+  // and the analyser parameterises which formula + detector to
+  // use internally.
+  if (
+    bodyPart === "neck" &&
+    (movement === "flexion_extension" || movement === "lateral_flexion")
+  ) {
     return analyzeMergedNeckVideo({
       file,
+      movement,
       onProgress,
     });
   }
@@ -1254,20 +1260,25 @@ async function analyzeMergedKneeVideo(
 
 interface MergedNeckOpts {
   file: File;
+  movement: "flexion_extension" | "lateral_flexion";
   onProgress?: (fraction: number) => void;
 }
 
 async function analyzeMergedNeckVideo(
   opts: MergedNeckOpts,
 ): Promise<BiomechDataDTO> {
-  const { file, onProgress } = opts;
-  const movement = "flexion_extension";
+  const { file, movement, onProgress } = opts;
+  const isLateral = movement === "lateral_flexion";
 
   const meta = NECK_MOVEMENTS.find((m) => m.id === movement);
-  const primaryTarget: [number, number] = meta?.target ?? [45, 80];
-  const secondaryTarget: [number, number] = meta?.secondaryTarget ?? [50, 70];
-  const primaryLabel = meta?.primaryLabel ?? "Flexion";
-  const secondaryLabel = meta?.secondaryLabel ?? "Extension";
+  const fallbackPrimaryTarget: [number, number] = isLateral ? [20, 45] : [45, 80];
+  const fallbackSecondaryTarget: [number, number] = isLateral ? [20, 45] : [50, 70];
+  const fallbackPrimaryLabel = isLateral ? "Right Lateral Flexion" : "Flexion";
+  const fallbackSecondaryLabel = isLateral ? "Left Lateral Flexion" : "Extension";
+  const primaryTarget: [number, number] = meta?.target ?? fallbackPrimaryTarget;
+  const secondaryTarget: [number, number] = meta?.secondaryTarget ?? fallbackSecondaryTarget;
+  const primaryLabel = meta?.primaryLabel ?? fallbackPrimaryLabel;
+  const secondaryLabel = meta?.secondaryLabel ?? fallbackSecondaryLabel;
 
   const detector = await getDetector();
 
@@ -1332,7 +1343,10 @@ async function analyzeMergedNeckVideo(
     if (!pose) return;
     const kps = smoother(pose.keypoints);
 
-    const angle = computeNeckAngle("flexion" as NeckMovementId, kps);
+    const angle = computeNeckAngle(
+      (isLateral ? "lateral_flexion" : "flexion") as NeckMovementId,
+      kps,
+    );
     if (angle === null || isNaN(angle)) return;
     validFrames += 1;
 
@@ -1342,15 +1356,30 @@ async function analyzeMergedNeckVideo(
       neutralUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
     }
 
-    const dir = detectNeckFlexExtDirection(kps);
-    if (!dir) return;
+    // Direction routing — flex/ext uses sagittal detector,
+    // lateral uses coronal-plane detector. Both return "primary"
+    // (positive direction) or "secondary" (negative); either may
+    // also return null when the magnitude is inside the deadband.
+    let primaryHit: boolean;
+    let secondaryHit: boolean;
+    if (isLateral) {
+      const lat = detectNeckLateralDirection(kps);
+      if (!lat) return;
+      primaryHit = lat === "right";
+      secondaryHit = lat === "left";
+    } else {
+      const fe = detectNeckFlexExtDirection(kps);
+      if (!fe) return;
+      primaryHit = fe === "flexion";
+      secondaryHit = fe === "extension";
+    }
 
-    if (dir === "flexion") {
+    if (primaryHit) {
       if (peakPrimarySigned === null || absA > Math.abs(peakPrimarySigned)) {
         peakPrimarySigned = angle;
         peakPrimaryUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
       }
-    } else {
+    } else if (secondaryHit) {
       if (peakSecondarySigned === null || absA > Math.abs(peakSecondarySigned)) {
         peakSecondarySigned = angle;
         peakSecondaryUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);

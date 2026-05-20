@@ -20,6 +20,7 @@ import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
 import {
   captureNeckRotationBaseline,
   detectNeckFlexExtDirection,
+  detectNeckLateralDirection,
   isStableFacingForward,
   type NeckRotationCalibration,
 } from "@/lib/biomech/neck";
@@ -265,12 +266,15 @@ export function LiveAssessment({
     !!merged && bodyPart === "knee" && movementId === "flexion_extension";
   const isMergedNeckFE =
     !!merged && bodyPart === "neck" && movementId === "flexion_extension";
+  const isMergedNeckLateral =
+    !!merged && bodyPart === "neck" && movementId === "lateral_flexion";
   const isMergedMovement =
     isMergedShoulderRotation ||
     isMergedShoulderAbAd ||
     isMergedShoulderFlexExt ||
     isMergedKneeFE ||
-    isMergedNeckFE;
+    isMergedNeckFE ||
+    isMergedNeckLateral;
 
   const stateRef = useRef({
     current: null as number | null,
@@ -446,7 +450,8 @@ export function LiveAssessment({
       isMergedShoulderRotation ||
       isMergedShoulderAbAd ||
       isMergedShoulderFlexExt ||
-      isMergedNeckFE
+      isMergedNeckFE ||
+      isMergedNeckLateral
     ) {
       const kpsForDir: Keypoint[] = data.landmarks.map((l) => ({
         x: l.x,
@@ -471,6 +476,10 @@ export function LiveAssessment({
         const fe = detectNeckFlexExtDirection(kpsForDir);
         if (fe === "flexion") dir = "primary";
         else if (fe === "extension") dir = "secondary";
+      } else if (isMergedNeckLateral) {
+        const lat = detectNeckLateralDirection(kpsForDir);
+        if (lat === "right") dir = "primary";
+        else if (lat === "left") dir = "secondary";
       }
       s.currentDirection = dir;
       if (!dir) return; // deadband — show Current but don't update peaks
@@ -689,6 +698,7 @@ export function LiveAssessment({
     isMergedShoulderFlexExt,
     isMergedKneeFE,
     isMergedNeckFE,
+    isMergedNeckLateral,
   ]);
 
   // Clears every per-trial peak-tracking field on the state ref —
