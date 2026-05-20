@@ -52,7 +52,22 @@ export const NECK_MOVEMENTS: NeckMovement[] = [
     secondaryLabel: "Extension",
     secondaryTarget: [50, 70],
   },
-  { id: "lateral_flexion", label: "Lateral Flexion", description: "Tilt the ear toward either shoulder",   target: [20, 45] },
+  // Lateral flexion is also a merged test — patient tilts head
+  // toward each shoulder in turn, and the report captures the peak
+  // on both sides plus a neutral upright thumbnail. Direction is
+  // detected from the sign of the neck-vs-vertical angle (signed
+  // value, not absolute).
+  {
+    id: "lateral_flexion",
+    label: "Lateral Flexion",
+    description:
+      "Tilt the head sideways toward each shoulder in turn. One recording captures the peak tilt on both sides.",
+    target: [20, 45],
+    merged: true,
+    primaryLabel: "Right Lateral Flexion",
+    secondaryLabel: "Left Lateral Flexion",
+    secondaryTarget: [20, 45],
+  },
   { id: "rotation",        label: "Rotation",        description: "Turn the head to either side",            target: [70, 90] },
   // Legacy single-direction entries — kept so saved reports
   // referring to them still resolve labels + targets, but hidden
@@ -134,12 +149,14 @@ export function computeNeckAngle(
   if (movement === "lateral_flexion") {
     // Lateral flexion stays on the cervical-spine formula — the
     // ear→nose approach only measures sagittal (forward/back) tilt.
+    // Returns the SIGNED angle (not absolute) so the merged-test
+    // direction routing can tell left tilt from right tilt by sign;
+    // peak tracking elsewhere takes Math.abs when displaying.
     const neckVecX = earMidX - shldrMidX;
     const neckVecY = earMidY - shldrMidY;
     const verticalX = 0;
     const verticalY = -1;
-    const raw = angleBetween(verticalX, verticalY, neckVecX, neckVecY);
-    return Math.abs(raw);
+    return angleBetween(verticalX, verticalY, neckVecX, neckVecY);
   }
 
   // rotation — nose offset relative to ear midline, ratio × 90°.
@@ -178,6 +195,28 @@ export function detectNeckFlexExtDirection(
   if (angle === null || Number.isNaN(angle)) return null;
   if (Math.abs(angle) < NECK_FLEXEXT_DEADBAND_DEG) return null;
   return angle > 0 ? "flexion" : "extension";
+}
+
+export type NeckLateralDirection = "right" | "left";
+
+/** Detect which side the patient is tilting their head toward
+ *  during a neck lateral flexion test. Uses the SIGN of
+ *  computeNeckAngle("lateral_flexion"). Convention assumes the
+ *  camera view is selfie-mirrored (live mode default): a positive
+ *  signed angle means the ear-midpoint sits right of the
+ *  shoulder-midpoint in the image, which corresponds to the
+ *  patient's LEFT (their left side appears on image-right in a
+ *  mirrored selfie). Reverses for non-mirrored uploaded videos —
+ *  the labels swap but the dual-direction capture still works. */
+export function detectNeckLateralDirection(
+  keypoints: Keypoint[],
+): NeckLateralDirection | null {
+  const angle = computeNeckAngle("lateral_flexion", keypoints);
+  if (angle === null || Number.isNaN(angle)) return null;
+  if (Math.abs(angle) < NECK_FLEXEXT_DEADBAND_DEG) return null;
+  // Negative signed → ear_mid left of shoulder_mid in image →
+  // patient's right side (in mirrored selfie view).
+  return angle < 0 ? "right" : "left";
 }
 
 // ─── Calibrated rotation (baseline-locked) ──────────────────────
