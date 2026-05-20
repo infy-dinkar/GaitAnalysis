@@ -222,48 +222,96 @@ export async function analyzeBiomechVideo(
   let totalFrames = 0;
   let measuredFps = 30;
 
+  // Key-frame screenshot tracking. Even for non-merged
+  // single-direction tests we want the saved report to include
+  // neutral + peak thumbnails (same UX as merged tests). Buffer
+  // canvas locks the analysed frame so the saved screenshot
+  // matches the keypoints that scored it.
+  const compCanvas = document.createElement("canvas");
+  const frameBuffer = document.createElement("canvas");
+  const frameBufferCtx = frameBuffer.getContext("2d");
+  const smoother = createKeypointSmoother();
+  let neutralUrl: string | null = null;
+  let neutralMag = Infinity;
+  let peakUrl: string | null = null;
+  let peakMagSoFar = -Infinity;
+
   // Helper to run one detection on the currently-displayed frame.
   const sideOrRight = side ?? "right";
   const detectCurrentFrame = async (): Promise<number | null> => {
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    if (!vw || !vh || !frameBufferCtx) return null;
+    // Snapshot to buffer BEFORE the async detector call so the
+    // pose and the screenshot both come from the same locked
+    // frame (the video advances during the await otherwise).
+    if (frameBuffer.width !== vw || frameBuffer.height !== vh) {
+      frameBuffer.width = vw;
+      frameBuffer.height = vh;
+    }
+    frameBufferCtx.drawImage(video, 0, 0, vw, vh);
+
+    let poses;
     try {
-      const poses = await detector.estimatePoses(video, {
+      poses = await detector.estimatePoses(frameBuffer, {
         flipHorizontal: false,
       });
-      const pose = poses[0];
-      if (!pose) return null;
-      switch (bodyPart) {
-        case "shoulder":
-          return computeShoulderAngle(
-            movement as ShoulderMovementId,
-            pose.keypoints,
-            sideOrRight,
-          );
-        case "neck":
-          return computeNeckAngle(
-            movement as NeckMovementId,
-            pose.keypoints,
-          );
-        case "knee":
-          return computeKneeAngle(
-            movement as KneeMovementId,
-            pose.keypoints,
-            sideOrRight,
-          );
-        case "hip":
-          return computeHipAngle(
-            movement as HipMovementId,
-            pose.keypoints,
-            sideOrRight,
-          );
-        // NOTE: "ankle" is intentionally absent here — the early
-        // return at the top of analyzeBiomechVideo dispatches ankle
-        // requests to the backend MediaPipe pipeline. TypeScript
-        // therefore narrows `bodyPart` to non-ankle inside this
-        // switch.
-      }
     } catch {
       return null;
     }
+    const pose = poses[0];
+    if (!pose) return null;
+    const kps = smoother(pose.keypoints);
+
+    let angle: number | null = null;
+    switch (bodyPart) {
+      case "shoulder":
+        angle = computeShoulderAngle(
+          movement as ShoulderMovementId,
+          kps,
+          sideOrRight,
+        );
+        break;
+      case "neck":
+        angle = computeNeckAngle(movement as NeckMovementId, kps);
+        break;
+      case "knee":
+        angle = computeKneeAngle(
+          movement as KneeMovementId,
+          kps,
+          sideOrRight,
+        );
+        break;
+      case "hip":
+        angle = computeHipAngle(
+          movement as HipMovementId,
+          kps,
+          sideOrRight,
+        );
+        break;
+      // NOTE: "ankle" is intentionally absent here — the early
+      // return at the top of analyzeBiomechVideo dispatches ankle
+      // requests to the backend MediaPipe pipeline. TypeScript
+      // therefore narrows `bodyPart` to non-ankle inside this
+      // switch.
+    }
+    if (angle === null || Number.isNaN(angle)) return null;
+
+    // Capture neutral (lowest |angle| seen so far) and peak
+    // (highest |angle|). For tests where the magnitude formula is
+    // already direction-symmetric this gives the natural "rest
+    // pose" + "max ROM" thumbnails the report's Key Frames
+    // section renders.
+    const absA = Math.abs(angle);
+    if (absA < neutralMag) {
+      neutralMag = absA;
+      neutralUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
+    }
+    if (absA > peakMagSoFar) {
+      peakMagSoFar = absA;
+      peakUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
+    }
+    return angle;
   };
 
   const supportsRVFC = typeof video.requestVideoFrameCallback === "function";
@@ -386,11 +434,39 @@ export async function analyzeBiomechVideo(
   const target = refRange[1];
   const percentage = target > 0 ? (peakMag / target) * 100 : 0;
 
-  // ── Status classification (mirrors AssessmentReport.classify) ──────
+  // ── Status classification (range-aware to match AssessmentReport.classify) ──
+  const inRange = peakMag >= refRange[0] && peakMag <= refRange[1];
+  const rangeWidth = Math.max(1, refRange[1] - refRange[0]);
+  const distOutside = peakMag < refRange[0]
+    ? refRange[0] - peakMag
+    : peakMag > refRange[1]
+      ? peakMag - refRange[1]
+      : 0;
   let status: "good" | "fair" | "poor";
-  if (percentage >= 90) status = "good";
-  else if (percentage >= 75) status = "fair";
+  if (inRange) status = "good";
+  else if (distOutside / rangeWidth <= 0.30) status = "fair";
   else status = "poor";
+
+  // Assemble neutral + peak key frames (only if we have them).
+  const keyFrames: Array<{
+    label: string;
+    frame_index: number;
+    image_data_url: string;
+  }> = [];
+  if (neutralUrl) {
+    keyFrames.push({
+      label: "Neutral — start",
+      frame_index: 0,
+      image_data_url: neutralUrl,
+    });
+  }
+  if (peakUrl && peakMagSoFar > 0) {
+    keyFrames.push({
+      label: `Peak ${movement.replace(/_/g, " ")} (${peakMag.toFixed(1)}°)`,
+      frame_index: 1,
+      image_data_url: peakUrl,
+    });
+  }
 
   return {
     body_part: bodyPart,
@@ -413,6 +489,7 @@ export async function analyzeBiomechVideo(
       movement,
       side,
     ),
+    key_frames: keyFrames,
   };
 }
 
