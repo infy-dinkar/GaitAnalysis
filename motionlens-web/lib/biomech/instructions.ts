@@ -92,6 +92,14 @@ export const MOVEMENT_INSTRUCTIONS: Record<Key, string[]> = {
     "Hold the furthest comfortable position for 2 seconds.",
     "Slowly bring the head back to facing forward.",
   ],
+  "neck.flexion_extension": [
+    "Sit upright on a chair, turned so the camera sees the SIDE of your head — one ear closer to the camera. Both shoulders should still be in frame.",
+    "Keep your shoulders relaxed and down. Look straight ahead with your chin level — this is the neutral position.",
+    "FLEXION: slowly lower your chin toward your chest as far as comfortable. Move only the head, not the upper back. Hold the lowest comfortable position for ~2 seconds.",
+    "Return the head to neutral (looking straight ahead).",
+    "EXTENSION: slowly tilt your head back to look up at the ceiling. Stop if it feels uncomfortable or causes dizziness. Hold the furthest comfortable position for ~2 seconds.",
+    "Return the head to neutral. Click Show Analysis — the report shows separate Flexion and Extension peak values plus screenshots of both moments.",
+  ],
   "neck.lateral_flexion": [
     "Sit upright on a chair, facing the camera straight on so it can see both ears and both shoulders.",
     "Keep your shoulders level and relaxed — important: do NOT lift your shoulder up toward your ear. The ear comes to the shoulder, not the other way around.",

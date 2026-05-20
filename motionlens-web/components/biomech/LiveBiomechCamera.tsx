@@ -435,6 +435,17 @@ export function LiveBiomechCamera({
               }
               break;
             case "neck":
+              // Merged flexion + extension uses the signed neck-vs-
+              // vertical angle (same formula as legacy "flexion").
+              // The parent reads its absolute value for peak magnitude
+              // and routes the slot via detectNeckFlexExtDirection.
+              if (movement === "flexion_extension") {
+                angle = computeNeckAngle(
+                  "flexion" as NeckMovementId,
+                  smoothedKps,
+                );
+                break;
+              }
               // Rotation: prefer the calibrated arcsin formula once
               // the baseline has been locked. Until then, fall back
               // to the legacy nose-offset formula so the camera still

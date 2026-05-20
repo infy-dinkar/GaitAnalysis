@@ -8,14 +8,11 @@ import { Section } from "@/components/ui/Section";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { LiveAssessment } from "@/components/biomech/LiveAssessment";
-import {
-  NECK_MOVEMENTS,
-  type NeckMovementId,
-} from "@/lib/biomech/neck";
+import { NECK_MOVEMENTS } from "@/lib/biomech/neck";
 
 function NeckLiveInner() {
   const params = useSearchParams();
-  const movementId = (params.get("movement") as NeckMovementId) || "flexion";
+  const movementId = params.get("movement") || "flexion_extension";
   const movement = NECK_MOVEMENTS.find((m) => m.id === movementId) ?? NECK_MOVEMENTS[0];
 
   return (
@@ -25,6 +22,10 @@ function NeckLiveInner() {
       movementLabel={`Neck · ${movement.label}`}
       description={movement.description}
       target={movement.target}
+      merged={movement.merged}
+      primaryLabel={movement.primaryLabel}
+      secondaryLabel={movement.secondaryLabel}
+      secondaryTarget={movement.secondaryTarget}
     />
   );
 }

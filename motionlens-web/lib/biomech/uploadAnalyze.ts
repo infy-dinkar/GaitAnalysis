@@ -37,6 +37,7 @@ import {
 } from "@/lib/biomech/shoulder";
 import {
   computeNeckAngle,
+  detectNeckFlexExtDirection,
   NECK_MOVEMENTS,
   type NeckMovementId,
 } from "@/lib/biomech/neck";
@@ -171,6 +172,19 @@ export async function analyzeBiomechVideo(
     return analyzeMergedKneeVideo({
       file,
       side: side ?? "right",
+      onProgress,
+    });
+  }
+
+  // ── Merged neck flexion + extension → direction-aware analyser ──
+  // Neck "flexion_extension" captures forward tilt (chin to chest)
+  // and backward tilt (head back) in one recording. Direction is
+  // detected per frame from the signed neck-vs-vertical angle
+  // normalised by the patient's facing direction (nose offset from
+  // ear midline in the lateral view).
+  if (bodyPart === "neck" && movement === "flexion_extension") {
+    return analyzeMergedNeckVideo({
+      file,
       onProgress,
     });
   }
@@ -1148,6 +1162,250 @@ async function analyzeMergedKneeVideo(
     key_frames: keyFrames,
     secondary_peak_angle: peakExt,
     secondary_peak_magnitude: extMag,
+    secondary_reference_range: secondaryTarget,
+    primary_label: primaryLabel,
+    secondary_label: secondaryLabel,
+  };
+}
+
+// ─── Merged neck video analyser ─────────────────────────────────
+// Neck "flexion_extension" — captures forward tilt (flexion) and
+// backward tilt (extension) in one lateral-view recording.
+// Magnitude comes from computeNeckAngle (signed angle between
+// vertical and the shoulder-to-ear vector); direction is detected
+// per frame via detectNeckFlexExtDirection.
+
+interface MergedNeckOpts {
+  file: File;
+  onProgress?: (fraction: number) => void;
+}
+
+async function analyzeMergedNeckVideo(
+  opts: MergedNeckOpts,
+): Promise<BiomechDataDTO> {
+  const { file, onProgress } = opts;
+  const movement = "flexion_extension";
+
+  const meta = NECK_MOVEMENTS.find((m) => m.id === movement);
+  const primaryTarget: [number, number] = meta?.target ?? [45, 80];
+  const secondaryTarget: [number, number] = meta?.secondaryTarget ?? [50, 70];
+  const primaryLabel = meta?.primaryLabel ?? "Flexion";
+  const secondaryLabel = meta?.secondaryLabel ?? "Extension";
+
+  const detector = await getDetector();
+
+  const url = URL.createObjectURL(file);
+  const video = document.createElement("video");
+  video.src = url;
+  video.muted = true;
+  video.playsInline = true;
+  video.crossOrigin = "anonymous";
+
+  await new Promise<void>((resolve, reject) => {
+    video.onloadedmetadata = () => resolve();
+    video.onerror = () =>
+      reject(new Error("Could not load video. Format may not be supported."));
+  });
+
+  video.currentTime = 0;
+  await new Promise<void>((resolve) => {
+    video.onseeked = () => resolve();
+  });
+
+  const duration = video.duration;
+  if (!isFinite(duration) || duration <= 0) {
+    URL.revokeObjectURL(url);
+    throw new Error("Video duration is invalid.");
+  }
+
+  // Per-trial state.
+  let peakPrimarySigned: number | null = null;
+  let peakSecondarySigned: number | null = null;
+  let neutralUrl: string | null = null;
+  let neutralMag = Infinity;
+  let peakPrimaryUrl: string | null = null;
+  let peakSecondaryUrl: string | null = null;
+  let totalFrames = 0;
+  let validFrames = 0;
+  let measuredFps = 30;
+
+  const compCanvas = document.createElement("canvas");
+  const frameBuffer = document.createElement("canvas");
+  const frameBufferCtx = frameBuffer.getContext("2d");
+  const smoother = createKeypointSmoother();
+
+  const processCurrentFrame = async (): Promise<void> => {
+    totalFrames += 1;
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    if (!vw || !vh || !frameBufferCtx) return;
+    if (frameBuffer.width !== vw || frameBuffer.height !== vh) {
+      frameBuffer.width = vw;
+      frameBuffer.height = vh;
+    }
+    frameBufferCtx.drawImage(video, 0, 0, vw, vh);
+
+    let poses;
+    try {
+      poses = await detector.estimatePoses(frameBuffer, { flipHorizontal: false });
+    } catch {
+      return;
+    }
+    const pose = poses[0];
+    if (!pose) return;
+    const kps = smoother(pose.keypoints);
+
+    const angle = computeNeckAngle("flexion" as NeckMovementId, kps);
+    if (angle === null || isNaN(angle)) return;
+    validFrames += 1;
+
+    const absA = Math.abs(angle);
+    if (absA < neutralMag) {
+      neutralMag = absA;
+      neutralUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
+    }
+
+    const dir = detectNeckFlexExtDirection(kps);
+    if (!dir) return;
+
+    if (dir === "flexion") {
+      if (peakPrimarySigned === null || absA > Math.abs(peakPrimarySigned)) {
+        peakPrimarySigned = angle;
+        peakPrimaryUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
+      }
+    } else {
+      if (peakSecondarySigned === null || absA > Math.abs(peakSecondarySigned)) {
+        peakSecondarySigned = angle;
+        peakSecondaryUrl = captureCompositeFrame(compCanvas, frameBuffer, kps);
+      }
+    }
+  };
+
+  const supportsRVFC = typeof video.requestVideoFrameCallback === "function";
+  if (supportsRVFC) {
+    video.playbackRate = 4;
+    let firstMediaTime: number | null = null;
+    let lastMediaTime = 0;
+    await new Promise<void>((resolve, reject) => {
+      let resolved = false;
+      let stallTimer: ReturnType<typeof setTimeout> | null = null;
+      const STALL_MS = 1500;
+      const finish = () => {
+        if (resolved) return;
+        resolved = true;
+        if (stallTimer) clearTimeout(stallTimer);
+        const span = lastMediaTime - (firstMediaTime ?? 0);
+        if (span > 0) measuredFps = totalFrames / span;
+        resolve();
+      };
+      const armStall = () => {
+        if (stallTimer) clearTimeout(stallTimer);
+        stallTimer = setTimeout(finish, STALL_MS);
+      };
+      const onFrame: VideoFrameRequestCallback = async (_now, metadata) => {
+        if (resolved) return;
+        if (firstMediaTime === null) firstMediaTime = metadata.mediaTime;
+        lastMediaTime = metadata.mediaTime;
+        await processCurrentFrame();
+        onProgress?.(Math.min(1, metadata.mediaTime / duration));
+        const nearEnd =
+          metadata.mediaTime >= Math.max(duration - 0.1, duration * 0.98);
+        if (video.ended || nearEnd) {
+          finish();
+          return;
+        }
+        armStall();
+        video.requestVideoFrameCallback(onFrame);
+      };
+      video.addEventListener("ended", finish, { once: true });
+      armStall();
+      video.requestVideoFrameCallback(onFrame);
+      video.play().catch((e) => {
+        if (!resolved) reject(e);
+      });
+    });
+    video.pause();
+  } else {
+    measuredFps = SAMPLE_FPS_FALLBACK;
+    const sampleCount = Math.max(1, Math.floor(duration * SAMPLE_FPS_FALLBACK));
+    for (let i = 0; i < sampleCount; i++) {
+      const t = i / SAMPLE_FPS_FALLBACK;
+      video.currentTime = t;
+      await new Promise<void>((resolve) => {
+        video.onseeked = () => resolve();
+      });
+      await processCurrentFrame();
+      onProgress?.((i + 1) / sampleCount);
+      if (i % 4 === 0) await new Promise<void>((r) => setTimeout(r, 0));
+    }
+  }
+
+  URL.revokeObjectURL(url);
+
+  const peakAMag = peakPrimarySigned !== null ? Math.abs(peakPrimarySigned) : 0;
+  const peakBMag = peakSecondarySigned !== null ? Math.abs(peakSecondarySigned) : 0;
+  const targetUpper = primaryTarget[1];
+  const percentage = targetUpper > 0 ? (peakAMag / targetUpper) * 100 : 0;
+  const inRange = (v: number, r: [number, number]) => v >= r[0] && v <= r[1];
+  const status: "good" | "fair" | "poor" = inRange(peakAMag, primaryTarget)
+    ? "good"
+    : Math.min(
+        Math.abs(peakAMag - primaryTarget[0]),
+        Math.abs(peakAMag - primaryTarget[1]),
+      ) /
+        Math.max(1, primaryTarget[1] - primaryTarget[0]) <=
+      0.30
+      ? "fair"
+      : "poor";
+
+  const keyFrames: { label: string; frame_index: number; image_data_url: string }[] = [];
+  if (neutralUrl) {
+    keyFrames.push({
+      label: "Neutral — start",
+      frame_index: 0,
+      image_data_url: neutralUrl,
+    });
+  }
+  if (peakPrimaryUrl && peakAMag > 0) {
+    keyFrames.push({
+      label: `${primaryLabel} (${peakAMag.toFixed(1)}°)`,
+      frame_index: 1,
+      image_data_url: peakPrimaryUrl,
+    });
+  }
+  if (peakSecondaryUrl && peakBMag > 0) {
+    keyFrames.push({
+      label: `${secondaryLabel} (${peakBMag.toFixed(1)}°)`,
+      frame_index: 2,
+      image_data_url: peakSecondaryUrl,
+    });
+  }
+
+  const interpretation =
+    `${primaryLabel} measured ${peakAMag.toFixed(1)}°` +
+    ` against the ${primaryTarget[0]}°–${primaryTarget[1]}° normal range. ` +
+    (peakBMag > 0
+      ? `${secondaryLabel} measured ${peakBMag.toFixed(1)}°` +
+        ` against the ${secondaryTarget[0]}°–${secondaryTarget[1]}° normal range.`
+      : `${secondaryLabel} direction was not detected in this recording.`);
+
+  return {
+    body_part: "neck",
+    movement,
+    side: null,
+    peak_angle: peakPrimarySigned,
+    peak_magnitude: peakAMag,
+    reference_range: primaryTarget,
+    target: targetUpper,
+    percentage,
+    status,
+    valid_frames: validFrames,
+    total_frames: totalFrames,
+    fps: measuredFps,
+    interpretation,
+    key_frames: keyFrames,
+    secondary_peak_angle: peakSecondarySigned,
+    secondary_peak_magnitude: peakBMag,
     secondary_reference_range: secondaryTarget,
     primary_label: primaryLabel,
     secondary_label: secondaryLabel,
