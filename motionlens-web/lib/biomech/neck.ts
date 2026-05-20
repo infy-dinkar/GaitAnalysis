@@ -97,15 +97,49 @@ export function computeNeckAngle(
   if (
     movement === "flexion" ||
     movement === "extension" ||
-    movement === "lateral_flexion"
+    movement === "flexion_extension"
   ) {
-    // angle of (shoulder_mid → ear_mid) from upward vertical
+    // Head-orientation angle from the ear→nose vector. The legacy
+    // shoulder_mid → ear_mid formula only captured the CERVICAL
+    // spine portion of flex/ext (~25° max anatomically), but
+    // clinically full neck flexion (45-80°) and extension (50-70°)
+    // include the atlanto-occipital joint + head-on-neck pitch as
+    // well. Tracking the face direction via ear→nose captures the
+    // combined motion.
+    //
+    // Sign convention:
+    //   positive = nose pointing below ear (flexion / chin-down)
+    //   negative = nose pointing above ear (extension / head-back)
+    //
+    // |faceVecX| in the atan2 denominator makes the sign depend only
+    // on the vertical component — so the same formula works for
+    // patients facing image-left OR image-right (the lateral
+    // orientation cancels out).
+    //
+    // 10° baseline subtraction approximates the typical neutral
+    // pose where the nose sits slightly below the ear-axis (the
+    // ear-tragus to nose-tip line points roughly horizontal but
+    // with a small downward bias). Patients with a flatter face
+    // profile may read slightly higher, those with a longer nose
+    // slightly lower — but the per-frame variation from this is
+    // small compared to actual flex/ext motion.
+    const faceVecX = nose.x - earMidX;
+    const faceVecY = nose.y - earMidY;
+    if (Math.hypot(faceVecX, faceVecY) < 1e-4) return null;
+    const tiltDeg = (Math.atan2(faceVecY, Math.abs(faceVecX)) * 180) / Math.PI;
+    const NEUTRAL_TILT_BASELINE = 10;
+    return tiltDeg - NEUTRAL_TILT_BASELINE;
+  }
+
+  if (movement === "lateral_flexion") {
+    // Lateral flexion stays on the cervical-spine formula — the
+    // ear→nose approach only measures sagittal (forward/back) tilt.
     const neckVecX = earMidX - shldrMidX;
     const neckVecY = earMidY - shldrMidY;
     const verticalX = 0;
     const verticalY = -1;
     const raw = angleBetween(verticalX, verticalY, neckVecX, neckVecY);
-    return movement === "lateral_flexion" ? Math.abs(raw) : raw;
+    return Math.abs(raw);
   }
 
   // rotation — nose offset relative to ear midline, ratio × 90°.
@@ -131,53 +165,19 @@ export type NeckFlexExtDirection = "flexion" | "extension";
 const NECK_FLEXEXT_DEADBAND_DEG = 5;
 
 /** Detect neck FLEXION (chin to chest) vs EXTENSION (head back) from
- *  the signed angle between vertical and the neck vector
- *  (shoulder_mid → ear_mid), normalised by the patient's facing
- *  direction (inferred from the nose's offset relative to the ear
- *  midline). The test runs in lateral view, so nose.x sits in front
- *  of the ear axis; sign(nose.x - earMidX) cleanly distinguishes
- *  image-left-facing from image-right-facing setups. */
+ *  the sign of the ear→nose tilt angle. Delegates to computeNeckAngle
+ *  so the direction always matches the magnitude the rest of the
+ *  pipeline displays. The angle's sign is already symmetric for both
+ *  lateral orientations (the formula uses |faceVecX| in its atan2
+ *  denominator), so no extra facing-direction normalisation is
+ *  needed here. */
 export function detectNeckFlexExtDirection(
   keypoints: Keypoint[],
 ): NeckFlexExtDirection | null {
-  const nose = keypoints[LM.NOSE];
-  const lEar = keypoints[LM.LEFT_EAR];
-  const rEar = keypoints[LM.RIGHT_EAR];
-  const lSh  = keypoints[LM.LEFT_SHOULDER];
-  const rSh  = keypoints[LM.RIGHT_SHOULDER];
-  for (const k of [nose, lEar, rEar, lSh, rSh]) {
-    if (!k || (k.score ?? 0) < VIS_THRESHOLD) return null;
-  }
-
-  const earMidX = (lEar.x + rEar.x) / 2;
-  const earMidY = (lEar.y + rEar.y) / 2;
-  const shldrMidX = (lSh.x + rSh.x) / 2;
-  const shldrMidY = (lSh.y + rSh.y) / 2;
-  const earWidth = Math.abs(lEar.x - rEar.x);
-  if (earWidth < 1e-4) return null;
-
-  // Patient's facing direction in image: nose offset from ear axis.
-  // In a near-lateral pose the nose sits in front of the ear axis,
-  // so the sign tells which lateral orientation is being recorded.
-  // If the offset is too small the patient is in a near-frontal
-  // view and sagittal flexion/extension can't be measured reliably.
-  const facingDx = nose.x - earMidX;
-  if (Math.abs(facingDx) / earWidth < 0.10) return null;
-  const facingSign = Math.sign(facingDx);
-
-  // Signed angle from vertical (0, -1) to the neck vector. Positive
-  // value on the unadjusted reading corresponds to "head forward"
-  // for a patient facing image-right; multiplying by facingSign
-  // normalises to "positive = flexion" regardless of orientation.
-  const neckX = earMidX - shldrMidX;
-  const neckY = earMidY - shldrMidY;
-  const cross = 0 * neckY - (-1) * neckX; // = neckX
-  const dot = 0 * neckX + (-1) * neckY;   // = -neckY
-  const signedAngle = (Math.atan2(cross, dot) * 180) / Math.PI;
-  const adjusted = signedAngle * facingSign;
-
-  if (Math.abs(adjusted) < NECK_FLEXEXT_DEADBAND_DEG) return null;
-  return adjusted > 0 ? "flexion" : "extension";
+  const angle = computeNeckAngle("flexion", keypoints);
+  if (angle === null || Number.isNaN(angle)) return null;
+  if (Math.abs(angle) < NECK_FLEXEXT_DEADBAND_DEG) return null;
+  return angle > 0 ? "flexion" : "extension";
 }
 
 // ─── Calibrated rotation (baseline-locked) ──────────────────────
