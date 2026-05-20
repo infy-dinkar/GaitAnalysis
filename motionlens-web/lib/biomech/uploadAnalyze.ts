@@ -73,54 +73,54 @@ interface AnalyzeOpts {
 
 const SAMPLE_FPS_FALLBACK = 15; // seek-mode sample rate (10-sec video → 150 samples)
 
-/** Per-keypoint EMA smoothing factor. Same value LiveBiomechCamera
- *  uses in live mode (0.4). Lower = heavier smoothing, more lag;
- *  higher = lighter, more per-frame jitter. 0.4 is the live-tested
- *  sweet spot that visibly steadies the skeleton without feeling
- *  laggy at 30-60 FPS. */
-const SMOOTH_ALPHA = 0.4;
+/** Score-sustenance decay per frame. The smoother below keeps the
+ *  higher of (current raw score) and (previous smoothed score *
+ *  this factor). Closer to 1 = visibility holds longer through
+ *  occlusion blips; closer to 0 = score follows raw more tightly.
+ *  0.9 sustains a brief 1-2 frame visibility drop without making
+ *  long-term occlusions look indefinitely visible. */
+const SCORE_DECAY = 0.9;
 
-/** Build a stateful keypoint-smoothing function for a single video
- *  analysis pass. Returns a callback that takes raw MoveNet
- *  keypoints and returns the EMA-smoothed version. Carries an
- *  internal buffer of the running smoothed values across frames.
+/** Build a stateful keypoint helper for one video analysis pass.
+ *  The output preserves RAW positions (no position-smoothing lag)
+ *  but applies an EMA-max on confidence scores so brief
+ *  one-or-two-frame visibility drops don't reject peak-ROM frames.
  *
- *  Live capture (LiveBiomechCamera) does this in its rAF loop and
- *  feeds smoothed keypoints into every downstream math (angle
- *  compute, direction detection). Upload mode used to feed raw
- *  per-frame keypoints straight through, which made profile-view
- *  measurements (knee flexion test, shoulder flex/ext) noticeably
- *  noisier — single-frame ankle / wrist visibility drops at peak
- *  ROM caused the formula to return null and the peak to be
- *  recorded against a lower mid-motion value. Smoothing in upload
- *  mode brings the two pipelines to byte-similar behaviour. */
+ *  Why not EMA-smooth positions like LiveBiomechCamera does?
+ *  Smoothing positions inevitably lags brief peaks — a knee
+ *  flexion that's only at maximum bend for a few frames gets
+ *  damped to a lower reading, and the upload report shows e.g. 61°
+ *  for a video where the patient genuinely reaches 90°. Live mode
+ *  compensates for this lag with a held-candidate confirmation
+ *  algorithm that survives brief noise frames; the upload pipeline
+ *  uses simple min/max tracking, so it needs the true per-frame
+ *  positions to find the real peak. The score side of the smoother
+ *  still helps — without it, single-frame ankle / wrist occlusions
+ *  rejected legitimate peak frames as low-visibility. */
 function createKeypointSmoother(): (raw: Keypoint[]) => Keypoint[] {
-  let buffer: Keypoint[] | null = null;
+  let scoreBuffer: number[] | null = null;
   return (raw: Keypoint[]): Keypoint[] => {
-    if (!buffer || buffer.length !== raw.length) {
+    if (!scoreBuffer || scoreBuffer.length !== raw.length) {
       // First frame, or detector returned a different keypoint
-      // count — re-seed from the current frame.
-      buffer = raw.map((k) => ({ ...k }));
-      return buffer;
+      // count — seed scores and pass positions through.
+      scoreBuffer = raw.map((k) => k.score ?? 0);
+      return raw;
     }
+    const out: Keypoint[] = new Array(raw.length);
     for (let i = 0; i < raw.length; i++) {
       const r = raw[i];
-      const b = buffer[i];
-      b.x = SMOOTH_ALPHA * r.x + (1 - SMOOTH_ALPHA) * b.x;
-      b.y = SMOOTH_ALPHA * r.y + (1 - SMOOTH_ALPHA) * b.y;
-      // Score: keep the higher of (current frame's raw score) and
-      // (slightly-decayed smoothed score). This is the key trick
-      // for sustaining visibility through occlusion blips: when a
-      // single frame's keypoint score collapses (the patient's
-      // ankle disappears behind the standing leg for one frame
-      // during knee flexion), the smoothed score holds steady so
-      // the formula doesn't return null and the peak measurement
-      // doesn't get lost.
-      const decayed = (b.score ?? 0) * 0.9;
+      const decayed = scoreBuffer[i] * SCORE_DECAY;
       const rawScore = r.score ?? 0;
-      b.score = Math.max(rawScore, decayed);
+      const newScore = Math.max(rawScore, decayed);
+      scoreBuffer[i] = newScore;
+      out[i] = {
+        x: r.x,
+        y: r.y,
+        score: newScore,
+        name: r.name,
+      };
     }
-    return buffer;
+    return out;
   };
 }
 
