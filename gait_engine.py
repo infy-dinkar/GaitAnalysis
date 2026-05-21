@@ -55,6 +55,15 @@ warnings.filterwarnings("ignore")
 # ──────────────────────────────────────────────
 LM = {
     "left_shoulder":  11, "right_shoulder": 12,
+    # Arm landmarks (elbow + wrist) — not consumed by gait math but
+    # extracted + smoothed alongside everything else so the shared
+    # extract_poses + build_time_series pipeline is reusable by the
+    # backend shoulder analyser (shoulder_engine.analyze_shoulder).
+    # Adding them here is a no-op for gait (LM-driven gait helpers
+    # explicitly index leg keypoints) and saves having to write a
+    # parallel pose-extraction path just for the arm.
+    "left_elbow":     13, "right_elbow":    14,
+    "left_wrist":     15, "right_wrist":    16,
     "left_hip":       23, "right_hip":      24,
     "left_knee":      25, "right_knee":     26,
     "left_ankle":     27, "right_ankle":    28,
@@ -74,6 +83,21 @@ def extract_poses(video_path: str, pose_options, progress_callback=None):
     pose_model = mp.tasks.vision.PoseLandmarker.create_from_options(pose_options)
 
     cap = cv2.VideoCapture(video_path)
+    # Honour the video's stored rotation metadata (phones record
+    # portrait-mode clips as landscape pixel data + a "rotate 90°"
+    # flag — HTML <video> respects the flag, raw cv2 reads do not).
+    # Without this, MediaPipe receives sideways frames for portrait
+    # uploads, and the saved key-frame screenshots come out rotated
+    # in the report. Setting AUTO=1 is a no-op for videos that have
+    # no rotation metadata (the gait / ankle / TUG landscape
+    # recordings), so this is safe for the whole pipeline.
+    try:
+        cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1.0)
+    except Exception:
+        # Older OpenCV builds don't expose the property; the frames
+        # will just be served in their raw orientation and the
+        # downstream report may render rotated for portrait clips.
+        pass
     # FPS is validated upstream in api.analyze_gait (must be >= 24 FPS).
     # The previous `or 30.0` silent fallback masked broken clips and
     # produced wrong cadence/step-time metrics — removed.

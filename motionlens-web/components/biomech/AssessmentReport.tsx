@@ -109,42 +109,55 @@ function getOrCreatePatientId(): string {
   }
 }
 
-/** Range-aware classification used across body parts.
+/** Asymmetric range-aware classification used across body parts.
  *
- *  Previous version measured "% of upper bound" which only worked for
- *  movements where higher is better (shoulder flexion, knee flexion,
- *  etc.). It produced clinically wrong labels in two cases:
+ *  Rules:
+ *    • In range                        → good
+ *    • Below range by ≤ 30% of width   → fair  (mild restriction)
+ *    • Below range by > 30% of width   → poor  (notable restriction)
+ *    • Above range by ≤ 30% of width   → good  (normal variation;
+ *                                                exceeding the spec
+ *                                                upper bound by a
+ *                                                little is not an
+ *                                                impairment)
+ *    • Above range by 30-100% of width → fair  (notable hypermobility;
+ *                                                worth flagging but
+ *                                                rarely problematic)
+ *    • Above range by > 100% of width  → poor  (anatomically suspect;
+ *                                                likely a sign-flip /
+ *                                                keypoint artefact)
  *
- *    1. Knee extension's secondary target [0, 5]: 2° residual flexion
- *       is in range (good) but `(2/5)*100 = 40%` => previously "poor".
- *    2. Mid-range shoulder rotation (e.g. 75° vs [70, 90]): in range
- *       but `(75/90)*100 = 83%` => previously "fair" instead of "good".
+ *  Why asymmetric: ROM screening's clinical worry is RESTRICTION
+ *  (below range), not having more range than average (above range).
+ *  A patient with 70° shoulder extension when the spec range is
+ *  [45, 60] has BETTER mobility than the population norm — calling
+ *  that "poor" inverts the clinical interpretation. Below-range gets
+ *  the strict thresholds; above-range gets graceful handling that
+ *  only flips to poor when the value is so far past the spec it's
+ *  almost certainly a measurement artefact.
  *
- *  Now: in-range = "good"; outside the range, fair/poor scale with
- *  how far away the value is from the nearest range edge, relative to
- *  the range width. Works for both higher-is-better and lower-is-
- *  better tests because the criterion is just "land inside the
- *  clinical normal band". `pct` is kept in the legacy 0-100 scale
- *  for backwards compatibility with the interpretation sentence. */
+ *  `pct` stays the simple measured/upper-bound legacy percentage so
+ *  the interpretation sentence reads consistently with prior reports. */
 function classify(measured: number, target: [number, number]) {
   const [lo, hi] = target;
   if (hi <= 0 && lo <= 0) return { status: "poor" as const, pct: 0 };
-  // Legacy-style percentage (kept for the interpretation line).
   const denom = hi > 0 ? hi : 1;
-  const legacyPct = (measured / denom) * 100;
+  const legacyPct = Math.round((measured / denom) * 100);
   if (measured >= lo && measured <= hi) {
-    return { status: "good" as const, pct: Math.round(legacyPct) };
+    return { status: "good" as const, pct: legacyPct };
   }
-  // Outside the range — distance to nearest edge, scaled by the
-  // range's own width so "fair" is "within ~30% of the band width
-  // outside it".
   const rangeWidth = Math.max(1, hi - lo);
-  const dist = measured < lo ? lo - measured : measured - hi;
-  const distFrac = dist / rangeWidth;
-  if (distFrac <= 0.30) {
-    return { status: "fair" as const, pct: Math.round(legacyPct) };
+  if (measured < lo) {
+    const distFrac = (lo - measured) / rangeWidth;
+    return distFrac <= 0.30
+      ? { status: "fair" as const, pct: legacyPct }
+      : { status: "poor" as const, pct: legacyPct };
   }
-  return { status: "poor" as const, pct: Math.round(legacyPct) };
+  // measured > hi
+  const distFrac = (measured - hi) / rangeWidth;
+  if (distFrac <= 0.30) return { status: "good" as const, pct: legacyPct };
+  if (distFrac <= 1.00) return { status: "fair" as const, pct: legacyPct };
+  return { status: "poor" as const, pct: legacyPct };
 }
 
 export function AssessmentReport({

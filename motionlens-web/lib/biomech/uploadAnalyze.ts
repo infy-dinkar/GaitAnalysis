@@ -448,18 +448,23 @@ export async function analyzeBiomechVideo(
   const target = refRange[1];
   const percentage = target > 0 ? (peakMag / target) * 100 : 0;
 
-  // ── Status classification (range-aware to match AssessmentReport.classify) ──
-  const inRange = peakMag >= refRange[0] && peakMag <= refRange[1];
-  const rangeWidth = Math.max(1, refRange[1] - refRange[0]);
-  const distOutside = peakMag < refRange[0]
-    ? refRange[0] - peakMag
-    : peakMag > refRange[1]
-      ? peakMag - refRange[1]
-      : 0;
+  // ── Status classification (asymmetric, matches AssessmentReport.classify) ──
+  // Exceeding the normal range upper bound is not impairment for
+  // ROM screening, so above-range gets graceful treatment; below-
+  // range (restricted ROM) keeps the strict thresholds.
   let status: "good" | "fair" | "poor";
-  if (inRange) status = "good";
-  else if (distOutside / rangeWidth <= 0.30) status = "fair";
-  else status = "poor";
+  const rangeWidth = Math.max(1, refRange[1] - refRange[0]);
+  if (peakMag >= refRange[0] && peakMag <= refRange[1]) {
+    status = "good";
+  } else if (peakMag < refRange[0]) {
+    const distFrac = (refRange[0] - peakMag) / rangeWidth;
+    status = distFrac <= 0.30 ? "fair" : "poor";
+  } else {
+    const distFrac = (peakMag - refRange[1]) / rangeWidth;
+    if (distFrac <= 0.30) status = "good";
+    else if (distFrac <= 1.0) status = "fair";
+    else status = "poor";
+  }
 
   // Assemble neutral + peak key frames (only if we have them).
   const keyFrames: Array<{
@@ -1191,19 +1196,20 @@ async function analyzeMergedKneeVideo(
   const extMag = peakExt ?? 0;
   const targetUpper = primaryTarget[1];
   const percentage = targetUpper > 0 ? (flexMag / targetUpper) * 100 : 0;
-  // Range-based classification — matches the AssessmentReport
-  // classify rewrite: in-range = good, near-range = fair, else poor.
-  const inRange = (v: number, r: [number, number]) => v >= r[0] && v <= r[1];
-  const status: "good" | "fair" | "poor" = inRange(flexMag, primaryTarget)
-    ? "good"
-    : Math.min(
-        Math.abs(flexMag - primaryTarget[0]),
-        Math.abs(flexMag - primaryTarget[1]),
-      ) /
-        Math.max(1, primaryTarget[1] - primaryTarget[0]) <=
-      0.30
-      ? "fair"
-      : "poor";
+  // Asymmetric range-aware classification — same logic as
+  // AssessmentReport.classify. Above-range = mostly good (exceeding
+  // normal ROM isn't impairment); below-range keeps the strict
+  // fair / poor thresholds.
+  const classifyAsym = (v: number, r: [number, number]): "good" | "fair" | "poor" => {
+    if (v >= r[0] && v <= r[1]) return "good";
+    const w = Math.max(1, r[1] - r[0]);
+    if (v < r[0]) return (r[0] - v) / w <= 0.30 ? "fair" : "poor";
+    const above = (v - r[1]) / w;
+    if (above <= 0.30) return "good";
+    if (above <= 1.0) return "fair";
+    return "poor";
+  };
+  const status: "good" | "fair" | "poor" = classifyAsym(flexMag, primaryTarget);
 
   const keyFrames: { label: string; frame_index: number; image_data_url: string }[] = [];
   if (neutralUrl) {
@@ -1460,17 +1466,17 @@ async function analyzeMergedNeckVideo(
   const peakBMag = peakSecondarySigned !== null ? Math.abs(peakSecondarySigned) : 0;
   const targetUpper = primaryTarget[1];
   const percentage = targetUpper > 0 ? (peakAMag / targetUpper) * 100 : 0;
-  const inRange = (v: number, r: [number, number]) => v >= r[0] && v <= r[1];
-  const status: "good" | "fair" | "poor" = inRange(peakAMag, primaryTarget)
-    ? "good"
-    : Math.min(
-        Math.abs(peakAMag - primaryTarget[0]),
-        Math.abs(peakAMag - primaryTarget[1]),
-      ) /
-        Math.max(1, primaryTarget[1] - primaryTarget[0]) <=
-      0.30
-      ? "fair"
-      : "poor";
+  // Asymmetric classification — see AssessmentReport.classify.
+  const classifyAsym = (v: number, r: [number, number]): "good" | "fair" | "poor" => {
+    if (v >= r[0] && v <= r[1]) return "good";
+    const w = Math.max(1, r[1] - r[0]);
+    if (v < r[0]) return (r[0] - v) / w <= 0.30 ? "fair" : "poor";
+    const above = (v - r[1]) / w;
+    if (above <= 0.30) return "good";
+    if (above <= 1.0) return "fair";
+    return "poor";
+  };
+  const status: "good" | "fair" | "poor" = classifyAsym(peakAMag, primaryTarget);
 
   const keyFrames: { label: string; frame_index: number; image_data_url: string }[] = [];
   if (neutralUrl) {

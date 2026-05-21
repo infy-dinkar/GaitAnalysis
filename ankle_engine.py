@@ -58,6 +58,12 @@ def _grab_ankle_key_frame(
         return None
     cap = cv2.VideoCapture(video_path)
     try:
+        # Honour rotation metadata so portrait recordings give upright
+        # screenshots that match the upright frames extract_poses sees.
+        try:
+            cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1.0)
+        except Exception:
+            pass
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
         ret, frame = cap.read()
     finally:

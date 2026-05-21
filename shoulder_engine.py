@@ -221,14 +221,39 @@ _MERGED_FLEXEXT_SECONDARY_TARGET: tuple[float, float] = (45.0, 60.0)
 
 
 def _classify_in_range(value: float, lo: float, hi: float) -> str:
-    """Range-aware classification matching AssessmentReport.classify:
-    in-range = good; within 30% of range width outside = fair; else
-    poor."""
-    if value >= lo and value <= hi:
+    """Asymmetric range-aware classification for clinical ROM:
+
+      • In range                       → good
+      • Below range by ≤ 30% of width  → fair  (mild restriction)
+      • Below range by > 30% of width  → poor  (notable restriction)
+      • Above range by ≤ 30% of width  → good  (normal variation /
+                                                 hypermobility — not
+                                                 a clinical concern
+                                                 for ROM screening)
+      • Above range by 30-100% of width → fair (notable hypermobility)
+      • Above range by > 100% of width  → poor (anatomically suspect;
+                                                  likely a measurement
+                                                  artefact / sign flip)
+
+    The asymmetry matters: a patient with 70° shoulder extension when
+    the normal-range upper bound is 60° has BETTER ROM than the spec
+    — they are not impaired — so calling it "poor" gives the operator
+    the opposite of the clinical truth. Restricted ROM (below range)
+    is the side that flags impairment.
+    """
+    if lo <= value <= hi:
         return "good"
     width = max(1.0, hi - lo)
-    dist = (lo - value) if value < lo else (value - hi)
-    return "fair" if (dist / width) <= 0.30 else "poor"
+    if value < lo:
+        dist_frac = (lo - value) / width
+        return "fair" if dist_frac <= 0.30 else "poor"
+    # value > hi  → exceeding the normal range
+    dist_frac = (value - hi) / width
+    if dist_frac <= 0.30:
+        return "good"
+    if dist_frac <= 1.00:
+        return "fair"
+    return "poor"
 
 
 def _grab_shoulder_key_frame(
@@ -245,6 +270,15 @@ def _grab_shoulder_key_frame(
         return None
     cap = cv2.VideoCapture(video_path)
     try:
+        # Honour any rotation metadata (phone portrait recordings).
+        # Without this, cv2 reads the raw landscape pixels while the
+        # pose pipeline (extract_poses) auto-rotates upright — leading
+        # to mismatched coords / sideways screenshots. Safe no-op on
+        # videos without rotation metadata.
+        try:
+            cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1.0)
+        except Exception:
+            pass
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
         ret, frame = cap.read()
     finally:
