@@ -268,23 +268,23 @@ def _grab_shoulder_key_frame(
     data URL. Mirrors ankle_engine._grab_ankle_key_frame's pattern."""
     if frame_index < 0:
         return None
+    # Match the rotation applied in extract_poses so the saved
+    # screenshot has the same orientation as the coordinate space the
+    # keypoints live in (cv2's CAP_PROP_ORIENTATION_AUTO is unreliable
+    # on Linux opencv builds — we always apply rotation manually).
+    from gait_engine import detect_video_rotation, apply_rotation as _apply_rot
+    rotation = detect_video_rotation(video_path)
+
     cap = cv2.VideoCapture(video_path)
     try:
-        # Honour any rotation metadata (phone portrait recordings).
-        # Without this, cv2 reads the raw landscape pixels while the
-        # pose pipeline (extract_poses) auto-rotates upright — leading
-        # to mismatched coords / sideways screenshots. Safe no-op on
-        # videos without rotation metadata.
-        try:
-            cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1.0)
-        except Exception:
-            pass
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
         ret, frame = cap.read()
     finally:
         cap.release()
     if not ret or frame is None:
         return None
+    if rotation:
+        frame = _apply_rot(frame, rotation)
 
     h, w = frame.shape[:2]
     target_w = min(640, w)

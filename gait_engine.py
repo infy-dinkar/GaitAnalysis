@@ -33,6 +33,7 @@ Metric math fixes vs the original engine:
 """
 
 import math
+import subprocess
 import warnings
 
 import cv2
@@ -76,28 +77,91 @@ DEFAULT_HEIGHT_CM    = 170
 LEG_HEIGHT_RATIO     = 0.53
 
 
+# ──────────────────────────────────────────────
+# PORTRAIT-VIDEO ROTATION HANDLING
+# ──────────────────────────────────────────────
+def detect_video_rotation(video_path: str) -> int:
+    """Return the CW rotation (0/90/180/270) the player should apply
+    to display the video upright. Phone portrait clips store the
+    pixel data as landscape and tag it with a "rotate 90" flag;
+    HTML <video> + ffmpeg honour the tag but cv2 on Linux (the HF
+    Space build) does not — so we have to read the tag ourselves
+    and rotate each frame manually after cap.read()."""
+    # Path 1: cv2's own metadata property (works on most Windows
+    # builds, often returns 0 on Linux opencv-python-headless even
+    # for clearly-rotated videos).
+    try:
+        cap = cv2.VideoCapture(video_path)
+        try:
+            rot = cap.get(cv2.CAP_PROP_ORIENTATION_META)
+        finally:
+            cap.release()
+        if rot:
+            r = int(round(float(rot))) % 360
+            if r in (90, 180, 270):
+                return r
+    except Exception:
+        pass
+    # Path 2: ffprobe — read rotation from stream side_data or
+    # the legacy `tags.rotate` field. ffmpeg is always installed
+    # on the HF Space (mediapipe pulls it in). Negative values
+    # (-90 for some cameras) are normalised to 0..360.
+    try:
+        out = subprocess.check_output(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries",
+                "stream_side_data=rotation:stream_tags=rotate",
+                "-of", "default=nw=1:nk=1",
+                video_path,
+            ],
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        ).decode("utf-8", errors="ignore").strip()
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                val = int(float(line))
+            except ValueError:
+                continue
+            r = val % 360
+            if r in (90, 180, 270):
+                return r
+    except Exception:
+        pass
+    return 0
+
+
+def apply_rotation(frame, rotation: int):
+    """Rotate a BGR frame so its top is the scene's top, given the
+    CW-rotation tag we read from the file. 0 = passthrough."""
+    if rotation == 90:
+        return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+    if rotation == 180:
+        return cv2.rotate(frame, cv2.ROTATE_180)
+    if rotation == 270:
+        return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return frame
+
+
 # ══════════════════════════════════════════════
 # STAGE 1 — POSE EXTRACTION
 # ══════════════════════════════════════════════
 def extract_poses(video_path: str, pose_options, progress_callback=None):
     pose_model = mp.tasks.vision.PoseLandmarker.create_from_options(pose_options)
 
+    # Detect rotation BEFORE opening for capture — phone portrait
+    # clips need every frame rotated by cv2.rotate() since the auto-
+    # rotation property is unreliable on Linux opencv builds (HF
+    # Space). Detection is a cheap one-off read of metadata; 0 means
+    # the video is already in scene-upright orientation (landscape
+    # gait/ankle/TUG clips), in which case apply_rotation is a no-op.
+    rotation = detect_video_rotation(video_path)
+
     cap = cv2.VideoCapture(video_path)
-    # Honour the video's stored rotation metadata (phones record
-    # portrait-mode clips as landscape pixel data + a "rotate 90°"
-    # flag — HTML <video> respects the flag, raw cv2 reads do not).
-    # Without this, MediaPipe receives sideways frames for portrait
-    # uploads, and the saved key-frame screenshots come out rotated
-    # in the report. Setting AUTO=1 is a no-op for videos that have
-    # no rotation metadata (the gait / ankle / TUG landscape
-    # recordings), so this is safe for the whole pipeline.
-    try:
-        cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1.0)
-    except Exception:
-        # Older OpenCV builds don't expose the property; the frames
-        # will just be served in their raw orientation and the
-        # downstream report may render rotated for portrait clips.
-        pass
     # FPS is validated upstream in api.analyze_gait (must be >= 24 FPS).
     # The previous `or 30.0` silent fallback masked broken clips and
     # produced wrong cadence/step-time metrics — removed.
@@ -108,8 +172,13 @@ def extract_poses(video_path: str, pose_options, progress_callback=None):
             "Video frame rate could not be determined from the file."
         )
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    frame_w      = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))  or 1
-    frame_h      = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1
+    raw_w        = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))  or 1
+    raw_h        = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1
+    # After rotation, width/height swap for 90 / 270 degree rotations.
+    if rotation in (90, 270):
+        frame_w, frame_h = raw_h, raw_w
+    else:
+        frame_w, frame_h = raw_w, raw_h
 
     raw = {name: [] for name in LM}
     raw["_frame_w"] = frame_w
@@ -121,6 +190,8 @@ def extract_poses(video_path: str, pose_options, progress_callback=None):
         ret, frame = cap.read()
         if not ret:
             break
+        if rotation:
+            frame = apply_rotation(frame, rotation)
         rgb      = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
