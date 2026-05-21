@@ -32,6 +32,7 @@ Metric math fixes vs the original engine:
     acceleration, and deceleration frames are excluded by frame mask).
 """
 
+import logging
 import math
 import subprocess
 import warnings
@@ -40,6 +41,8 @@ import cv2
 import numpy as np
 import mediapipe as mp
 from scipy.signal import savgol_filter, find_peaks
+
+_log = logging.getLogger("motionlens.gait")
 
 from gait_cycle import (
     detect_heel_strikes,
@@ -102,10 +105,16 @@ def detect_video_rotation(video_path: str) -> int:
             for stream in container.streams.video:
                 # Legacy MP4 rotation tag (older phones, most Android).
                 rotate_tag = (stream.metadata or {}).get("rotate")
+                _log.info(
+                    "rotation-probe: pyav stream metadata=%s rotate_tag=%r",
+                    dict(stream.metadata) if stream.metadata else {},
+                    rotate_tag,
+                )
                 if rotate_tag:
                     try:
                         r = int(float(rotate_tag)) % 360
                         if r in (90, 180, 270):
+                            _log.info("rotation-probe: pyav.rotate_tag -> %d", r)
                             return r
                     except ValueError:
                         pass
@@ -124,16 +133,20 @@ def detect_video_rotation(video_path: str) -> int:
                         if "displaymatrix" in sd_type or "rotation" in sd_type:
                             try:
                                 r = int(float(getattr(sd, "rotation", 0))) % 360
+                                _log.info(
+                                    "rotation-probe: pyav.side_data type=%s r=%d",
+                                    sd_type, r,
+                                )
                                 if r in (90, 180, 270):
                                     return r
                             except Exception:
                                 pass
                 except AttributeError:
-                    pass
+                    _log.info("rotation-probe: pyav.side_data attr missing")
         finally:
             container.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.info("rotation-probe: pyav failed: %r", exc)
     # Path 2: cv2's own metadata property (works on most Windows
     # builds, often returns 0 on Linux opencv-python-headless even
     # for clearly-rotated videos).
@@ -143,12 +156,14 @@ def detect_video_rotation(video_path: str) -> int:
             rot = cap.get(cv2.CAP_PROP_ORIENTATION_META)
         finally:
             cap.release()
+        _log.info("rotation-probe: cv2.ORIENTATION_META=%r", rot)
         if rot:
             r = int(round(float(rot))) % 360
             if r in (90, 180, 270):
+                _log.info("rotation-probe: cv2.meta -> %d", r)
                 return r
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.info("rotation-probe: cv2.meta failed: %r", exc)
     # Path 3: ffprobe — read rotation from stream side_data or
     # the legacy `tags.rotate` field. Only works if ffmpeg's ffprobe
     # is on PATH (true on HF Space; not guaranteed on all hosts).
@@ -165,6 +180,7 @@ def detect_video_rotation(video_path: str) -> int:
             stderr=subprocess.DEVNULL,
             timeout=5,
         ).decode("utf-8", errors="ignore").strip()
+        _log.info("rotation-probe: ffprobe out=%r", out)
         for line in out.splitlines():
             line = line.strip()
             if not line:
@@ -175,9 +191,11 @@ def detect_video_rotation(video_path: str) -> int:
                 continue
             r = val % 360
             if r in (90, 180, 270):
+                _log.info("rotation-probe: ffprobe -> %d", r)
                 return r
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.info("rotation-probe: ffprobe failed: %r", exc)
+    _log.info("rotation-probe: no rotation detected, returning 0")
     return 0
 
 
@@ -206,6 +224,7 @@ def extract_poses(video_path: str, pose_options, progress_callback=None):
     # the video is already in scene-upright orientation (landscape
     # gait/ankle/TUG clips), in which case apply_rotation is a no-op.
     rotation = detect_video_rotation(video_path)
+    _log.info("extract_poses: video=%s rotation=%d", video_path, rotation)
 
     cap = cv2.VideoCapture(video_path)
     # FPS is validated upstream in api.analyze_gait (must be >= 24 FPS).
@@ -265,6 +284,16 @@ def extract_poses(video_path: str, pose_options, progress_callback=None):
 
     cap.release()
     pose_model.close()
+    # Count how many frames produced a usable left/right wrist (the
+    # arm-visibility check the shoulder backend later trips on).
+    n_lw = sum(1 for v in raw.get("left_wrist", []) if v is not None)
+    n_rw = sum(1 for v in raw.get("right_wrist", []) if v is not None)
+    n_ls = sum(1 for v in raw.get("left_shoulder", []) if v is not None)
+    n_rs = sum(1 for v in raw.get("right_shoulder", []) if v is not None)
+    _log.info(
+        "extract_poses: done frames=%d rot=%d w=%d h=%d L_sh=%d R_sh=%d L_wr=%d R_wr=%d",
+        frame_idx, rotation, frame_w, frame_h, n_ls, n_rs, n_lw, n_rw,
+    )
     return raw, fps, total_frames
 
 
