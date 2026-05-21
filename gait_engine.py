@@ -265,13 +265,17 @@ def infer_pose_rotation(keypoints_normalized: dict) -> int:
 def extract_poses(video_path: str, pose_options, progress_callback=None):
     pose_model = mp.tasks.vision.PoseLandmarker.create_from_options(pose_options)
 
-    # Detect rotation BEFORE opening for capture — phone portrait
-    # clips need every frame rotated by cv2.rotate() since the auto-
-    # rotation property is unreliable on Linux opencv builds (HF
-    # Space). Detection is a cheap one-off read of metadata; 0 means
-    # the video is already in scene-upright orientation (landscape
-    # gait/ankle/TUG clips), in which case apply_rotation is a no-op.
-    rotation = detect_video_rotation(video_path)
+    # Note on rotation: OpenCV 4.5.2+ has CAP_PROP_ORIENTATION_AUTO
+    # enabled by default, so cv2.VideoCapture already honours the
+    # video's rotation metadata and returns upright frames. Layering
+    # our own manual cv2.rotate() on top caused double-rotation on
+    # the HF Space (Linux opencv-python-headless): the screenshot
+    # came out tilted 90° from the actual scene. We now let cv2 do
+    # its default thing, run pose detection on whatever it returns,
+    # and rely on a pose-based correction in the screenshot helpers
+    # to handle the remaining cases (clips where cv2 didn't / can't
+    # auto-rotate). Math is rotation-invariant so this is safe for
+    # all angle measurements.
 
     cap = cv2.VideoCapture(video_path)
     # FPS is validated upstream in api.analyze_gait (must be >= 24 FPS).
@@ -284,17 +288,14 @@ def extract_poses(video_path: str, pose_options, progress_callback=None):
             "Video frame rate could not be determined from the file."
         )
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    raw_w        = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))  or 1
-    raw_h        = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1
-    # After rotation, width/height swap for 90 / 270 degree rotations.
-    if rotation in (90, 270):
-        frame_w, frame_h = raw_h, raw_w
-    else:
-        frame_w, frame_h = raw_w, raw_h
 
     raw = {name: [] for name in LM}
-    raw["_frame_w"] = frame_w
-    raw["_frame_h"] = frame_h
+    # Frame width/height come from the first decoded frame's actual
+    # shape, not CAP_PROP_FRAME_WIDTH — that property returns raw
+    # codec dimensions which differ from delivered dimensions when
+    # cv2 auto-rotates.
+    raw["_frame_w"] = 0
+    raw["_frame_h"] = 0
 
     frame_idx = 0
     last_ts_ms = -1
@@ -302,8 +303,8 @@ def extract_poses(video_path: str, pose_options, progress_callback=None):
         ret, frame = cap.read()
         if not ret:
             break
-        if rotation:
-            frame = apply_rotation(frame, rotation)
+        if raw["_frame_w"] == 0:
+            raw["_frame_h"], raw["_frame_w"] = frame.shape[:2]
         rgb      = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
