@@ -86,8 +86,55 @@ def detect_video_rotation(video_path: str) -> int:
     pixel data as landscape and tag it with a "rotate 90" flag;
     HTML <video> + ffmpeg honour the tag but cv2 on Linux (the HF
     Space build) does not — so we have to read the tag ourselves
-    and rotate each frame manually after cap.read()."""
-    # Path 1: cv2's own metadata property (works on most Windows
+    and rotate each frame manually after cap.read().
+
+    Three independent detection paths because no single one is
+    reliable across (a) Windows OpenCV builds, (b) Linux opencv-
+    python-headless, (c) HF Space Docker (ffprobe may or may not
+    be on PATH). PyAV is in requirements.txt and is pure Python,
+    so it's the most portable."""
+    # Path 1: PyAV (pure-Python, bundled with us via requirements).
+    # Works regardless of OpenCV build or whether ffprobe is on PATH.
+    try:
+        import av  # type: ignore
+        container = av.open(video_path)
+        try:
+            for stream in container.streams.video:
+                # Legacy MP4 rotation tag (older phones, most Android).
+                rotate_tag = (stream.metadata or {}).get("rotate")
+                if rotate_tag:
+                    try:
+                        r = int(float(rotate_tag)) % 360
+                        if r in (90, 180, 270):
+                            return r
+                    except ValueError:
+                        pass
+                # Modern displaymatrix-based rotation (iOS, recent
+                # Android) — PyAV >= 10 exposes the resolved angle
+                # via `stream.codec_context.coded_width/height` plus
+                # a side_data list. We use `stream.side_data` if
+                # available, else `stream.metadata['rotate']` (above).
+                try:
+                    sd_list = stream.side_data  # may not exist on older PyAV
+                    for sd in sd_list or []:
+                        try:
+                            sd_type = str(sd.type).lower()
+                        except Exception:
+                            sd_type = ""
+                        if "displaymatrix" in sd_type or "rotation" in sd_type:
+                            try:
+                                r = int(float(getattr(sd, "rotation", 0))) % 360
+                                if r in (90, 180, 270):
+                                    return r
+                            except Exception:
+                                pass
+                except AttributeError:
+                    pass
+        finally:
+            container.close()
+    except Exception:
+        pass
+    # Path 2: cv2's own metadata property (works on most Windows
     # builds, often returns 0 on Linux opencv-python-headless even
     # for clearly-rotated videos).
     try:
@@ -102,10 +149,9 @@ def detect_video_rotation(video_path: str) -> int:
                 return r
     except Exception:
         pass
-    # Path 2: ffprobe — read rotation from stream side_data or
-    # the legacy `tags.rotate` field. ffmpeg is always installed
-    # on the HF Space (mediapipe pulls it in). Negative values
-    # (-90 for some cameras) are normalised to 0..360.
+    # Path 3: ffprobe — read rotation from stream side_data or
+    # the legacy `tags.rotate` field. Only works if ffmpeg's ffprobe
+    # is on PATH (true on HF Space; not guaranteed on all hosts).
     try:
         out = subprocess.check_output(
             [
