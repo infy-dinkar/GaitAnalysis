@@ -286,6 +286,11 @@ def _grab_shoulder_key_frame(
     # rotation, extract_poses already used it, so the pose appears
     # upright in normalized coords → infer returns 0.)
     pose_extra_rot = 0 if metadata_rot else infer_pose_rotation(keypoints_normalized)
+    import logging as _logging
+    _logging.getLogger("motionlens.shoulder").info(
+        "key_frame: idx=%d label=%s metadata_rot=%d pose_extra_rot=%d",
+        frame_index, label, metadata_rot, pose_extra_rot,
+    )
 
     cap = cv2.VideoCapture(video_path)
     try:

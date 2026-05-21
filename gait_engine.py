@@ -219,6 +219,8 @@ def infer_pose_rotation(keypoints_normalized: dict) -> int:
 
     Returns 0 / 90 / 180 / 270. 0 means no extra rotation needed
     (pose already appears upright, or insufficient landmarks)."""
+    import logging as _logging
+    _log = _logging.getLogger("motionlens.gait")
     def _series(name):
         return [v for v in (keypoints_normalized.get(name) or []) if v is not None]
     ls = _series("left_shoulder")
@@ -226,6 +228,11 @@ def infer_pose_rotation(keypoints_normalized: dict) -> int:
     lh = _series("left_hip")
     rh = _series("right_hip")
     if not (ls and rs and lh and rh):
+        _log.info(
+            "infer_pose_rotation: insufficient landmarks "
+            "ls=%d rs=%d lh=%d rh=%d → 0",
+            len(ls), len(rs), len(lh), len(rh),
+        )
         return 0
     def _med(series, idx):
         vals = sorted(p[idx] for p in series)
@@ -239,11 +246,17 @@ def infer_pose_rotation(keypoints_normalized: dict) -> int:
     if abs(dy) > abs(dx):
         # Shoulder-hip axis mostly vertical: upright (dy<0, smaller
         # y is up in image space) or upside down.
-        return 0 if dy < 0 else 180
-    # Mostly horizontal: shoulders are to the left or right of hips.
-    # Rotating the frame so that side ends up at top makes the body
-    # upright.
-    return 270 if dx > 0 else 90
+        result = 0 if dy < 0 else 180
+    else:
+        # Mostly horizontal: shoulders are to the left or right of hips.
+        # Rotating the frame so that side ends up at top makes the body
+        # upright.
+        result = 270 if dx > 0 else 90
+    _log.info(
+        "infer_pose_rotation: sh=(%.3f,%.3f) hp=(%.3f,%.3f) dx=%.3f dy=%.3f → %d",
+        sh_x, sh_y, hp_x, hp_y, dx, dy, result,
+    )
+    return result
 
 
 # ══════════════════════════════════════════════
