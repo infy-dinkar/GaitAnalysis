@@ -229,7 +229,20 @@ export function ApiUploadAssessment({
         <div className="rounded-card border border-border bg-surface p-5">
           <div className="flex items-center justify-between">
             <span className="text-xs uppercase tracking-[0.12em] text-subtle">
-              Analysing in browser
+              {(() => {
+                // Shoulder flexion+extension and ankle run on the
+                // backend (BlazePose Full). Other tests run locally
+                // (MoveNet). Label the stage accordingly so the
+                // "your video is not uploaded" note doesn't appear
+                // for backend-routed tests.
+                const backendRouted =
+                  bodyPart === "ankle" ||
+                  (bodyPart === "shoulder" && movementId === "flexion_extension");
+                if (!backendRouted) return "Analysing in browser";
+                if (progress < 0.25) return "Uploading video…";
+                if (progress < 0.95) return "Analysing movement…";
+                return "Done";
+              })()}
             </span>
             <span className="tabular text-sm text-foreground">
               {`${Math.round(progress * 100)}%`}
@@ -241,9 +254,11 @@ export function ApiUploadAssessment({
               style={{ width: `${progress * 100}%` }}
             />
           </div>
-          <p className="mt-3 text-[11px] text-subtle">
-            Pose detection runs locally on your device — your video is not uploaded.
-          </p>
+          {bodyPart !== "ankle" && !(bodyPart === "shoulder" && movementId === "flexion_extension") && (
+            <p className="mt-3 text-[11px] text-subtle">
+              Pose detection runs locally on your device — your video is not uploaded.
+            </p>
+          )}
         </div>
       )}
 
@@ -254,10 +269,21 @@ export function ApiUploadAssessment({
             <div className="text-sm">
               <p className="font-medium text-foreground">Analysis failed</p>
               <p className="mt-1 text-muted">{error}</p>
-              <Button variant="secondary" size="sm" className="mt-4" onClick={reset}>
-                <RotateCcw className="h-4 w-4" />
-                Try another video
-              </Button>
+              <div className="mt-4 flex flex-wrap gap-2">
+                {/* For transient failures (network / 500-ish), let the
+                    operator retry the SAME video without re-picking
+                    the file. Otherwise show the file-picker reset. */}
+                {file && /check connection|Analysis failed\.?$/.test(error) && (
+                  <Button size="sm" onClick={run} disabled={busy} loading={busy}>
+                    <Play className="h-4 w-4" />
+                    Retry
+                  </Button>
+                )}
+                <Button variant="secondary" size="sm" onClick={reset}>
+                  <RotateCcw className="h-4 w-4" />
+                  Try another video
+                </Button>
+              </div>
             </div>
           </div>
         </div>

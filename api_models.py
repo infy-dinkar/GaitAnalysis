@@ -261,6 +261,18 @@ class BiomechData(BaseModel):
     # (e.g. neutral, peak ROM). Backend-processed body parts return
     # 2-3 entries here; the live-frontend path leaves it empty.
     key_frames: list[BiomechKeyFrame] = []
+    # Merged-test additions — populated only when the movement bundles
+    # two directions into one trial (e.g. shoulder "flexion_extension"
+    # captures both flexion and extension peaks). The fields above
+    # describe the PRIMARY direction; these mirror them for the
+    # secondary. The frontend renders the dual-row report when any
+    # of these are non-null. Optional so single-direction responses
+    # serialize unchanged.
+    secondary_peak_angle: Optional[float] = None
+    secondary_peak_magnitude: Optional[float] = None
+    secondary_reference_range: Optional[list[float]] = None
+    primary_label: Optional[str] = None
+    secondary_label: Optional[str] = None
 
 
 class BiomechResponse(BaseModel):

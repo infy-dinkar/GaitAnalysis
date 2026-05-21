@@ -141,19 +141,27 @@ export async function analyzeBiomechVideo(
     return analyzeAnkleBackend(file, movement, side ?? "right", onProgress);
   }
 
-  // ── Merged shoulder movements → dedicated dual-direction analyser ──
-  // The shoulder "rotation" (external + internal) and
-  // "abduction_adduction" (abduction + adduction) tests bundle two
-  // directions into one trial. Direction is detected per frame from
-  // joint geometry, and two parallel peak trackers run side-by-side
-  // — the same logic the live mode uses. The merged analyser returns
-  // an extended BiomechDataDTO carrying both peaks + three key-frame
-  // thumbnails (neutral, primary peak, secondary peak).
+  // ── Shoulder flexion + extension → backend MediaPipe BlazePose Full ──
+  // The browser MoveNet path (analyzeMergedShoulderVideo) is
+  // GPU/CPU-dependent and gave inconsistent results across devices
+  // for fast arm movements. Flexion + extension are the highest-
+  // priority pair to be device-consistent, so they route to the
+  // backend /api/analyze-shoulder pipeline (same MediaPipe pipeline
+  // used by gait / ankle / TUG). The endpoint returns the extended
+  // BiomechDataDTO shape with secondary_peak_* fields populated.
+  if (bodyPart === "shoulder" && movement === "flexion_extension") {
+    return analyzeShoulderBackend(file, "flexion_extension", side ?? "right", onProgress);
+  }
+
+  // ── Merged shoulder movements (browser path, kept for now) ──
+  // Rotation (external + internal) and abduction + adduction
+  // continue to run through the browser MoveNet dual-direction
+  // analyser. They will be moved to the backend in a follow-up
+  // pass once shoulder flexion/extension is verified on real
+  // patient videos.
   if (
     bodyPart === "shoulder" &&
-    (movement === "rotation" ||
-      movement === "abduction_adduction" ||
-      movement === "flexion_extension")
+    (movement === "rotation" || movement === "abduction_adduction")
   ) {
     return analyzeMergedShoulderVideo({
       file,
@@ -1604,6 +1612,87 @@ function captureCompositeFrame(
   }
   ctx.shadowBlur = 0;
   return canvas.toDataURL("image/jpeg", 0.78);
+}
+
+// ─── Shoulder backend dispatch ─────────────────────────────────
+// Uploads the video to /api/analyze-shoulder (MediaPipe BlazePose
+// Full) and returns the same BiomechDataDTO shape the in-browser
+// merged analyser produced. The endpoint handles per-frame
+// processing at native FPS server-side, which avoids the GPU/CPU
+// device variability and frame-drop issues the browser MoveNet path
+// had for fast arm movements.
+//
+// For shoulder "flexion_extension" the response carries both peaks
+// (primary = flexion, secondary = extension) plus three key-frame
+// thumbnails (neutral + flexion peak + extension peak) — the
+// existing AssessmentReport dual-row rendering picks these up
+// unchanged.
+async function analyzeShoulderBackend(
+  file: File,
+  movement: string,
+  side: "left" | "right",
+  onProgress?: (fraction: number) => void,
+): Promise<BiomechDataDTO> {
+  onProgress?.(0.1);
+  const form = new FormData();
+  form.append("video", file, file.name || "shoulder.mp4");
+  form.append("movement_type", movement);
+  form.append("side", side);
+
+  onProgress?.(0.3);
+  const res = await authedFetch("/api/analyze-shoulder", {
+    method: "POST",
+    body: form,
+  });
+  onProgress?.(0.85);
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+    throw new Error(formatShoulderError(body.detail, res.status));
+  }
+  const wrapper = (await res.json()) as {
+    success: boolean;
+    data: BiomechDataDTO | null;
+    error: string | null;
+  };
+  onProgress?.(1.0);
+  if (!wrapper.success || !wrapper.data) {
+    throw new Error(wrapper.error ?? "Analysis failed. Please check connection and try again.");
+  }
+  return wrapper.data;
+}
+
+// Map the backend's structured error tokens (raised via
+// HTTPException.detail in api.analyze_shoulder) to the user-facing
+// strings the spec calls for. Anything not in the token list falls
+// back to the raw detail string so debugging never loses information.
+function formatShoulderError(detail: unknown, status: number): string {
+  const raw = typeof detail === "string" ? detail : Array.isArray(detail)
+    ? detail.map((d) => (typeof d === "string" ? d : JSON.stringify(d))).join("; ")
+    : JSON.stringify(detail ?? {});
+
+  if (raw.startsWith("fps_too_low")) {
+    return "Video quality too low. Please record at 30 FPS or higher.";
+  }
+  if (raw.startsWith("video_too_short")) {
+    return "Video too short. Please record at least 3 seconds of movement.";
+  }
+  if (raw.startsWith("duration_too_long")) {
+    return "Video too long. Maximum 60 seconds.";
+  }
+  if (raw.startsWith("file_too_large")) {
+    return "File too large. Maximum size is 100 MB.";
+  }
+  if (raw.startsWith("poor_visibility")) {
+    return (
+      "Arm not clearly visible in video. Please ensure the full arm is in " +
+      "frame with good lighting."
+    );
+  }
+  if (status >= 500) {
+    return "Analysis failed. Please check connection and try again.";
+  }
+  return raw || `Analysis failed (HTTP ${status}).`;
 }
 
 function formatAnkleError(detail: unknown, status: number): string {
