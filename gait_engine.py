@@ -55,6 +55,12 @@ warnings.filterwarnings("ignore")
 # LANDMARK INDICES
 # ──────────────────────────────────────────────
 LM = {
+    # Nose — needed by shoulder flexion/extension to detect which way
+    # the patient is facing in the frame (nose-x vs shoulder midpoint-x).
+    # Without this, the signed angle convention is correct only when
+    # the patient faces camera-right; in left-side profile the sign
+    # inverts and the system labels flexion frames as extension.
+    "nose": 0,
     "left_shoulder":  11, "right_shoulder": 12,
     # Arm landmarks (elbow + wrist) — not consumed by gait math but
     # extracted + smoothed alongside everything else so the shared
