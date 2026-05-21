@@ -56,19 +56,15 @@ def _grab_ankle_key_frame(
 ) -> Optional[dict]:
     if frame_index < 0:
         return None
-    # Match the rotation applied in extract_poses (manual rotate is
-    # the only reliable path on Linux opencv builds).
+    # Pose-based rotation is the single source of truth — see
+    # shoulder_engine._grab_shoulder_key_frame for the rationale
+    # (cv2 already auto-rotates by default in 4.5.2+).
     from gait_engine import (
-        detect_video_rotation,
         apply_rotation as _apply_rot,
         infer_pose_rotation,
         rotate_norm_point,
     )
-    metadata_rot = detect_video_rotation(video_path)
-    # Pose-based fallback for clips that strip rotation metadata but
-    # still encode pixel data sideways. See shoulder_engine for the
-    # rationale (same pattern).
-    pose_extra_rot = 0 if metadata_rot else infer_pose_rotation(keypoints_normalized)
+    pose_rot = infer_pose_rotation(keypoints_normalized)
 
     cap = cv2.VideoCapture(video_path)
     try:
@@ -78,10 +74,8 @@ def _grab_ankle_key_frame(
         cap.release()
     if not ret or frame is None:
         return None
-    if metadata_rot:
-        frame = _apply_rot(frame, metadata_rot)
-    if pose_extra_rot:
-        frame = _apply_rot(frame, pose_extra_rot)
+    if pose_rot:
+        frame = _apply_rot(frame, pose_rot)
 
     h, w = frame.shape[:2]
     # Resize so the embedded image isn't huge in MongoDB / JSON payload.
@@ -100,8 +94,8 @@ def _grab_ankle_key_frame(
         if kp is None:
             return None
         x_n, y_n, _vis = kp
-        if pose_extra_rot:
-            x_n, y_n = rotate_norm_point(x_n, y_n, pose_extra_rot)
+        if pose_rot:
+            x_n, y_n = rotate_norm_point(x_n, y_n, pose_rot)
         px = int(x_n * w)
         py = int(y_n * h)
         emphasised = name.startswith(side)
