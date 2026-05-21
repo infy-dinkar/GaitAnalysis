@@ -272,8 +272,20 @@ def _grab_shoulder_key_frame(
     # screenshot has the same orientation as the coordinate space the
     # keypoints live in (cv2's CAP_PROP_ORIENTATION_AUTO is unreliable
     # on Linux opencv builds — we always apply rotation manually).
-    from gait_engine import detect_video_rotation, apply_rotation as _apply_rot
-    rotation = detect_video_rotation(video_path)
+    from gait_engine import (
+        detect_video_rotation,
+        apply_rotation as _apply_rot,
+        infer_pose_rotation,
+        rotate_norm_point,
+    )
+    metadata_rot = detect_video_rotation(video_path)
+    # Fallback: some processed / edited clips strip the rotation tag
+    # but still encode pixel data sideways. When metadata says 0 we
+    # cross-check the pose itself — shoulder/hip positions tell us if
+    # the body is sideways in the image. (When metadata gave us a
+    # rotation, extract_poses already used it, so the pose appears
+    # upright in normalized coords → infer returns 0.)
+    pose_extra_rot = 0 if metadata_rot else infer_pose_rotation(keypoints_normalized)
 
     cap = cv2.VideoCapture(video_path)
     try:
@@ -283,8 +295,10 @@ def _grab_shoulder_key_frame(
         cap.release()
     if not ret or frame is None:
         return None
-    if rotation:
-        frame = _apply_rot(frame, rotation)
+    if metadata_rot:
+        frame = _apply_rot(frame, metadata_rot)
+    if pose_extra_rot:
+        frame = _apply_rot(frame, pose_extra_rot)
 
     h, w = frame.shape[:2]
     target_w = min(640, w)
@@ -304,6 +318,8 @@ def _grab_shoulder_key_frame(
         if kp is None:
             return None
         x_n, y_n, _vis = kp
+        if pose_extra_rot:
+            x_n, y_n = rotate_norm_point(x_n, y_n, pose_extra_rot)
         px = int(x_n * w)
         py = int(y_n * h)
         emphasised = name.startswith(side)

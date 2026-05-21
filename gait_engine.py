@@ -193,6 +193,59 @@ def apply_rotation(frame, rotation: int):
     return frame
 
 
+def rotate_norm_point(x_n: float, y_n: float, rotation: int):
+    """Apply the same CW rotation apply_rotation() applies to the
+    underlying frame, but in [0,1]² normalized coordinate space.
+    Used so the skeleton overlay's coordinates stay aligned with
+    the screenshot after a pose-based rotation fallback rotates
+    the frame post-pose-extraction."""
+    if rotation == 90:
+        return (1.0 - y_n, x_n)
+    if rotation == 180:
+        return (1.0 - x_n, 1.0 - y_n)
+    if rotation == 270:
+        return (y_n, 1.0 - x_n)
+    return (x_n, y_n)
+
+
+def infer_pose_rotation(keypoints_normalized: dict) -> int:
+    """Pose-based rotation fallback for videos that strip the file
+    rotation metadata but still encode pixel data sideways (some
+    processed / edited / re-muxed clips). Inspects the median
+    shoulder + hip positions across all valid frames in the raw
+    pose dict; if the shoulder-to-hip vector is more horizontal
+    than vertical, the body is sideways in the image, and we
+    return the extra CW rotation needed to put the head at top.
+
+    Returns 0 / 90 / 180 / 270. 0 means no extra rotation needed
+    (pose already appears upright, or insufficient landmarks)."""
+    def _series(name):
+        return [v for v in (keypoints_normalized.get(name) or []) if v is not None]
+    ls = _series("left_shoulder")
+    rs = _series("right_shoulder")
+    lh = _series("left_hip")
+    rh = _series("right_hip")
+    if not (ls and rs and lh and rh):
+        return 0
+    def _med(series, idx):
+        vals = sorted(p[idx] for p in series)
+        return vals[len(vals) // 2]
+    sh_x = (_med(ls, 0) + _med(rs, 0)) / 2.0
+    sh_y = (_med(ls, 1) + _med(rs, 1)) / 2.0
+    hp_x = (_med(lh, 0) + _med(rh, 0)) / 2.0
+    hp_y = (_med(lh, 1) + _med(rh, 1)) / 2.0
+    dx = sh_x - hp_x
+    dy = sh_y - hp_y
+    if abs(dy) > abs(dx):
+        # Shoulder-hip axis mostly vertical: upright (dy<0, smaller
+        # y is up in image space) or upside down.
+        return 0 if dy < 0 else 180
+    # Mostly horizontal: shoulders are to the left or right of hips.
+    # Rotating the frame so that side ends up at top makes the body
+    # upright.
+    return 270 if dx > 0 else 90
+
+
 # ══════════════════════════════════════════════
 # STAGE 1 — POSE EXTRACTION
 # ══════════════════════════════════════════════
