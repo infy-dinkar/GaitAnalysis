@@ -284,15 +284,16 @@ def extract_poses(video_path: str, pose_options, progress_callback=None):
 
     cap.release()
     pose_model.close()
-    # Count how many frames produced a usable left/right wrist (the
-    # arm-visibility check the shoulder backend later trips on).
-    n_lw = sum(1 for v in raw.get("left_wrist", []) if v is not None)
-    n_rw = sum(1 for v in raw.get("right_wrist", []) if v is not None)
-    n_ls = sum(1 for v in raw.get("left_shoulder", []) if v is not None)
-    n_rs = sum(1 for v in raw.get("right_shoulder", []) if v is not None)
+    # Count how many frames produced each upper-body landmark (the
+    # shoulder backend's visibility check trips on the lowest of
+    # shoulder/elbow/hip on the selected side).
+    def _cnt(name): return sum(1 for v in raw.get(name, []) if v is not None)
     _log.info(
-        "extract_poses: done frames=%d rot=%d w=%d h=%d L_sh=%d R_sh=%d L_wr=%d R_wr=%d",
-        frame_idx, rotation, frame_w, frame_h, n_ls, n_rs, n_lw, n_rw,
+        "extract_poses: done frames=%d rot=%d w=%d h=%d "
+        "L_sh=%d L_el=%d L_hp=%d L_wr=%d  R_sh=%d R_el=%d R_hp=%d R_wr=%d",
+        frame_idx, rotation, frame_w, frame_h,
+        _cnt("left_shoulder"),  _cnt("left_elbow"),  _cnt("left_hip"),  _cnt("left_wrist"),
+        _cnt("right_shoulder"), _cnt("right_elbow"), _cnt("right_hip"), _cnt("right_wrist"),
     )
     return raw, fps, total_frames
 

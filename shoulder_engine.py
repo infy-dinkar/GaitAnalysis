@@ -433,6 +433,16 @@ def analyze_shoulder(
         # Less than ~half a second of usable footage. Surfaced to
         # the operator as "arm not clearly visible" rather than a
         # generic analysis failure.
+        import logging as _logging
+        _logging.getLogger("motionlens.shoulder").info(
+            "poor_visibility: side=%s movement=%s n=%d valid=%d threshold=%d "
+            "vs_lt_thr=%d ve_lt_thr=%d vh_lt_thr=%d vw_lt_thr=%d",
+            side, movement, n, valid_frames, max(3, int(fps * 0.5)),
+            sum(1 for v in vs[:n] if v < _SHOULDER_VIS_THRESHOLD),
+            sum(1 for v in ve[:n] if v < _SHOULDER_VIS_THRESHOLD),
+            sum(1 for v in vh[:n] if v < _SHOULDER_VIS_THRESHOLD),
+            sum(1 for v in vw[:n] if v < _SHOULDER_VIS_THRESHOLD) if needs_wrist else -1,
+        )
         raise ValueError("poor_visibility")
 
     # ── Single-direction movements ──────────────────────────────
