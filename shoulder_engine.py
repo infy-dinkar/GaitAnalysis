@@ -410,6 +410,47 @@ def analyze_shoulder(
     hx = ts[hip_key]["x_px"];      hy = ts[hip_key]["y_px"];      vh = ts[hip_key]["vis"]
     wx = ts[wrist_key]["x_px"];    wy = ts[wrist_key]["y_px"];    vw = ts[wrist_key]["vis"]
 
+    # Facing-direction sign for flexion/extension. The signed-angle
+    # math in shoulder_flexion_extension assumes the patient faces
+    # camera-right (nose to the right of shoulder midpoint in image
+    # space) — under that assumption, arm-forward gives + (flexion)
+    # and arm-backward gives − (extension). When the patient films
+    # in the opposite profile (right-side test → patient faces image-
+    # left), the sign convention inverts: arm-forward becomes − and
+    # the system labels flexion frames as extension. Detect facing
+    # once from the median nose/shoulder positions and apply as a
+    # multiplier to every per-frame angle. is_merged + single-direction
+    # flex/ext both need this; ab/ad and rotation don't (those are
+    # frontal-plane / axial and don't have a forward/back sign).
+    is_flex_ext = is_merged or movement in ("flexion", "extension")
+    facing_sign = 1.0
+    if is_flex_ext and "nose" in ts:
+        nx_arr = ts["nose"]["x_px"]; nv_arr = ts["nose"]["vis"]
+        lsx_arr = ts["left_shoulder"]["x_px"]; lsv_arr = ts["left_shoulder"]["vis"]
+        rsx_arr = ts["right_shoulder"]["x_px"]; rsv_arr = ts["right_shoulder"]["vis"]
+        deltas = []
+        for i in range(min(len(nx_arr), len(lsx_arr), len(rsx_arr))):
+            if nv_arr[i] < _SHOULDER_VIS_THRESHOLD:
+                continue
+            if lsv_arr[i] < _SHOULDER_VIS_THRESHOLD or rsv_arr[i] < _SHOULDER_VIS_THRESHOLD:
+                continue
+            sm_x = (float(lsx_arr[i]) + float(rsx_arr[i])) / 2.0
+            deltas.append(float(nx_arr[i]) - sm_x)
+        if deltas:
+            deltas.sort()
+            med_delta = deltas[len(deltas) // 2]
+            # Negative median delta (nose to the LEFT of shoulder
+            # midpoint) → patient faces image-left → invert sign.
+            if med_delta < 0:
+                facing_sign = -1.0
+        import logging as _logging
+        _logging.getLogger("motionlens.shoulder").info(
+            "facing detection: samples=%d med_nose-sm_delta=%s facing_sign=%+.0f",
+            len(deltas),
+            f"{deltas[len(deltas)//2]:.1f}" if deltas else "N/A",
+            facing_sign,
+        )
+
     needs_wrist = movement in ("external_rotation", "internal_rotation")
     n = int(min(len(sx), len(ex), len(hx)))
     if needs_wrist:
@@ -430,7 +471,7 @@ def analyze_shoulder(
         e = (float(ex[i]), float(ey[i]))
         h = (float(hx[i]), float(hy[i]))
         if is_merged or movement in ("flexion", "extension"):
-            a = shoulder_flexion_extension(s, e, h)
+            a = shoulder_flexion_extension(s, e, h) * facing_sign
         elif movement in ("abduction", "adduction"):
             a = shoulder_abduction_adduction(s, e, h)
         else:
