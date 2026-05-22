@@ -194,10 +194,20 @@ export async function analyzeBiomechVideo(
   // in one recording. Both share the same direction-routing flow
   // and the analyser parameterises which formula + detector to
   // use internally.
-  if (
-    bodyPart === "neck" &&
-    (movement === "flexion_extension" || movement === "lateral_flexion")
-  ) {
+  // ── Neck flexion + extension → backend MediaPipe BlazePose Full ──
+  // Same rationale as the other migrations: device-consistent
+  // BlazePose pipeline beats the GPU-dependent browser MoveNet
+  // path. Math (ear→nose tilt with the |faceVecX|-denominator
+  // baseline-subtracted atan2) matches the browser computeNeckAngle
+  // verbatim so live + upload agree on the metric. The backend
+  // pre-flight rejects pure-frontal recordings (the math collapses
+  // there) and surfaces the message verbatim.
+  if (bodyPart === "neck" && movement === "flexion_extension") {
+    return analyzeNeckBackend(file, "flexion_extension", onProgress);
+  }
+  // Neck lateral flexion still runs through the browser path —
+  // separate follow-up migration.
+  if (bodyPart === "neck" && movement === "lateral_flexion") {
     return analyzeMergedNeckVideo({
       file,
       movement,
@@ -1804,6 +1814,84 @@ function formatKneeError(detail: unknown, status: number): string {
   if (raw.startsWith("Requested side")) {
     // Pre-flight wrong-side check — surface verbatim so the user
     // sees the exact actionable message (which side to switch to).
+    return raw;
+  }
+  if (status >= 500) {
+    return "Analysis failed. Please check connection and try again.";
+  }
+  return raw || `Analysis failed (HTTP ${status}).`;
+}
+
+// ─── Neck backend client ─────────────────────────────────────────
+// Posts the uploaded video to /api/analyze-neck and unwraps the
+// BiomechResponse envelope. Mirrors analyzeKneeBackend exactly
+// (no `side` form field — neck flex/ext doesn't carry a side).
+async function analyzeNeckBackend(
+  file: File,
+  movement: string,
+  onProgress?: (fraction: number) => void,
+): Promise<BiomechDataDTO> {
+  onProgress?.(0.1);
+  const form = new FormData();
+  form.append("video", file, file.name || "neck.mp4");
+  form.append("movement_type", movement);
+
+  onProgress?.(0.3);
+  const res = await authedFetch("/api/analyze-neck", {
+    method: "POST",
+    body: form,
+  });
+  onProgress?.(0.85);
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+    throw new Error(formatNeckError(body.detail, res.status));
+  }
+  const wrapper = (await res.json()) as {
+    success: boolean;
+    data: BiomechDataDTO | null;
+    error: string | null;
+  };
+  onProgress?.(1.0);
+  if (!wrapper.success || !wrapper.data) {
+    throw new Error(
+      wrapper.error ?? "Analysis failed. Please check connection and try again.",
+    );
+  }
+  return wrapper.data;
+}
+
+// Map the backend's structured error tokens (raised via
+// HTTPException.detail in api.analyze_neck) to the user-facing
+// strings the spec calls for. Anything not in the token list
+// falls back to the raw detail string so debugging never loses
+// information.
+function formatNeckError(detail: unknown, status: number): string {
+  const raw = typeof detail === "string" ? detail : Array.isArray(detail)
+    ? detail.map((d) => (typeof d === "string" ? d : JSON.stringify(d))).join("; ")
+    : JSON.stringify(detail ?? {});
+
+  if (raw.startsWith("fps_too_low")) {
+    return "Video quality too low. Please record at 30 FPS or higher.";
+  }
+  if (raw.startsWith("video_too_short")) {
+    return "Video too short. Please record at least 3 seconds of movement.";
+  }
+  if (raw.startsWith("duration_too_long")) {
+    return "Video too long. Maximum 60 seconds.";
+  }
+  if (raw.startsWith("file_too_large")) {
+    return "File too large. Maximum size is 100 MB.";
+  }
+  if (raw.startsWith("poor_visibility")) {
+    return (
+      "Face not clearly visible in video. Please ensure the head and " +
+      "shoulders are in frame with good lighting throughout the recording."
+    );
+  }
+  if (raw.startsWith("Camera angle")) {
+    // Frontal-view rejection — surface verbatim so the user sees
+    // the exact "side profile" guidance.
     return raw;
   }
   if (status >= 500) {

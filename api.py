@@ -78,6 +78,9 @@ from ankle_engine import analyze_ankle as analyze_ankle_engine
 # ─── Knee (merged flex+ext) — reuses gait MediaPipe pipeline ─────
 from knee_engine import analyze_knee as analyze_knee_engine
 
+# ─── Neck (merged flex+ext) — reuses gait MediaPipe pipeline ─────
+from neck_engine import analyze_neck as analyze_neck_engine
+
 # ─── SPPB Component 1 (Balance) — reuses gait MediaPipe pipeline ─
 from sppb_balance_engine import analyze_sppb_balance
 
@@ -1222,6 +1225,155 @@ async def analyze_knee(
         return BiomechResponse(success=False, error=msg)
     except Exception as e:
         log.exception("knee analysis failed")
+        return BiomechResponse(success=False, error=f"Analysis failed: {e}")
+    finally:
+        cleanup_temp_file(tmp_path)
+        if fixed_path_cleanup and fixed_path_cleanup != tmp_path:
+            cleanup_temp_file(fixed_path_cleanup)
+
+
+@app.post("/api/analyze-neck", response_model=BiomechResponse)
+async def analyze_neck(
+    video: UploadFile = File(...),
+    movement_type: str = Form(...),
+    # Neck flex/ext doesn't carry a side; the field is accepted
+    # for sibling-endpoint parity and ignored by the engine.
+    side: Optional[str] = Form(None),
+    patient_name: Optional[str] = Form(None),
+    recording_duration_ms: Optional[int] = Form(None),
+) -> BiomechResponse:
+    """Neck merged flexion+extension upload analysis on backend
+    MediaPipe BlazePose Full.
+
+    Only `flexion_extension` is routed to backend; the other neck
+    movements (lateral_flexion, rotation) still run through the
+    browser MoveNet path.
+
+    Math note — the backend uses the ear→nose tilt formula
+    (`tilt = atan2(faceVecY, |faceVecX|) − 10° baseline`),
+    mirroring motionlens-web/lib/biomech/neck.ts:computeNeckAngle
+    so live + upload report the same metric. This requires a
+    LATERAL camera profile (the formula collapses in pure
+    frontal view); pre-flight rejection surfaces a clear,
+    actionable message when the upload is near-frontal.
+
+    Validation gates (raise HTTPException → frontend maps to user-
+    facing error text):
+      • file_too_large            (>100 MB)         → 413
+      • fps_too_low               (<24 FPS)         → 400
+      • duration_too_long         (>60 s)           → 400
+      • video_too_short           (<2 s)            → 400
+      • poor_visibility           (engine raises)   → 400
+      • Camera angle …            (engine raises)   → 400
+    """
+    from tug_engine import _ensure_decodable_video
+
+    tmp_path: str | None = None
+    fixed_path_cleanup: str | None = None
+    try:
+        movement = movement_type.lower().strip()
+        if movement != "flexion_extension":
+            return BiomechResponse(
+                success=False,
+                error=(
+                    f"Unknown neck movement '{movement_type}'. "
+                    f"Allowed: 'flexion_extension'."
+                ),
+            )
+        _ = side  # accepted for parity, ignored by the engine
+
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"file_too_large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(contents, video.filename or "neck.mp4")
+        log.info(
+            "neck: file=%s size=%.2f MB movement=%s recording_ms=%s",
+            video.filename, size_mb, movement, recording_duration_ms,
+        )
+
+        # Repair MediaRecorder WebMs with broken duration headers
+        # before the cv2 FPS probe (same as ankle / shoulder / knee).
+        processed_path, fixed_path_cleanup = _ensure_decodable_video(
+            tmp_path, recording_duration_ms,
+        )
+
+        probe = cv2.VideoCapture(processed_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0 or probe_total_frames <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not read video metadata. Please retry, "
+                    "or upload a different file."
+                ),
+            )
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"fps_too_low ({probe_fps:.1f} FPS). "
+                    f"Minimum {MIN_REQUIRED_FPS} FPS required."
+                ),
+            )
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds < 2.0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"video_too_short ({duration_seconds:.1f}s). "
+                    f"Minimum 2 seconds required."
+                ),
+            )
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"duration_too_long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed."
+                ),
+            )
+
+        _ = patient_name
+
+        pose_options = _build_gait_pose_options()
+        result = analyze_neck_engine(
+            video_path=processed_path,
+            pose_options=pose_options,
+            movement=movement,
+        )
+        return BiomechResponse(success=True, data=result, error=None)
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        msg = str(e)
+        log.warning("neck validation: %s", msg)
+        if msg == "poor_visibility":
+            raise HTTPException(status_code=400, detail="poor_visibility")
+        # Frontal-view rejection — surfaced as HTTP 400 with the
+        # user-facing message preserved verbatim.
+        if msg.startswith("Camera angle"):
+            raise HTTPException(status_code=400, detail=msg)
+        return BiomechResponse(success=False, error=msg)
+    except Exception as e:
+        log.exception("neck analysis failed")
         return BiomechResponse(success=False, error=f"Analysis failed: {e}")
     finally:
         cleanup_temp_file(tmp_path)

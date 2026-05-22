@@ -3,6 +3,19 @@ neck_engine.py
 Neck (cervical) range-of-motion angle math for the Biomechanical
 Analysis flow.
 
+Two distinct surfaces live in this file:
+
+  • Single-frame helpers (`compute_neck_angle` + the per-movement
+    formulas below). Used by api.analyze_live_biomech_frame for the
+    live-camera path.
+
+  • Video pipeline (`analyze_neck` near the end of the file). Used
+    by api.analyze_neck for the merged flexion+extension upload
+    test. Reuses the shared gait pipeline (extract_poses +
+    build_time_series), inherits the `_pose_rotation` portrait-
+    video correction set by extract_poses, ships its own key-frame
+    screenshot helper, returns the merged BiomechData DTO shape.
+
 Conventions
 -----------
 Coordinate system: MediaPipe Pose 2D image coords. Origin top-left,
@@ -19,6 +32,13 @@ Magnitude = degrees away from neutral; sign on flexion/extension =
 forward (chin to chest, +) vs back (chin up, −) for a subject
 facing camera-right.
 
+For the video pipeline, the flex/ext math uses the ear→nose tilt
+formula (rather than the cervical-only shoulder→ear formula above)
+to capture the full clinical 45-80° / 50-70° ROM including the
+atlanto-occipital pitch — mirroring motionlens-web/lib/biomech/
+neck.ts:computeNeckAngle. This requires a LATERAL (side-profile)
+camera view; the pre-flight check rejects near-frontal uploads.
+
 Visibility
 ----------
 `compute_neck_angle` returns None when ANY required landmark has
@@ -33,8 +53,9 @@ goniometer is the clinical reference for precise rotation.
 """
 from __future__ import annotations
 
+import base64
 import math
-from typing import Sequence
+from typing import Optional, Sequence
 
 # MediaPipe Pose landmark indices used for neck ROM
 NOSE            = 0
@@ -174,6 +195,461 @@ def compute_neck_angle(
         return neck_lateral_flexion(ear_mid, shldr_mid)
     # rotation
     return neck_rotation(nose, left_ear, right_ear, shldr_mid)
+
+
+# ══════════════════════════════════════════════════════════════════
+# Video pipeline (BlazePose Full, reuses gait pipeline)
+# ══════════════════════════════════════════════════════════════════
+#
+# `analyze_neck` is the merged flex+ext upload entry point. Mirrors
+# knee_engine.analyze_knee / ankle_engine.analyze_ankle / the merged
+# shoulder branches:
+#
+#   • Reuses extract_poses + build_time_series from gait_engine
+#     (shared pose model, smoothing, interpolation, platform-
+#     independent rotation correction).
+#   • Inherits raw["_pose_rotation"] for the screenshot helper, so
+#     portrait phone videos are handled automatically.
+#   • Returns the merged DTO shape (secondary_peak_* + primary /
+#     secondary labels) so the existing dual-row report renders
+#     without any frontend display changes.
+#
+# Math (matches motionlens-web/lib/biomech/neck.ts:computeNeckAngle):
+#
+#     faceVecX = nose.x − ear_midpoint.x
+#     faceVecY = nose.y − ear_midpoint.y
+#     tiltDeg  = atan2(faceVecY, |faceVecX|) × 180 / π
+#     signed   = tiltDeg − NEUTRAL_TILT_BASELINE (10°)
+#
+#     signed > 0  → flexion (chin to chest)
+#     signed < 0  → extension (head back)
+#
+# Why ear→nose instead of the legacy shoulder→ear used by the single-
+# frame compute_neck_angle helper above: shoulder→ear only captures
+# the cervical-spine portion (~25° max), but full clinical neck
+# flexion (45-80°) and extension (50-70°) include the atlanto-
+# occipital joint + head pitch. Ear→nose tracks the face direction
+# and captures the combined motion.
+
+
+# Merged flex+ext reference ranges (browser NECK_MOVEMENTS verbatim
+# — keep in sync so live + upload report identical reference
+# bounds in the dual-row chart).
+_MERGED_NECKFLEXEXT_PRIMARY_TARGET:   tuple[float, float] = (45.0, 80.0)  # Flexion
+_MERGED_NECKFLEXEXT_SECONDARY_TARGET: tuple[float, float] = (50.0, 70.0)  # Extension
+
+# Visibility floor for the smoothed time-series. Looser than the
+# per-frame compute_neck_angle default because brief dips in vis
+# don't kill a well-smoothed signal.
+_NECK_VIS_THRESHOLD = 0.4
+
+# 10° baseline subtraction — the typical neutral pose has the nose
+# sitting slightly below the ear-axis line (ear-tragus to nose-tip
+# vector points ~10° below horizontal in a relaxed head). Recenters
+# the signed tilt on 0° at neutral.
+_NECK_NEUTRAL_TILT_BASELINE_DEG = 10.0
+
+# Deadband on the signed angle — below this magnitude the head is
+# too close to neutral to confidently classify as flexion or
+# extension. Same role as the corresponding constant in shoulder
+# flex/ext.
+_NECK_FLEXEXT_DEADBAND_DEG = 5.0
+
+# Anatomical sanity ceilings — bumped slightly above the clinical
+# normal-range upper bounds so hypermobile patients are not over-
+# clamped, but any reading past these limits is dropped from peak
+# tracking as a measurement artefact.
+_NECK_FLEXION_ANATOMICAL_MAX_DEG   = 90.0
+_NECK_EXTENSION_ANATOMICAL_MAX_DEG = 75.0
+
+# Lateral-view pre-flight: median (|faceVecX| / |faceVec|) across
+# visible frames must be at least this fraction. In LATERAL profile
+# the nose sits clearly to one side of the ear midpoint and the
+# ratio is large (~0.4-0.7); in near-FRONTAL view it collapses to
+# ≈ 0 and the atan2-with-|faceVecX|-denominator math becomes
+# unreliable (returns ≈ 90° regardless of head tilt). 0.25
+# conservatively accepts true lateral + 3/4 profile.
+_NECK_LATERAL_PROFILE_MIN_RATIO = 0.25
+
+
+def _classify_in_range(value: float, lo: float, hi: float) -> str:
+    """Asymmetric range classifier — mirror of the version in
+    knee_engine / shoulder_engine. Below range = fair / poor (mild
+    vs notable restriction); above range = good (normal variation)
+    up to ~30%, then fair, then poor."""
+    if lo <= value <= hi:
+        return "good"
+    width = max(1.0, hi - lo)
+    if value < lo:
+        dist_frac = (lo - value) / width
+        return "fair" if dist_frac <= 0.30 else "poor"
+    dist_frac = (value - hi) / width
+    if dist_frac <= 0.30:
+        return "good"
+    if dist_frac <= 1.00:
+        return "fair"
+    return "poor"
+
+
+def _frontal_view_for_neck(ts: dict) -> Optional[str]:
+    """Pre-flight rejection of near-frontal uploads. Returns a
+    user-facing error message when the median nose-to-ear-midpoint
+    horizontal component ratio (|faceVecX| / |faceVec|) is below
+    the threshold across visible frames — that case the atan2-
+    with-|faceVecX|-denominator math collapses and the resulting
+    tilt readings are noise. Conservative threshold so true
+    lateral profile + 3/4 profile pass cleanly."""
+    nose_entry = ts.get("nose")      or {}
+    le_entry   = ts.get("left_ear")  or {}
+    re_entry   = ts.get("right_ear") or {}
+    nx  = nose_entry.get("x_px"); ny  = nose_entry.get("y_px"); nv  = nose_entry.get("vis")
+    lex = le_entry.get("x_px");   ley = le_entry.get("y_px");   lev = le_entry.get("vis")
+    rex = re_entry.get("x_px");   rey = re_entry.get("y_px");   rev = re_entry.get("vis")
+    for arr in (nx, ny, nv, lex, ley, lev, rex, rey, rev):
+        if arr is None:
+            return None
+    n = min(len(nx), len(lex), len(rex))
+    if n == 0:
+        return None
+    ratios = []
+    for i in range(n):
+        if nv[i]  < _NECK_VIS_THRESHOLD: continue
+        if lev[i] < _NECK_VIS_THRESHOLD: continue
+        if rev[i] < _NECK_VIS_THRESHOLD: continue
+        ear_mid_x = (float(lex[i]) + float(rex[i])) / 2.0
+        ear_mid_y = (float(ley[i]) + float(rey[i])) / 2.0
+        fx = float(nx[i]) - ear_mid_x
+        fy = float(ny[i]) - ear_mid_y
+        mag = math.hypot(fx, fy)
+        if mag < 1e-4:
+            continue
+        ratios.append(abs(fx) / mag)
+    if not ratios:
+        return None
+    ratios.sort()
+    med_ratio = ratios[len(ratios) // 2]
+    if med_ratio < _NECK_LATERAL_PROFILE_MIN_RATIO:
+        return (
+            "Camera angle appears to be a front view, but the neck "
+            "flexion/extension test needs a SIDE (lateral) profile — "
+            "place the camera to the patient's side so the face is "
+            "seen from the ear. Please re-record."
+        )
+    return None
+
+
+def _poor_nose_visibility(ts: dict) -> bool:
+    """True when nose visibility is below 0.5 for more than half
+    the frames. The ear→nose tilt math needs the nose landmark, so
+    a run where the nose is hidden most of the time can't produce
+    a meaningful peak."""
+    # Local import — numpy is only needed by the video pipeline,
+    # not the single-frame compute_neck_angle helper.
+    import numpy as _np
+    nose_entry = ts.get("nose") or {}
+    nv = nose_entry.get("vis")
+    if nv is None or len(nv) == 0:
+        return False
+    nv_arr = _np.asarray(nv, dtype=float)
+    visible_frac = float(_np.mean(nv_arr >= 0.5))
+    return visible_frac < 0.50
+
+
+def _grab_neck_key_frame(
+    video_path: str,
+    frame_index: int,
+    keypoints_normalized: dict,
+    label: str,
+) -> Optional[dict]:
+    """Seek to `frame_index`, apply the same pose-based rotation
+    extract_poses applied to the keypoints, draw a face-emphasised
+    skeleton overlay, return a JPEG data URL. Mirrors the other
+    engines' _grab_*_key_frame helpers."""
+    if frame_index < 0:
+        return None
+    # Local imports — keep the live-frame surface above import-free.
+    import cv2 as _cv2
+    from gait_engine import LM as _LM, apply_rotation as _apply_rot
+
+    pose_rot = int(keypoints_normalized.get("_pose_rotation") or 0)
+
+    cap = _cv2.VideoCapture(video_path)
+    try:
+        cap.set(_cv2.CAP_PROP_POS_FRAMES, frame_index)
+        ret, frame = cap.read()
+    finally:
+        cap.release()
+    if not ret or frame is None:
+        return None
+    if pose_rot:
+        frame = _apply_rot(frame, pose_rot)
+
+    h, w = frame.shape[:2]
+    target_w = min(640, w)
+    if target_w < w:
+        scale = target_w / w
+        frame = _cv2.resize(frame, (target_w, int(h * scale)))
+        h, w = frame.shape[:2]
+
+    # Face / neck landmarks emphasised; the rest of the upper-body
+    # skeleton stays in grey for context.
+    EMPHASISED = {"nose", "left_ear", "right_ear"}
+
+    def _draw_dot(name: str):
+        frames = keypoints_normalized.get(name, [])
+        if frame_index >= len(frames):
+            return None
+        kp = frames[frame_index]
+        if kp is None:
+            return None
+        x_n, y_n, _vis = kp
+        px = int(x_n * w)
+        py = int(y_n * h)
+        outer = (0, 0, 220) if name in EMPHASISED else (150, 150, 150)
+        _cv2.circle(frame, (px, py), 5, outer, -1)
+        _cv2.circle(frame, (px, py), 7, (255, 255, 255), 1)
+        return (px, py)
+
+    edges = [
+        ("left_shoulder",  "right_shoulder"),
+        ("left_ear",       "right_ear"),
+        ("left_ear",       "nose"),
+        ("right_ear",      "nose"),
+        ("left_shoulder",  "left_hip"),
+        ("right_shoulder", "right_hip"),
+        ("left_hip",       "right_hip"),
+    ]
+    dot_pos: dict[str, tuple[int, int]] = {}
+    for name in _LM:
+        p = _draw_dot(name)
+        if p:
+            dot_pos[name] = p
+    for a, b in edges:
+        if a in dot_pos and b in dot_pos:
+            highlight = a in EMPHASISED and b in EMPHASISED
+            line_colour = (255, 255, 255) if highlight else (180, 180, 180)
+            _cv2.line(frame, dot_pos[a], dot_pos[b], line_colour, 2)
+
+    ok, buf = _cv2.imencode(".jpg", frame, [_cv2.IMWRITE_JPEG_QUALITY, 78])
+    if not ok:
+        return None
+    b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+    return {
+        "label": label,
+        "frame_index": int(frame_index),
+        "image_data_url": f"data:image/jpeg;base64,{b64}",
+    }
+
+
+def analyze_neck(
+    video_path: str,
+    pose_options,
+    movement: str,
+) -> dict:
+    """Run the BlazePose-Full merged neck flex+ext pipeline on an
+    uploaded clip.
+
+    Args:
+        video_path:   path to the uploaded (and optionally repaired)
+                      video file on disk.
+        pose_options: PoseLandmarkerOptions built by
+                      api._build_gait_pose_options().
+        movement:     "flexion_extension" — the only neck movement
+                      currently routed to backend. (lateral_flexion
+                      still runs through the browser path.)
+
+    Returns:
+        Dict matching the merged BiomechData Pydantic schema —
+        secondary_peak_* + primary/secondary labels populated so
+        the existing dual-row neck report renders without any
+        frontend display changes.
+
+    Raises:
+        ValueError: input invalid, frontal-view rejection,
+                    insufficient nose visibility, or fewer than
+                    ~half a second of usable frames. The endpoint
+                    maps these to HTTP 400 with the original
+                    user-facing message preserved.
+    """
+    # Local imports keep the single-frame surface dependency-light.
+    from gait_engine import build_time_series, extract_poses
+
+    if movement != "flexion_extension":
+        raise ValueError(f"Unsupported neck movement: {movement!r}")
+
+    raw, fps, _cv_total_frames = extract_poses(video_path, pose_options)
+    ts = build_time_series(raw)
+
+    # Pre-flight: reject pure-frontal recordings fast (the math
+    # collapses there). Run before the heavy per-frame loop.
+    frontal_msg = _frontal_view_for_neck(ts)
+    if frontal_msg:
+        raise ValueError(frontal_msg)
+
+    # Pre-flight: nose must be visible in at least half the frames.
+    # Without it, the ear→nose tilt is undefined.
+    if _poor_nose_visibility(ts):
+        raise ValueError("poor_visibility")
+
+    nose_entry = ts["nose"]
+    le_entry   = ts["left_ear"]
+    re_entry   = ts["right_ear"]
+    ls_entry   = ts["left_shoulder"]
+    rs_entry   = ts["right_shoulder"]
+
+    nx  = nose_entry["x_px"];  ny  = nose_entry["y_px"];  nv  = nose_entry["vis"]
+    lex = le_entry["x_px"];    ley = le_entry["y_px"];    lev = le_entry["vis"]
+    rex = re_entry["x_px"];    rey = re_entry["y_px"];    rev = re_entry["vis"]
+    lsv = ls_entry["vis"]
+    rsv = rs_entry["vis"]
+
+    n = int(min(len(nx), len(lex), len(rex), len(lsv), len(rsv)))
+
+    # Per-frame signed neck tilt. None for frames where any of
+    # the five required landmarks dips below threshold — the
+    # min/max tracker just skips those frames, so the running
+    # peak holds its last good value (no false 0° contamination
+    # at the extremes where an ear can briefly be occluded).
+    signed_angles: list[Optional[float]] = []
+    valid_frames = 0
+    for i in range(n):
+        if (nv[i]  < _NECK_VIS_THRESHOLD
+                or lev[i] < _NECK_VIS_THRESHOLD
+                or rev[i] < _NECK_VIS_THRESHOLD
+                or lsv[i] < _NECK_VIS_THRESHOLD
+                or rsv[i] < _NECK_VIS_THRESHOLD):
+            signed_angles.append(None)
+            continue
+        ear_mid_x = (float(lex[i]) + float(rex[i])) / 2.0
+        ear_mid_y = (float(ley[i]) + float(rey[i])) / 2.0
+        fx = float(nx[i]) - ear_mid_x
+        fy = float(ny[i]) - ear_mid_y
+        if math.hypot(fx, fy) < 1e-4:
+            signed_angles.append(None)
+            continue
+        tilt_deg = math.degrees(math.atan2(fy, abs(fx)))
+        signed = tilt_deg - _NECK_NEUTRAL_TILT_BASELINE_DEG
+        # Anatomical sanity: drop frames where the signed tilt
+        # exceeds the physical limits in either direction —
+        # almost certainly a measurement artefact (chin occluding
+        # an ear, etc.).
+        if signed > _NECK_FLEXION_ANATOMICAL_MAX_DEG + 15.0:
+            signed_angles.append(None)
+            continue
+        if signed < -(_NECK_EXTENSION_ANATOMICAL_MAX_DEG + 15.0):
+            signed_angles.append(None)
+            continue
+        signed_angles.append(signed)
+        valid_frames += 1
+
+    if valid_frames < max(3, int(fps * 0.5)):
+        raise ValueError("poor_visibility")
+
+    # ── Dual-peak tracking ───────────────────────────────────
+    # No direction detection needed — the sign of the signed
+    # tilt is the direction. Inside the deadband the frame is
+    # neutral and updates neither peak slot.
+    primary_peak_signed:   Optional[float] = None  # flexion (positive)
+    primary_peak_idx   = -1
+    secondary_peak_signed: Optional[float] = None  # extension (negative)
+    secondary_peak_idx = -1
+    for i, a in enumerate(signed_angles):
+        if a is None:
+            continue
+        if a > _NECK_FLEXEXT_DEADBAND_DEG:
+            if primary_peak_signed is None or a > primary_peak_signed:
+                primary_peak_signed = a
+                primary_peak_idx = i
+        elif a < -_NECK_FLEXEXT_DEADBAND_DEG:
+            if secondary_peak_signed is None or a < secondary_peak_signed:
+                secondary_peak_signed = a
+                secondary_peak_idx = i
+        # Else: in deadband → neutral, neither peak updated.
+
+    # Clamp the REPORTED magnitudes to the anatomical max so a
+    # single artefact frame past the sanity ceiling can't lock an
+    # implausible peak. We still keep the raw signed peak for the
+    # `peak_angle` field (debug / re-analysis).
+    primary_mag = (
+        min(_NECK_FLEXION_ANATOMICAL_MAX_DEG, max(0.0, float(primary_peak_signed)))
+        if primary_peak_signed is not None else 0.0
+    )
+    secondary_mag = (
+        min(_NECK_EXTENSION_ANATOMICAL_MAX_DEG, max(0.0, float(-secondary_peak_signed)))
+        if secondary_peak_signed is not None else 0.0
+    )
+
+    # ── Build response ───────────────────────────────────────
+    p_lo, p_hi = _MERGED_NECKFLEXEXT_PRIMARY_TARGET
+    s_lo, s_hi = _MERGED_NECKFLEXEXT_SECONDARY_TARGET
+    p_target = p_hi
+    p_pct = (primary_mag / p_target) * 100.0 if p_target > 0 else 0.0
+    p_status = _classify_in_range(primary_mag, p_lo, p_hi)
+
+    interpretation_primary = (
+        f"Flexion measured {primary_mag:.1f}°, which is "
+        f"{p_pct:.0f}% of the {p_lo:.0f}°–{p_hi:.0f}° normal range "
+        f"— {p_status}."
+    )
+    if secondary_mag > 0:
+        s_status = _classify_in_range(secondary_mag, s_lo, s_hi)
+        interpretation_secondary = (
+            f"Extension measured {secondary_mag:.1f}°, which is "
+            f"{(secondary_mag / s_hi) * 100.0:.0f}% of the "
+            f"{s_lo:.0f}°–{s_hi:.0f}° normal range — {s_status}."
+        )
+    else:
+        interpretation_secondary = (
+            "Extension direction was not detected in this recording."
+        )
+    interpretation = f"{interpretation_primary} {interpretation_secondary}"
+
+    # Two key frames only (Flexion + Extension peaks). Matches the
+    # merged knee + shoulder ab/ad layout — no neutral frame.
+    key_frames: list[dict] = []
+    if primary_peak_idx >= 0 and primary_mag > 0:
+        kf = _grab_neck_key_frame(
+            video_path, primary_peak_idx, raw,
+            f"Flexion ({primary_mag:.1f}°)",
+        )
+        if kf:
+            key_frames.append(kf)
+    if secondary_peak_idx >= 0 and secondary_mag > 0:
+        kf = _grab_neck_key_frame(
+            video_path, secondary_peak_idx, raw,
+            f"Extension ({secondary_mag:.1f}°)",
+        )
+        if kf:
+            key_frames.append(kf)
+
+    return {
+        "body_part": "neck",
+        "movement": "flexion_extension",
+        # Neck flex/ext doesn't carry a side; field kept on the DTO
+        # for sibling-endpoint parity (the report omits the side
+        # column when this is None).
+        "side": None,
+        "peak_angle": (
+            float(primary_peak_signed) if primary_peak_signed is not None else None
+        ),
+        "peak_magnitude": primary_mag,
+        "reference_range": [float(p_lo), float(p_hi)],
+        "target": float(p_target),
+        "percentage": p_pct,
+        "status": p_status,
+        "valid_frames": valid_frames,
+        "total_frames": n,
+        "fps": float(fps),
+        "interpretation": interpretation,
+        "key_frames": key_frames,
+        "secondary_peak_angle": (
+            float(secondary_peak_signed) if secondary_peak_signed is not None else None
+        ),
+        "secondary_peak_magnitude": secondary_mag if secondary_mag > 0 else None,
+        "secondary_reference_range": [float(s_lo), float(s_hi)],
+        "primary_label": "Flexion",
+        "secondary_label": "Extension",
+    }
 
 
 # ══════════════════════════════════════════════════════════════════
