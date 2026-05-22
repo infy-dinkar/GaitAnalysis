@@ -21,6 +21,28 @@ interface Props {
   side?: "left" | "right";
 }
 
+/** Returns true when the (bodyPart, movementId) pair posts its
+ *  upload to a FastAPI /api/analyze-… endpoint rather than running
+ *  locally in the browser. Keep in sync with the dispatch table at
+ *  the top of analyzeBiomechVideo in lib/biomech/uploadAnalyze.ts —
+ *  this drives the loading-stage label ("Uploading video… →
+ *  Analysing movement…") and the privacy note ("your video is not
+ *  uploaded") in the UI. */
+function isBackendRouted(bodyPart: Props["bodyPart"], movementId: string): boolean {
+  if (bodyPart === "ankle") return true;
+  if (bodyPart === "shoulder") {
+    return (
+      movementId === "flexion_extension" ||
+      movementId === "abduction_adduction" ||
+      movementId === "rotation"
+    );
+  }
+  if (bodyPart === "knee") {
+    return movementId === "flexion_extension";
+  }
+  return false;
+}
+
 export function ApiUploadAssessment({
   bodyPart,
   movementId,
@@ -230,15 +252,16 @@ export function ApiUploadAssessment({
           <div className="flex items-center justify-between">
             <span className="text-xs uppercase tracking-[0.12em] text-subtle">
               {(() => {
-                // Shoulder flexion+extension and ankle run on the
-                // backend (BlazePose Full). Other tests run locally
-                // (MoveNet). Label the stage accordingly so the
-                // "your video is not uploaded" note doesn't appear
-                // for backend-routed tests.
-                const backendRouted =
-                  bodyPart === "ankle" ||
-                  (bodyPart === "shoulder" && movementId === "flexion_extension");
-                if (!backendRouted) return "Analysing in browser";
+                // Backend-routed tests run on the FastAPI BlazePose
+                // pipeline (video uploads to /api/analyze-…); other
+                // tests run locally in the browser via MoveNet. The
+                // stage label + the "not uploaded" privacy note
+                // both branch on this. Keep this list in sync with
+                // analyzeBiomechVideo's dispatch in
+                // lib/biomech/uploadAnalyze.ts.
+                if (!isBackendRouted(bodyPart, movementId)) {
+                  return "Analysing in browser";
+                }
                 if (progress < 0.25) return "Uploading video…";
                 if (progress < 0.95) return "Analysing movement…";
                 return "Done";
@@ -254,7 +277,7 @@ export function ApiUploadAssessment({
               style={{ width: `${progress * 100}%` }}
             />
           </div>
-          {bodyPart !== "ankle" && !(bodyPart === "shoulder" && movementId === "flexion_extension") && (
+          {!isBackendRouted(bodyPart, movementId) && (
             <p className="mt-3 text-[11px] text-subtle">
               Pose detection runs locally on your device — your video is not uploaded.
             </p>

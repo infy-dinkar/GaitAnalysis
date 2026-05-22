@@ -174,18 +174,17 @@ export async function analyzeBiomechVideo(
     return analyzeShoulderBackend(file, "rotation", side ?? "right", onProgress);
   }
 
-  // ── Merged knee flexion + extension → min/max analyser ──
-  // Knee "flexion_extension" captures the full knee ROM in one
-  // recording. The angle metric (180° - interior knee angle, range
-  // 0-140°) is bidirectional: max-of-trial = peak flexion (most
-  // bent), min-of-trial = peak extension (most straight). No
-  // direction routing — both peaks update on every gated frame.
+  // ── Knee flexion + extension → backend MediaPipe BlazePose Full ──
+  // Same rationale as the shoulder migrations: device-consistent
+  // BlazePose pipeline beats the GPU-dependent browser MoveNet
+  // path. Knee math is the simplest of the merged tests — just
+  // min/max tracking of (180° − interior_knee_angle), no
+  // direction detection / no calibration. The backend reuses the
+  // same shared gait pose pipeline + _pose_rotation correction
+  // already in place from the shoulder PRs, so portrait videos
+  // and platform-specific cv2 behaviour are handled automatically.
   if (bodyPart === "knee" && movement === "flexion_extension") {
-    return analyzeMergedKneeVideo({
-      file,
-      side: side ?? "right",
-      onProgress,
-    });
+    return analyzeKneeBackend(file, "flexion_extension", side ?? "right", onProgress);
   }
 
   // ── Merged neck tests → direction-aware analyser ──
@@ -1730,4 +1729,85 @@ function formatAnkleError(detail: unknown, status: number): string {
       .join("; ");
   }
   return `Ankle analysis failed (${status})`;
+}
+
+// ─── Knee backend client ─────────────────────────────────────────
+// Posts the uploaded video to /api/analyze-knee and unwraps the
+// BiomechResponse envelope. Mirrors analyzeShoulderBackend exactly;
+// kept as a separate function so the body-part-specific error
+// message map (formatKneeError) stays local.
+async function analyzeKneeBackend(
+  file: File,
+  movement: string,
+  side: "left" | "right",
+  onProgress?: (fraction: number) => void,
+): Promise<BiomechDataDTO> {
+  onProgress?.(0.1);
+  const form = new FormData();
+  form.append("video", file, file.name || "knee.mp4");
+  form.append("movement_type", movement);
+  form.append("side", side);
+
+  onProgress?.(0.3);
+  const res = await authedFetch("/api/analyze-knee", {
+    method: "POST",
+    body: form,
+  });
+  onProgress?.(0.85);
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+    throw new Error(formatKneeError(body.detail, res.status));
+  }
+  const wrapper = (await res.json()) as {
+    success: boolean;
+    data: BiomechDataDTO | null;
+    error: string | null;
+  };
+  onProgress?.(1.0);
+  if (!wrapper.success || !wrapper.data) {
+    throw new Error(
+      wrapper.error ?? "Analysis failed. Please check connection and try again.",
+    );
+  }
+  return wrapper.data;
+}
+
+// Map the backend's structured error tokens (raised via
+// HTTPException.detail in api.analyze_knee) to the user-facing
+// strings the spec calls for. Anything not in the token list
+// falls back to the raw detail string so debugging never loses
+// information.
+function formatKneeError(detail: unknown, status: number): string {
+  const raw = typeof detail === "string" ? detail : Array.isArray(detail)
+    ? detail.map((d) => (typeof d === "string" ? d : JSON.stringify(d))).join("; ")
+    : JSON.stringify(detail ?? {});
+
+  if (raw.startsWith("fps_too_low")) {
+    return "Video quality too low. Please record at 30 FPS or higher.";
+  }
+  if (raw.startsWith("video_too_short")) {
+    return "Video too short. Please record at least 3 seconds of movement.";
+  }
+  if (raw.startsWith("duration_too_long")) {
+    return "Video too long. Maximum 60 seconds.";
+  }
+  if (raw.startsWith("file_too_large")) {
+    return "File too large. Maximum size is 100 MB.";
+  }
+  if (raw.startsWith("poor_visibility")) {
+    return (
+      "Knee not clearly visible in video. Please ensure the full leg is " +
+      "visible with good lighting."
+    );
+  }
+  if (raw.startsWith("Requested side")) {
+    // Pre-flight wrong-side check — surface verbatim so the user
+    // sees the exact actionable message (which side to switch to).
+    return raw;
+  }
+  if (status >= 500) {
+    return "Analysis failed. Please check connection and try again.";
+  }
+  return raw || `Analysis failed (HTTP ${status}).`;
 }
