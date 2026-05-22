@@ -56,15 +56,11 @@ def _grab_ankle_key_frame(
 ) -> Optional[dict]:
     if frame_index < 0:
         return None
-    # Pose-based rotation is the single source of truth — see
-    # shoulder_engine._grab_shoulder_key_frame for the rationale
-    # (cv2 already auto-rotates by default in 4.5.2+).
-    from gait_engine import (
-        apply_rotation as _apply_rot,
-        infer_pose_rotation,
-        rotate_norm_point,
-    )
-    pose_rot = infer_pose_rotation(keypoints_normalized)
+    # extract_poses stores the pose-based rotation it applied to
+    # the keypoints; re-apply the same rotation to the screenshot
+    # frame so the JPEG and keypoint overlay stay aligned.
+    from gait_engine import apply_rotation as _apply_rot
+    pose_rot = int(keypoints_normalized.get("_pose_rotation") or 0)
 
     cap = cv2.VideoCapture(video_path)
     try:
@@ -93,9 +89,10 @@ def _grab_ankle_key_frame(
         kp = frames[frame_index]
         if kp is None:
             return None
+        # Keypoints are already in upright space (extract_poses
+        # rotated them when needed); project directly into the
+        # post-rotation frame pixel dimensions.
         x_n, y_n, _vis = kp
-        if pose_rot:
-            x_n, y_n = rotate_norm_point(x_n, y_n, pose_rot)
         px = int(x_n * w)
         py = int(y_n * h)
         emphasised = name.startswith(side)

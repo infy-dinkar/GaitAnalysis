@@ -338,6 +338,36 @@ def extract_poses(video_path: str, pose_options, progress_callback=None):
 
     cap.release()
     pose_model.close()
+
+    # Platform-independent rotation correction. cv2 honours rotation
+    # metadata by default on Linux opencv-python-headless (HF Space)
+    # but NOT reliably on Windows / some opencv-python builds —
+    # phone-recorded portrait videos can come through sideways, the
+    # body projects horizontally, shoulder-width shrinks to a few
+    # pixels, and ratios like dx/shoulder_width explode (the merged
+    # ab/ad direction detector saw dxr values in the thousands).
+    # Run our own pose-based check after extraction: if the body
+    # appears sideways or upside-down, rotate ALL keypoint
+    # normalized coords into upright space and swap frame_w/_h.
+    # Downstream math (ab/ad direction, flex/ext, screenshot helpers)
+    # then sees consistent upright coordinates regardless of how
+    # cv2 delivered the frames.
+    pose_rot = infer_pose_rotation(raw)
+    if pose_rot:
+        for _name in LM:
+            arr = raw[_name]
+            for i, kp in enumerate(arr):
+                if kp is None:
+                    continue
+                x_n, y_n, v = kp
+                new_x, new_y = rotate_norm_point(float(x_n), float(y_n), pose_rot)
+                arr[i] = (new_x, new_y, v)
+        if pose_rot in (90, 270):
+            raw["_frame_w"], raw["_frame_h"] = raw["_frame_h"], raw["_frame_w"]
+    # Always remember the applied rotation so the screenshot helpers
+    # can rotate their re-read cv2 frame to match the keypoints.
+    raw["_pose_rotation"] = pose_rot
+
     return raw, fps, total_frames
 
 

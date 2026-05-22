@@ -939,12 +939,18 @@ async def analyze_shoulder(
     fixed_path_cleanup: str | None = None
     try:
         movement = movement_type.lower().strip()
-        if movement != "flexion_extension" and movement not in SHOULDER_NORMAL_RANGES:
+        # Merged movements (one recording, both directions) live as
+        # their own movement IDs and aren't part of SHOULDER_NORMAL_
+        # RANGES (which is structured for single-direction movements
+        # with a single reference range). The engine knows how to
+        # dispatch each merged ID on its own.
+        _ALLOWED_MERGED = ("flexion_extension", "abduction_adduction")
+        if movement not in _ALLOWED_MERGED and movement not in SHOULDER_NORMAL_RANGES:
             return BiomechResponse(
                 success=False,
                 error=(
                     f"Unknown shoulder movement '{movement_type}'. "
-                    f"Allowed: 'flexion_extension' or "
+                    f"Allowed: {sorted(_ALLOWED_MERGED)} or "
                     f"{sorted(SHOULDER_NORMAL_RANGES.keys())}"
                 ),
             )
@@ -1041,6 +1047,15 @@ async def analyze_shoulder(
         # Engine raises "poor_visibility" directly; surface it 1:1.
         if msg == "poor_visibility":
             raise HTTPException(status_code=400, detail="poor_visibility")
+        # Wrong-side selection — surface the user-facing message as
+        # the HTTPException detail so the frontend displays it
+        # verbatim (matches the poor_visibility pattern).
+        if msg.startswith("Requested side"):
+            raise HTTPException(status_code=400, detail=msg)
+        # Lateral-view rejection for ab/ad test (side profile
+        # filmed instead of frontal). Same HTTP 400 surface.
+        if msg.startswith("Camera angle"):
+            raise HTTPException(status_code=400, detail=msg)
         return BiomechResponse(success=False, error=msg)
     except Exception as e:
         log.exception("shoulder analysis failed")
