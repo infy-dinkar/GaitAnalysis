@@ -317,6 +317,78 @@ _NECK_LATERAL_ASYMMETRY_FLAG_DEG = 10.0
 _NECK_LATERAL_FRONTAL_MIN_SHOULDER_EAR_RATIO = 1.8
 
 
+# ── Merged rotation (left + right) ─────────────────────────────
+# Patient stands FRONTAL to camera, faces it squarely at the start
+# of the recording (the calibration "neutral" pose), then turns
+# the head to one side and the other in turn.
+#
+# Math (matches motionlens-web/lib/biomech/neck.ts:
+# computeNeckRotationFromBaseline verbatim — ear-width foreshortening
+# with per-patient anatomy correction):
+#
+#     baseline_ear_width = ear_width at calibration (head-sphere
+#                          diameter at facing-forward)
+#     current_ratio = current_ear_width / baseline_ear_width
+#     ratio_clamped = max(0, min(1, current_ratio))
+#     magnitude_deg = acos(ratio_clamped) × 180 / π
+#
+#     baseline_nose_ratio = (nose.x − ear_mid.x) / (baseline_ear_width / 2)
+#                          at calibration (anatomical asymmetry baseline)
+#     current_nose_ratio  = (nose.x − ear_mid.x) / (current_ear_width / 2)
+#                          per-frame
+#     direction_sign = sign(current_nose_ratio − baseline_nose_ratio)
+#
+#     signed = direction_sign × magnitude_deg
+#
+# Sign convention (image-space, browser-aligned):
+#   • positive → nose moved RIGHT in image after baseline (patient
+#                turned right in mirrored selfie view; patient
+#                turned left in non-mirrored upload)
+#   • negative → nose moved LEFT in image
+#
+# Labels follow spec convention (image-space):
+#   primary   = "Left Rotation"   ← negative signed peaks
+#   secondary = "Right Rotation"  ← positive signed peaks
+#
+# Why foreshortening beats the nose-displacement approximation:
+# nose protrusion varies per patient (3-5 cm forward of ear axis,
+# vs shoulder width ~ 30-45 cm), so nose-displacement / shoulder-
+# width gives a ratio that saturates at ~0.15-0.25 even at full
+# 90° rotation. arcsin of that returns just ~10-15°, severely
+# under-reporting ROM. The ear-width foreshortening cancels nose
+# anatomy and is geometrically faithful (ear-to-ear chord shrinks
+# as cos(θ) when the head rotates around its vertical axis).
+_MERGED_NECKROT_PRIMARY_TARGET:   tuple[float, float] = (60.0, 80.0)  # Left
+_MERGED_NECKROT_SECONDARY_TARGET: tuple[float, float] = (60.0, 80.0)  # Right
+
+# Maximum tolerated baseline ratio when auto-detecting "facing
+# forward". 0.15 = nose sits within 15% of half-ear-width of the
+# ear midline. Larger than that and we suspect the patient isn't
+# actually facing the camera squarely. Matches browser constant.
+_NECK_ROT_FACING_FORWARD_RATIO = 0.15
+
+# Minimum ear-to-ear pixel width to accept calibration. Below this
+# the patient is too far from camera and keypoint noise dominates.
+_NECK_ROT_MIN_EAR_WIDTH_PX = 30.0
+
+# Consecutive stable facing-forward frames required before the
+# baseline locks. Matches the shoulder-rotation pattern; once
+# locked, never relocked mid-trial (would destabilise magnitudes).
+_NECK_ROT_CALIBRATION_STABLE_FRAMES = 5
+
+# Deadband on the signed angle — below this magnitude the head is
+# too close to neutral to commit to a side.
+_NECK_ROT_DEADBAND_DEG = 5.0
+
+# Anatomical clamp per spec; the foreshortening formula's arccos
+# naturally saturates at 90° anyway, so this is a conservative
+# clinical reporting cap rather than a math guard.
+_NECK_ROT_ANATOMICAL_MAX_DEG = 80.0
+
+# Threshold for flagging meaningful left/right asymmetry.
+_NECK_ROT_ASYMMETRY_FLAG_DEG = 10.0
+
+
 def _classify_in_range(value: float, lo: float, hi: float) -> str:
     """Asymmetric range classifier — mirror of the version in
     knee_engine / shoulder_engine. Below range = fair / poor (mild
@@ -740,6 +812,277 @@ def _analyze_neck_lateral_flexion(
     }
 
 
+def _is_neck_rotation_neutral(
+    nose_x: float, le_x: float, re_x: float,
+) -> tuple[bool, float]:
+    """Returns (is_facing_forward, ear_width_px). Ports
+    isStableFacingForward from motionlens-web/lib/biomech/neck.ts.
+
+    The patient is "facing forward" when the nose sits roughly
+    between the two ears in image-x — specifically within
+    _NECK_ROT_FACING_FORWARD_RATIO of half the ear-width of the
+    ear midline. Also rejects the frame when the ears are too
+    close in pixel space (patient too far from camera)."""
+    ear_width = abs(le_x - re_x)
+    if ear_width < _NECK_ROT_MIN_EAR_WIDTH_PX:
+        return False, ear_width
+    ear_mid_x = (le_x + re_x) / 2.0
+    ratio = abs((nose_x - ear_mid_x) / (ear_width / 2.0))
+    return ratio <= _NECK_ROT_FACING_FORWARD_RATIO, ear_width
+
+
+def _analyze_neck_rotation(
+    video_path: str,
+    pose_options,
+) -> dict:
+    """Backend pipeline for the merged neck rotation test (left +
+    right captured in one trial). Math + sign convention mirror
+    motionlens-web/lib/biomech/neck.ts:computeNeckRotationFromBaseline
+    verbatim so live + upload report the same metric.
+
+    Two-phase flow (matches shoulder rotation):
+
+      Phase 1 — lock a calibration baseline from the first
+        _NECK_ROT_CALIBRATION_STABLE_FRAMES consecutive frames
+        where the patient is facing the camera squarely. Baseline
+        is locked ONCE and never relocked (a mid-trial relock
+        would shift the magnitude scale).
+
+      Phase 2 — per-frame ear-width foreshortening + nose-direction
+        sign. Inside the deadband (|signed| < 5°) frames neither
+        peak slot is updated. Frames with bad nose/ear visibility
+        are skipped; running peaks hold their last good value
+        (no 0° contamination at the extreme of rotation where
+        one ear can briefly occlude).
+    """
+    from gait_engine import build_time_series, extract_poses
+
+    raw, fps, _cv_total_frames = extract_poses(video_path, pose_options)
+    ts = build_time_series(raw)
+
+    # Pre-flight: FRONTAL view required (same physical setup as
+    # lateral_flexion). Re-use that helper — both tests share the
+    # shoulder-width / ear-width frontal-view geometric check.
+    lateral_msg = _lateral_profile_for_neck_lateral_flexion(ts)
+    if lateral_msg:
+        raise ValueError(lateral_msg)
+
+    nose_entry = ts["nose"]
+    le_entry   = ts["left_ear"]
+    re_entry   = ts["right_ear"]
+    ls_entry   = ts["left_shoulder"]
+    rs_entry   = ts["right_shoulder"]
+
+    nx  = nose_entry["x_px"];  nv  = nose_entry["vis"]
+    lex = le_entry["x_px"];    lev = le_entry["vis"]
+    rex = re_entry["x_px"];    rev = re_entry["vis"]
+    lsv = ls_entry["vis"]
+    rsv = rs_entry["vis"]
+
+    n = int(min(len(nx), len(lex), len(rex), len(lsv), len(rsv)))
+
+    # ── Phase 1: baseline lock ───────────────────────────────
+    # Look for the first run of _NECK_ROT_CALIBRATION_STABLE_FRAMES
+    # consecutive frames where the patient is facing forward
+    # squarely AND all five anchor keypoints are confidently
+    # visible. Once found, snapshot ear-width + nose ratio.
+    baseline_ear_width: Optional[float] = None
+    baseline_nose_ratio: Optional[float] = None
+    baseline_locked_idx = -1
+    stable_count = 0
+    for i in range(n):
+        if (nv[i]  < _NECK_VIS_THRESHOLD
+                or lev[i] < _NECK_VIS_THRESHOLD
+                or rev[i] < _NECK_VIS_THRESHOLD
+                or lsv[i] < _NECK_VIS_THRESHOLD
+                or rsv[i] < _NECK_VIS_THRESHOLD):
+            stable_count = 0
+            continue
+        n_x  = float(nx[i])
+        le_x = float(lex[i])
+        re_x = float(rex[i])
+        ok, ear_width = _is_neck_rotation_neutral(n_x, le_x, re_x)
+        if not ok:
+            stable_count = 0
+            continue
+        stable_count += 1
+        if stable_count >= _NECK_ROT_CALIBRATION_STABLE_FRAMES:
+            baseline_ear_width = ear_width
+            ear_mid_x = (le_x + re_x) / 2.0
+            baseline_nose_ratio = (n_x - ear_mid_x) / (ear_width / 2.0)
+            baseline_locked_idx = i
+            break
+
+    if baseline_ear_width is None or baseline_nose_ratio is None:
+        # Surfaced as HTTP 400 by api.analyze_neck.
+        raise ValueError(
+            "Neutral pose not detected. Please start the recording with "
+            "the patient facing the camera squarely (head straight, "
+            "both ears equally visible) for at least 1 second before "
+            "rotating."
+        )
+
+    # ── Phase 2: per-frame magnitude + direction ─────────────
+    primary_peak_signed:   Optional[float] = None  # left rotation (negative)
+    primary_peak_idx   = -1
+    secondary_peak_signed: Optional[float] = None  # right rotation (positive)
+    secondary_peak_idx = -1
+    valid_frames = 0
+    for i in range(n):
+        # Nose + both ears required for the foreshortening formula.
+        # Shoulder visibility checked to ensure the pose pipeline
+        # is tracking a coherent torso (drops in shoulder vis
+        # usually mean the patient walked out of frame).
+        if (nv[i]  < _NECK_VIS_THRESHOLD
+                or lev[i] < _NECK_VIS_THRESHOLD
+                or rev[i] < _NECK_VIS_THRESHOLD
+                or lsv[i] < _NECK_VIS_THRESHOLD
+                or rsv[i] < _NECK_VIS_THRESHOLD):
+            continue
+        n_x  = float(nx[i])
+        le_x = float(lex[i])
+        re_x = float(rex[i])
+        current_ear_width = abs(le_x - re_x)
+        # Clamp ratio to [0, 1]: it can technically exceed 1 if the
+        # patient stepped closer to the camera since calibration
+        # (apparent ear-width grows); clamping keeps acos defined
+        # and under-reports rather than crashing.
+        ratio = max(0.0, min(1.0, current_ear_width / baseline_ear_width))
+        magnitude_deg = math.degrees(math.acos(ratio))
+
+        # Sign from nose direction relative to ear midline, with
+        # baseline ratio subtracted so anatomical asymmetry (off-
+        # centre nose at calibration) cancels out.
+        if current_ear_width > 1e-3:
+            ear_mid_x = (le_x + re_x) / 2.0
+            current_nose_ratio = (n_x - ear_mid_x) / (current_ear_width / 2.0)
+        else:
+            current_nose_ratio = 0.0
+        delta = current_nose_ratio - baseline_nose_ratio
+        sign = -1.0 if delta < 0 else 1.0
+        signed = sign * magnitude_deg
+
+        # Inside deadband → neither peak updated (neutral pose
+        # noise can flip the sign at small magnitudes).
+        if abs(signed) < _NECK_ROT_DEADBAND_DEG:
+            valid_frames += 1
+            continue
+        # Anatomical clamp on REPORTED magnitudes (the math itself
+        # naturally caps at ~90° but the spec asks for 80° as a
+        # clinical reporting ceiling).
+        clamped_mag = min(_NECK_ROT_ANATOMICAL_MAX_DEG, magnitude_deg)
+        clamped_signed = sign * clamped_mag
+
+        if clamped_signed < 0:
+            if primary_peak_signed is None or clamped_signed < primary_peak_signed:
+                primary_peak_signed = clamped_signed
+                primary_peak_idx = i
+        else:
+            if secondary_peak_signed is None or clamped_signed > secondary_peak_signed:
+                secondary_peak_signed = clamped_signed
+                secondary_peak_idx = i
+        valid_frames += 1
+
+    if valid_frames < max(3, int(fps * 0.5)):
+        raise ValueError("poor_visibility")
+
+    primary_mag = (
+        float(-primary_peak_signed) if primary_peak_signed is not None else 0.0
+    )
+    secondary_mag = (
+        float(secondary_peak_signed) if secondary_peak_signed is not None else 0.0
+    )
+
+    # ── Asymmetry detection ──────────────────────────────────
+    both_captured = primary_mag > 0 and secondary_mag > 0
+    asymmetry_deg = (
+        abs(primary_mag - secondary_mag) if both_captured else 0.0
+    )
+    asymmetry_flag = both_captured and asymmetry_deg > _NECK_ROT_ASYMMETRY_FLAG_DEG
+
+    # ── Build response ───────────────────────────────────────
+    p_lo, p_hi = _MERGED_NECKROT_PRIMARY_TARGET
+    s_lo, s_hi = _MERGED_NECKROT_SECONDARY_TARGET
+    p_target = p_hi
+    p_pct = (primary_mag / p_target) * 100.0 if p_target > 0 else 0.0
+    p_status = _classify_in_range(primary_mag, p_lo, p_hi)
+
+    interpretation_primary = (
+        f"Left rotation measured {primary_mag:.1f}°, which is "
+        f"{p_pct:.0f}% of the {p_lo:.0f}°–{p_hi:.0f}° normal range "
+        f"— {p_status}."
+    )
+    if secondary_mag > 0:
+        s_status = _classify_in_range(secondary_mag, s_lo, s_hi)
+        interpretation_secondary = (
+            f"Right rotation measured {secondary_mag:.1f}°, which is "
+            f"{(secondary_mag / s_hi) * 100.0:.0f}% of the "
+            f"{s_lo:.0f}°–{s_hi:.0f}° normal range — {s_status}."
+        )
+    else:
+        interpretation_secondary = (
+            "Right rotation direction was not detected in this recording."
+        )
+    interpretation = f"{interpretation_primary} {interpretation_secondary}"
+    if asymmetry_flag:
+        interpretation += (
+            f" Notable left-right asymmetry detected "
+            f"({asymmetry_deg:.1f}°). Clinical correlation recommended."
+        )
+    # 2D approximation caveat — surfaced in the interpretation so
+    # the clinician sees it on the report. Rotation around the
+    # vertical axis is fundamentally a 3D motion projected to 2D;
+    # the ear-width foreshortening cancels nose anatomy but is
+    # still sensitive to head-tilt / chin-up combined motions.
+    interpretation += (
+        " Note: rotation is measured from a 2D pose estimate; "
+        "results may be less precise than for in-plane neck movements."
+    )
+
+    # Two key frames only — peak left + peak right.
+    key_frames: list[dict] = []
+    if primary_peak_idx >= 0 and primary_mag > 0:
+        kf = _grab_neck_key_frame(
+            video_path, primary_peak_idx, raw,
+            f"Left rotation ({primary_mag:.1f}°)",
+        )
+        if kf:
+            key_frames.append(kf)
+    if secondary_peak_idx >= 0 and secondary_mag > 0:
+        kf = _grab_neck_key_frame(
+            video_path, secondary_peak_idx, raw,
+            f"Right rotation ({secondary_mag:.1f}°)",
+        )
+        if kf:
+            key_frames.append(kf)
+
+    return {
+        "body_part": "neck",
+        "movement": "rotation",
+        "side": None,
+        "peak_angle": (
+            float(primary_peak_signed) if primary_peak_signed is not None else None
+        ),
+        "peak_magnitude": primary_mag,
+        "reference_range": [float(p_lo), float(p_hi)],
+        "target": float(p_target),
+        "percentage": p_pct,
+        "status": p_status,
+        "valid_frames": valid_frames,
+        "total_frames": n,
+        "fps": float(fps),
+        "interpretation": interpretation,
+        "key_frames": key_frames,
+        "secondary_peak_angle": (
+            float(secondary_peak_signed) if secondary_peak_signed is not None else None
+        ),
+        "secondary_peak_magnitude": secondary_mag if secondary_mag > 0 else None,
+        "secondary_reference_range": [float(s_lo), float(s_hi)],
+        "primary_label": "Left Rotation",
+        "secondary_label": "Right Rotation",
+    }
+
+
 def analyze_neck(
     video_path: str,
     pose_options,
@@ -753,10 +1096,9 @@ def analyze_neck(
                       video file on disk.
         pose_options: PoseLandmarkerOptions built by
                       api._build_gait_pose_options().
-        movement:     "flexion_extension" or "lateral_flexion" —
-                      the two merged neck tests currently routed
-                      to backend. (rotation still runs through the
-                      browser path.)
+        movement:     "flexion_extension" / "lateral_flexion" /
+                      "rotation" — the three merged neck tests
+                      now routed to backend.
 
     Returns:
         Dict matching the merged BiomechData Pydantic schema —
@@ -772,11 +1114,14 @@ def analyze_neck(
                     HTTP 400 with the original user-facing
                     message preserved.
     """
-    # Lateral flexion runs through its own pipeline (needs FRONTAL
-    # view + different math + dual-side labels). Branch early so
-    # the existing flex/ext code below stays untouched.
+    # Lateral flexion + rotation each run through their own
+    # pipelines (different math + view requirement + dual-side
+    # labels). Branch early so the existing flex/ext code below
+    # stays untouched.
     if movement == "lateral_flexion":
         return _analyze_neck_lateral_flexion(video_path, pose_options)
+    if movement == "rotation":
+        return _analyze_neck_rotation(video_path, pose_options)
 
     # Local imports keep the single-frame surface dependency-light.
     from gait_engine import build_time_series, extract_poses

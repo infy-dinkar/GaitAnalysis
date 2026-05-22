@@ -194,20 +194,26 @@ export async function analyzeBiomechVideo(
   // in one recording. Both share the same direction-routing flow
   // and the analyser parameterises which formula + detector to
   // use internally.
-  // ── Neck flex+ext and lateral flexion → backend MediaPipe ──
-  // Both merged neck tests now route to /api/analyze-neck. The
+  // ── All three merged neck tests → backend MediaPipe ──
+  // All neck merged tests now route to /api/analyze-neck. The
   // backend's analyze_neck dispatches on the movement string:
-  //   • flexion_extension uses the ear→nose tilt formula (lateral
-  //     camera profile required — see backend pre-flight check).
+  //   • flexion_extension uses the ear→nose tilt formula (LATERAL
+  //     camera profile required — patient seen from the side).
   //   • lateral_flexion uses the shoulder→ear vs vertical formula
-  //     (frontal camera profile required — opposite view).
-  // The view requirement is enforced by the backend pre-flight
-  // check, which surfaces an actionable HTTP 400 message either
-  // way. Live + upload report the same metric for both movements
-  // because the backend formulas are verbatim ports of the
-  // browser implementations.
-  if (bodyPart === "neck" &&
-      (movement === "flexion_extension" || movement === "lateral_flexion")) {
+  //     (FRONTAL camera profile required — patient facing camera).
+  //   • rotation uses the ear-width foreshortening formula with a
+  //     baseline locked from the patient's facing-forward neutral
+  //     pose at the start of the recording (FRONTAL view required).
+  // The view + neutral-pose requirements are enforced by the
+  // backend pre-flight checks, which surface actionable HTTP 400
+  // messages. Live + upload report the same metric for every
+  // movement because the backend formulas are verbatim ports of
+  // the browser implementations.
+  if (bodyPart === "neck" && (
+        movement === "flexion_extension" ||
+        movement === "lateral_flexion" ||
+        movement === "rotation"
+      )) {
     return analyzeNeckBackend(file, movement, onProgress);
   }
 
@@ -1886,8 +1892,15 @@ function formatNeckError(detail: unknown, status: number): string {
     );
   }
   if (raw.startsWith("Camera angle")) {
-    // Frontal-view rejection — surface verbatim so the user sees
-    // the exact "side profile" guidance.
+    // Frontal/lateral view rejection — surface verbatim so the
+    // user sees the exact view-required guidance for whichever
+    // neck movement they uploaded.
+    return raw;
+  }
+  if (raw.startsWith("Neutral pose")) {
+    // Rotation test couldn't lock a calibration baseline at the
+    // start of the recording — surface verbatim so the user sees
+    // the "start facing forward" guidance.
     return raw;
   }
   if (status >= 500) {

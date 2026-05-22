@@ -1272,7 +1272,7 @@ async def analyze_neck(
     fixed_path_cleanup: str | None = None
     try:
         movement = movement_type.lower().strip()
-        _ALLOWED_NECK = ("flexion_extension", "lateral_flexion")
+        _ALLOWED_NECK = ("flexion_extension", "lateral_flexion", "rotation")
         if movement not in _ALLOWED_NECK:
             return BiomechResponse(
                 success=False,
@@ -1368,9 +1368,13 @@ async def analyze_neck(
         log.warning("neck validation: %s", msg)
         if msg == "poor_visibility":
             raise HTTPException(status_code=400, detail="poor_visibility")
-        # Frontal-view rejection — surfaced as HTTP 400 with the
-        # user-facing message preserved verbatim.
+        # Frontal/lateral view rejection — surfaced as HTTP 400 with
+        # the user-facing message preserved verbatim.
         if msg.startswith("Camera angle"):
+            raise HTTPException(status_code=400, detail=msg)
+        # Rotation test couldn't lock a calibration baseline (patient
+        # didn't hold "facing forward" for the calibration window).
+        if msg.startswith("Neutral pose"):
             raise HTTPException(status_code=400, detail=msg)
         return BiomechResponse(success=False, error=msg)
     except Exception as e:
