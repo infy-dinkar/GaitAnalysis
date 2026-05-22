@@ -49,9 +49,16 @@ function isBackendRouted(bodyPart: Props["bodyPart"], movementId: string): boole
     );
   }
   if (bodyPart === "hip") {
-    // Hip flexion + extension are backend-routed; internal /
-    // external rotation still use the browser MoveNet path.
-    return movementId === "flexion" || movementId === "extension";
+    // All three hip tests (flexion / extension / merged rotation)
+    // route to /api/analyze-hip. The legacy single-direction
+    // internal_rotation / external_rotation IDs are hidden from
+    // the chooser and only resolve for saved-report
+    // compatibility — never reachable from the upload flow.
+    return (
+      movementId === "flexion" ||
+      movementId === "extension" ||
+      movementId === "rotation"
+    );
   }
   return false;
 }

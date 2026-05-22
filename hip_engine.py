@@ -60,6 +60,57 @@ HIP_NORMAL_RANGES = {
     "extension": {"range": (20,  30),  "target": 30.0},
 }
 
+# Merged internal + external rotation. Patient supine, knee bent
+# at 90° with the lower leg pointing toward the camera. One
+# recording captures both directions. Math + sign convention
+# mirror the shoulder-rotation backend (calibrated foreshortening
+# with a baseline locked at the neutral pose). Same AAOS ranges
+# for both directions.
+_MERGED_HIPROT_PRIMARY_TARGET:   tuple[float, float] = (30.0, 45.0)  # Internal
+_MERGED_HIPROT_SECONDARY_TARGET: tuple[float, float] = (30.0, 45.0)  # External
+
+# Tibia (lower-leg) to femur (thigh) anatomical ratio used as a
+# proxy in the arcsin formula. Same role as
+# FOREARM_TO_UPPER_ARM_PROXY in shoulder rotation — without this
+# scale factor the full ROM caps at a lower value because the
+# thigh proxy overshoots the true lower-leg length. Adult tibia
+# is typically ≈ 80-85% of the femur length.
+_HIP_ROT_LOWER_LEG_TO_THIGH_PROXY = 0.85
+
+# Anatomical reporting cap per side. Hip rotation ROM rarely
+# exceeds 45° in healthy adults.
+_HIP_ROT_MAX_DEG = 45.0
+
+# Deadband on the signed lateral-displacement ratio (ankle.x −
+# baseline_ankle_x) / thigh_length. Below this the lower-leg is
+# essentially at neutral and the frame doesn't commit a
+# direction.
+_HIP_ROT_DIRECTION_DEADBAND_FRAC = 0.03
+
+# Maximum tolerated lower-leg foreshortening ratio at calibration
+# (lower-leg projected length / thigh length). At true neutral
+# the lower leg points toward the camera and projects to a
+# short segment — ratio ≤ 0.20 is the "knee at 90° + tibia
+# vertical toward camera" pose.
+_HIP_ROT_NEUTRAL_LOWER_LEG_RATIO_MAX = 0.20
+
+# Minimum thigh pixel length to accept calibration. Below this
+# the patient is too far from the camera and keypoints get noisy.
+_HIP_ROT_MIN_THIGH_PX = 30.0
+
+# Consecutive stable neutral-pose frames before the baseline
+# locks. Matches the shoulder + neck rotation pattern.
+_HIP_ROT_CALIBRATION_STABLE_FRAMES = 5
+
+# Search window in which to find the calibration stretch — about
+# 2 s at 30 fps. If the patient never holds neutral by then,
+# something's wrong with the recording.
+_HIP_ROT_BASELINE_SEARCH_FRAMES = 60
+
+# Asymmetry-flag threshold for the left/right side-to-side
+# difference. Same clinical convention as neck rotation.
+_HIP_ROT_ASYMMETRY_FLAG_DEG = 10.0
+
 
 # Visibility floor — looser than the per-frame default because
 # the smoothed time-series tolerates brief dips better than
@@ -168,6 +219,51 @@ def _wrong_side_for_hip_video(ts: dict, side: str) -> Optional[str]:
     return None
 
 
+# ─── Rotation: neutral-pose + direction helpers ─────────────────
+def _is_hip_rotation_neutral_pose(
+    h_x: float, h_y: float,
+    k_x: float, k_y: float,
+    a_x: float, a_y: float,
+) -> tuple[bool, float]:
+    """Returns (is_neutral, thigh_pixel_length).
+
+    Neutral hip-rotation pose: patient supine with knee bent at
+    90° and lower leg pointing straight up toward the camera. In
+    2D image the tibia (knee → ankle) projects to a short
+    segment — its projected length must be at most
+    _HIP_ROT_NEUTRAL_LOWER_LEG_RATIO_MAX of the thigh length.
+    Also rejects too-far-from-camera frames where the thigh
+    pixel length is below the calibration floor."""
+    thigh_len = math.hypot(k_x - h_x, k_y - h_y)
+    if thigh_len < _HIP_ROT_MIN_THIGH_PX:
+        return False, thigh_len
+    lower_leg_len = math.hypot(a_x - k_x, a_y - k_y)
+    if lower_leg_len / thigh_len > _HIP_ROT_NEUTRAL_LOWER_LEG_RATIO_MAX:
+        return False, thigh_len
+    return True, thigh_len
+
+
+def _hip_rotation_outward_sign(side: str) -> float:
+    """Sign of (ankle.x − knee.x) that corresponds to INTERNAL
+    rotation for the given side. The signal flips between sides
+    because of how the tibia pivots around the femur:
+    - Patient supine with head at top of frame, knee bent 90°.
+    - LEFT hip internal rotation → ankle moves IMAGE-RIGHT
+      (lateral, away from the body midline). So positive
+      (ankle.x − knee.x) ≡ internal rotation → sign = +1.
+    - RIGHT hip internal rotation → ankle moves IMAGE-LEFT
+      (lateral for right side). So positive (ankle.x − knee.x)
+      ≡ external rotation → sign = −1, meaning we multiply the
+      raw delta by −1 to get the "internal-positive" convention.
+
+    The function returns the multiplier that converts raw
+    `(ankle.x − knee.x)` into a signed quantity where positive
+    = internal rotation and negative = external rotation. The
+    caller uses the sign to route per-frame magnitudes into the
+    correct peak slot."""
+    return 1.0 if side == "left" else -1.0
+
+
 # ─── Key-frame helper ───────────────────────────────────────────
 # Mirrors knee_engine._grab_knee_key_frame: seek to the source-
 # video frame, apply the same pose-based rotation extract_poses
@@ -256,6 +352,255 @@ def _grab_hip_key_frame(
     }
 
 
+def _analyze_hip_rotation(
+    video_path: str,
+    pose_options,
+    side: str,
+) -> dict:
+    """Backend pipeline for the merged hip rotation test
+    (internal + external captured in one trial).
+
+    Two-phase flow (matches the shoulder + neck rotation
+    backends):
+
+      Phase 1 — lock a calibration baseline from the first
+        _HIP_ROT_CALIBRATION_STABLE_FRAMES consecutive frames
+        where the patient is in the neutral hip-rotation pose
+        (knee at 90°, lower leg pointing toward the camera so
+        it projects to a short segment). Baseline records the
+        thigh pixel length + the lateral knee↔ankle offset at
+        neutral (so anatomical asymmetry cancels out). Locked
+        ONCE, never relocked.
+
+      Phase 2 — per-frame ankle-displacement foreshortening:
+
+          delta_x = (ankle.x − knee.x) − baseline_delta_x
+          ratio   = clamp01(|delta_x| / (thigh_len × 0.85))
+          mag     = asin(ratio) × 180/π   (capped at 45°)
+          signed  = mag × _hip_rotation_outward_sign(side) × sgn(delta_x)
+
+        Positive `signed` → INTERNAL rotation peak (ankle moved
+        laterally for the test side); negative → EXTERNAL
+        rotation peak.
+
+    Frames with low hip / knee / ankle visibility are skipped;
+    the running peak holds its last good value. Deadband on
+    the lateral-offset ratio suppresses neutral-pose noise.
+    """
+    if side not in ("left", "right"):
+        raise ValueError(f"Unsupported side: {side!r}")
+
+    raw, fps, _cv_total_frames = extract_poses(video_path, pose_options)
+    ts = build_time_series(raw)
+
+    # Pre-flight wrong-side check (reused from flexion/extension).
+    wrong_side_msg = _wrong_side_for_hip_video(ts, side)
+    if wrong_side_msg:
+        raise ValueError(wrong_side_msg)
+
+    hip_key   = f"{side}_hip"
+    knee_key  = f"{side}_knee"
+    ankle_key = f"{side}_ankle"
+
+    hx = ts[hip_key]["x_px"];   hy = ts[hip_key]["y_px"];   vh = ts[hip_key]["vis"]
+    kx = ts[knee_key]["x_px"];  ky = ts[knee_key]["y_px"];  vk = ts[knee_key]["vis"]
+    ax = ts[ankle_key]["x_px"]; ay = ts[ankle_key]["y_px"]; va = ts[ankle_key]["vis"]
+
+    n = int(min(len(hx), len(kx), len(ax)))
+
+    # ── Phase 1: baseline lock ───────────────────────────────
+    baseline_thigh_len: Optional[float] = None
+    baseline_delta_x: Optional[float] = None
+    baseline_locked_idx = -1
+    stable_count = 0
+    search_limit = min(n, _HIP_ROT_BASELINE_SEARCH_FRAMES)
+    for i in range(search_limit):
+        if (vh[i] < _HIP_VIS_THRESHOLD
+                or vk[i] < _HIP_VIS_THRESHOLD
+                or va[i] < _HIP_VIS_THRESHOLD):
+            stable_count = 0
+            continue
+        h_x = float(hx[i]); h_y = float(hy[i])
+        k_x = float(kx[i]); k_y = float(ky[i])
+        a_x = float(ax[i]); a_y = float(ay[i])
+        is_neutral, thigh_len = _is_hip_rotation_neutral_pose(
+            h_x, h_y, k_x, k_y, a_x, a_y,
+        )
+        if not is_neutral:
+            stable_count = 0
+            continue
+        stable_count += 1
+        if stable_count >= _HIP_ROT_CALIBRATION_STABLE_FRAMES:
+            baseline_thigh_len = thigh_len
+            baseline_delta_x = a_x - k_x
+            baseline_locked_idx = i
+            break
+
+    if baseline_thigh_len is None or baseline_delta_x is None:
+        # Surfaced as HTTP 400 by api.analyze_hip.
+        raise ValueError(
+            "Neutral pose not detected. Please start the recording with "
+            "the patient lying on their back, knee bent at 90°, and the "
+            "lower leg pointing straight up toward the camera."
+        )
+
+    _ = baseline_locked_idx  # available for diagnostics
+
+    # ── Phase 2: per-frame magnitude + direction ─────────────
+    effective_ref = baseline_thigh_len * _HIP_ROT_LOWER_LEG_TO_THIGH_PROXY
+    outward_sign = _hip_rotation_outward_sign(side)
+
+    primary_peak_signed:   Optional[float] = None  # internal (positive)
+    primary_peak_idx   = -1
+    secondary_peak_signed: Optional[float] = None  # external (negative)
+    secondary_peak_idx = -1
+    valid_frames = 0
+
+    for i in range(n):
+        if (vh[i] < _HIP_VIS_THRESHOLD
+                or vk[i] < _HIP_VIS_THRESHOLD
+                or va[i] < _HIP_VIS_THRESHOLD):
+            continue
+        k_x = float(kx[i])
+        a_x = float(ax[i])
+        # Per-frame lateral displacement of the ankle from the
+        # knee, with the patient's anatomical baseline asymmetry
+        # subtracted out so we measure DELTAS from neutral.
+        delta_x = (a_x - k_x) - baseline_delta_x
+        # Deadband on the normalised displacement — below this
+        # the ankle hasn't visibly left the neutral position.
+        if abs(delta_x) / baseline_thigh_len < _HIP_ROT_DIRECTION_DEADBAND_FRAC:
+            valid_frames += 1
+            continue
+
+        # Foreshortening magnitude. Clamp to [0, 1] before
+        # asin — CRITICAL math.asin() raises ValueError outside
+        # that range. Ratio can exceed 1 if patient moved
+        # closer to the camera since calibration; the clamp
+        # under-reports rather than crashes.
+        ratio = abs(delta_x) / effective_ref if effective_ref > 0 else 0.0
+        ratio = max(0.0, min(1.0, ratio))
+        magnitude = math.degrees(math.asin(ratio))
+        if magnitude > _HIP_ROT_MAX_DEG:
+            magnitude = _HIP_ROT_MAX_DEG
+
+        # Sign convention: positive raw delta means ankle moved
+        # image-right of its baseline position. Multiply by
+        # outward_sign so "positive = INTERNAL rotation"
+        # regardless of which side we're testing.
+        raw_sign = 1.0 if delta_x > 0 else -1.0
+        # internal_positive_sign > 0 ↔ INTERNAL rotation peak;
+        # < 0 ↔ EXTERNAL rotation peak.
+        internal_positive_sign = raw_sign * outward_sign
+        signed = internal_positive_sign * magnitude
+
+        valid_frames += 1
+        if signed > 0:
+            if primary_peak_signed is None or signed > primary_peak_signed:
+                primary_peak_signed = signed
+                primary_peak_idx = i
+        else:
+            if secondary_peak_signed is None or signed < secondary_peak_signed:
+                secondary_peak_signed = signed
+                secondary_peak_idx = i
+
+    if valid_frames < max(3, int(fps * 0.5)):
+        raise ValueError("poor_visibility")
+
+    primary_mag = (
+        float(primary_peak_signed) if primary_peak_signed is not None else 0.0
+    )
+    secondary_mag = (
+        float(-secondary_peak_signed) if secondary_peak_signed is not None else 0.0
+    )
+
+    # ── Asymmetry detection ──────────────────────────────────
+    both_captured = primary_mag > 0 and secondary_mag > 0
+    asymmetry_deg = (
+        abs(primary_mag - secondary_mag) if both_captured else 0.0
+    )
+    asymmetry_flag = both_captured and asymmetry_deg > _HIP_ROT_ASYMMETRY_FLAG_DEG
+
+    # ── Build response ───────────────────────────────────────
+    p_lo, p_hi = _MERGED_HIPROT_PRIMARY_TARGET
+    s_lo, s_hi = _MERGED_HIPROT_SECONDARY_TARGET
+    p_target = p_hi
+    p_pct = (primary_mag / p_target) * 100.0 if p_target > 0 else 0.0
+    p_status = _classify_in_range(primary_mag, p_lo, p_hi)
+
+    interpretation_primary = (
+        f"Internal rotation ({side.capitalize()}) measured "
+        f"{primary_mag:.1f}°, which is {p_pct:.0f}% of the "
+        f"{p_lo:.0f}°–{p_hi:.0f}° normal range — {p_status}."
+    )
+    if secondary_mag > 0:
+        s_status = _classify_in_range(secondary_mag, s_lo, s_hi)
+        interpretation_secondary = (
+            f"External rotation ({side.capitalize()}) measured "
+            f"{secondary_mag:.1f}°, which is "
+            f"{(secondary_mag / s_hi) * 100.0:.0f}% of the "
+            f"{s_lo:.0f}°–{s_hi:.0f}° normal range — {s_status}."
+        )
+    else:
+        interpretation_secondary = (
+            "External rotation direction was not detected in this recording."
+        )
+    interpretation = f"{interpretation_primary} {interpretation_secondary}"
+    if asymmetry_flag:
+        interpretation += (
+            f" Notable internal-vs-external asymmetry detected "
+            f"({asymmetry_deg:.1f}°). Clinical correlation recommended."
+        )
+    interpretation += (
+        " Note: hip rotation is measured from a 2D pose estimate; "
+        "patient must be supine with knee at 90° for accurate results."
+    )
+
+    # Two key frames — internal + external peaks. Matches the
+    # other merged tests' layout (no neutral frame).
+    key_frames: list[dict] = []
+    if primary_peak_idx >= 0 and primary_mag > 0:
+        kf = _grab_hip_key_frame(
+            video_path, primary_peak_idx, raw,
+            f"Internal Rotation ({primary_mag:.1f}°)", side,
+        )
+        if kf:
+            key_frames.append(kf)
+    if secondary_peak_idx >= 0 and secondary_mag > 0:
+        kf = _grab_hip_key_frame(
+            video_path, secondary_peak_idx, raw,
+            f"External Rotation ({secondary_mag:.1f}°)", side,
+        )
+        if kf:
+            key_frames.append(kf)
+
+    return {
+        "body_part": "hip",
+        "movement": "rotation",
+        "side": side,
+        "peak_angle": (
+            float(primary_peak_signed) if primary_peak_signed is not None else None
+        ),
+        "peak_magnitude": primary_mag,
+        "reference_range": [float(p_lo), float(p_hi)],
+        "target": float(p_target),
+        "percentage": p_pct,
+        "status": p_status,
+        "valid_frames": valid_frames,
+        "total_frames": n,
+        "fps": float(fps),
+        "interpretation": interpretation,
+        "key_frames": key_frames,
+        "secondary_peak_angle": (
+            float(secondary_peak_signed) if secondary_peak_signed is not None else None
+        ),
+        "secondary_peak_magnitude": secondary_mag if secondary_mag > 0 else None,
+        "secondary_reference_range": [float(s_lo), float(s_hi)],
+        "primary_label": "Internal Rotation",
+        "secondary_label": "External Rotation",
+    }
+
+
 # ─── Main entry point ───────────────────────────────────────────
 def analyze_hip(
     video_path: str,
@@ -270,10 +615,12 @@ def analyze_hip(
                       video file on disk.
         pose_options: PoseLandmarkerOptions built by
                       api._build_gait_pose_options().
-        movement:     "flexion" or "extension" — the two single-
-                      direction hip tests now routed to backend.
-                      (internal / external rotation still run
-                      through the browser MoveNet path.)
+        movement:     "flexion", "extension", or "rotation" — the
+                      three hip tests now routed to backend.
+                      Flexion / extension are single-direction
+                      tests; rotation is a merged (internal +
+                      external) test with its own calibration-
+                      baseline pipeline.
         side:         "left" or "right".
 
     Returns:
@@ -287,6 +634,13 @@ def analyze_hip(
                     The endpoint maps these to HTTP 400 with the
                     original user-facing message preserved.
     """
+    # Merged rotation runs through its own pipeline (calibration
+    # baseline + dual-peak tracking + 2D-approximation caveat).
+    # Branch early so the existing flexion / extension code below
+    # stays untouched.
+    if movement == "rotation":
+        return _analyze_hip_rotation(video_path, pose_options, side)
+
     if movement not in ("flexion", "extension"):
         raise ValueError(f"Unsupported hip movement: {movement!r}")
     if side not in ("left", "right"):

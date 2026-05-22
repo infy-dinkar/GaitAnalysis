@@ -157,6 +157,14 @@ export const MOVEMENT_INSTRUCTIONS: Record<Key, string[]> = {
     "Hold the furthest backward position for 2 seconds. Important: don't arch your lower back — that fakes the movement.",
     "Slowly bring the leg back to standing. Repeat on the other side if assessing both.",
   ],
+  "hip.rotation": [
+    "Lie on your back (supine) on a flat surface with the camera positioned overhead or at the foot of the table, facing the test leg.",
+    "Bend the test-side knee to 90° so the lower leg points straight up toward the camera. Keep the thigh still on the table.",
+    "Hold this neutral position for ~2 seconds — the system needs a stable starting pose to calibrate against (knee at 90°, lower leg vertical).",
+    "Slowly rotate the thigh INWARD at the hip (foot moves AWAY from the midline) — this is internal rotation. Hold the comfortable end-range for 2 seconds.",
+    "Return to neutral, then slowly rotate the thigh OUTWARD (foot crosses TOWARD the midline / opposite leg) — this is external rotation. Hold the end-range for 2 seconds.",
+    "Note: 2D camera measurement of hip rotation is approximate — keep the pelvis flat on the table throughout for the cleanest reading.",
+  ],
   "hip.internal_rotation": [
     "Sit on a chair facing the camera, with the camera showing both legs from the front. Both feet flat on the floor.",
     "Keep the knee at 90° and the thigh still. The hip rotation happens at the hip, not the knee.",
@@ -201,7 +209,12 @@ export function isRotationMovement(
   movementId: string,
 ): boolean {
   if (bodyPart === "shoulder" || bodyPart === "hip") {
-    return movementId === "external_rotation" || movementId === "internal_rotation";
+    return (
+      movementId === "external_rotation"
+      || movementId === "internal_rotation"
+      // Merged rotation IDs (hip + shoulder use the same merged label).
+      || movementId === "rotation"
+    );
   }
   if (bodyPart === "neck") return movementId === "rotation";
   return false;
