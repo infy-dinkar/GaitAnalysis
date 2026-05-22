@@ -163,18 +163,15 @@ export async function analyzeBiomechVideo(
     return analyzeShoulderBackend(file, "abduction_adduction", side ?? "right", onProgress);
   }
 
-  // ── Merged shoulder rotation (browser path, kept for now) ──
-  // Rotation (external + internal) still runs through the browser
-  // MoveNet dual-direction analyser. It needs a calibration
-  // baseline + arcsin-based magnitude formula that the backend
-  // doesn't yet implement; moved in a separate PR.
+  // ── Shoulder rotation (internal + external) → backend MediaPipe ──
+  // The browser MoveNet path ran a streaming baseline-calibration +
+  // arcsin pipeline; the backend now implements the same formula
+  // against BlazePose Full, so live and upload modes give the same
+  // peak ±2°. The endpoint maps the calibration-failed error to
+  // HTTP 400 with a user-actionable "Neutral pose not detected"
+  // message which formatShoulderError surfaces verbatim.
   if (bodyPart === "shoulder" && movement === "rotation") {
-    return analyzeMergedShoulderVideo({
-      file,
-      movement,
-      side: side ?? "right",
-      onProgress,
-    });
+    return analyzeShoulderBackend(file, "rotation", side ?? "right", onProgress);
   }
 
   // ── Merged knee flexion + extension → min/max analyser ──
@@ -1700,6 +1697,18 @@ function formatShoulderError(detail: unknown, status: number): string {
       "Arm not clearly visible in video. Please ensure the full arm is in " +
       "frame with good lighting."
     );
+  }
+  if (raw.startsWith("Neutral pose")) {
+    // Rotation test specifically — the backend couldn't lock a
+    // calibration baseline because the recording never started
+    // with the patient at neutral.
+    return raw;
+  }
+  if (raw.startsWith("Camera angle")) {
+    return raw;
+  }
+  if (raw.startsWith("Requested side")) {
+    return raw;
   }
   if (status >= 500) {
     return "Analysis failed. Please check connection and try again.";

@@ -944,7 +944,11 @@ async def analyze_shoulder(
         # RANGES (which is structured for single-direction movements
         # with a single reference range). The engine knows how to
         # dispatch each merged ID on its own.
-        _ALLOWED_MERGED = ("flexion_extension", "abduction_adduction")
+        _ALLOWED_MERGED = (
+            "flexion_extension",
+            "abduction_adduction",
+            "rotation",
+        )
         if movement not in _ALLOWED_MERGED and movement not in SHOULDER_NORMAL_RANGES:
             return BiomechResponse(
                 success=False,
@@ -1055,6 +1059,11 @@ async def analyze_shoulder(
         # Lateral-view rejection for ab/ad test (side profile
         # filmed instead of frontal). Same HTTP 400 surface.
         if msg.startswith("Camera angle"):
+            raise HTTPException(status_code=400, detail=msg)
+        # Rotation test couldn't lock a calibration baseline — the
+        # patient must hold neutral (elbow at 90°, forearm pointing
+        # at camera) for ~5 frames at the start of the recording.
+        if msg.startswith("Neutral pose"):
             raise HTTPException(status_code=400, detail=msg)
         return BiomechResponse(success=False, error=msg)
     except Exception as e:
