@@ -41,9 +41,12 @@ function isBackendRouted(bodyPart: Props["bodyPart"], movementId: string): boole
     return movementId === "flexion_extension";
   }
   if (bodyPart === "neck") {
-    // Only flexion_extension is backend-routed for now;
-    // lateral_flexion + rotation stay on the browser path.
-    return movementId === "flexion_extension";
+    // Both merged neck tests route to /api/analyze-neck; rotation
+    // still uses the browser path.
+    return (
+      movementId === "flexion_extension" ||
+      movementId === "lateral_flexion"
+    );
   }
   return false;
 }

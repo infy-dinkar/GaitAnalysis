@@ -194,25 +194,21 @@ export async function analyzeBiomechVideo(
   // in one recording. Both share the same direction-routing flow
   // and the analyser parameterises which formula + detector to
   // use internally.
-  // ── Neck flexion + extension → backend MediaPipe BlazePose Full ──
-  // Same rationale as the other migrations: device-consistent
-  // BlazePose pipeline beats the GPU-dependent browser MoveNet
-  // path. Math (ear→nose tilt with the |faceVecX|-denominator
-  // baseline-subtracted atan2) matches the browser computeNeckAngle
-  // verbatim so live + upload agree on the metric. The backend
-  // pre-flight rejects pure-frontal recordings (the math collapses
-  // there) and surfaces the message verbatim.
-  if (bodyPart === "neck" && movement === "flexion_extension") {
-    return analyzeNeckBackend(file, "flexion_extension", onProgress);
-  }
-  // Neck lateral flexion still runs through the browser path —
-  // separate follow-up migration.
-  if (bodyPart === "neck" && movement === "lateral_flexion") {
-    return analyzeMergedNeckVideo({
-      file,
-      movement,
-      onProgress,
-    });
+  // ── Neck flex+ext and lateral flexion → backend MediaPipe ──
+  // Both merged neck tests now route to /api/analyze-neck. The
+  // backend's analyze_neck dispatches on the movement string:
+  //   • flexion_extension uses the ear→nose tilt formula (lateral
+  //     camera profile required — see backend pre-flight check).
+  //   • lateral_flexion uses the shoulder→ear vs vertical formula
+  //     (frontal camera profile required — opposite view).
+  // The view requirement is enforced by the backend pre-flight
+  // check, which surfaces an actionable HTTP 400 message either
+  // way. Live + upload report the same metric for both movements
+  // because the backend formulas are verbatim ports of the
+  // browser implementations.
+  if (bodyPart === "neck" &&
+      (movement === "flexion_extension" || movement === "lateral_flexion")) {
+    return analyzeNeckBackend(file, movement, onProgress);
   }
 
   const detector = await getDetector();
