@@ -50,14 +50,14 @@ from gait_engine import (
 )
 
 
-# Clinical normal range (AAOS / per the spec). Spec gives
-# 100-120°; the browser HIP_MOVEMENTS metadata has [110, 130].
-# Using the spec values for the upload-mode reporting; live
-# mode reads ranges from the same browser metadata, so the
-# range column may differ on the report — match the spec
-# until clinical guidance settles on a single source.
+# Clinical normal ranges. Spec values used here; browser
+# HIP_MOVEMENTS metadata has slightly different bounds (flexion
+# [110,130], extension [10,30]), so the range column may differ
+# on the report column until clinical guidance picks a single
+# source. Using spec values consistently across both movements.
 HIP_NORMAL_RANGES = {
-    "flexion": {"range": (100, 120), "target": 120.0},
+    "flexion":   {"range": (100, 120), "target": 120.0},
+    "extension": {"range": (20,  30),  "target": 30.0},
 }
 
 
@@ -66,14 +66,25 @@ HIP_NORMAL_RANGES = {
 # raw frames.
 _HIP_VIS_THRESHOLD = 0.4
 
-# Anatomical sanity bounds on the hip-flexion magnitude.
-#   Flexion ceiling 140° = anatomical max (knee well past chest;
-#                          anything past this is almost certainly
-#                          a keypoint artefact).
-#   Hyperextension floor −5° = small backward extension tolerated
-#                              as noise rather than as artefact.
-_HIP_FLEXION_ANATOMICAL_MAX = 140.0
-_HIP_HYPEREXTENSION_LIMIT   = -5.0
+# Anatomical sanity bounds on the hip-angle magnitudes.
+# The flexion + extension formulas BOTH return |180° − interior|
+# (unsigned deviation from standing straight), so a single
+# frame's reading doesn't itself tell us which direction the
+# patient was moving — the test movement selection does. Use
+# different ceilings per movement to clamp reported peaks at
+# the appropriate clinical max.
+#
+#   Flexion 140°  = knee well past chest; beyond this is a
+#                   keypoint artefact (knee left frame, etc.).
+#   Extension 30° = anatomical max for healthy adults; spec
+#                   guidance. Hip extension is a small range
+#                   (only 20-30° normal), so tight clamping
+#                   suppresses spurious large readings if the
+#                   test was performed incorrectly (e.g. patient
+#                   accidentally did flexion).
+_HIP_FLEXION_ANATOMICAL_MAX   = 140.0
+_HIP_EXTENSION_ANATOMICAL_MAX = 30.0
+_HIP_HYPEREXTENSION_LIMIT     = -5.0
 
 
 # ─── Math primitive ─────────────────────────────────────────────
@@ -252,24 +263,23 @@ def analyze_hip(
     movement: str,
     side: str,
 ) -> dict:
-    """Run the BlazePose-Full hip flexion pipeline on an uploaded
-    clip.
+    """Run the BlazePose-Full hip pipeline on an uploaded clip.
 
     Args:
         video_path:   path to the uploaded (and optionally repaired)
                       video file on disk.
         pose_options: PoseLandmarkerOptions built by
                       api._build_gait_pose_options().
-        movement:     "flexion" — the only hip movement currently
-                      routed to backend. (extension, internal /
-                      external rotation still run through the
-                      browser MoveNet path.)
+        movement:     "flexion" or "extension" — the two single-
+                      direction hip tests now routed to backend.
+                      (internal / external rotation still run
+                      through the browser MoveNet path.)
         side:         "left" or "right".
 
     Returns:
         Dict matching the single-direction BiomechData Pydantic
-        schema (no secondary_peak_* fields — hip flexion isn't a
-        merged test). Caller wraps in BiomechResponse.
+        schema (no secondary_peak_* fields — neither hip test is
+        merged). Caller wraps in BiomechResponse.
 
     Raises:
         ValueError: input invalid, wrong-side selection, or
@@ -277,10 +287,29 @@ def analyze_hip(
                     The endpoint maps these to HTTP 400 with the
                     original user-facing message preserved.
     """
-    if movement != "flexion":
+    if movement not in ("flexion", "extension"):
         raise ValueError(f"Unsupported hip movement: {movement!r}")
     if side not in ("left", "right"):
         raise ValueError(f"Unsupported side: {side!r}")
+
+    # Movement-specific clamp + display label. Same per-frame
+    # math (180° − interior angle between trunk and thigh) is
+    # used for both — the formula returns the unsigned deviation
+    # from standing-straight, and the test movement the user
+    # selected determines clinical interpretation + reference
+    # range. Tight clamp on extension (anatomical max only 30°)
+    # also acts as a sanity guard: if the patient accidentally
+    # performed flexion when extension was selected, the reading
+    # gets capped at 30° rather than reporting an implausible
+    # large value as extension.
+    if movement == "flexion":
+        anatomical_max = _HIP_FLEXION_ANATOMICAL_MAX
+        movement_label = "Hip flexion"
+        peak_caption_prefix = "Peak Flexion"
+    else:  # extension
+        anatomical_max = _HIP_EXTENSION_ANATOMICAL_MAX
+        movement_label = "Hip extension"
+        peak_caption_prefix = "Peak Extension"
 
     raw, fps, _cv_total_frames = extract_poses(video_path, pose_options)
     ts = build_time_series(raw)
@@ -324,18 +353,22 @@ def analyze_hip(
         if interior is None:
             angles.append(None)
             continue
-        flexion = 180.0 - interior
+        deviation = 180.0 - interior
         # Anatomical sanity: drop frames where the computed
-        # flexion is outside what a real hip can produce, then
-        # clamp accepted values to the anatomical ceiling so a
-        # single noise spike can't lock an implausible peak.
-        if (flexion < _HIP_HYPEREXTENSION_LIMIT
-                or flexion > _HIP_FLEXION_ANATOMICAL_MAX + 15.0):
+        # deviation is clearly an artefact (knee/hip keypoint
+        # mis-tracking). Per-movement ceiling: large for
+        # flexion (knee can reach the chest), small for
+        # extension (~30° anatomical max). Frames past the
+        # ceiling get dropped, then accepted values are
+        # clamped to the ceiling so a single noise spike can't
+        # lock an implausible peak.
+        if (deviation < _HIP_HYPEREXTENSION_LIMIT
+                or deviation > anatomical_max + 15.0):
             angles.append(None)
             continue
-        flexion = max(_HIP_HYPEREXTENSION_LIMIT,
-                      min(_HIP_FLEXION_ANATOMICAL_MAX, flexion))
-        angles.append(flexion)
+        deviation = max(_HIP_HYPEREXTENSION_LIMIT,
+                        min(anatomical_max, deviation))
+        angles.append(deviation)
         valid_frames += 1
 
     if valid_frames < max(3, int(fps * 0.5)):
@@ -345,46 +378,49 @@ def analyze_hip(
         raise ValueError("poor_visibility")
 
     # ── Min/max tracking ───────────────────────────────────
-    # Peak flexion = max bent angle (leg most lifted forward).
-    # Neutral = frame with smallest |flexion| (closest to
-    # standing straight) — used for the report's neutral key
-    # frame so the operator can see the patient's starting pose.
-    peak_flexion_mag: float = -math.inf
-    peak_flexion_idx: int = -1
+    # Peak = max deviation from standing-straight (the formula
+    # gives unsigned magnitude, so this works for both flexion
+    # and extension — the test type chosen by the user gives
+    # the clinical direction).
+    # Neutral = frame with smallest |deviation| (closest to
+    # standing-straight). Used for the report's neutral key
+    # frame so the operator can verify the starting pose.
+    peak_mag: float = -math.inf
+    peak_idx: int = -1
     neutral_idx: int = -1
     neutral_abs: float = math.inf
     for i, a in enumerate(angles):
         if a is None:
             continue
-        if a > peak_flexion_mag:
-            peak_flexion_mag = a
-            peak_flexion_idx = i
+        if a > peak_mag:
+            peak_mag = a
+            peak_idx = i
         if abs(a) < neutral_abs:
             neutral_abs = abs(a)
             neutral_idx = i
 
-    # Guard rail — unreachable given valid_frames check above
-    # but keeps the type-checker happy.
-    if peak_flexion_idx < 0:
+    # Guard rail — unreachable given the valid_frames check
+    # above but keeps the type-checker happy.
+    if peak_idx < 0:
         raise ValueError("poor_visibility")
 
     # ── Build response ─────────────────────────────────────
     normal = HIP_NORMAL_RANGES[movement]
     ref_low, ref_high = normal["range"]
     target = normal["target"]
-    percentage = (peak_flexion_mag / target) * 100.0 if target > 0 else 0.0
-    status = _classify_in_range(peak_flexion_mag, float(ref_low), float(ref_high))
+    percentage = (peak_mag / target) * 100.0 if target > 0 else 0.0
+    status = _classify_in_range(peak_mag, float(ref_low), float(ref_high))
 
     interpretation = (
-        f"Hip flexion ({side.capitalize()}) measured "
-        f"{peak_flexion_mag:.1f}°, which is {percentage:.0f}% of the "
+        f"{movement_label} ({side.capitalize()}) measured "
+        f"{peak_mag:.1f}°, which is {percentage:.0f}% of the "
         f"{ref_low:.0f}°–{ref_high:.0f}° normal range — {status}."
     )
 
-    # Two key frames: neutral (starting pose) + peak flexion.
-    # Matches the single-direction shoulder layout — operator
-    # gets both the starting reference and the maximum-ROM
-    # snapshot to verify the test was performed correctly.
+    # Two key frames: neutral (starting pose) + peak. Matches
+    # the single-direction shoulder layout — operator gets
+    # both the starting reference and the maximum-ROM snapshot
+    # to verify the test was performed correctly.
     key_frames: list[dict] = []
     if neutral_idx >= 0:
         kf = _grab_hip_key_frame(
@@ -392,20 +428,20 @@ def analyze_hip(
         )
         if kf:
             key_frames.append(kf)
-    if peak_flexion_idx >= 0 and peak_flexion_mag > 0:
+    if peak_idx >= 0 and peak_mag > 0:
         kf = _grab_hip_key_frame(
-            video_path, peak_flexion_idx, raw,
-            f"Peak Flexion ({peak_flexion_mag:.1f}°)", side,
+            video_path, peak_idx, raw,
+            f"{peak_caption_prefix} ({peak_mag:.1f}°)", side,
         )
         if kf:
             key_frames.append(kf)
 
     return {
         "body_part": "hip",
-        "movement": "flexion",
+        "movement": movement,
         "side": side,
-        "peak_angle": float(peak_flexion_mag),
-        "peak_magnitude": float(peak_flexion_mag),
+        "peak_angle": float(peak_mag),
+        "peak_magnitude": float(peak_mag),
         "reference_range": [float(ref_low), float(ref_high)],
         "target": float(target),
         "percentage": percentage,

@@ -187,15 +187,18 @@ export async function analyzeBiomechVideo(
     return analyzeKneeBackend(file, "flexion_extension", side ?? "right", onProgress);
   }
 
-  // ── Hip flexion → backend MediaPipe BlazePose Full ──
-  // Hip flexion is a single-direction test (max-tracking; no
-  // direction detection / no calibration baseline). Math is
-  // `180° − interior(trunk, thigh)` at the hip vertex, mirroring
-  // the browser computeHipAngle("flexion") verbatim so live +
-  // upload report the same metric. Hip extension + rotations
-  // still run through the browser path (separate follow-up).
-  if (bodyPart === "hip" && movement === "flexion") {
-    return analyzeHipBackend(file, "flexion", side ?? "right", onProgress);
+  // ── Hip flexion + extension → backend MediaPipe BlazePose Full ──
+  // Both single-direction hip tests share the same per-frame
+  // math (`180° − interior(trunk, thigh)`) — the formula
+  // returns the unsigned magnitude of deviation from standing-
+  // straight, and the test movement the user picked determines
+  // the clinical interpretation + reference range. Mirrors
+  // computeHipAngle for both movements in
+  // motionlens-web/lib/biomech/hip.ts. Internal / external
+  // rotation still run through the browser path (separate
+  // follow-up).
+  if (bodyPart === "hip" && (movement === "flexion" || movement === "extension")) {
+    return analyzeHipBackend(file, movement, side ?? "right", onProgress);
   }
 
   // ── Merged neck tests → direction-aware analyser ──
