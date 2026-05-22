@@ -1272,12 +1272,13 @@ async def analyze_neck(
     fixed_path_cleanup: str | None = None
     try:
         movement = movement_type.lower().strip()
-        if movement != "flexion_extension":
+        _ALLOWED_NECK = ("flexion_extension", "lateral_flexion")
+        if movement not in _ALLOWED_NECK:
             return BiomechResponse(
                 success=False,
                 error=(
                     f"Unknown neck movement '{movement_type}'. "
-                    f"Allowed: 'flexion_extension'."
+                    f"Allowed: {sorted(_ALLOWED_NECK)}."
                 ),
             )
         _ = side  # accepted for parity, ignored by the engine

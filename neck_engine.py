@@ -272,6 +272,51 @@ _NECK_EXTENSION_ANATOMICAL_MAX_DEG = 75.0
 _NECK_LATERAL_PROFILE_MIN_RATIO = 0.25
 
 
+# ── Merged lateral flexion (left + right) ──────────────────────
+# Patient stands FRONTAL to the camera and tilts the head sideways
+# toward each shoulder in turn. Math (matches motionlens-web/lib/
+# biomech/neck.ts:computeNeckAngle("lateral_flexion") verbatim):
+#
+#     neck_vec  = ear_midpoint − shoulder_midpoint
+#     signed    = angle_between(vertical=(0,−1), neck_vec)
+#
+# Sign convention (image-space, browser-aligned):
+#   • positive signed → ear_mid right of shoulder_mid in image
+#                       → labelled "Left Lateral Flexion" (per
+#                          the spec; matches the patient's
+#                          anatomical left in selfie-mirrored
+#                          view, swaps in non-mirrored uploads —
+#                          same behaviour as live mode)
+#   • negative signed → "Right Lateral Flexion"
+_MERGED_NECKLATERAL_PRIMARY_TARGET:   tuple[float, float] = (35.0, 45.0)  # Left
+_MERGED_NECKLATERAL_SECONDARY_TARGET: tuple[float, float] = (35.0, 45.0)  # Right
+
+# Deadband on the signed angle — below this magnitude the head is
+# too close to neutral to commit to a side. Same threshold the
+# browser detectNeckLateralDirection uses, so live + upload agree
+# on what counts as a recordable tilt.
+_NECK_LATERAL_DEADBAND_DEG = 5.0
+
+# Anatomical max per side. Lateral flexion of the cervical spine
+# tops out around 45°; bumped slightly to allow for hypermobile
+# patients before we drop the frame as an artefact.
+_NECK_LATERAL_ANATOMICAL_MAX_DEG = 45.0
+
+# Threshold for flagging clinically-meaningful left/right
+# asymmetry. AAOS / clinical convention: > 10° side-to-side
+# difference is worth a clinician's attention.
+_NECK_LATERAL_ASYMMETRY_FLAG_DEG = 10.0
+
+# Pre-flight frontal-view check for lateral_flexion (OPPOSITE
+# direction from the flex/ext check above — lateral flexion
+# needs the patient FACING the camera). Compare shoulder width
+# to ear width; in frontal view shoulders are 2.5-4× the ear
+# width, in lateral profile they project narrow and the ratio
+# drops below ~1.5. 1.8 is conservative — accepts true frontal
+# + 3/4 profile, rejects pure lateral.
+_NECK_LATERAL_FRONTAL_MIN_SHOULDER_EAR_RATIO = 1.8
+
+
 def _classify_in_range(value: float, lo: float, hi: float) -> str:
     """Asymmetric range classifier — mirror of the version in
     knee_engine / shoulder_engine. Below range = fair / poor (mild
@@ -441,22 +486,277 @@ def _grab_neck_key_frame(
     }
 
 
+def _lateral_profile_for_neck_lateral_flexion(ts: dict) -> Optional[str]:
+    """Pre-flight FRONTAL-view requirement for the lateral_flexion
+    test. Compare shoulder-width to ear-width: in frontal view
+    shoulders project clearly wider than the head (ratio ≥ ~2),
+    in lateral profile both project narrow and the ratio drops
+    toward 1. Conservative threshold rejects only clearly-lateral
+    uploads so true frontal + 3/4 profile pass."""
+    ls = ts.get("left_shoulder")  or {}
+    rs = ts.get("right_shoulder") or {}
+    le = ts.get("left_ear")  or {}
+    re = ts.get("right_ear") or {}
+    ls_x = ls.get("x_px"); ls_v = ls.get("vis")
+    rs_x = rs.get("x_px"); rs_v = rs.get("vis")
+    le_x = le.get("x_px"); le_v = le.get("vis")
+    re_x = re.get("x_px"); re_v = re.get("vis")
+    for arr in (ls_x, rs_x, le_x, re_x, ls_v, rs_v, le_v, re_v):
+        if arr is None:
+            return None
+    n = min(len(ls_x), len(rs_x), len(le_x), len(re_x))
+    if n == 0:
+        return None
+    ratios = []
+    for i in range(n):
+        if ls_v[i] < _NECK_VIS_THRESHOLD: continue
+        if rs_v[i] < _NECK_VIS_THRESHOLD: continue
+        if le_v[i] < _NECK_VIS_THRESHOLD: continue
+        if re_v[i] < _NECK_VIS_THRESHOLD: continue
+        sw = abs(float(rs_x[i]) - float(ls_x[i]))
+        ew = abs(float(re_x[i]) - float(le_x[i]))
+        if ew < 1e-4:
+            continue
+        ratios.append(sw / ew)
+    if not ratios:
+        return None
+    ratios.sort()
+    med_ratio = ratios[len(ratios) // 2]
+    if med_ratio < _NECK_LATERAL_FRONTAL_MIN_SHOULDER_EAR_RATIO:
+        return (
+            "Camera angle appears to be a side view, but the neck "
+            "lateral flexion test needs a FRONT-FACING view of the "
+            "patient. Please face the camera directly and re-record."
+        )
+    return None
+
+
+def _analyze_neck_lateral_flexion(
+    video_path: str,
+    pose_options,
+) -> dict:
+    """Backend pipeline for the merged neck lateral_flexion test
+    (left + right tilt captured in one trial). Math + sign
+    convention mirror motionlens-web/lib/biomech/neck.ts:
+    computeNeckAngle("lateral_flexion") + detectNeckLateralDirection
+    verbatim so live + upload report the same metric / direction
+    frame-by-frame.
+
+    Math: signed angle between the vertical reference (0, −1) and
+    the shoulder_mid → ear_mid vector, computed in image-coordinate
+    2D space.
+
+    Sign convention:
+      positive → ear_mid right of shoulder_mid in image → labelled
+                  "Left Lateral Flexion" (selfie-mirrored
+                  convention; in non-mirrored uploads the labels
+                  reflect image-space, same as live mode).
+      negative → "Right Lateral Flexion".
+
+    No direction detector — the sign is the direction. Deadband
+    on the angle magnitude (5°) suppresses neutral-pose noise.
+    """
+    from gait_engine import build_time_series, extract_poses
+
+    raw, fps, _cv_total_frames = extract_poses(video_path, pose_options)
+    ts = build_time_series(raw)
+
+    # Pre-flight: FRONTAL view required (the test relies on the
+    # frontal-plane tilt of the shoulder→ear axis; in pure
+    # lateral profile both shoulders project to similar x and
+    # the math collapses).
+    lateral_msg = _lateral_profile_for_neck_lateral_flexion(ts)
+    if lateral_msg:
+        raise ValueError(lateral_msg)
+
+    le_entry = ts["left_ear"]
+    re_entry = ts["right_ear"]
+    ls_entry = ts["left_shoulder"]
+    rs_entry = ts["right_shoulder"]
+
+    lex = le_entry["x_px"]; ley = le_entry["y_px"]; lev = le_entry["vis"]
+    rex = re_entry["x_px"]; rey = re_entry["y_px"]; rev = re_entry["vis"]
+    lsx = ls_entry["x_px"]; lsy = ls_entry["y_px"]; lsv = ls_entry["vis"]
+    rsx = rs_entry["x_px"]; rsy = rs_entry["y_px"]; rsv = rs_entry["vis"]
+
+    n = int(min(len(lex), len(rex), len(lsx), len(rsx)))
+
+    # Per-frame signed lateral angle. None for frames with any
+    # required landmark below the visibility threshold — the
+    # min/max tracker simply skips those frames so the running
+    # peak holds its last good value (avoids the 0° fall-back
+    # at extreme tilt where one ear can briefly occlude).
+    signed_angles: list[Optional[float]] = []
+    valid_frames = 0
+    for i in range(n):
+        if (lev[i] < _NECK_VIS_THRESHOLD
+                or rev[i] < _NECK_VIS_THRESHOLD
+                or lsv[i] < _NECK_VIS_THRESHOLD
+                or rsv[i] < _NECK_VIS_THRESHOLD):
+            signed_angles.append(None)
+            continue
+        ear_mid_x = (float(lex[i]) + float(rex[i])) / 2.0
+        ear_mid_y = (float(ley[i]) + float(rey[i])) / 2.0
+        sh_mid_x = (float(lsx[i]) + float(rsx[i])) / 2.0
+        sh_mid_y = (float(lsy[i]) + float(rsy[i])) / 2.0
+        nvx = ear_mid_x - sh_mid_x
+        nvy = ear_mid_y - sh_mid_y
+        if math.hypot(nvx, nvy) < 1e-4:
+            signed_angles.append(None)
+            continue
+        # Signed angle from vertical (0, −1) to neck_vec in image
+        # coords (y grows downward). atan2(cross, dot) where:
+        #   cross = vert.x*vec.y − vert.y*vec.x = vec.x
+        #   dot   = vert.x*vec.x + vert.y*vec.y = −vec.y
+        signed = math.degrees(math.atan2(nvx, -nvy))
+        # Anatomical sanity: drop frames where the signed tilt
+        # exceeds physical limits (artefact — typically an ear
+        # occluded by hand / clothing during the tilt).
+        if abs(signed) > _NECK_LATERAL_ANATOMICAL_MAX_DEG + 15.0:
+            signed_angles.append(None)
+            continue
+        signed_angles.append(signed)
+        valid_frames += 1
+
+    if valid_frames < max(3, int(fps * 0.5)):
+        raise ValueError("poor_visibility")
+
+    # ── Dual-peak tracking ───────────────────────────────────
+    # No direction detector — the sign is the direction. Inside
+    # the deadband (|signed| < 5°) the frame is neutral and
+    # updates neither peak.
+    primary_peak_signed:   Optional[float] = None  # left  (positive)
+    primary_peak_idx   = -1
+    secondary_peak_signed: Optional[float] = None  # right (negative)
+    secondary_peak_idx = -1
+    for i, a in enumerate(signed_angles):
+        if a is None:
+            continue
+        if a > _NECK_LATERAL_DEADBAND_DEG:
+            if primary_peak_signed is None or a > primary_peak_signed:
+                primary_peak_signed = a
+                primary_peak_idx = i
+        elif a < -_NECK_LATERAL_DEADBAND_DEG:
+            if secondary_peak_signed is None or a < secondary_peak_signed:
+                secondary_peak_signed = a
+                secondary_peak_idx = i
+        # Else in deadband → neither peak updated.
+
+    # Clamp the REPORTED magnitudes to anatomical limits (45°
+    # each side). The raw signed peak is still preserved on the
+    # `peak_angle` field for downstream debugging.
+    primary_mag = (
+        min(_NECK_LATERAL_ANATOMICAL_MAX_DEG, max(0.0, float(primary_peak_signed)))
+        if primary_peak_signed is not None else 0.0
+    )
+    secondary_mag = (
+        min(_NECK_LATERAL_ANATOMICAL_MAX_DEG, max(0.0, float(-secondary_peak_signed)))
+        if secondary_peak_signed is not None else 0.0
+    )
+
+    # ── Asymmetry detection ──────────────────────────────────
+    # Only meaningful when BOTH sides were captured (else the
+    # patient simply didn't perform that direction in the run
+    # and asymmetry would be a spurious flag).
+    both_captured = primary_mag > 0 and secondary_mag > 0
+    asymmetry_deg = (
+        abs(primary_mag - secondary_mag) if both_captured else 0.0
+    )
+    asymmetry_flag = both_captured and asymmetry_deg > _NECK_LATERAL_ASYMMETRY_FLAG_DEG
+
+    # ── Build response ───────────────────────────────────────
+    p_lo, p_hi = _MERGED_NECKLATERAL_PRIMARY_TARGET
+    s_lo, s_hi = _MERGED_NECKLATERAL_SECONDARY_TARGET
+    p_target = p_hi
+    p_pct = (primary_mag / p_target) * 100.0 if p_target > 0 else 0.0
+    p_status = _classify_in_range(primary_mag, p_lo, p_hi)
+
+    interpretation_primary = (
+        f"Left lateral flexion measured {primary_mag:.1f}°, which is "
+        f"{p_pct:.0f}% of the {p_lo:.0f}°–{p_hi:.0f}° normal range "
+        f"— {p_status}."
+    )
+    if secondary_mag > 0:
+        s_status = _classify_in_range(secondary_mag, s_lo, s_hi)
+        interpretation_secondary = (
+            f"Right lateral flexion measured {secondary_mag:.1f}°, "
+            f"which is {(secondary_mag / s_hi) * 100.0:.0f}% of the "
+            f"{s_lo:.0f}°–{s_hi:.0f}° normal range — {s_status}."
+        )
+    else:
+        interpretation_secondary = (
+            "Right lateral flexion direction was not detected in this "
+            "recording."
+        )
+    interpretation = f"{interpretation_primary} {interpretation_secondary}"
+    if asymmetry_flag:
+        interpretation += (
+            f" Notable left-right asymmetry detected "
+            f"({asymmetry_deg:.1f}°). Clinical correlation recommended."
+        )
+
+    # Two key frames only — peak left + peak right. Matches the
+    # other merged tests' layout (no neutral frame).
+    key_frames: list[dict] = []
+    if primary_peak_idx >= 0 and primary_mag > 0:
+        kf = _grab_neck_key_frame(
+            video_path, primary_peak_idx, raw,
+            f"Left lateral flexion ({primary_mag:.1f}°)",
+        )
+        if kf:
+            key_frames.append(kf)
+    if secondary_peak_idx >= 0 and secondary_mag > 0:
+        kf = _grab_neck_key_frame(
+            video_path, secondary_peak_idx, raw,
+            f"Right lateral flexion ({secondary_mag:.1f}°)",
+        )
+        if kf:
+            key_frames.append(kf)
+
+    return {
+        "body_part": "neck",
+        "movement": "lateral_flexion",
+        "side": None,
+        "peak_angle": (
+            float(primary_peak_signed) if primary_peak_signed is not None else None
+        ),
+        "peak_magnitude": primary_mag,
+        "reference_range": [float(p_lo), float(p_hi)],
+        "target": float(p_target),
+        "percentage": p_pct,
+        "status": p_status,
+        "valid_frames": valid_frames,
+        "total_frames": n,
+        "fps": float(fps),
+        "interpretation": interpretation,
+        "key_frames": key_frames,
+        "secondary_peak_angle": (
+            float(secondary_peak_signed) if secondary_peak_signed is not None else None
+        ),
+        "secondary_peak_magnitude": secondary_mag if secondary_mag > 0 else None,
+        "secondary_reference_range": [float(s_lo), float(s_hi)],
+        "primary_label": "Left Lateral Flexion",
+        "secondary_label": "Right Lateral Flexion",
+    }
+
+
 def analyze_neck(
     video_path: str,
     pose_options,
     movement: str,
 ) -> dict:
-    """Run the BlazePose-Full merged neck flex+ext pipeline on an
-    uploaded clip.
+    """Run the BlazePose-Full backend pipeline on an uploaded
+    neck-ROM clip.
 
     Args:
         video_path:   path to the uploaded (and optionally repaired)
                       video file on disk.
         pose_options: PoseLandmarkerOptions built by
                       api._build_gait_pose_options().
-        movement:     "flexion_extension" — the only neck movement
-                      currently routed to backend. (lateral_flexion
-                      still runs through the browser path.)
+        movement:     "flexion_extension" or "lateral_flexion" —
+                      the two merged neck tests currently routed
+                      to backend. (rotation still runs through the
+                      browser path.)
 
     Returns:
         Dict matching the merged BiomechData Pydantic schema —
@@ -465,12 +765,19 @@ def analyze_neck(
         frontend display changes.
 
     Raises:
-        ValueError: input invalid, frontal-view rejection,
-                    insufficient nose visibility, or fewer than
-                    ~half a second of usable frames. The endpoint
-                    maps these to HTTP 400 with the original
-                    user-facing message preserved.
+        ValueError: input invalid, frontal/lateral-view rejection
+                    (depending on movement), insufficient nose
+                    visibility, or fewer than ~half a second of
+                    usable frames. The endpoint maps these to
+                    HTTP 400 with the original user-facing
+                    message preserved.
     """
+    # Lateral flexion runs through its own pipeline (needs FRONTAL
+    # view + different math + dual-side labels). Branch early so
+    # the existing flex/ext code below stays untouched.
+    if movement == "lateral_flexion":
+        return _analyze_neck_lateral_flexion(video_path, pose_options)
+
     # Local imports keep the single-frame surface dependency-light.
     from gait_engine import build_time_series, extract_poses
 
