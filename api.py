@@ -1272,7 +1272,7 @@ async def analyze_hip(
     fixed_path_cleanup: str | None = None
     try:
         movement = movement_type.lower().strip()
-        _ALLOWED_HIP = ("flexion", "extension")
+        _ALLOWED_HIP = ("flexion", "extension", "rotation")
         if movement not in _ALLOWED_HIP:
             return BiomechResponse(
                 success=False,
@@ -1373,6 +1373,12 @@ async def analyze_hip(
         if msg == "poor_visibility":
             raise HTTPException(status_code=400, detail="poor_visibility")
         if msg.startswith("Requested side"):
+            raise HTTPException(status_code=400, detail=msg)
+        # Rotation test couldn't lock a calibration baseline at the
+        # start of the recording — patient must hold the supine
+        # neutral pose (knee at 90°, lower leg pointing toward
+        # camera) for ~5 frames before initiating rotation.
+        if msg.startswith("Neutral pose"):
             raise HTTPException(status_code=400, detail=msg)
         return BiomechResponse(success=False, error=msg)
     except Exception as e:

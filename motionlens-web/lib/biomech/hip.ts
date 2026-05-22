@@ -10,6 +10,7 @@ import { LM } from "@/lib/pose/landmarks";
 export type HipMovementId =
   | "flexion"
   | "extension"
+  | "rotation"
   | "internal_rotation"
   | "external_rotation";
 
@@ -18,6 +19,17 @@ export interface HipMovement {
   label: string;
   description: string;
   target: [number, number];
+  /** Merged tests carry a secondary direction with its own target.
+   *  Only set on dual-direction merged entries (currently `rotation`). */
+  merged?: boolean;
+  primaryLabel?: string;
+  secondaryLabel?: string;
+  secondaryTarget?: [number, number];
+  /** When true the chooser hides the entry but the lookup table still
+   *  resolves it — kept so saved reports referencing legacy single-
+   *  direction IDs (`internal_rotation` / `external_rotation`) still
+   *  resolve their labels + targets. */
+  hidden?: boolean;
 }
 
 export const HIP_MOVEMENTS: HipMovement[] = [
@@ -33,17 +45,42 @@ export const HIP_MOVEMENTS: HipMovement[] = [
     description: "Move the leg backward behind the body",
     target: [10, 30],
   },
+  // Merged Internal + External rotation. Patient supine, knee bent at
+  // 90° with the lower leg pointing toward the camera. One recording
+  // captures BOTH directions (lower leg falls laterally for internal
+  // rotation at the hip, medially for external — counter-intuitive but
+  // anatomically correct, since rotation happens at the hip and the
+  // ankle is at the far end of the tibia lever). The backend pipeline
+  // mirrors the shoulder rotation flow (calibrated foreshortening with
+  // a baseline locked at the neutral pose).
+  {
+    id: "rotation",
+    label: "Rotation (Internal + External)",
+    description:
+      "Lying on the back with the knee bent at 90° and the lower leg pointing at the camera, rotate the thigh inward then outward. One session captures both peaks.",
+    target: [30, 45],
+    merged: true,
+    primaryLabel: "Internal Rotation",
+    secondaryLabel: "External Rotation",
+    secondaryTarget: [30, 45],
+  },
+  // Legacy single-direction entries — kept in the lookup table so
+  // saved reports that referenced these IDs still resolve labels +
+  // targets. Hidden from the chooser since the merged entry above is
+  // the new default.
   {
     id: "internal_rotation",
     label: "Internal Rotation",
     description: "Rotate the thigh inward (knee bent at 90°)",
     target: [30, 45],
+    hidden: true,
   },
   {
     id: "external_rotation",
     label: "External Rotation",
     description: "Rotate the thigh outward (knee bent at 90°)",
     target: [40, 60],
+    hidden: true,
   },
 ];
 
@@ -86,7 +123,11 @@ export function computeHipAngle(
 
   const needed: Keypoint[] = [hip, knee];
   if (movement === "flexion" || movement === "extension") needed.push(shoulder);
-  if (movement === "internal_rotation" || movement === "external_rotation") {
+  if (
+    movement === "internal_rotation" ||
+    movement === "external_rotation" ||
+    movement === "rotation"
+  ) {
     needed.push(ankle);
   }
   for (const k of needed) {

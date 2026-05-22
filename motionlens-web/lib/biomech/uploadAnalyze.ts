@@ -187,17 +187,26 @@ export async function analyzeBiomechVideo(
     return analyzeKneeBackend(file, "flexion_extension", side ?? "right", onProgress);
   }
 
-  // ── Hip flexion + extension → backend MediaPipe BlazePose Full ──
-  // Both single-direction hip tests share the same per-frame
-  // math (`180° − interior(trunk, thigh)`) — the formula
-  // returns the unsigned magnitude of deviation from standing-
-  // straight, and the test movement the user picked determines
-  // the clinical interpretation + reference range. Mirrors
-  // computeHipAngle for both movements in
-  // motionlens-web/lib/biomech/hip.ts. Internal / external
-  // rotation still run through the browser path (separate
-  // follow-up).
-  if (bodyPart === "hip" && (movement === "flexion" || movement === "extension")) {
+  // ── Hip flexion + extension + rotation → backend MediaPipe ──
+  // All three hip tests now route to /api/analyze-hip. The
+  // backend's analyze_hip dispatches on the movement string:
+  //   • flexion / extension use `180° − interior(trunk, thigh)`
+  //     and a simple max-tracker (single-direction tests).
+  //   • rotation is a merged test (internal + external captured
+  //     in one trial) with a calibration baseline locked at the
+  //     supine neutral pose — patient must hold "knee at 90°,
+  //     lower leg pointing at camera" for ~5 frames at the
+  //     start. Backend uses ankle-displacement foreshortening
+  //     (the calibrated-arcsin approach used by shoulder rotation).
+  // The legacy single-direction internal_rotation /
+  // external_rotation IDs still exist in HIP_MOVEMENTS for
+  // saved-report compatibility (hidden from the chooser); only
+  // the merged "rotation" ID is reachable from the new UI.
+  if (bodyPart === "hip" && (
+        movement === "flexion" ||
+        movement === "extension" ||
+        movement === "rotation"
+      )) {
     return analyzeHipBackend(file, movement, side ?? "right", onProgress);
   }
 
@@ -1996,6 +2005,12 @@ function formatHipError(detail: unknown, status: number): string {
   if (raw.startsWith("Requested side")) {
     // Pre-flight wrong-side check — surface verbatim so the user
     // sees the exact actionable message (which side to switch to).
+    return raw;
+  }
+  if (raw.startsWith("Neutral pose")) {
+    // Merged hip rotation couldn't lock a calibration baseline —
+    // surface verbatim so the user sees the "supine + knee at 90°
+    // + lower leg pointing at camera" guidance.
     return raw;
   }
   if (status >= 500) {

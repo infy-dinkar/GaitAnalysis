@@ -51,7 +51,7 @@ function HipSetupInner() {
               </h2>
               <div className="mt-4">
                 <MovementGrid
-                  options={HIP_MOVEMENTS}
+                  options={HIP_MOVEMENTS.filter((m) => !m.hidden)}
                   selected={movement}
                   onSelect={setMovement}
                 />
