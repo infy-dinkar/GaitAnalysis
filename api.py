@@ -1272,12 +1272,13 @@ async def analyze_hip(
     fixed_path_cleanup: str | None = None
     try:
         movement = movement_type.lower().strip()
-        if movement != "flexion":
+        _ALLOWED_HIP = ("flexion", "extension")
+        if movement not in _ALLOWED_HIP:
             return BiomechResponse(
                 success=False,
                 error=(
                     f"Unknown hip movement '{movement_type}'. "
-                    f"Allowed: 'flexion'."
+                    f"Allowed: {sorted(_ALLOWED_HIP)}."
                 ),
             )
         side_lc = side.lower().strip()
