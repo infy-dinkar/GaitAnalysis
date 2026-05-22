@@ -61,6 +61,11 @@ LM = {
     # the patient faces camera-right; in left-side profile the sign
     # inverts and the system labels flexion frames as extension.
     "nose": 0,
+    # Ears — consumed by neck_engine.analyze_neck (ear→nose tilt
+    # captures the full clinical neck flex/ext range including the
+    # atlanto-occipital pitch). Not used by gait math; additive
+    # only.
+    "left_ear":       7,  "right_ear":     8,
     "left_shoulder":  11, "right_shoulder": 12,
     # Arm landmarks (elbow + wrist) — not consumed by gait math but
     # extracted + smoothed alongside everything else so the shared
