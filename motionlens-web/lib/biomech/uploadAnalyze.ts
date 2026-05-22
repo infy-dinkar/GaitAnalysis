@@ -153,16 +153,22 @@ export async function analyzeBiomechVideo(
     return analyzeShoulderBackend(file, "flexion_extension", side ?? "right", onProgress);
   }
 
-  // ── Merged shoulder movements (browser path, kept for now) ──
-  // Rotation (external + internal) and abduction + adduction
-  // continue to run through the browser MoveNet dual-direction
-  // analyser. They will be moved to the backend in a follow-up
-  // pass once shoulder flexion/extension is verified on real
-  // patient videos.
-  if (
-    bodyPart === "shoulder" &&
-    (movement === "rotation" || movement === "abduction_adduction")
-  ) {
+  // ── Shoulder abduction + adduction → backend MediaPipe BlazePose Full ──
+  // Same rationale as flex/ext: backend pipeline for device-
+  // consistent fast-movement capture. The backend's merged ab/ad
+  // branch mirrors the browser analyser's direction-detection rules
+  // (elbow position vs test-side shoulder, with the overhead y-axis
+  // override) so live and upload modes agree frame-by-frame.
+  if (bodyPart === "shoulder" && movement === "abduction_adduction") {
+    return analyzeShoulderBackend(file, "abduction_adduction", side ?? "right", onProgress);
+  }
+
+  // ── Merged shoulder rotation (browser path, kept for now) ──
+  // Rotation (external + internal) still runs through the browser
+  // MoveNet dual-direction analyser. It needs a calibration
+  // baseline + arcsin-based magnitude formula that the backend
+  // doesn't yet implement; moved in a separate PR.
+  if (bodyPart === "shoulder" && movement === "rotation") {
     return analyzeMergedShoulderVideo({
       file,
       movement,

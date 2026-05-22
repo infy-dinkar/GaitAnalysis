@@ -219,6 +219,71 @@ _EXTENSION_ANATOMICAL_MAX = 75.0
 _MERGED_FLEXEXT_PRIMARY_TARGET: tuple[float, float] = (150.0, 180.0)
 _MERGED_FLEXEXT_SECONDARY_TARGET: tuple[float, float] = (45.0, 60.0)
 
+# Merged abduction + adduction. Patient is in FRONTAL view (arms
+# at side, camera facing torso); one recording captures both
+# directions. Direction is detected geometrically (elbow position
+# vs test-side shoulder, with a y-axis override for the overhead
+# end of the abduction arc); magnitude is the direction-symmetric
+# abs() angle the existing shoulder_abduction_adduction formula
+# returns. AAOS reference ranges.
+_MERGED_ABAD_PRIMARY_TARGET: tuple[float, float] = (150.0, 180.0)   # Abduction
+_MERGED_ABAD_SECONDARY_TARGET: tuple[float, float] = (30.0, 50.0)   # Adduction
+
+# Direction-detection knobs — mirror the browser merged-ab/ad code
+# in motionlens-web/lib/biomech/shoulder.ts so live and upload modes
+# agree frame-by-frame on what counts as abduction vs adduction.
+_ABAD_OVERHEAD_FRAC = 0.20            # elbow above shoulder by 20%
+                                       # of shoulder-width triggers
+                                       # the overhead branch (default
+                                       # "abduction" unless the
+                                       # lateral signal is clearly
+                                       # medial — see below).
+_ABAD_DIRECTION_DEADBAND_FRAC = 0.01  # Minimum lateral offset (as
+                                       # fraction of shoulder width)
+                                       # before any direction is
+                                       # committed at NORMAL (below-
+                                       # overhead) elevation. Set to
+                                       # 1% so patients with limited
+                                       # mobility — who may only
+                                       # achieve a few degrees of
+                                       # adduction — still register
+                                       # a peak rather than being
+                                       # silently absorbed by the
+                                       # deadband as "neutral".
+_ABAD_OVERHEAD_MEDIAL_FRAC = 0.02     # At overhead elevation, declare
+                                       # "adduction" when the elbow
+                                       # is at least 2% of shoulder
+                                       # width medial of the test-
+                                       # side shoulder. Wider than
+                                       # the at-shoulder deadband to
+                                       # suppress true angle-sign
+                                       # flip noise at the top of
+                                       # the abduction arc, but
+                                       # loose enough that a small-
+                                       # amplitude overhead-adduction
+                                       # motion (arm raised slightly
+                                       # across body) classifies as
+                                       # adduction rather than being
+                                       # absorbed by the default
+                                       # "abduction" override.
+_ABAD_MIN_MOTION_MAGNITUDE_DEG = 2.0  # Don't commit a direction when
+                                       # the raw arm-vs-trunk angle
+                                       # is below this — postural
+                                       # sway / breathing produces
+                                       # sub-2° displacements at rest
+                                       # that we don't want sneaking
+                                       # into either peak slot. Above
+                                       # this floor, even a tiny
+                                       # genuine adduction (~3-5°)
+                                       # registers correctly.
+
+# Anatomical max magnitudes used as final clamps before peak update.
+# The deadband + overhead override catch most flip artefacts; this
+# is the belt-and-suspenders cap so an upstream noise spike never
+# locks an implausibly large adduction (e.g. 90°) as the peak.
+_ABDUCTION_ANATOMICAL_MAX = 180.0
+_ADDUCTION_ANATOMICAL_MAX = 50.0
+
 
 def _classify_in_range(value: float, lo: float, hi: float) -> str:
     """Asymmetric range-aware classification for clinical ROM:
@@ -256,6 +321,173 @@ def _classify_in_range(value: float, lo: float, hi: float) -> str:
     return "poor"
 
 
+def _detect_ab_ad_direction(
+    s_x: float, s_y: float,
+    e_x: float, e_y: float,
+    w_x: Optional[float], w_y: Optional[float],
+    ls_x: float, rs_x: float,
+    side: str,
+) -> Optional[str]:
+    """Classify one frame as 'abduction' / 'adduction' / None.
+
+    Direction signal: WRIST position (when visible) relative to the
+    test-side shoulder and body centreline. Wrist is the distal end
+    of the arm chain — when a patient with limited ROM bends the
+    elbow and brings the hand across the body, the wrist crosses
+    the body midline well before the elbow does (the elbow can stay
+    near the shoulder x). Using wrist makes the detector sensitive
+    to genuine small-amplitude adduction motions that elbow-only
+    detection would silently miss. Falls back to elbow when wrist
+    visibility drops (e.g. at the extreme of overhead abduction).
+
+    Elevation signal: ELBOW height above shoulder — drives the
+    overhead override that suppresses dx-sign flips at the top of
+    the abduction arc, where any shoulder-x/elbow-x noise can flip
+    the detector. Anatomically the overhead arc is always on the
+    abduction range, so we lock direction to 'abduction' there.
+
+    Rules (in order):
+      1. Overhead (dy_ratio_elbow > _ABAD_OVERHEAD_FRAC) → always
+         'abduction'.
+      2. Below-overhead — use the wrist's signed lateral offset
+         from the test-side shoulder (scaled by shoulder width).
+         Outward → abduction, medial → adduction.
+      3. Inside deadband (|dx_ratio| < _ABAD_DIRECTION_DEADBAND_FRAC)
+         → None (neutral pose, neither peak updated).
+    """
+    _ = side  # outward direction is inferred from s.x vs centreline.
+    _ = w_y   # only x matters for direction; y kept in signature for
+              # symmetry / future use.
+    shoulder_width = abs(rs_x - ls_x)
+    if shoulder_width < 1e-4:
+        return None
+    centre_x = (ls_x + rs_x) / 2.0
+    if s_x > centre_x:
+        outward_sign = 1.0
+    elif s_x < centre_x:
+        outward_sign = -1.0
+    else:
+        return None
+    # Image y axis grows DOWNWARD, so (s_y - e_y) > 0 means the
+    # elbow is above the shoulder on screen.
+    dy_ratio = (s_y - e_y) / shoulder_width
+    if dy_ratio > _ABAD_OVERHEAD_FRAC:
+        # Overhead arc — locked to abduction (see docstring).
+        return "abduction"
+    # Direction signal: prefer WRIST (more distal, more sensitive
+    # to small bent-arm adduction). Fall back to elbow when the
+    # caller couldn't pass a confident wrist coordinate (low
+    # visibility). The shoulder reference stays the test-side
+    # shoulder either way.
+    if w_x is not None:
+        dx_ratio = ((w_x - s_x) * outward_sign) / shoulder_width
+    else:
+        dx_ratio = ((e_x - s_x) * outward_sign) / shoulder_width
+    if abs(dx_ratio) < _ABAD_DIRECTION_DEADBAND_FRAC:
+        return None
+    return "abduction" if dx_ratio > 0 else "adduction"
+
+
+def _lateral_view_for_ab_ad(ts: dict) -> Optional[str]:
+    """Pre-flight check for the merged ab/ad test. The math (elbow
+    position vs body centreline) assumes a FRONTAL view; in LATERAL
+    profile both shoulders project to similar image-x and the
+    centreline collapses, producing the spurious 50° clamp.
+
+    Detect lateral view from body GEOMETRY rather than nose position
+    (the nose moves around with head tilt and produced false-
+    positive rejections on perfectly frontal videos). The signature
+    of lateral view is that the projected SHOULDER WIDTH (left-to-
+    right shoulder horizontal distance) is small relative to TRUNK
+    HEIGHT (shoulder-to-hip vertical distance). In frontal pose the
+    ratio is typically 0.45–0.70 (~half of trunk height); in lateral
+    pose it drops well below 0.25 because the body's depth is much
+    smaller than its width. Threshold is set conservatively so only
+    clearly-lateral videos get rejected."""
+    ls_entry = ts.get("left_shoulder")  or {}
+    rs_entry = ts.get("right_shoulder") or {}
+    lh_entry = ts.get("left_hip")  or {}
+    rh_entry = ts.get("right_hip") or {}
+    ls_x = ls_entry.get("x_px"); ls_y = ls_entry.get("y_px"); ls_v = ls_entry.get("vis")
+    rs_x = rs_entry.get("x_px"); rs_y = rs_entry.get("y_px"); rs_v = rs_entry.get("vis")
+    lh_y = lh_entry.get("y_px"); lh_v = lh_entry.get("vis")
+    rh_y = rh_entry.get("y_px"); rh_v = rh_entry.get("vis")
+    for arr in (ls_x, ls_y, rs_x, rs_y, lh_y, rh_y, ls_v, rs_v, lh_v, rh_v):
+        if arr is None:
+            return None
+    n = min(len(ls_x), len(rs_x), len(lh_y), len(rh_y))
+    if n == 0:
+        return None
+    ratios = []
+    for i in range(n):
+        if ls_v[i] < _SHOULDER_VIS_THRESHOLD: continue
+        if rs_v[i] < _SHOULDER_VIS_THRESHOLD: continue
+        if lh_v[i] < _SHOULDER_VIS_THRESHOLD: continue
+        if rh_v[i] < _SHOULDER_VIS_THRESHOLD: continue
+        sw = abs(float(rs_x[i]) - float(ls_x[i]))
+        sm_y = (float(ls_y[i]) + float(rs_y[i])) / 2.0
+        hm_y = (float(lh_y[i]) + float(rh_y[i])) / 2.0
+        trunk_h = abs(hm_y - sm_y)
+        if trunk_h < 1e-4:
+            continue
+        ratios.append(sw / trunk_h)
+    if not ratios:
+        return None
+    ratios.sort()
+    med_ratio = ratios[len(ratios) // 2]
+    # Frontal: ratio 0.45–0.70. Lateral: <0.25. Threshold 0.22 is
+    # conservative — only clearly-lateral profiles get rejected so
+    # we don't false-positive on baggy clothes / slightly-turned
+    # frontal poses.
+    if med_ratio < 0.22:
+        return (
+            "Camera angle appears to be a side view, but the "
+            "abduction/adduction test needs a FRONT-FACING view of "
+            "the patient. Please re-record with the camera directly "
+            "in front."
+        )
+    return None
+
+
+def _wrong_side_for_video(ts: dict, side: str) -> Optional[str]:
+    """Pre-flight sanity check: if the requested side's elbow has
+    consistently lower visibility than the other side's, the user
+    almost certainly picked the wrong side in the UI. Returns a
+    user-facing error string, or None when the selection is
+    plausibly correct.
+
+    Thresholds are conservative — only fires when the visibility
+    gap is clear, so borderline lateral views (one side modestly
+    occluded) don't false-positive."""
+    # `vis` is a numpy array — use explicit None / len checks (a
+    # numpy `array or default` raises "ambiguous truth value").
+    l_entry = ts.get("left_elbow") or {}
+    r_entry = ts.get("right_elbow") or {}
+    l_ve = l_entry.get("vis")
+    r_ve = r_entry.get("vis")
+    if l_ve is None or r_ve is None:
+        return None
+    n = min(len(l_ve), len(r_ve))
+    if n == 0:
+        return None
+    l_mean = float(np.mean(l_ve[:n]))
+    r_mean = float(np.mean(r_ve[:n]))
+    requested_mean = l_mean if side == "left" else r_mean
+    other_mean = r_mean if side == "left" else l_mean
+    other_side = "right" if side == "left" else "left"
+    if (
+        requested_mean < 0.4
+        and other_mean > 0.6
+        and (other_mean - requested_mean) > 0.25
+    ):
+        return (
+            f"Requested side '{side}' has lower visibility than the other "
+            f"side. Please re-record showing the correct arm clearly, or "
+            f"switch to the '{other_side}' side."
+        )
+    return None
+
+
 def _grab_shoulder_key_frame(
     video_path: str,
     frame_index: int,
@@ -268,20 +500,13 @@ def _grab_shoulder_key_frame(
     data URL. Mirrors ankle_engine._grab_ankle_key_frame's pattern."""
     if frame_index < 0:
         return None
-    # Rotation handling: OpenCV 4.5.2+ auto-rotates frames using the
-    # video's metadata by default, so cv2.VideoCapture returns frames
-    # already in upright orientation. Layering a manual metadata-
-    # based rotation on top caused double-rotation on the HF Space.
-    # Instead, observe the actual pose orientation in the extracted
-    # keypoints and use that as the single source of truth — it
-    # self-corrects whether cv2 rotated, didn't rotate, or got it
-    # wrong, because the pose dict came from those same cv2 frames.
-    from gait_engine import (
-        apply_rotation as _apply_rot,
-        infer_pose_rotation,
-        rotate_norm_point,
-    )
-    pose_rot = infer_pose_rotation(keypoints_normalized)
+    # Rotation handling: extract_poses now stores the pose-based
+    # rotation it applied to the keypoints in raw["_pose_rotation"].
+    # The screenshot frame is re-read straight from cv2, so we need
+    # to apply the SAME rotation here to keep the JPEG and the
+    # keypoint overlay aligned.
+    from gait_engine import apply_rotation as _apply_rot
+    pose_rot = int(keypoints_normalized.get("_pose_rotation") or 0)
 
     cap = cv2.VideoCapture(video_path)
     try:
@@ -311,9 +536,10 @@ def _grab_shoulder_key_frame(
         kp = frames[frame_index]
         if kp is None:
             return None
+        # Keypoints are already in upright space (extract_poses
+        # rotated them when needed), so just project into the
+        # rotated frame's pixel dimensions directly.
         x_n, y_n, _vis = kp
-        if pose_rot:
-            x_n, y_n = rotate_norm_point(x_n, y_n, pose_rot)
         px = int(x_n * w)
         py = int(y_n * h)
         emphasised = name.startswith(side)
@@ -388,7 +614,14 @@ def analyze_shoulder(
     """
     if side not in ("left", "right"):
         raise ValueError(f"Unsupported side: {side!r}")
-    is_merged = movement == "flexion_extension"
+    # Two merged tests share the same upload pipeline but have
+    # different direction-detection + reference-range structures.
+    # Keep them as separate booleans so downstream branches stay
+    # explicit (and "is_merged" can still gate the not-single-
+    # direction path uniformly).
+    is_merged_flex_ext = movement == "flexion_extension"
+    is_merged_ab_ad    = movement == "abduction_adduction"
+    is_merged = is_merged_flex_ext or is_merged_ab_ad
     if not is_merged and movement not in SHOULDER_NORMAL_RANGES:
         raise ValueError(f"Unsupported shoulder movement: {movement!r}")
 
@@ -399,6 +632,28 @@ def analyze_shoulder(
 
     raw, fps, _cv_total_frames = extract_poses(video_path, pose_options)
     ts = build_time_series(raw)
+
+    # Pre-flight sanity checks on the merged ab/ad path — fail
+    # fast with clear, user-actionable error messages rather than
+    # running a full analysis that would produce garbage values.
+    # Scoped to ab/ad so flex/ext (already-shipped, frontal-or-
+    # lateral agnostic) is unaffected.
+    if is_merged_ab_ad:
+        # 1. Lateral / side-profile rejection. The ab/ad direction
+        # detector compares elbow lateral offset to the body
+        # centreline (midpoint of the two shoulders); in lateral
+        # view both shoulders project to the same image-x and the
+        # centreline collapses, producing the spurious 50° clamp
+        # users hit on flexion videos mistagged as ab/ad.
+        lateral_msg = _lateral_view_for_ab_ad(ts)
+        if lateral_msg:
+            raise ValueError(lateral_msg)
+        # 2. Wrong-side selection. If the requested side's elbow
+        # is far less visible than the other side's across the
+        # run, the user almost certainly picked the wrong side.
+        wrong_side_msg = _wrong_side_for_video(ts, side)
+        if wrong_side_msg:
+            raise ValueError(wrong_side_msg)
 
     shoulder_key = f"{side}_shoulder"
     elbow_key    = f"{side}_elbow"
@@ -422,7 +677,7 @@ def analyze_shoulder(
     # multiplier to every per-frame angle. is_merged + single-direction
     # flex/ext both need this; ab/ad and rotation don't (those are
     # frontal-plane / axial and don't have a forward/back sign).
-    is_flex_ext = is_merged or movement in ("flexion", "extension")
+    is_flex_ext = is_merged_flex_ext or movement in ("flexion", "extension")
     facing_sign = 1.0
     if is_flex_ext and "nose" in ts:
         nx_arr = ts["nose"]["x_px"]; nv_arr = ts["nose"]["vis"]
@@ -470,9 +725,9 @@ def analyze_shoulder(
         s = (float(sx[i]), float(sy[i]))
         e = (float(ex[i]), float(ey[i]))
         h = (float(hx[i]), float(hy[i]))
-        if is_merged or movement in ("flexion", "extension"):
+        if is_merged_flex_ext or movement in ("flexion", "extension"):
             a = shoulder_flexion_extension(s, e, h) * facing_sign
-        elif movement in ("abduction", "adduction"):
+        elif is_merged_ab_ad or movement in ("abduction", "adduction"):
             a = shoulder_abduction_adduction(s, e, h)
         else:
             w_pt = (float(wx[i]), float(wy[i]))
@@ -550,6 +805,210 @@ def analyze_shoulder(
             "fps": float(fps),
             "interpretation": interpretation,
             "key_frames": key_frames,
+        }
+
+    # ── Merged abduction + adduction ───────────────────────────
+    # Magnitude is direction-symmetric (shoulder_abduction_adduction
+    # returns abs() between trunk and arm), so per-frame magnitude is
+    # already in `angles` from the loop above. Direction comes from
+    # _detect_ab_ad_direction (elbow position vs test-side shoulder
+    # + body centreline, with a y-axis override for the overhead end
+    # of the abduction arc). Mirrors the browser merged-ab/ad path in
+    # shoulder.ts so live and upload modes agree on direction frame-
+    # by-frame. Returns its own response so the merged flex/ext
+    # branch below only runs when is_merged_flex_ext == True.
+    if is_merged_ab_ad:
+        import logging as _logging
+        _ablog = _logging.getLogger("motionlens.shoulder")
+        lsx_arr = ts["left_shoulder"]["x_px"]
+        lsv_arr = ts["left_shoulder"]["vis"]
+        rsx_arr = ts["right_shoulder"]["x_px"]
+        rsv_arr = ts["right_shoulder"]["vis"]
+
+        primary_peak_mag = 0.0       # abduction (positive magnitude)
+        primary_peak_idx = -1
+        secondary_peak_mag = 0.0     # adduction (positive magnitude)
+        secondary_peak_idx = -1
+        ab_neutral_idx = -1
+        ab_neutral_abs = math.inf
+
+        # Direction-detection diagnostics. Track per-frame stats so
+        # the HF Space log shows exactly why a given test's
+        # secondary slot ended up empty (none classified, deadband,
+        # visibility, etc.) — replaces guess-and-check debugging.
+        n_classified_ab = 0
+        n_classified_ad = 0
+        n_deadband = 0
+        n_skipped_vis = 0
+        n_skipped_angle = 0
+        sample_logged = 0
+        # Capture min dx_ratio (most-medial elbow seen) across the
+        # whole run so we can tell if the adduction motion ever
+        # produced a clearly medial elbow at all. Also track the
+        # dy_ratio at that same frame to distinguish "medial at
+        # overhead" (would hit the overhead override) from "medial
+        # at chest level" (clean adduction).
+        min_dx_ratio = math.inf
+        min_dx_at_dyr = 0.0
+        min_dx_at_mag = 0.0
+        max_dx_ratio = -math.inf
+
+        for i, a in enumerate(angles):
+            if a is None:
+                n_skipped_angle += 1
+                continue
+            if lsv_arr[i] < _SHOULDER_VIS_THRESHOLD or rsv_arr[i] < _SHOULDER_VIS_THRESHOLD:
+                n_skipped_vis += 1
+                continue
+            s_x = float(sx[i]); s_y = float(sy[i])
+            e_x = float(ex[i]); e_y = float(ey[i])
+            ls_x = float(lsx_arr[i]); rs_x = float(rsx_arr[i])
+            # Wrist used for direction signal when visible — see
+            # _detect_ab_ad_direction docstring (more sensitive to
+            # bent-arm small-amplitude adduction than elbow).
+            if vw[i] >= _SHOULDER_VIS_THRESHOLD:
+                w_x: Optional[float] = float(wx[i])
+                w_y: Optional[float] = float(wy[i])
+            else:
+                w_x = None
+                w_y = None
+            # Recompute dx_ratio here for logging stats — use the
+            # SAME (wrist-or-elbow) point the detector uses so the
+            # diagnostic numbers match the classification.
+            sw = abs(rs_x - ls_x)
+            if sw > 1e-4:
+                cx = (ls_x + rs_x) / 2.0
+                outsign = 1.0 if s_x > cx else (-1.0 if s_x < cx else 0.0)
+                ref_x = w_x if w_x is not None else e_x
+                dxr = ((ref_x - s_x) * outsign) / sw if outsign != 0.0 else 0.0
+                dyr_now = (s_y - e_y) / sw
+                if dxr < min_dx_ratio:
+                    min_dx_ratio = dxr
+                    min_dx_at_dyr = dyr_now
+                    min_dx_at_mag = float(a)
+                if dxr > max_dx_ratio: max_dx_ratio = dxr
+            direction = _detect_ab_ad_direction(
+                s_x, s_y, e_x, e_y, w_x, w_y, ls_x, rs_x, side,
+            )
+            # Magnitude floor: ignore frames where the arm has
+            # barely moved from rest. Without this, postural sway
+            # at neutral could pick up sub-degree "adductions" once
+            # we widen the deadband for limited-ROM patients.
+            if direction is not None and float(a) < _ABAD_MIN_MOTION_MAGNITUDE_DEG:
+                direction = None
+            # Sample-log a handful of frames near the magnitude peak
+            # so we can see what the detector actually sees.
+            if sample_logged < 6 and float(a) > 25.0:
+                _ablog.info(
+                    "ab_ad frame i=%d mag=%.1f dxr=%.3f dyr=%.3f dir=%s",
+                    i, float(a),
+                    dxr if sw > 1e-4 else float("nan"),
+                    (s_y - e_y) / sw if sw > 1e-4 else float("nan"),
+                    direction,
+                )
+                sample_logged += 1
+            if direction is None:
+                n_deadband += 1
+                if abs(a) < ab_neutral_abs:
+                    ab_neutral_abs = abs(a)
+                    ab_neutral_idx = i
+                continue
+            if direction == "abduction":
+                n_classified_ab += 1
+                mag = min(_ABDUCTION_ANATOMICAL_MAX, max(0.0, float(a)))
+                if mag > primary_peak_mag:
+                    primary_peak_mag = mag
+                    primary_peak_idx = i
+            else:  # adduction
+                n_classified_ad += 1
+                mag = min(_ADDUCTION_ANATOMICAL_MAX, max(0.0, float(a)))
+                if mag > secondary_peak_mag:
+                    secondary_peak_mag = mag
+                    secondary_peak_idx = i
+
+        _ablog.info(
+            "ab_ad summary: side=%s frames=%d ab=%d ad=%d deadband=%d "
+            "skip_vis=%d skip_angle=%d dxr_range=[%.3f, %.3f] "
+            "min_dx@dyr=%.3f min_dx@mag=%.1f peak_ab=%.1f peak_ad=%.1f",
+            side, len(angles),
+            n_classified_ab, n_classified_ad, n_deadband,
+            n_skipped_vis, n_skipped_angle,
+            min_dx_ratio if min_dx_ratio != math.inf else 0.0,
+            max_dx_ratio if max_dx_ratio != -math.inf else 0.0,
+            min_dx_at_dyr, min_dx_at_mag,
+            primary_peak_mag, secondary_peak_mag,
+        )
+
+        p_lo, p_hi = _MERGED_ABAD_PRIMARY_TARGET
+        s_lo, s_hi = _MERGED_ABAD_SECONDARY_TARGET
+        p_target = p_hi
+        p_pct = (primary_peak_mag / p_target) * 100.0 if p_target > 0 else 0.0
+        p_status = _classify_in_range(primary_peak_mag, p_lo, p_hi)
+
+        interpretation_primary = (
+            f"Abduction ({side.capitalize()}) measured {primary_peak_mag:.1f}°, "
+            f"which is {p_pct:.0f}% of the {p_lo:.0f}°–{p_hi:.0f}° normal range "
+            f"— {p_status}."
+        )
+        if secondary_peak_mag > 0:
+            s_status = _classify_in_range(secondary_peak_mag, s_lo, s_hi)
+            interpretation_secondary = (
+                f"Adduction ({side.capitalize()}) measured {secondary_peak_mag:.1f}°, "
+                f"which is "
+                f"{(secondary_peak_mag / s_hi) * 100.0:.0f}% of the "
+                f"{s_lo:.0f}°–{s_hi:.0f}° normal range — {s_status}."
+            )
+        else:
+            interpretation_secondary = (
+                "Adduction direction was not detected in this recording."
+            )
+        interpretation = f"{interpretation_primary} {interpretation_secondary}"
+
+        # Merged ab/ad key frames: only the two peak frames. The
+        # neutral / rest pose is omitted on user request — for this
+        # test the two peaks already convey the full ROM picture
+        # (single-direction tests still include neutral; merged
+        # flex/ext also keeps neutral for its dual-peak context).
+        ab_key_frames: list[dict] = []
+        if primary_peak_idx >= 0 and primary_peak_mag > 0:
+            kf = _grab_shoulder_key_frame(
+                video_path, primary_peak_idx, raw,
+                f"Abduction ({primary_peak_mag:.1f}°)", side,
+            )
+            if kf:
+                ab_key_frames.append(kf)
+        if secondary_peak_idx >= 0 and secondary_peak_mag > 0:
+            kf = _grab_shoulder_key_frame(
+                video_path, secondary_peak_idx, raw,
+                f"Adduction ({secondary_peak_mag:.1f}°)", side,
+            )
+            if kf:
+                ab_key_frames.append(kf)
+
+        return {
+            "body_part": "shoulder",
+            "movement": "abduction_adduction",
+            "side": side,
+            "peak_angle": float(primary_peak_mag) if primary_peak_mag > 0 else None,
+            "peak_magnitude": primary_peak_mag,
+            "reference_range": [float(p_lo), float(p_hi)],
+            "target": float(p_target),
+            "percentage": p_pct,
+            "status": p_status,
+            "valid_frames": valid_frames,
+            "total_frames": n,
+            "fps": float(fps),
+            "interpretation": interpretation,
+            "key_frames": ab_key_frames,
+            "secondary_peak_angle": (
+                float(secondary_peak_mag) if secondary_peak_mag > 0 else None
+            ),
+            "secondary_peak_magnitude": (
+                secondary_peak_mag if secondary_peak_mag > 0 else None
+            ),
+            "secondary_reference_range": [float(s_lo), float(s_hi)],
+            "primary_label": "Abduction",
+            "secondary_label": "Adduction",
         }
 
     # ── Merged flexion + extension ─────────────────────────────
