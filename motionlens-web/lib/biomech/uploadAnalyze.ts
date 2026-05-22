@@ -187,6 +187,17 @@ export async function analyzeBiomechVideo(
     return analyzeKneeBackend(file, "flexion_extension", side ?? "right", onProgress);
   }
 
+  // ── Hip flexion → backend MediaPipe BlazePose Full ──
+  // Hip flexion is a single-direction test (max-tracking; no
+  // direction detection / no calibration baseline). Math is
+  // `180° − interior(trunk, thigh)` at the hip vertex, mirroring
+  // the browser computeHipAngle("flexion") verbatim so live +
+  // upload report the same metric. Hip extension + rotations
+  // still run through the browser path (separate follow-up).
+  if (bodyPart === "hip" && movement === "flexion") {
+    return analyzeHipBackend(file, "flexion", side ?? "right", onProgress);
+  }
+
   // ── Merged neck tests → direction-aware analyser ──
   // Neck "flexion_extension" captures forward (chin to chest) and
   // backward (head back) tilt in one recording. Neck
@@ -1901,6 +1912,87 @@ function formatNeckError(detail: unknown, status: number): string {
     // Rotation test couldn't lock a calibration baseline at the
     // start of the recording — surface verbatim so the user sees
     // the "start facing forward" guidance.
+    return raw;
+  }
+  if (status >= 500) {
+    return "Analysis failed. Please check connection and try again.";
+  }
+  return raw || `Analysis failed (HTTP ${status}).`;
+}
+
+// ─── Hip backend client ─────────────────────────────────────────
+// Posts the uploaded video to /api/analyze-hip and unwraps the
+// BiomechResponse envelope. Mirrors analyzeKneeBackend exactly;
+// kept as a separate function so the body-part-specific error
+// message map (formatHipError) stays local.
+async function analyzeHipBackend(
+  file: File,
+  movement: string,
+  side: "left" | "right",
+  onProgress?: (fraction: number) => void,
+): Promise<BiomechDataDTO> {
+  onProgress?.(0.1);
+  const form = new FormData();
+  form.append("video", file, file.name || "hip.mp4");
+  form.append("movement_type", movement);
+  form.append("side", side);
+
+  onProgress?.(0.3);
+  const res = await authedFetch("/api/analyze-hip", {
+    method: "POST",
+    body: form,
+  });
+  onProgress?.(0.85);
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+    throw new Error(formatHipError(body.detail, res.status));
+  }
+  const wrapper = (await res.json()) as {
+    success: boolean;
+    data: BiomechDataDTO | null;
+    error: string | null;
+  };
+  onProgress?.(1.0);
+  if (!wrapper.success || !wrapper.data) {
+    throw new Error(
+      wrapper.error ?? "Analysis failed. Please check connection and try again.",
+    );
+  }
+  return wrapper.data;
+}
+
+// Map the backend's structured error tokens (raised via
+// HTTPException.detail in api.analyze_hip) to the user-facing
+// strings the spec calls for. Anything not in the token list
+// falls back to the raw detail string so debugging never loses
+// information.
+function formatHipError(detail: unknown, status: number): string {
+  const raw = typeof detail === "string" ? detail : Array.isArray(detail)
+    ? detail.map((d) => (typeof d === "string" ? d : JSON.stringify(d))).join("; ")
+    : JSON.stringify(detail ?? {});
+
+  if (raw.startsWith("fps_too_low")) {
+    return "Video quality too low. Please record at 30 FPS or higher.";
+  }
+  if (raw.startsWith("video_too_short")) {
+    return "Video too short. Please record at least 3 seconds of movement.";
+  }
+  if (raw.startsWith("duration_too_long")) {
+    return "Video too long. Maximum 60 seconds.";
+  }
+  if (raw.startsWith("file_too_large")) {
+    return "File too large. Maximum size is 100 MB.";
+  }
+  if (raw.startsWith("poor_visibility")) {
+    return (
+      "Hip and leg not clearly visible. Please ensure the full leg is in " +
+      "frame with good lighting throughout the recording."
+    );
+  }
+  if (raw.startsWith("Requested side")) {
+    // Pre-flight wrong-side check — surface verbatim so the user
+    // sees the exact actionable message (which side to switch to).
     return raw;
   }
   if (status >= 500) {

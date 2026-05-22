@@ -48,6 +48,11 @@ function isBackendRouted(bodyPart: Props["bodyPart"], movementId: string): boole
       movementId === "rotation"
     );
   }
+  if (bodyPart === "hip") {
+    // Hip flexion is backend-routed; extension + rotation
+    // still use the browser MoveNet path.
+    return movementId === "flexion";
+  }
   return false;
 }
 
