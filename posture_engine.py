@@ -68,7 +68,10 @@ from typing import Optional
 
 import mediapipe as mp
 import numpy as np
-from PIL import Image, ImageOps
+
+# Pillow imported lazily inside _load_image_rgb so a missing PIL
+# dependency only breaks the posture endpoint, not the whole
+# FastAPI app on module import.
 
 log = logging.getLogger("motionlens.posture")
 
@@ -204,6 +207,10 @@ def _load_image_rgb(image_path: str) -> tuple[np.ndarray, int, int]:
 
     Raises ValueError on invalid / unreadable images so the API
     endpoint can map to HTTP 400 invalid_image."""
+    # Lazy import — keeps the whole FastAPI app up even if the
+    # Pillow dep isn't installed on a particular environment;
+    # only the posture endpoint would fail with a useful error.
+    from PIL import Image, ImageOps
     try:
         with Image.open(image_path) as raw:
             corrected = ImageOps.exif_transpose(raw)
