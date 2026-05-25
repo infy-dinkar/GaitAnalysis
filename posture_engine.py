@@ -218,49 +218,78 @@ def _load_image_rgb(image_path: str) -> tuple[np.ndarray, int, int]:
 # ─── Pose extraction ──────────────────────────────────────────
 def _extract_posture_keypoints(
     rgb_array: np.ndarray, image_width: int, image_height: int,
-) -> list[Optional[dict]]:
+) -> list[dict]:
     """Run the BlazePose IMAGE-mode landmarker on a single
     RGB array and return a 17-element list of keypoint dicts
     indexed in the MoveNet layout (so the frontend `LM` accessors
     keep working unchanged).
 
-    Each entry is either:
+    The list ALWAYS has 17 entries with the same shape
       {"x": float (px), "y": float (px), "score": float,
        "name": "left_ear" | ... }
-    or None when the corresponding BlazePose landmark has
-    visibility below _POSTURE_VIS_THRESHOLD."""
+    matching MoveNet's "always emit all 17 keypoints" contract.
+    Low-visibility / undetected landmarks get score=0 (and
+    placeholder coordinates) — the downstream `_is_visible`
+    check filters them by score, same as the browser path used
+    to do. This is what the saved-report viewer + KeypointDTO
+    serialiser expect (the ReportCreatePayload schema declares
+    KeypointDTO[] non-nullable per element)."""
     pose_options = _build_image_pose_options()
     PoseLandmarker = mp.tasks.vision.PoseLandmarker
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_array)
     with PoseLandmarker.create_from_options(pose_options) as landmarker:
         result = landmarker.detect(mp_image)
+
+    def _empty_kp(movenet_idx: int) -> dict:
+        # Placeholder for an undetected / low-visibility keypoint.
+        # Frontend reads `score >= 0.2` to gate visibility, so a
+        # score-0 entry is skipped naturally. Position (0, 0) so
+        # the array can serialise as JSON without surprising
+        # NaN values.
+        return {
+            "x": 0.0,
+            "y": 0.0,
+            "score": 0.0,
+            "name": _KP_NAMES_MOVENET[movenet_idx],
+        }
+
     if not result.pose_landmarks or len(result.pose_landmarks) == 0:
-        # No person detected — caller maps this to HTTP 400
-        # poor_visibility.
-        return [None] * 17
+        # No person detected — engine raises poor_visibility
+        # downstream once the trunk-anchor gate runs. Return a
+        # full 17-element placeholder array so callers that only
+        # touch keypoints don't blow up.
+        return [_empty_kp(i) for i in range(17)]
+
     lms = result.pose_landmarks[0]
-    out: list[Optional[dict]] = []
+    out: list[dict] = []
     for movenet_idx, blazepose_idx in enumerate(_MOVENET_TO_BLAZEPOSE_IDX):
         lm = lms[blazepose_idx]
         vis = float(lm.visibility) if lm.visibility is not None else 0.0
         # Keypoints are returned in image PIXEL coordinates (matches
         # MoveNet output convention; the frontend overlay scales
         # them when persisting to the compressed display image).
-        out.append({
-            "x": float(lm.x) * image_width,
-            "y": float(lm.y) * image_height,
-            "score": vis,
-            "name": _KP_NAMES_MOVENET[movenet_idx],
-        })
+        if vis < _POSTURE_VIS_THRESHOLD:
+            # Below the visibility floor — emit the placeholder so
+            # the array stays 17-aligned and the saved-report
+            # schema (KeypointDTO[] non-nullable per element)
+            # validates cleanly.
+            out.append(_empty_kp(movenet_idx))
+        else:
+            out.append({
+                "x": float(lm.x) * image_width,
+                "y": float(lm.y) * image_height,
+                "score": vis,
+                "name": _KP_NAMES_MOVENET[movenet_idx],
+            })
     return out
 
 
-def _is_visible(kp: Optional[dict]) -> bool:
-    return kp is not None and (kp.get("score") or 0.0) >= _POSTURE_VIS_THRESHOLD
+def _is_visible(kp: dict) -> bool:
+    return (kp.get("score") or 0.0) >= _POSTURE_VIS_THRESHOLD
 
 
 # ─── Body-height proxy for normalisation ──────────────────────
-def _body_height_px(kps: list[Optional[dict]]) -> Optional[float]:
+def _body_height_px(kps: list[dict]) -> Optional[float]:
     """Shoulder-midpoint to ankle-midpoint vertical distance, used
     to normalise side-view horizontal shifts (so "10% forward
     head" reads consistently across image sizes)."""
@@ -274,7 +303,7 @@ def _body_height_px(kps: list[Optional[dict]]) -> Optional[float]:
 
 
 # ─── Front-view measurements ───────────────────────────────────
-def _compute_front_measurements(kps: list[Optional[dict]]) -> dict:
+def _compute_front_measurements(kps: list[dict]) -> dict:
     out: dict = {
         "headTilt": None,
         "shoulderTilt": None,
@@ -346,7 +375,7 @@ _SIDE_INDICES = {
 
 
 def _compute_one_side(
-    kps: list[Optional[dict]],
+    kps: list[dict],
     idx: dict,
     body_h: Optional[float],
     trunk_lean: Optional[float],
@@ -373,7 +402,7 @@ def _compute_one_side(
     return out
 
 
-def _compute_side_measurements(kps: list[Optional[dict]]) -> dict:
+def _compute_side_measurements(kps: list[dict]) -> dict:
     # pickedSide = side with the highest min-confidence across
     # its 5 anchor keypoints. Used to anchor the bilateral
     # trunk-lean sign so positive consistently means "anatomical

@@ -27,8 +27,10 @@ import type {
 // MoveNet-compatible keypoint shape — same {x, y, score, name}
 // fields the browser detector produced, so PostureImageOverlay and
 // SavedPostureReport keep reading keypoints by index unchanged.
-// Backend emits null for landmarks below the visibility floor so
-// downstream code can skip them with a single nullish check.
+// Backend always emits all 17 entries (MoveNet contract); low-
+// visibility / undetected landmarks come back with score=0 and
+// placeholder coordinates, so downstream visibility checks (score
+// >= 0.2) skip them naturally without needing nullish guards.
 export interface PostureKeypoint {
   x: number;
   y: number;
@@ -41,7 +43,7 @@ export interface PostureAnalysisResult {
   imageUrl: string;       // ObjectURL — caller is responsible for revoking
   imageWidth: number;
   imageHeight: number;
-  keypoints: (PostureKeypoint | null)[];
+  keypoints: PostureKeypoint[];
   front?: FrontMeasurements;
   side?: SideMeasurements;
   /** Server-computed findings (matches buildFrontFindings /
@@ -84,7 +86,7 @@ export async function analyzePostureCombined(
         view: "front";
         imageWidth: number;
         imageHeight: number;
-        keypoints: (PostureKeypoint | null)[];
+        keypoints: PostureKeypoint[];
         front?: FrontMeasurements;
         findings: PostureFinding[];
       };
@@ -92,7 +94,7 @@ export async function analyzePostureCombined(
         view: "side";
         imageWidth: number;
         imageHeight: number;
-        keypoints: (PostureKeypoint | null)[];
+        keypoints: PostureKeypoint[];
         side?: SideMeasurements;
         findings: PostureFinding[];
       };
