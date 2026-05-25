@@ -5,6 +5,7 @@ import { Menu, X, LayoutDashboard, LogOut } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/contexts/AuthContext";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
+import { HeaderBackPill } from "@/components/ui/HeaderBackPill";
 
 const NAV_LINKS = [
   { href: "#product", label: "Product" },
@@ -94,9 +95,15 @@ export function Nav() {
               )}
             </div>
           )}
+
+          {/* Accent back pill — sits in the rightmost slot of the
+              desktop nav so it never collides with per-page action
+              buttons below. Hidden on `/` by the component itself. */}
+          <HeaderBackPill />
         </nav>
 
         <div className="flex items-center gap-3 md:hidden">
+          <HeaderBackPill />
           <ThemeToggle />
           <button
             type="button"
