@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { cn } from "@/lib/utils";
+import { HeaderBackPill } from "@/components/ui/HeaderBackPill";
 
 const NAV = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
@@ -150,10 +151,13 @@ export function DashboardShell({ children, backHref, backLabel, title }: Props) 
             <h1 className="ml-1 text-sm font-medium text-foreground">{title}</h1>
           )}
 
-          <div className="ml-auto flex items-center gap-2 text-xs text-subtle">
+          <div className="ml-auto flex items-center gap-3 text-xs text-subtle">
             <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
             <Activity className="h-3.5 w-3.5" />
             Live
+            {/* Accent back pill — last item in the topbar's right
+                cluster so it never overlaps page action buttons. */}
+            <HeaderBackPill />
           </div>
         </header>
 
