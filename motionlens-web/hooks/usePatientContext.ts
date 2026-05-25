@@ -22,7 +22,16 @@ interface SaveOutcome {
 
 export function usePatientContext() {
   const params = useSearchParams();
-  const patientId = params.get("patientId");
+  // Sanitise at the source: the literal strings "undefined" / "null"
+  // are coerced to null so isDoctorFlow stays correctly false AND
+  // downstream consumers (getPatient fetch, createReport POST) never
+  // see them either — otherwise the save call would hit
+  // /api/patients/undefined/reports and fail in a confusing way.
+  const rawPatientId = params.get("patientId");
+  const patientId =
+    rawPatientId && rawPatientId !== "undefined" && rawPatientId !== "null"
+      ? rawPatientId
+      : null;
 
   const [patient, setPatient] = useState<PatientDTO | null>(null);
   const [loading, setLoading] = useState<boolean>(!!patientId);
