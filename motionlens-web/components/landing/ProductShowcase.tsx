@@ -1,4 +1,36 @@
-import Link from "next/link";
+"use client";
+// Eleven landing-page module cards.
+//
+// Why card clicks no longer link directly to bare module routes:
+//   A bare URL like /orthopedic/trendelenburg carries no ?patientId=,
+//   so usePatientContext returns isDoctorFlow=false and the entire
+//   save / banner / history surface stays hidden — even for a
+//   logged-in doctor. The audit showed this was the *only* difference
+//   between the dashboard path and the landing path.
+//
+// The fix: route the visitor through the existing dashboard flow so
+// the patientId is attached to the URL the same way it always is.
+// Each card stashes its *intended module route* in sessionStorage
+// before redirecting; the patient list page reads that key on the
+// next patient-card click and forwards straight to
+//   <module>?patientId=<id>
+// — skipping the patient-profile page so the doctor lands on the
+// module they actually picked. If sessionStorage is empty (normal
+// dashboard usage), the patient list keeps its existing
+// behaviour (open the profile).
+//
+//   - Not signed in  → /auth/signin?next=/dashboard/patients
+//                      (SignInForm already honours `next` and routes
+//                       there after login; intendedModule survives
+//                       the round-trip since it's per-tab.)
+//   - Signed in      → /dashboard/patients  → patient click
+//                      → /<module>?patientId=<id>
+//
+// No other file is touched — usePatientContext, SaveToPatientButton,
+// the capture components, the patient profile, and every backend
+// endpoint are all unchanged.
+
+import { useRouter } from "next/navigation";
 import {
   Activity,
   ArmchairIcon,
@@ -16,9 +48,13 @@ import {
 } from "lucide-react";
 import { Section } from "@/components/ui/Section";
 import { Badge } from "@/components/ui/Badge";
+import { useAuth } from "@/contexts/AuthContext";
 
 interface ProductCard {
-  href: string;
+  /** Module route the doctor is launching. Stored in sessionStorage
+   *  under INTENDED_MODULE_KEY so the patient list page can forward
+   *  here with ?patientId=<id> appended. */
+  targetRoute: string;
   eyebrow: string;
   title: string;
   body: string;
@@ -27,9 +63,14 @@ interface ProductCard {
   iconTone: string;
 }
 
+// Same key the patient list page reads in app/dashboard/patients/page.tsx.
+// Keep the two in sync if either side is ever renamed.
+const INTENDED_MODULE_KEY = "motionlens.intendedModule";
+const PATIENT_LIST_PATH = "/dashboard/patients";
+
 const PRODUCTS: ProductCard[] = [
   {
-    href: "/gait",
+    targetRoute: "/gait/upload",
     eyebrow: "Gait module",
     title: "Walk in. Walk out with data.",
     body:
@@ -40,7 +81,7 @@ const PRODUCTS: ProductCard[] = [
     iconTone: "text-cyan-500",
   },
   {
-    href: "/biomech",
+    targetRoute: "/biomech",
     eyebrow: "Biomechanics module",
     title: "Range of motion, objectively.",
     body:
@@ -51,7 +92,7 @@ const PRODUCTS: ProductCard[] = [
     iconTone: "text-amber-500",
   },
   {
-    href: "/posture",
+    targetRoute: "/posture",
     eyebrow: "Posture module",
     title: "Static posture, instantly.",
     body:
@@ -62,7 +103,7 @@ const PRODUCTS: ProductCard[] = [
     iconTone: "text-emerald-500",
   },
   {
-    href: "/orthopedic/trendelenburg",
+    targetRoute: "/orthopedic/trendelenburg",
     eyebrow: "Orthopedic test",
     title: "Trendelenburg, in 30 seconds.",
     body:
@@ -73,7 +114,7 @@ const PRODUCTS: ProductCard[] = [
     iconTone: "text-violet-500",
   },
   {
-    href: "/orthopedic/single-leg-squat",
+    targetRoute: "/orthopedic/single-leg-squat",
     eyebrow: "Orthopedic test",
     title: "Single-leg squat.",
     body:
@@ -84,7 +125,7 @@ const PRODUCTS: ProductCard[] = [
     iconTone: "text-fuchsia-500",
   },
   {
-    href: "/orthopedic/sit-to-stand",
+    targetRoute: "/orthopedic/sit-to-stand",
     eyebrow: "Geriatric screen",
     title: "5x Sit-to-Stand.",
     body:
@@ -95,7 +136,7 @@ const PRODUCTS: ProductCard[] = [
     iconTone: "text-rose-500",
   },
   {
-    href: "/orthopedic/30-second-chair-stand",
+    targetRoute: "/orthopedic/30-second-chair-stand",
     eyebrow: "Geriatric screen",
     title: "30-Second Chair Stand.",
     body:
@@ -106,7 +147,7 @@ const PRODUCTS: ProductCard[] = [
     iconTone: "text-sky-500",
   },
   {
-    href: "/orthopedic/single-leg-stance",
+    targetRoute: "/orthopedic/single-leg-stance",
     eyebrow: "Balance test",
     title: "Single-Leg Stance.",
     body:
@@ -117,7 +158,7 @@ const PRODUCTS: ProductCard[] = [
     iconTone: "text-teal-500",
   },
   {
-    href: "/orthopedic/4-stage-balance",
+    targetRoute: "/orthopedic/4-stage-balance",
     eyebrow: "Balance test",
     title: "4-Stage Balance Test.",
     body:
@@ -128,7 +169,7 @@ const PRODUCTS: ProductCard[] = [
     iconTone: "text-indigo-500",
   },
   {
-    href: "/orthopedic/tug",
+    targetRoute: "/orthopedic/tug",
     eyebrow: "Geriatric / fall-risk",
     title: "Timed Up and Go (TUG).",
     body:
@@ -139,7 +180,7 @@ const PRODUCTS: ProductCard[] = [
     iconTone: "text-yellow-500",
   },
   {
-    href: "/orthopedic/sppb",
+    targetRoute: "/orthopedic/sppb",
     eyebrow: "Geriatric flagship · composite",
     title: "SPPB.",
     body:
@@ -152,6 +193,33 @@ const PRODUCTS: ProductCard[] = [
 ];
 
 export function ProductShowcase() {
+  const router = useRouter();
+  const { doctor, loading } = useAuth();
+
+  function handleCardClick(targetRoute: string) {
+    if (loading) {
+      // Auth status not yet known — wait for the next click rather than
+      // sending the doctor somewhere wrong. The button stays visually
+      // active so the click registers and they can retry instantly.
+      return;
+    }
+    // Stash the picked module so the patient list can forward there
+    // after the doctor selects a patient. sessionStorage is per-tab and
+    // survives the sign-in round-trip below.
+    try {
+      sessionStorage.setItem(INTENDED_MODULE_KEY, targetRoute);
+    } catch {
+      // sessionStorage can throw in private-mode contexts. The fallback
+      // is the legacy behaviour: doctor lands on the patient list, picks
+      // a patient, lands on the profile — exactly what worked before.
+    }
+    if (doctor === null) {
+      router.push(`/auth/signin?next=${encodeURIComponent(PATIENT_LIST_PATH)}`);
+      return;
+    }
+    router.push(PATIENT_LIST_PATH);
+  }
+
   return (
     <Section id="modules" className="bg-dots">
       <div className="max-w-2xl">
@@ -165,10 +233,12 @@ export function ProductShowcase() {
         {PRODUCTS.map((p) => {
           const Icon = p.icon;
           return (
-            <Link
-              key={p.href}
-              href={p.href}
-              className="group relative m-[2px] flex min-h-[436px] flex-col justify-between overflow-hidden rounded-hero border border-border bg-elevated p-8 transition-all duration-300 hover:border-accent hover:shadow-glow-sm md:min-h-[476px] md:p-10"
+            <button
+              key={p.targetRoute}
+              type="button"
+              onClick={() => handleCardClick(p.targetRoute)}
+              disabled={loading}
+              className="group relative m-[2px] flex min-h-[436px] flex-col justify-between overflow-hidden rounded-hero border border-border bg-elevated p-8 text-left transition-all duration-300 hover:border-accent hover:shadow-glow-sm disabled:cursor-wait md:min-h-[476px] md:p-10"
             >
               <div
                 className="pointer-events-none absolute inset-0 opacity-90 transition-opacity duration-500 group-hover:opacity-100"
@@ -197,13 +267,13 @@ export function ProductShowcase() {
                 </div>
               </div>
 
-              {/* Bottom group — Learn more, pinned to the very bottom of
+              {/* Bottom group — Launch CTA, pinned to the very bottom of
                   the card via justify-between on the parent. */}
               <div className="relative mt-8 inline-flex items-center gap-1 text-sm text-accent">
-                Learn more
+                Launch assessment
                 <ArrowUpRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
               </div>
-            </Link>
+            </button>
           );
         })}
       </div>
