@@ -796,49 +796,56 @@ def analyze_shoulder(
         n_rot = int(min(len(sx), len(ex), len(wx),
                         len(lsx_arr), len(rsx_arr)))
 
-        # ── Phase 1: lock the baseline from the first
-        # _ROT_CALIBRATION_STABLE_FRAMES consecutive frames where
-        # the patient is at neutral (forearm pointing at camera).
-        # Baseline is locked ONCE — never relocked mid-trial, since
-        # a mid-trial relock would shift the magnitude scale and
-        # destabilise the peak readings.
-        baseline_upper_arm: Optional[float] = None
-        baseline_locked_idx = -1
-        stable_count = 0
+        # ── Phase 1: lock the baseline as the MEDIAN upper-arm pixel
+        # length across every frame where both shoulder + elbow are
+        # confidently visible.
+        #
+        # Why median-across-all-frames instead of "wait for neutral
+        # pose": for shoulder rotation the patient keeps the elbow
+        # tucked at the side throughout the test — so the upper-arm
+        # vector (shoulder→elbow) barely moves and its pixel length
+        # is essentially constant for every frame, regardless of
+        # whether the forearm is at IR peak, ER peak, or anywhere in
+        # between. The previous logic required the first N
+        # consecutive frames to be at "neutral" (forearm pointing at
+        # camera, projecting to ≤20% of upper-arm length) which
+        # produced HTTP 400 errors whenever the patient started the
+        # recording mid-rotation. Using the elbow point as a stable
+        # reference removes that requirement without touching Phase 2
+        # math — the arcsin formula below sees the exact same
+        # baseline_upper_arm it always did, it's just sourced from a
+        # more robust statistic.
+        upper_arm_samples: list[float] = []
         for i in range(n_rot):
             if (vs[i] < _SHOULDER_VIS_THRESHOLD
-                    or ve[i] < _SHOULDER_VIS_THRESHOLD
-                    or vw[i] < _SHOULDER_VIS_THRESHOLD):
-                stable_count = 0
+                    or ve[i] < _SHOULDER_VIS_THRESHOLD):
                 continue
-            s_x = float(sx[i]); s_y = float(sy[i])
-            e_x = float(ex[i]); e_y = float(ey[i])
-            w_x = float(wx[i]); w_y = float(wy[i])
-            is_neutral, ua_len = _is_rotation_neutral_pose(
-                s_x, s_y, e_x, e_y, w_x, w_y,
+            ua_len = math.hypot(
+                float(ex[i]) - float(sx[i]),
+                float(ey[i]) - float(sy[i]),
             )
-            if not is_neutral:
-                stable_count = 0
-                continue
-            stable_count += 1
-            if stable_count >= _ROT_CALIBRATION_STABLE_FRAMES:
-                baseline_upper_arm = ua_len
-                baseline_locked_idx = i
-                break
+            if ua_len >= _ROT_MIN_UPPER_ARM_PX:
+                upper_arm_samples.append(ua_len)
+
+        baseline_upper_arm: Optional[float] = None
+        if upper_arm_samples:
+            baseline_upper_arm = float(np.median(upper_arm_samples))
 
         if baseline_upper_arm is None:
-            # Surfaced as HTTP 400 by api.analyze_shoulder.
+            # Distinct from the legacy "neutral pose" message because
+            # this branch only fires when shoulder + elbow are never
+            # simultaneously visible at a reasonable distance — i.e.
+            # the patient was out of frame / too far from the camera.
             raise ValueError(
-                "Neutral pose not detected. Please start recording "
-                "with the elbow bent at 90° and the forearm pointing "
-                "directly at the camera."
+                "Shoulder + elbow not clearly visible in the video. "
+                "Please re-record with the patient's full upper body "
+                "in frame and good lighting."
             )
 
         _rotlog.info(
             "rotation baseline locked: side=%s upper_arm_px=%.1f "
-            "locked_frame=%d (after %d stable frames)",
-            side, baseline_upper_arm, baseline_locked_idx,
-            _ROT_CALIBRATION_STABLE_FRAMES,
+            "(median of %d valid frames)",
+            side, baseline_upper_arm, len(upper_arm_samples),
         )
 
         # ── Phase 2: per-frame calibrated magnitude + direction.
@@ -851,10 +858,15 @@ def analyze_shoulder(
         # cross briefly behind the body and lose visibility).
         effective_ref = baseline_upper_arm * _ROT_FOREARM_TO_UPPER_ARM_PROXY
         if effective_ref <= 0:
+            # Defensive — baseline_upper_arm is filtered to be ≥
+            # _ROT_MIN_UPPER_ARM_PX and the proxy is a positive
+            # constant, so this branch is unreachable in normal
+            # operation. Kept so a future config change can't silently
+            # divide-by-zero downstream.
             raise ValueError(
-                "Neutral pose not detected. Please start recording "
-                "with the elbow bent at 90° and the forearm pointing "
-                "directly at the camera."
+                "Shoulder + elbow not clearly visible in the video. "
+                "Please re-record with the patient's full upper body "
+                "in frame and good lighting."
             )
 
         primary_peak_mag = 0.0      # internal rotation
