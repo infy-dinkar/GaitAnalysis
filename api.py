@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import tempfile
 import threading
 from contextlib import contextmanager
 from typing import Optional
@@ -83,6 +84,11 @@ from neck_engine import analyze_neck as analyze_neck_engine
 
 # ─── Hip (flexion) — reuses gait MediaPipe pipeline ──────────────
 from hip_engine import analyze_hip as analyze_hip_engine
+
+# ─── Posture — IMAGE-mode MediaPipe (separate pipeline) ─────────
+from posture_engine import (
+    analyze_posture_combined as analyze_posture_combined_engine,
+)
 
 # ─── SPPB Component 1 (Balance) — reuses gait MediaPipe pipeline ─
 from sppb_balance_engine import analyze_sppb_balance
@@ -1388,6 +1394,158 @@ async def analyze_hip(
         cleanup_temp_file(tmp_path)
         if fixed_path_cleanup and fixed_path_cleanup != tmp_path:
             cleanup_temp_file(fixed_path_cleanup)
+
+
+# ──────────────────────────────────────────────────────────────────
+# Posture (front + side static-photo analysis)
+# ──────────────────────────────────────────────────────────────────
+# Posture is the only backend pipeline that takes STATIC PHOTOS
+# instead of video — RunningMode.IMAGE rather than VIDEO. Two
+# photos arrive in one multipart request (front + side). The
+# engine handles EXIF rotation correction (mobile portraits) +
+# runs BlazePose Full IMAGE-mode on each photo + returns combined
+# metrics/findings + keypoints in the MoveNet-indexed layout so
+# the existing frontend overlay and saved-report viewer keep
+# rendering without any display changes.
+#
+# Replaces the browser MoveNet path in
+# motionlens-web/lib/posture/analyzer.ts (which now just POSTs
+# here and unwraps the response).
+
+# Max per-photo size — posture photos are static stills, smaller
+# limit than the 100 MB video cap.
+_MAX_POSTURE_PHOTO_MB = 10
+
+
+@app.post("/api/analyze-posture")
+async def analyze_posture(
+    front_image: UploadFile = File(...),
+    side_image:  UploadFile = File(...),
+    patient_name: Optional[str] = Form(None),
+):
+    """Posture analysis endpoint — accepts two photos in one
+    multipart request (front view + side view), runs BlazePose
+    Full IMAGE-mode on each after EXIF-correcting orientation,
+    returns combined metrics + findings + keypoints (MoveNet-
+    indexed 17-element arrays so the existing saved-report
+    viewer renders unchanged).
+
+    Validation gates:
+      • file_too_large       (>10 MB per photo)        → 413
+      • invalid_image        (PIL can't decode)        → 400
+      • poor_visibility      (engine raises)           → 400
+        → emitted when the engine can't see the trunk anchors
+          (both shoulders + both hips) in either photo.
+
+    Response shape:
+      {
+        "success": true,
+        "data": {
+          "front": { view, imageWidth, imageHeight, keypoints,
+                     front: {...}, findings: [...] },
+          "side":  { view, imageWidth, imageHeight, keypoints,
+                     side:  {...}, findings: [...] },
+          "relative_units": true,
+        },
+        "error": null,
+      }
+
+    Photos are DELETED from disk after analysis (privacy decision
+    from Phase B — only metrics + keypoints get persisted to
+    MongoDB, never the source photos).
+    """
+    front_path: Optional[str] = None
+    side_path: Optional[str] = None
+    try:
+        front_bytes = await front_image.read()
+        side_bytes  = await side_image.read()
+        if not front_bytes or not side_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail="Both front and side photos are required.",
+            )
+        for tag, payload in (("front", front_bytes), ("side", side_bytes)):
+            size_mb = len(payload) / (1024 * 1024)
+            if size_mb > _MAX_POSTURE_PHOTO_MB:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"file_too_large ({size_mb:.1f} MB {tag} photo). "
+                        f"Maximum {_MAX_POSTURE_PHOTO_MB} MB per photo."
+                    ),
+                )
+
+        # Save the two photos to disk for PIL/MediaPipe processing.
+        # save_uploaded_video validates the suffix against the video-
+        # extension allowlist and would reject .png/.jpg here, so we
+        # save inline against an image-extension allowlist instead.
+        # tempfile.mkstemp gives us a path the engine + the finally-
+        # block cleanup both reach via cleanup_temp_file.
+        _ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".bmp"}
+
+        def _save_image(payload: bytes, original_name: str, fallback: str) -> str:
+            ext = os.path.splitext(original_name or fallback)[1].lower() or ".jpg"
+            if ext not in _ALLOWED_IMAGE_EXTS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"invalid_image (unsupported extension: {ext}). "
+                        f"Allowed: {sorted(_ALLOWED_IMAGE_EXTS)}"
+                    ),
+                )
+            fd, path = tempfile.mkstemp(suffix=ext, prefix="motionlens_posture_")
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(payload)
+            except Exception:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
+                raise
+            return path
+
+        front_path = _save_image(
+            front_bytes, front_image.filename or "", "posture_front.jpg",
+        )
+        side_path = _save_image(
+            side_bytes, side_image.filename or "", "posture_side.jpg",
+        )
+        log.info(
+            "posture: front=%s (%.2f MB) side=%s (%.2f MB)",
+            front_image.filename,
+            len(front_bytes) / 1024 / 1024,
+            side_image.filename,
+            len(side_bytes) / 1024 / 1024,
+        )
+
+        _ = patient_name  # accepted for parity; not used here
+
+        result = analyze_posture_combined_engine(
+            front_image_path=front_path,
+            side_image_path=side_path,
+        )
+        return {"success": True, "data": result, "error": None}
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        msg = str(e)
+        log.warning("posture validation: %s", msg)
+        if msg == "invalid_image":
+            raise HTTPException(status_code=400, detail="invalid_image")
+        if msg == "poor_visibility":
+            raise HTTPException(status_code=400, detail="poor_visibility")
+        return {"success": False, "data": None, "error": msg}
+    except Exception as e:
+        log.exception("posture analysis failed")
+        return {"success": False, "data": None, "error": f"Analysis failed: {e}"}
+    finally:
+        # Phase B privacy decision: photos are NEVER persisted on
+        # the backend. Delete temp files whether the analysis
+        # succeeded or failed.
+        cleanup_temp_file(front_path)
+        cleanup_temp_file(side_path)
 
 
 @app.post("/api/analyze-neck", response_model=BiomechResponse)

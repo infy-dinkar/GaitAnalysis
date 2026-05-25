@@ -1,14 +1,16 @@
 "use client";
 // Two-slot posture capture flow: front-view photo + side-view photo.
-// Each photo is analyzed independently in the browser using the same
-// MoveNet detector the live + biomech features use. After both views
-// are picked the user clicks "Run analysis" and gets a combined report.
+// Both photos are uploaded together to /api/analyze-posture, which
+// runs BlazePose Full IMAGE-mode on each (after EXIF rotation
+// correction) and returns combined metrics + findings + 17-keypoint
+// arrays in the MoveNet-indexed layout. MoveNet has been completely
+// removed from this module.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Image as ImageIcon, Play, RotateCcw, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import {
-  analyzePostureImage,
+  analyzePostureCombined,
   type PostureAnalysisResult,
 } from "@/lib/posture/analyzer";
 import { PostureReport } from "@/components/posture/PostureReport";
@@ -107,15 +109,15 @@ export function PostureCapture() {
     setFront(null);
     setSide(null);
     try {
-      const frontResult = await analyzePostureImage(frontFile, "front");
-      const sideResult = await analyzePostureImage(sideFile, "side");
-      // Compress the source images in parallel with the analysis
-      // results so the save payload has them ready by the time the
-      // doctor clicks Save.
-      const [frontPersist, sidePersist] = await Promise.all([
-        compressFileToDataUrl(frontFile),
-        compressFileToDataUrl(sideFile),
-      ]);
+      // Single POST to /api/analyze-posture — backend runs
+      // BlazePose Full IMAGE-mode on both photos and returns
+      // combined metrics + findings + keypoints in one response.
+      const [{ front: frontResult, side: sideResult }, frontPersist, sidePersist] =
+        await Promise.all([
+          analyzePostureCombined(frontFile, sideFile),
+          compressFileToDataUrl(frontFile),
+          compressFileToDataUrl(sideFile),
+        ]);
       persistedRef.current.front = frontPersist;
       persistedRef.current.side = sidePersist;
       setFront(frontResult);
@@ -251,10 +253,12 @@ export function PostureCapture() {
       {phase === "analysing" && (
         <div className="rounded-card border border-border bg-surface p-5">
           <p className="text-xs uppercase tracking-[0.12em] text-subtle">
-            Analysing photos in browser…
+            Uploading and analysing photos…
           </p>
           <p className="mt-3 text-[11px] text-subtle">
-            Your photos never leave this device — pose detection runs locally.
+            Pose detection runs on the server. Photos are processed in memory
+            and deleted immediately after analysis — only metrics and
+            keypoints are saved with the patient's report.
           </p>
         </div>
       )}
