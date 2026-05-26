@@ -1,0 +1,77 @@
+// MediaPipe BlazePose Full 33-keypoint indices for the LIVE camera
+// stack. Completely independent from `lib/pose/landmarks.ts`, which
+// keeps the legacy MoveNet 17-keypoint layout used by upload mode and
+// every backend-served saved report. ZERO cross-import either way.
+
+export const LM_LIVE = {
+  NOSE: 0,
+  LEFT_EYE_INNER: 1,
+  LEFT_EYE: 2,
+  LEFT_EYE_OUTER: 3,
+  RIGHT_EYE_INNER: 4,
+  RIGHT_EYE: 5,
+  RIGHT_EYE_OUTER: 6,
+  LEFT_EAR: 7,
+  RIGHT_EAR: 8,
+  MOUTH_LEFT: 9,
+  MOUTH_RIGHT: 10,
+  LEFT_SHOULDER: 11,
+  RIGHT_SHOULDER: 12,
+  LEFT_ELBOW: 13,
+  RIGHT_ELBOW: 14,
+  LEFT_WRIST: 15,
+  RIGHT_WRIST: 16,
+  LEFT_PINKY: 17,
+  RIGHT_PINKY: 18,
+  LEFT_INDEX: 19,
+  RIGHT_INDEX: 20,
+  LEFT_THUMB: 21,
+  RIGHT_THUMB: 22,
+  LEFT_HIP: 23,
+  RIGHT_HIP: 24,
+  LEFT_KNEE: 25,
+  RIGHT_KNEE: 26,
+  LEFT_ANKLE: 27,
+  RIGHT_ANKLE: 28,
+  LEFT_HEEL: 29,
+  RIGHT_HEEL: 30,
+  LEFT_FOOT_INDEX: 31,
+  RIGHT_FOOT_INDEX: 32,
+} as const;
+
+// Live skeleton — same body topology as the upload-side
+// SKELETON_EDGES, plus the ankle→heel→foot_index chains that
+// BlazePose makes available (and MoveNet didn't).
+export const SKELETON_EDGES_LIVE: [number, number][] = [
+  // arms
+  [LM_LIVE.LEFT_SHOULDER, LM_LIVE.LEFT_ELBOW],
+  [LM_LIVE.LEFT_ELBOW, LM_LIVE.LEFT_WRIST],
+  [LM_LIVE.RIGHT_SHOULDER, LM_LIVE.RIGHT_ELBOW],
+  [LM_LIVE.RIGHT_ELBOW, LM_LIVE.RIGHT_WRIST],
+  // torso
+  [LM_LIVE.LEFT_SHOULDER, LM_LIVE.RIGHT_SHOULDER],
+  [LM_LIVE.LEFT_SHOULDER, LM_LIVE.LEFT_HIP],
+  [LM_LIVE.RIGHT_SHOULDER, LM_LIVE.RIGHT_HIP],
+  [LM_LIVE.LEFT_HIP, LM_LIVE.RIGHT_HIP],
+  // legs
+  [LM_LIVE.LEFT_HIP, LM_LIVE.LEFT_KNEE],
+  [LM_LIVE.LEFT_KNEE, LM_LIVE.LEFT_ANKLE],
+  [LM_LIVE.RIGHT_HIP, LM_LIVE.RIGHT_KNEE],
+  [LM_LIVE.RIGHT_KNEE, LM_LIVE.RIGHT_ANKLE],
+  // feet (BlazePose-only)
+  [LM_LIVE.LEFT_ANKLE, LM_LIVE.LEFT_HEEL],
+  [LM_LIVE.RIGHT_ANKLE, LM_LIVE.RIGHT_HEEL],
+  [LM_LIVE.LEFT_HEEL, LM_LIVE.LEFT_FOOT_INDEX],
+  [LM_LIVE.RIGHT_HEEL, LM_LIVE.RIGHT_FOOT_INDEX],
+];
+
+export const KEY_JOINTS_LIVE = [
+  LM_LIVE.LEFT_SHOULDER, LM_LIVE.RIGHT_SHOULDER,
+  LM_LIVE.LEFT_ELBOW, LM_LIVE.RIGHT_ELBOW,
+  LM_LIVE.LEFT_WRIST, LM_LIVE.RIGHT_WRIST,
+  LM_LIVE.LEFT_HIP, LM_LIVE.RIGHT_HIP,
+  LM_LIVE.LEFT_KNEE, LM_LIVE.RIGHT_KNEE,
+  LM_LIVE.LEFT_ANKLE, LM_LIVE.RIGHT_ANKLE,
+  LM_LIVE.LEFT_HEEL, LM_LIVE.RIGHT_HEEL,
+  LM_LIVE.LEFT_FOOT_INDEX, LM_LIVE.RIGHT_FOOT_INDEX,
+] as const;

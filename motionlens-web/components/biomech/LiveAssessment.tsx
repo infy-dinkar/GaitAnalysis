@@ -23,7 +23,7 @@ import {
   detectNeckLateralDirection,
   isStableFacingForward,
   type NeckRotationCalibration,
-} from "@/lib/biomech/neck";
+} from "@/lib/biomech/neck-live";
 import {
   captureShoulderRotationBaseline,
   detectShoulderAbAdDirection,
@@ -31,10 +31,10 @@ import {
   detectShoulderRotationDirection,
   isShoulderRotationNeutral,
   type ShoulderRotationCalibration,
-} from "@/lib/biomech/shoulder";
-import type { Keypoint } from "@tensorflow-models/pose-detection";
+} from "@/lib/biomech/shoulder-live";
+import type { LiveKeypoint as Keypoint } from "@/hooks/usePoseDetectionLive";
 import type { LiveBiomechFrameDataDTO } from "@/lib/api";
-import { LM } from "@/lib/pose/landmarks";
+import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 
 type PostureStatus = "idle" | "good" | "low_visibility" | "no_landmarks";
 

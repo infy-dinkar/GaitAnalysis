@@ -1,8 +1,16 @@
 "use client";
-// Ankle live-camera recording mode. The recording is sent to the same
-// backend MediaPipe pipeline as the upload page — browser-side pose
-// detection (MoveNet, 17 keypoints) does not have foot landmarks, so
-// the heavy work cannot happen client-side regardless of capture mode.
+// Ankle real-time live-camera mode. Uses the same LiveAssessment +
+// LiveBiomechCamera stack as shoulder / neck / knee / hip — runs
+// browser-side BlazePose Full (33-keypoint WASM) and computes the
+// per-frame ankle angle via lib/biomech/ankle-live.ts.
+//
+// Why this works now (it didn't before): the legacy MoveNet detector
+// only emitted 17 keypoints with no foot landmarks, so live-side
+// ankle math could only read shin-from-vertical and ankle ROM had to
+// go to a backend-MediaPipe video-upload endpoint. BlazePose Full
+// includes LEFT_HEEL / RIGHT_HEEL / LEFT_FOOT_INDEX /
+// RIGHT_FOOT_INDEX (indices 29-32), so we no longer need a
+// record-and-upload detour for live ankle assessment.
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -12,8 +20,11 @@ import { Footer } from "@/components/layout/Footer";
 import { Section } from "@/components/ui/Section";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { AnkleCapture } from "@/components/biomech/AnkleCapture";
-import { ANKLE_MOVEMENTS, type AnkleMovementId } from "@/lib/biomech/ankle";
+import { LiveAssessment } from "@/components/biomech/LiveAssessment";
+import {
+  ANKLE_MOVEMENTS,
+  type AnkleMovementId,
+} from "@/lib/biomech/ankle-live";
 
 function AnkleLiveInner() {
   const params = useSearchParams();
@@ -24,13 +35,13 @@ function AnkleLiveInner() {
     ANKLE_MOVEMENTS.find((m) => m.id === movementId) ?? ANKLE_MOVEMENTS[0];
 
   return (
-    <AnkleCapture
+    <LiveAssessment
+      bodyPart="ankle"
       movementId={movement.id}
       movementLabel={`Ankle · ${movement.label}`}
       description={movement.description}
       target={movement.target}
       side={side}
-      initialMode="record"
     />
   );
 }
@@ -41,23 +52,19 @@ export default function AnkleLivePage() {
       <Nav />
       <main className="flex flex-col">
         <Section className="pt-32 md:pt-40">
-          <div className="flex items-start justify-between">
-            <div>
-              <Badge>Live recording</Badge>
-              <h1 className="mt-4 text-3xl font-semibold tracking-tight md:text-4xl">
-                Ankle — live recording
-              </h1>
-              <p className="mt-2 text-sm text-muted">
-                Capture a short side-view clip from your camera. Server-side
-                MediaPipe BlazePose Full (33-keypoint model with foot
-                landmarks) computes the ankle joint angle from the
-                shin-foot vector. The video is processed once and
-                discarded — only the landmarks + peak angle are persisted.
-              </p>
-            </div>
-            <Link href="/biomech/ankle">
+          <div className="relative">
+            <Link
+              href="/biomech/ankle"
+              className="absolute right-0 top-0 z-10"
+            >
               <Button variant="ghost" size="sm">← Back</Button>
             </Link>
+            <div className="text-center">
+              <Badge>Live assessment</Badge>
+              <h1 className="mt-4 text-3xl font-semibold tracking-tight md:text-4xl">
+                Ankle — live capture
+              </h1>
+            </div>
           </div>
           <div className="mt-10">
             <Suspense fallback={<p className="text-sm text-muted">Loading…</p>}>
