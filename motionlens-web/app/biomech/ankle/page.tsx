@@ -41,9 +41,10 @@ function AnkleSetupInner() {
             </h1>
             <p className="mt-5 text-lg text-muted">
               Ankle dorsiflexion (toes up) and plantarflexion (toes down).
-              Server-side MediaPipe analysis with foot landmarks for an
-              accurate joint angle. Capture live from the camera or
-              upload a pre-recorded clip.
+              Browser-side BlazePose Full pose detection (33 keypoints
+              including heel + foot index) drives a real-time joint
+              angle readout — or drop a pre-recorded clip for backend
+              analysis instead.
             </p>
           </div>
 
@@ -74,11 +75,13 @@ function AnkleSetupInner() {
               <h2 className="text-sm font-bold uppercase tracking-[0.12em] text-foreground">
                 Capture mode
               </h2>
-              {/* Both modes route to the SAME backend MediaPipe pipeline.
-                  The browser cannot do ankle math itself (MoveNet, 17 kp,
-                  has no foot_index landmark) — but it CAN record video
-                  via getUserMedia + MediaRecorder and ship the bytes to
-                  the server. */}
+              {/* Live mode runs the same browser-side BlazePose
+                  pipeline shoulder / neck / knee / hip use — MediaPipe
+                  Pose Full (33 keypoints with foot landmarks) loaded
+                  via the live detector singleton. Upload mode still
+                  dispatches to the backend MediaPipe endpoint via
+                  AnkleCapture for byte-identical compatibility with
+                  legacy uploaded reports. */}
               <div className="mt-4 grid gap-4 md:grid-cols-2">
                 <Link
                   href={`/biomech/ankle/live?movement=${movement ?? ""}&side=${side ?? ""}${patientQS}`}
@@ -91,11 +94,11 @@ function AnkleSetupInner() {
                   <span className="flex h-11 w-11 items-center justify-center rounded-lg bg-accent/10 text-accent">
                     <Camera className="h-5 w-5" />
                   </span>
-                  <h3 className="mt-4 text-lg font-semibold">Live recording</h3>
+                  <h3 className="mt-4 text-lg font-semibold">Live camera</h3>
                   <p className="mt-2 text-sm text-muted">
-                    Record a short clip from your device camera. The video
-                    is uploaded once and analysed server-side; nothing is
-                    stored after the result is returned.
+                    Use your webcam. Real-time pose tracking with peak
+                    angle readout — no upload, no server round-trip per
+                    frame.
                   </p>
                 </Link>
 

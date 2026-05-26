@@ -2,26 +2,34 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Camera, CameraOff, Loader2, AlertCircle, Eye, EyeOff } from "lucide-react";
 import { useCamera } from "@/hooks/useCamera";
-import { usePoseDetection } from "@/hooks/usePoseDetection";
+import { usePoseDetectionLive as usePoseDetection } from "@/hooks/usePoseDetectionLive";
 import { Button } from "@/components/ui/Button";
 import type { LiveBiomechFrameDataDTO } from "@/lib/api";
-import { LM } from "@/lib/pose/landmarks";
+import {
+  LM_LIVE as LM,
+  SKELETON_EDGES_LIVE as SKELETON_EDGES,
+} from "@/lib/pose/landmarks-live";
 import {
   computeShoulderAngle,
   computeShoulderRotationFromBaseline,
   type ShoulderMovementId,
   type ShoulderRotationCalibration,
-} from "@/lib/biomech/shoulder";
+} from "@/lib/biomech/shoulder-live";
 import {
   computeNeckAngle,
   computeNeckRotationFromBaseline,
   type NeckMovementId,
   type NeckRotationCalibration,
-} from "@/lib/biomech/neck";
-import type { Keypoint } from "@tensorflow-models/pose-detection";
-import { computeKneeAngle, type KneeMovementId } from "@/lib/biomech/knee";
-import { computeHipAngle, type HipMovementId } from "@/lib/biomech/hip";
-import { computeAnkleAngle, type AnkleMovementId } from "@/lib/biomech/ankle";
+} from "@/lib/biomech/neck-live";
+import type { LiveKeypoint as Keypoint } from "@/hooks/usePoseDetectionLive";
+import { computeKneeAngle, type KneeMovementId } from "@/lib/biomech/knee-live";
+import { computeHipAngle, type HipMovementId } from "@/lib/biomech/hip-live";
+import { computeAnkleAngle, type AnkleMovementId } from "@/lib/biomech/ankle-live";
+// Suppress unused-import warning for SKELETON_EDGES — the local
+// FULL_BODY_EDGES table inlines LM-keyed edges directly, but the
+// brief asked for this re-export to be available from landmarks-live
+// for forward-compat.
+void SKELETON_EDGES;
 
 export type BiomechBodyPart = "shoulder" | "neck" | "knee" | "hip" | "ankle";
 
