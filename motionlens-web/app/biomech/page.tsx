@@ -2,7 +2,7 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { ArrowUpRight } from "lucide-react";
+import { ArrowUpRight, Layers } from "lucide-react";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
 import { Section } from "@/components/ui/Section";
@@ -119,6 +119,45 @@ function BiomechInner() {
                 </div>
               </Link>
             ))}
+
+            {/* Batch assessment — multi-joint upload session that
+                produces a single combined report. Sits alongside the
+                joint cards as a sixth tile so doctors who want to run
+                a full ROM battery don't have to launch each joint
+                separately and reconcile reports manually. */}
+            <Link
+              href={`/biomech/batch${qs}`}
+              className="group relative flex aspect-[4/3] flex-col justify-between overflow-hidden rounded-hero border border-border bg-elevated p-6 transition-all duration-300 hover:border-accent hover:shadow-glow-sm md:p-8"
+            >
+              <div
+                className="pointer-events-none absolute inset-0 opacity-90 transition-opacity duration-500 group-hover:opacity-100"
+                style={{
+                  background:
+                    "linear-gradient(135deg, rgba(168,85,247,0.20) 0%, rgba(234,88,12,0.10) 50%, rgba(28,28,33,0.0) 100%)",
+                }}
+                aria-hidden
+              />
+              <div className="pointer-events-none absolute inset-0 bg-grid opacity-30" aria-hidden />
+
+              <div className="relative flex items-start justify-between">
+                <Badge>Combined session</Badge>
+                <Layers className="h-6 w-6 text-accent" aria-hidden />
+              </div>
+              <div className="relative">
+                <h2 className="text-3xl font-semibold tracking-tight md:text-4xl">
+                  Batch assessment
+                </h2>
+                <p className="mt-4 max-w-md text-sm leading-relaxed text-muted">
+                  Upload videos for any combination of joints + movements in
+                  one session. One stacked report, one PDF, save all to the
+                  patient at once.
+                </p>
+                <div className="mt-6 inline-flex items-center gap-1 text-sm text-accent">
+                  Start batch session
+                  <ArrowUpRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
+                </div>
+              </div>
+            </Link>
           </div>
     </>
   );
