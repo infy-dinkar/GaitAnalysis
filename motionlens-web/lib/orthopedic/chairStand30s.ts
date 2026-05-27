@@ -16,6 +16,7 @@
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 import { getChairStand30sNorm, type Sex } from "@/lib/orthopedic/normsDatabase";
+import { authedFetch, AuthError } from "@/lib/auth";
 
 const VIS_THRESHOLD = 0.3;
 
@@ -340,3 +341,71 @@ export const CLASSIFICATION_TONE: Record<Classification, string> = {
   above_norm: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
   below_norm: "bg-red-500/10 text-red-700 dark:text-red-400",
 };
+
+// ─── Upload-mode API client ─────────────────────────────────────
+interface ChairStand30sResponseDTO {
+  success: boolean;
+  data: ChairStand30sResult | null;
+  error: string | null;
+  fps_warning: string | null;
+  duration_warning: string | null;
+}
+
+function humanizeUploadError(raw: string | null): string {
+  if (!raw) return "Analysis failed. Please try again.";
+  const s = raw.toLowerCase();
+  if (s.includes("poor_visibility")) {
+    return "Patient is not clearly visible in the recording. Ensure the full body is visible in lateral (side) view.";
+  }
+  if (s.includes("frame rate too low") || s.includes("fps")) {
+    return "Video quality too low. Please record at 30 fps or higher.";
+  }
+  if (s.includes("too short")) return "Video is too short. Please record at least 5 seconds.";
+  if (s.includes("too long")) return "Video is too long. Maximum 60 seconds.";
+  if (s.includes("file too large")) return "File too large. Maximum 100 MB.";
+  return raw;
+}
+
+export async function analyzeChairStand30sUpload(
+  file: File,
+  patientAge: number | null,
+  patientSex: Sex | "other" | null,
+  onProgress?: (pct: number) => void,
+): Promise<ChairStand30sResult> {
+  const form = new FormData();
+  form.append("video", file, file.name || "chair_stand_30s.mp4");
+  if (patientAge !== null) form.append("patient_age", String(patientAge));
+  if (patientSex !== null) form.append("patient_sex", patientSex);
+
+  onProgress?.(5);
+  let pulseHandle: ReturnType<typeof setTimeout> | null = null;
+  if (onProgress) {
+    let pct = 5;
+    const pulse = () => {
+      pct = Math.min(90, pct + 5);
+      onProgress(pct);
+      pulseHandle = setTimeout(pulse, 1500);
+    };
+    pulseHandle = setTimeout(pulse, 1500);
+  }
+
+  try {
+    const res = await authedFetch("/api/analyze-chair-stand-30s", {
+      method: "POST",
+      body: form,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+      const detail = typeof body.detail === "string" ? body.detail : `Chair stand analysis failed (${res.status})`;
+      throw new AuthError(humanizeUploadError(detail), res.status);
+    }
+    const payload = (await res.json()) as ChairStand30sResponseDTO;
+    if (!payload.success || !payload.data) {
+      throw new AuthError(humanizeUploadError(payload.error), 500);
+    }
+    return payload.data;
+  } finally {
+    if (pulseHandle !== null) clearTimeout(pulseHandle);
+    onProgress?.(100);
+  }
+}

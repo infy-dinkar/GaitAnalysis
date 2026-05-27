@@ -95,6 +95,28 @@ from single_leg_squat_engine import analyze_single_leg_squat
 # both without translation.
 from sit_to_stand_engine import analyze_sit_to_stand
 
+# ─── 30-Second Chair Stand — Test C3 upload mode ─────────────────
+# Single trial, timer-driven (30s). Same sit↔stand state machine
+# as 5xSTS; differs in termination (30s timer) and primary outcome
+# (rep COUNT vs total time). CDC STEADI age + sex norm comparison.
+from chair_stand_30s_engine import analyze_chair_stand_30s
+
+# ─── Single-Leg Stance — Test C5 upload mode ─────────────────────
+# Per-trial analysis (side + condition). Up to 4 trials per session
+# (left_open, right_open, left_closed, right_closed). Frontend
+# parallelises uploads via Promise.allSettled.
+from single_leg_stance_engine import analyze_single_leg_stance
+
+# ─── 4-Stage Balance — Test C4 upload mode ───────────────────────
+# Per-stage analysis. Frontend uploads up to 4 stages in parallel
+# and applies the stop-at-first-failure rule client-side.
+from four_stage_balance_engine import analyze_four_stage_balance
+
+# ─── SPPB Component 2 (Gait Speed) — Test C7 upload mode ─────────
+# 4-metre walk gait-speed detection on the backend. Other two SPPB
+# components reuse existing endpoints.
+from sppb_gait_speed_engine import analyze_sppb_gait_speed
+
 # ─── Ankle (dorsi/plantar) — reuses gait MediaPipe pipeline ──────
 from ankle_engine import analyze_ankle as analyze_ankle_engine
 
@@ -1253,6 +1275,579 @@ async def analyze_sit_to_stand_endpoint(
     except Exception as e:
         log.exception("sit_to_stand analysis failed")
         return SitToStandResponse(
+            success=False, data=None, error=f"Analysis failed: {e}",
+        )
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 30-Second Chair Stand — Test C3, single-trial upload analysis
+# ══════════════════════════════════════════════════════════════════════
+# Single trial, timer-driven. Sit↔stand 2-state machine + CDC STEADI
+# age+sex norm lookup. Frontend uploads ONE video; backend analyzes
+# the first 30s and returns rep count + per-rep metrics + classification.
+class CS30RepDTO(BaseModel):
+    rep_index: int
+    duration_seconds: float
+    min_knee_angle_deg: float
+
+
+class CS30FrameSampleDTO(BaseModel):
+    t_ms: float
+    hip_mid_y: Optional[float] = None
+    knee_angle_deg: Optional[float] = None
+    arms_crossed: bool
+
+
+class CS30KeypointDTO(BaseModel):
+    x: float
+    y: float
+    score: float
+
+
+class ChairStand30sResultDTO(BaseModel):
+    rep_count: int
+    reps: List[CS30RepDTO]
+    rep_durations: List[float]
+    mean_rep_duration_sec: float
+    depth_sd_deg: float
+    fatigue_slope_sec_per_rep: float
+    norm_threshold: int
+    norm_band_label: str
+    norm_comparable: bool
+    classification: str
+    arm_uncrossed_flag: bool
+    termination: str
+    trial_duration_seconds: float
+    patient_age: Optional[int] = None
+    patient_sex: Optional[str] = None
+    samples: List[CS30FrameSampleDTO]
+    keypoints: List[List[CS30KeypointDTO]]
+    last_rep_screenshot_data_url: Optional[str] = None
+    fps: Optional[float] = None
+    total_frames: Optional[int] = None
+    valid_frames: Optional[int] = None
+    interpretation: Optional[str] = None
+    norm_passed: Optional[bool] = None
+
+
+class ChairStand30sResponse(BaseModel):
+    success: bool
+    data: Optional[ChairStand30sResultDTO] = None
+    error: Optional[str] = None
+    fps_warning: Optional[str] = None
+    duration_warning: Optional[str] = None
+
+
+@app.post("/api/analyze-chair-stand-30s", response_model=ChairStand30sResponse)
+async def analyze_chair_stand_30s_endpoint(
+    video: UploadFile = File(...),
+    patient_age: Optional[int] = Form(None),
+    patient_sex: Optional[str] = Form(None),
+) -> ChairStand30sResponse:
+    """Run the 30-Second Chair Stand (Test C3) pipeline. Single
+    trial — no `side` form field. CDC STEADI age + sex norm
+    comparison applied server-side."""
+    tmp_path: Optional[str] = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(contents, video.filename or "chair_stand_30s.mp4")
+        log.info(
+            "chair_stand_30s: file=%s size=%.2f MB age=%s sex=%s",
+            video.filename, size_mb, patient_age, patient_sex,
+        )
+
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not determine video frame rate. "
+                    "Please upload a different file."
+                ),
+            )
+
+        fps_warning: Optional[str] = None
+        duration_warning: Optional[str] = None
+
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video frame rate too low ({probe_fps:.1f} FPS). "
+                    f"Minimum {MIN_REQUIRED_FPS} FPS required. "
+                    f"Recommended: {RECOMMENDED_FPS}+ FPS."
+                ),
+            )
+        if probe_fps < RECOMMENDED_FPS:
+            fps_warning = (
+                f"Note: Video is {probe_fps:.1f} FPS, below recommended "
+                f"{RECOMMENDED_FPS} FPS — results may be less accurate."
+            )
+        if probe_total_frames <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not determine video length. Please upload a different file.",
+            )
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video too long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed."
+                ),
+            )
+        if duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = (
+                f"Video is short ({duration_seconds:.1f}s) — at least "
+                f"{MIN_GAIT_DURATION_SEC} seconds recommended for a complete "
+                f"30-second chair stand trial."
+            )
+
+        pose_options = _build_gait_pose_options()
+        result: Dict[str, Any] = analyze_chair_stand_30s(
+            video_path=tmp_path,
+            pose_options=pose_options,
+            patient_age=patient_age,
+            patient_sex=patient_sex,
+        )
+
+        return ChairStand30sResponse(
+            success=True,
+            data=ChairStand30sResultDTO(**result),
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("chair_stand_30s validation: %s", e)
+        return ChairStand30sResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("chair_stand_30s analysis failed")
+        return ChairStand30sResponse(
+            success=False, data=None, error=f"Analysis failed: {e}",
+        )
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Single-Leg Stance — Test C5, per-trial upload analysis
+# ══════════════════════════════════════════════════════════════════════
+class SLSStanceFrameSampleDTO(BaseModel):
+    t_ms: float
+    hip_x: Optional[float] = None
+    hip_y: Optional[float] = None
+    trunk_lean_deg: Optional[float] = None
+
+
+class SLSStanceKeypointDTO(BaseModel):
+    x: float
+    y: float
+    score: float
+
+
+class SLSStancePointDTO(BaseModel):
+    x: float
+    y: float
+
+
+class SingleLegStanceTrialResultDTO(BaseModel):
+    side: str
+    condition: str
+    hold_seconds: float
+    hold_capped_at: float
+    termination: str
+    norm_threshold_sec: float
+    norm_band_label: str
+    norm_comparable: bool
+    classification: str
+    sway_path_px: float
+    sway_95_ellipse_px2: float
+    mean_trunk_lean_deg: float
+    max_trunk_lean_deg: float
+    hip_path: List[SLSStancePointDTO]
+    samples: List[SLSStanceFrameSampleDTO]
+    keypoints: List[List[SLSStanceKeypointDTO]]
+    screenshot_data_url: Optional[str] = None
+    fps: Optional[float] = None
+    total_frames: Optional[int] = None
+    interpretation: Optional[str] = None
+
+
+class SingleLegStanceResponse(BaseModel):
+    success: bool
+    data: Optional[SingleLegStanceTrialResultDTO] = None
+    error: Optional[str] = None
+    fps_warning: Optional[str] = None
+    duration_warning: Optional[str] = None
+
+
+@app.post("/api/analyze-single-leg-stance", response_model=SingleLegStanceResponse)
+async def analyze_single_leg_stance_endpoint(
+    video: UploadFile = File(...),
+    side: str = Form(...),
+    condition: str = Form(...),
+    patient_age: Optional[int] = Form(None),
+) -> SingleLegStanceResponse:
+    """Run the Single-Leg Stance pipeline on ONE (side, condition)
+    trial. `side` ∈ {'left', 'right'} (stance leg). `condition` ∈
+    {'eyes_open', 'eyes_closed'}."""
+    if side not in ("left", "right"):
+        raise HTTPException(status_code=400, detail="Side must be 'left' or 'right'.")
+    if condition not in ("eyes_open", "eyes_closed"):
+        raise HTTPException(status_code=400, detail="Condition must be 'eyes_open' or 'eyes_closed'.")
+
+    tmp_path: Optional[str] = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large ({size_mb:.1f} MB). Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB.",
+            )
+
+        tmp_path = save_uploaded_video(contents, video.filename or "single_leg_stance.mp4")
+        log.info(
+            "single_leg_stance: file=%s side=%s condition=%s size=%.2f MB age=%s",
+            video.filename, side, condition, size_mb, patient_age,
+        )
+
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not determine video frame rate. Please upload a different file.",
+            )
+
+        fps_warning: Optional[str] = None
+        duration_warning: Optional[str] = None
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Video frame rate too low ({probe_fps:.1f} FPS). Minimum {MIN_REQUIRED_FPS} FPS required.",
+            )
+        if probe_fps < RECOMMENDED_FPS:
+            fps_warning = (
+                f"Note: Video is {probe_fps:.1f} FPS, below recommended "
+                f"{RECOMMENDED_FPS} FPS — results may be less accurate."
+            )
+        if probe_total_frames <= 0:
+            raise HTTPException(status_code=400, detail="Could not determine video length.")
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Video too long ({duration_seconds:.1f}s). Maximum {MAX_GAIT_DURATION_SEC} seconds allowed.",
+            )
+        if duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = (
+                f"Video is short ({duration_seconds:.1f}s) — at least "
+                f"{MIN_GAIT_DURATION_SEC} seconds recommended."
+            )
+
+        pose_options = _build_gait_pose_options()
+        result: Dict[str, Any] = analyze_single_leg_stance(
+            video_path=tmp_path,
+            pose_options=pose_options,
+            side=side,
+            condition=condition,
+            patient_age=patient_age,
+        )
+
+        return SingleLegStanceResponse(
+            success=True,
+            data=SingleLegStanceTrialResultDTO(**result),
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("single_leg_stance validation: %s", e)
+        return SingleLegStanceResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("single_leg_stance analysis failed")
+        return SingleLegStanceResponse(
+            success=False, data=None, error=f"Analysis failed: {e}",
+        )
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 4-Stage Balance — Test C4, per-stage upload analysis
+# ══════════════════════════════════════════════════════════════════════
+class FSBFrameSampleDTO(BaseModel):
+    t_ms: float
+    hip_x: Optional[float] = None
+    hip_y: Optional[float] = None
+    ankle_l_x: Optional[float] = None
+    ankle_l_y: Optional[float] = None
+    ankle_r_x: Optional[float] = None
+    ankle_r_y: Optional[float] = None
+
+
+class FSBKeypointDTO(BaseModel):
+    x: float
+    y: float
+    score: float
+
+
+class FSBPointDTO(BaseModel):
+    x: float
+    y: float
+
+
+class FourStageBalanceStageResultDTO(BaseModel):
+    stage: int
+    outcome: str
+    hold_seconds: float
+    failure_mode: Optional[str] = None
+    sway_path_px: float
+    sway_95_ellipse_px2: float
+    hip_path: List[FSBPointDTO]
+    samples: List[FSBFrameSampleDTO]
+    keypoints: List[List[FSBKeypointDTO]]
+    screenshot_data_url: Optional[str] = None
+    duration_seconds: float
+    fps: Optional[float] = None
+    total_frames: Optional[int] = None
+
+
+class FourStageBalanceResponse(BaseModel):
+    success: bool
+    data: Optional[FourStageBalanceStageResultDTO] = None
+    error: Optional[str] = None
+    fps_warning: Optional[str] = None
+    duration_warning: Optional[str] = None
+
+
+@app.post("/api/analyze-four-stage-balance", response_model=FourStageBalanceResponse)
+async def analyze_four_stage_balance_endpoint(
+    video: UploadFile = File(...),
+    stage: int = Form(...),
+) -> FourStageBalanceResponse:
+    """Run the 4-Stage Balance (Test C4) pipeline on ONE stage. The
+    frontend uploads stages 1-4 separately and assembles the
+    SessionResult client-side, applying the CDC stop-at-first-failure
+    rule for downstream stages."""
+    if stage not in (1, 2, 3, 4):
+        raise HTTPException(status_code=400, detail="Stage must be 1, 2, 3, or 4.")
+
+    tmp_path: Optional[str] = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large ({size_mb:.1f} MB). Maximum: {MAX_GAIT_FILE_SIZE_MB} MB.",
+            )
+
+        tmp_path = save_uploaded_video(contents, video.filename or "four_stage_balance.mp4")
+        log.info(
+            "four_stage_balance: file=%s stage=%d size=%.2f MB",
+            video.filename, stage, size_mb,
+        )
+
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0:
+            raise HTTPException(status_code=400, detail="Could not determine video frame rate.")
+
+        fps_warning: Optional[str] = None
+        duration_warning: Optional[str] = None
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Video frame rate too low ({probe_fps:.1f} FPS). Minimum {MIN_REQUIRED_FPS} FPS required.",
+            )
+        if probe_fps < RECOMMENDED_FPS:
+            fps_warning = f"Note: Video is {probe_fps:.1f} FPS, below recommended {RECOMMENDED_FPS} FPS."
+        if probe_total_frames <= 0:
+            raise HTTPException(status_code=400, detail="Could not determine video length.")
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Video too long ({duration_seconds:.1f}s). Maximum {MAX_GAIT_DURATION_SEC} seconds allowed.",
+            )
+        if duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = f"Video is short ({duration_seconds:.1f}s)."
+
+        pose_options = _build_gait_pose_options()
+        result: Dict[str, Any] = analyze_four_stage_balance(
+            video_path=tmp_path,
+            pose_options=pose_options,
+            stage=stage,
+        )
+
+        return FourStageBalanceResponse(
+            success=True,
+            data=FourStageBalanceStageResultDTO(**result),
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("four_stage_balance validation: %s", e)
+        return FourStageBalanceResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("four_stage_balance analysis failed")
+        return FourStageBalanceResponse(
+            success=False, data=None, error=f"Analysis failed: {e}",
+        )
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# SPPB Component 2 — 4-metre Gait Speed upload analysis
+# ══════════════════════════════════════════════════════════════════════
+class SPPBGaitSpeedResultDTO(BaseModel):
+    duration_sec: float
+    speed_mps: float
+    score: int
+    completed: bool
+    started_at_ms: int
+    fps: Optional[float] = None
+    total_frames: Optional[int] = None
+    interpretation: Optional[str] = None
+
+
+class SPPBGaitSpeedResponse(BaseModel):
+    success: bool
+    data: Optional[SPPBGaitSpeedResultDTO] = None
+    error: Optional[str] = None
+    fps_warning: Optional[str] = None
+    duration_warning: Optional[str] = None
+
+
+@app.post("/api/analyze-sppb-gait-speed", response_model=SPPBGaitSpeedResponse)
+async def analyze_sppb_gait_speed_endpoint(
+    video: UploadFile = File(...),
+) -> SPPBGaitSpeedResponse:
+    """Run the SPPB 4-metre gait-speed pipeline on an uploaded clip."""
+    tmp_path: Optional[str] = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large ({size_mb:.1f} MB). Maximum: {MAX_GAIT_FILE_SIZE_MB} MB.",
+            )
+
+        tmp_path = save_uploaded_video(contents, video.filename or "sppb_gait_speed.mp4")
+        log.info("sppb_gait_speed: file=%s size=%.2f MB", video.filename, size_mb)
+
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0:
+            raise HTTPException(status_code=400, detail="Could not determine video frame rate.")
+
+        fps_warning: Optional[str] = None
+        duration_warning: Optional[str] = None
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Video frame rate too low ({probe_fps:.1f} FPS). Minimum {MIN_REQUIRED_FPS} FPS required.",
+            )
+        if probe_fps < RECOMMENDED_FPS:
+            fps_warning = f"Note: Video is {probe_fps:.1f} FPS, below recommended {RECOMMENDED_FPS} FPS."
+        if probe_total_frames <= 0:
+            raise HTTPException(status_code=400, detail="Could not determine video length.")
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Video too long ({duration_seconds:.1f}s). Maximum {MAX_GAIT_DURATION_SEC} seconds.",
+            )
+        if duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = f"Video is short ({duration_seconds:.1f}s)."
+
+        pose_options = _build_gait_pose_options()
+        result: Dict[str, Any] = analyze_sppb_gait_speed(
+            video_path=tmp_path,
+            pose_options=pose_options,
+        )
+
+        return SPPBGaitSpeedResponse(
+            success=True,
+            data=SPPBGaitSpeedResultDTO(**result),
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("sppb_gait_speed validation: %s", e)
+        return SPPBGaitSpeedResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("sppb_gait_speed analysis failed")
+        return SPPBGaitSpeedResponse(
             success=False, data=None, error=f"Analysis failed: {e}",
         )
     finally:

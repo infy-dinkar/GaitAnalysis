@@ -88,6 +88,7 @@ import {
 
 // ── Composite scoring ────────────────────────────────────────
 import {
+  analyzeSPPBGaitSpeedUpload,
   buildBalanceComponent,
   buildChairStandComponent,
   buildGaitSpeedComponent,
@@ -95,6 +96,17 @@ import {
   type GaitSpeedTrial,
   type SPPBResult,
 } from "@/lib/orthopedic/sppb";
+
+// Upload-mode imports — Component 3 reuses the new STS engine,
+// Component 1 reuses the existing /api/sppb/balance via SPPBBalanceRecorder,
+// Component 2 uses the brand-new gait-speed engine.
+import { analyzeSitToStandUpload } from "@/lib/orthopedic/sitToStand";
+import {
+  Camera as CameraIcon,
+  FileVideo,
+  Upload as UploadIcon,
+  Video as VideoIcon,
+} from "lucide-react";
 
 // ─── State machine types ────────────────────────────────────
 
@@ -108,6 +120,20 @@ type Phase =
   | "transition_to_chair"
   | "chair"
   | "done";
+
+type Mode = "live" | "upload";
+type UploadPhase = "idle" | "analyzing" | "done" | "error";
+
+const MAX_FILE_MB = 100;
+const ACCEPTED_VIDEO_TYPES = [
+  "video/mp4", "video/webm", "video/quicktime", "video/x-matroska",
+];
+
+function errorMessageStr(e: unknown): string | null {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  return null;
+}
 
 type GaitTrialPhase = "ready" | "active" | "complete";
 
@@ -135,6 +161,8 @@ interface ChairRunState {
 
 export function SPPBCapture() {
   const { isDoctorFlow, patient } = usePatientContext();
+
+  const [mode, setMode] = useState<Mode>("live");
 
   const [phase, setPhase] = useState<Phase>("setup");
   const [error, setError] = useState<string | null>(null);
@@ -508,6 +536,164 @@ export function SPPBCapture() {
     setPhase("setup");
   }
 
+  // ─── Upload-mode state ─────────────────────────────────────
+  // 3 file slots — one per SPPB component. Component 1 (Balance)
+  // posts to /api/sppb/balance (existing endpoint). Component 2
+  // (Gait Speed) posts to /api/analyze-sppb-gait-speed (new).
+  // Component 3 (Chair Stand) posts to /api/analyze-sit-to-stand
+  // (reuses the new STS engine).
+  const [uploadPhase, setUploadPhase] = useState<UploadPhase>("idle");
+  const [uploadBalanceFile, setUploadBalanceFile] = useState<File | null>(null);
+  const [uploadGaitFile, setUploadGaitFile] = useState<File | null>(null);
+  const [uploadChairFile, setUploadChairFile] = useState<File | null>(null);
+  const [uploadBalanceProgress, setUploadBalanceProgress] = useState<number>(0);
+  const [uploadGaitProgress, setUploadGaitProgress] = useState<number>(0);
+  const [uploadChairProgress, setUploadChairProgress] = useState<number>(0);
+  const [uploadBalanceError, setUploadBalanceError] = useState<string | null>(null);
+  const [uploadGaitError, setUploadGaitError] = useState<string | null>(null);
+  const [uploadChairError, setUploadChairError] = useState<string | null>(null);
+  const [uploadFilePickError, setUploadFilePickError] = useState<string | null>(null);
+
+  function validateAndSetUploadFile(
+    slot: "balance" | "gait" | "chair",
+    file: File | null,
+  ) {
+    setUploadFilePickError(null);
+    const setter =
+      slot === "balance" ? setUploadBalanceFile
+      : slot === "gait"  ? setUploadGaitFile
+      : setUploadChairFile;
+    if (!file) {
+      setter(null);
+      return;
+    }
+    if (file.size > MAX_FILE_MB * 1024 * 1024) {
+      setUploadFilePickError(`File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Max ${MAX_FILE_MB} MB.`);
+      return;
+    }
+    if (file.type && !ACCEPTED_VIDEO_TYPES.includes(file.type)) {
+      setUploadFilePickError(`Unsupported file type (${file.type}). Use MP4, WebM, MOV, or MKV.`);
+      return;
+    }
+    setter(file);
+  }
+
+  async function analyzeAllUploads() {
+    if (!uploadBalanceFile || !uploadGaitFile || !uploadChairFile) return;
+
+    setUploadPhase("analyzing");
+    setUploadBalanceProgress(0);
+    setUploadGaitProgress(0);
+    setUploadChairProgress(0);
+    setUploadBalanceError(null);
+    setUploadGaitError(null);
+    setUploadChairError(null);
+    setError(null);
+
+    const age = patient?.age ?? null;
+
+    // Component 1 — Balance via /api/sppb/balance using the existing
+    // analyzeSPPBBalance helper. recording_duration_ms = null since
+    // the file is a real uploaded clip (not a MediaRecorder Blob).
+    const balancePromise = (async () => {
+      const { analyzeSPPBBalance, normaliseBalanceStages } = await import(
+        "@/lib/orthopedic/sppbBalance"
+      );
+      setUploadBalanceProgress(20);
+      const res = await analyzeSPPBBalance(uploadBalanceFile, null);
+      setUploadBalanceProgress(80);
+      if (!res.success || !res.data) {
+        throw new Error(res.error ?? "Balance analysis failed");
+      }
+      const stages = normaliseBalanceStages(res.data.stages);
+      const diagnostics = res.data.diagnostics ?? null;
+      setUploadBalanceProgress(100);
+      return { stages, diagnostics };
+    })();
+
+    const gaitPromise = analyzeSPPBGaitSpeedUpload(
+      uploadGaitFile, setUploadGaitProgress,
+    );
+    const chairPromise = analyzeSitToStandUpload(
+      uploadChairFile, age, setUploadChairProgress,
+    );
+
+    const [bSettled, gSettled, cSettled] = await Promise.allSettled([
+      balancePromise, gaitPromise, chairPromise,
+    ]);
+
+    // Apply results / errors per component.
+    if (bSettled.status === "fulfilled") {
+      setBalanceStages(bSettled.value.stages);
+      setBalanceDiagnostics(bSettled.value.diagnostics);
+    } else {
+      setUploadBalanceError(errorMessageStr(bSettled.reason) ?? "Balance analysis failed.");
+    }
+
+    if (gSettled.status === "fulfilled") {
+      const g = gSettled.value;
+      // SPPB stores two trials and takes the best; for upload mode we
+      // populate trial1 with the uploaded clip and leave trial2 null.
+      // buildGaitSpeedComponent handles the single-trial case.
+      setGaitTrials({
+        1: {
+          duration_sec: g.duration_sec,
+          completed: g.completed,
+          started_at_ms: g.started_at_ms,
+        },
+        2: null,
+      });
+    } else {
+      setUploadGaitError(errorMessageStr(gSettled.reason) ?? "Gait-speed analysis failed.");
+    }
+
+    if (cSettled.status === "fulfilled") {
+      setChairResult(cSettled.value);
+    } else {
+      setUploadChairError(errorMessageStr(cSettled.reason) ?? "Chair-stand analysis failed.");
+    }
+
+    const anySuccess =
+      bSettled.status === "fulfilled"
+      || gSettled.status === "fulfilled"
+      || cSettled.status === "fulfilled";
+    if (anySuccess) {
+      setUploadPhase("done");
+      setPhase("done");
+    } else {
+      setUploadPhase("error");
+    }
+  }
+
+  function resetUpload() {
+    setUploadBalanceFile(null);
+    setUploadGaitFile(null);
+    setUploadChairFile(null);
+    setUploadBalanceProgress(0);
+    setUploadGaitProgress(0);
+    setUploadChairProgress(0);
+    setUploadBalanceError(null);
+    setUploadGaitError(null);
+    setUploadChairError(null);
+    setUploadFilePickError(null);
+    setUploadPhase("idle");
+    setBalanceStages({});
+    setBalanceDiagnostics(null);
+    setGaitTrials({ 1: null, 2: null });
+    setChairResult(null);
+    setPhase("setup");
+    setError(null);
+  }
+
+  function switchMode(next: Mode) {
+    if (next === mode) return;
+    if (uploadPhase === "analyzing") return;
+    if (phase !== "setup" && phase !== "done") return;
+    reset();
+    resetUpload();
+    setMode(next);
+  }
+
   // ─── Render ─────────────────────────────────────────────
 
   if (phase === "done") {
@@ -546,9 +732,154 @@ export function SPPBCapture() {
     );
   }
 
+  // ─── Mode toggle + upload-mode early return ─────────────────
+  // By the time we reach this branch, the `phase === "done"` early
+  // return has already fired (line ~513), so `phase` here is one of
+  // setup / balance / transition_to_gait / gait / transition_to_chair
+  // / chair. Switching modes mid-flow would lose recording state —
+  // restrict the toggle to the "setup" idle state.
+  const modeSwitchDisabled =
+    uploadPhase === "analyzing" || phase !== "setup";
+
+  const modeToggle = (
+    <div className="inline-flex rounded-card border border-border bg-surface p-1">
+      <button
+        type="button"
+        onClick={() => switchMode("live")}
+        disabled={modeSwitchDisabled}
+        className={`inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition ${
+          mode === "live"
+            ? "bg-accent text-white shadow-sm"
+            : "text-muted hover:text-foreground"
+        } ${modeSwitchDisabled ? "opacity-50" : ""}`}
+      >
+        <CameraIcon className="h-4 w-4" />
+        Live capture
+      </button>
+      <button
+        type="button"
+        onClick={() => switchMode("upload")}
+        disabled={modeSwitchDisabled}
+        className={`inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition ${
+          mode === "upload"
+            ? "bg-accent text-white shadow-sm"
+            : "text-muted hover:text-foreground"
+        } ${modeSwitchDisabled ? "opacity-50" : ""}`}
+      >
+        <UploadIcon className="h-4 w-4" />
+        Upload videos
+      </button>
+    </div>
+  );
+
+  if (mode === "upload") {
+    return (
+      <div className="space-y-8">
+        {isDoctorFlow && <SaveStatusBanner patient={patient} saveStatus={null} />}
+        {modeToggle}
+
+        <div className="rounded-card border border-border bg-surface p-5">
+          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+            Setup checklist
+          </p>
+          <ol className="mt-3 space-y-2.5 text-sm text-foreground">
+            {[
+              "Record THREE separate clips — one per SPPB sub-test.",
+              "Balance: frontal view, ~30s, patient progresses side-by-side → semi-tandem → tandem.",
+              "Gait Speed: side view, 4-metre walk at usual pace.",
+              "Chair Stand: side view, 5x sit-to-stand cycles.",
+              "All three clips upload + analyse in parallel.",
+            ].map((s, i) => (
+              <li key={i} className="flex gap-2.5">
+                <span className="tabular shrink-0 text-accent">{i + 1}.</span>
+                <span className="leading-relaxed">{s}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+
+        <div className="space-y-3">
+          <SPPBSlotPicker
+            label="Component 1 — Balance (3 stages)"
+            file={uploadBalanceFile}
+            onPick={(f) => validateAndSetUploadFile("balance", f)}
+            progress={uploadBalanceProgress}
+            busy={uploadPhase === "analyzing" && uploadBalanceFile !== null}
+            error={uploadBalanceError}
+          />
+          <SPPBSlotPicker
+            label="Component 2 — Gait Speed (4 m walk)"
+            file={uploadGaitFile}
+            onPick={(f) => validateAndSetUploadFile("gait", f)}
+            progress={uploadGaitProgress}
+            busy={uploadPhase === "analyzing" && uploadGaitFile !== null}
+            error={uploadGaitError}
+          />
+          <SPPBSlotPicker
+            label="Component 3 — Chair Stand (5x sit-to-stand)"
+            file={uploadChairFile}
+            onPick={(f) => validateAndSetUploadFile("chair", f)}
+            progress={uploadChairProgress}
+            busy={uploadPhase === "analyzing" && uploadChairFile !== null}
+            error={uploadChairError}
+          />
+        </div>
+
+        {uploadFilePickError && (
+          <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
+            <p className="text-foreground">{uploadFilePickError}</p>
+          </div>
+        )}
+
+        {uploadPhase === "idle" && (
+          <div className="flex flex-wrap items-center gap-3">
+            <Button
+              onClick={analyzeAllUploads}
+              disabled={!uploadBalanceFile || !uploadGaitFile || !uploadChairFile}
+            >
+              <UploadIcon className="h-4 w-4" />
+              Analyse all three
+            </Button>
+            <p className="text-xs text-muted">
+              All three videos are required for a complete SPPB score.
+            </p>
+          </div>
+        )}
+
+        {uploadPhase === "analyzing" && (
+          <div className="rounded-card border border-border bg-surface p-5">
+            <div className="flex items-center gap-3">
+              <Loader2 className="h-5 w-5 animate-spin text-accent" />
+              <p className="text-sm text-foreground">
+                Uploading and analysing all three components in parallel.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {uploadPhase === "error" && (
+          <div className="rounded-card border border-border bg-surface p-5">
+            <div className="flex items-start gap-3 rounded-md border border-error/40 bg-error/5 p-3 text-sm">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
+              <p className="text-foreground">All three components failed — re-check the videos and try again.</p>
+            </div>
+            <div className="mt-3">
+              <Button variant="secondary" onClick={resetUpload}>
+                <RotateCcw className="h-4 w-4" />
+                Try again
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-8">
       {isDoctorFlow && <SaveStatusBanner patient={patient} saveStatus={null} />}
+      {modeToggle}
 
       <ProgressStrip phase={phase} />
 
@@ -1788,3 +2119,67 @@ function ComponentHeader({
 // Suppress unused-warning for icons that are conditionally rendered.
 void AlertCircle;
 void Loader2;
+
+// ─── Upload-mode per-component picker ────────────────────────────
+function SPPBSlotPicker({
+  label,
+  file,
+  onPick,
+  progress,
+  busy,
+  error,
+}: {
+  label: string;
+  file: File | null;
+  onPick: (f: File | null) => void;
+  progress: number;
+  busy: boolean;
+  error: string | null;
+}) {
+  return (
+    <div className="rounded-card border border-border bg-surface p-4">
+      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+        {label}
+      </p>
+      {!file && (
+        <label className="mt-3 flex cursor-pointer flex-col items-center justify-center gap-2 rounded-card border border-dashed border-border bg-elevated p-5 text-center transition hover:border-accent/60">
+          <FileVideo className="h-7 w-7 text-muted" />
+          <p className="text-sm font-medium text-foreground">Choose video file</p>
+          <input
+            type="file"
+            accept="video/mp4,video/webm,video/quicktime,video/x-matroska"
+            className="hidden"
+            onChange={(e) => onPick(e.target.files?.[0] ?? null)}
+            disabled={busy}
+          />
+        </label>
+      )}
+      {file && (
+        <div className="mt-3 space-y-2">
+          <div className="flex items-center gap-2 rounded-md bg-elevated p-2.5 text-sm">
+            <VideoIcon className="h-4 w-4 shrink-0 text-accent" />
+            <span className="min-w-0 flex-1 truncate font-medium text-foreground">{file.name}</span>
+            {!busy && (
+              <button type="button" onClick={() => onPick(null)} className="text-[11px] text-muted hover:text-error">
+                remove
+              </button>
+            )}
+          </div>
+          {busy && (
+            <div className="space-y-1.5">
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
+                <div className="h-full bg-accent transition-all" style={{ width: `${Math.min(100, Math.max(0, progress))}%` }} />
+              </div>
+              <p className="text-[11px] text-muted">Analysing — {Math.round(progress)}%</p>
+            </div>
+          )}
+          {error && (
+            <p className="rounded-md border border-error/40 bg-error/5 px-2.5 py-2 text-[11px] text-foreground">
+              {error}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
