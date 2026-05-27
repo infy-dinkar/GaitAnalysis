@@ -317,6 +317,25 @@ function BiomechBody({
   patientCode: string | null;
   isoDate: string;
 }) {
+  // Batch sentinel — see BatchSession.saveAll. A biomech batch save
+  // packs N per-item entries into metrics.items with is_batch=true,
+  // leaving body_part / movement / side null on the wrapper row.
+  const rawMetrics = report.metrics as Record<string, unknown>;
+  if (
+    rawMetrics.is_batch === true &&
+    Array.isArray(rawMetrics.items)
+  ) {
+    return (
+      <BiomechBatchBody
+        report={report}
+        patient={patient}
+        patientName={patientName}
+        patientCode={patientCode}
+        isoDate={isoDate}
+      />
+    );
+  }
+
   const bodyPart = report.body_part as
     | "shoulder" | "neck" | "knee" | "hip" | "ankle" | null;
   if (!bodyPart || !report.movement) {
@@ -433,6 +452,165 @@ function BiomechBody({
           </div>
         </section>
       )}
+      <BackLink patientId={report.patient_id} />
+    </div>
+  );
+}
+
+// ─── Biomech batch body ──────────────────────────────────────────
+// Renders a saved biomech batch report (one DB row, N per-item
+// AssessmentReports stacked). Mirrors BatchSession's report-phase
+// layout so the saved view and the live view look identical.
+function BiomechBatchBody({
+  report,
+  patient,
+  patientName,
+  patientCode,
+  isoDate,
+}: {
+  report: ReportDTO;
+  patient: PatientDTO | null;
+  patientName: string | null;
+  patientCode: string | null;
+  isoDate: string;
+}) {
+  const m = report.metrics as Record<string, unknown>;
+  const rawItems = Array.isArray(m.items) ? (m.items as unknown[]) : [];
+  // Normalise each entry — discard malformed rows rather than crashing
+  // the whole report. Each rendered item is a self-contained
+  // AssessmentReport with the same merged-test handling the
+  // single-item BiomechBody applies.
+  const items: Array<{
+    bodyPart: "shoulder" | "neck" | "knee" | "hip" | "ankle";
+    movement: string;
+    side: "left" | "right" | undefined;
+    measured: number;
+    target: [number, number];
+    movementName: string;
+    secondaryMovementName?: string;
+    secondaryMeasured?: number;
+    secondaryTarget?: [number, number];
+    keyFrames?: Array<{ label: string; frame_index: number; image_data_url: string }>;
+  }> = [];
+
+  for (const raw of rawItems) {
+    if (!raw || typeof raw !== "object") continue;
+    const e = raw as Record<string, unknown>;
+    const bp = e.body_part;
+    if (bp !== "shoulder" && bp !== "neck" && bp !== "knee" && bp !== "hip" && bp !== "ankle") {
+      continue;
+    }
+    const movement = typeof e.movement === "string" ? e.movement : null;
+    if (!movement) continue;
+    const measured = pickNumber(e, "peak_magnitude") ?? pickNumber(e, "peak_angle");
+    const target =
+      pickRange(e, "reference_range") ??
+      pickRange(e, "target");
+    if (measured === null || !target) continue;
+    const side = e.side === "left" || e.side === "right" ? e.side : undefined;
+
+    const meta = resolveMovement(bp, movement);
+    const primaryLabelSaved = pickString(e, "primary_label");
+    const secondaryLabelSaved = pickString(e, "secondary_label");
+    const secondaryTargetSaved =
+      pickRange(e, "secondary_reference_range") ?? pickRange(e, "secondary_target");
+    const secondaryMeasuredSaved = pickNumber(e, "secondary_peak_magnitude");
+    const isMerged =
+      !!primaryLabelSaved || !!secondaryLabelSaved || !!meta?.merged;
+
+    const movementName = isMerged
+      ? (primaryLabelSaved ?? meta?.primaryLabel ?? meta?.label ?? movement)
+      : (meta?.label ?? movement);
+    const secondaryMovementName = isMerged
+      ? (secondaryLabelSaved ?? meta?.secondaryLabel ?? undefined)
+      : undefined;
+    const secondaryTarget = isMerged
+      ? (secondaryTargetSaved ?? meta?.secondaryTarget ?? undefined)
+      : undefined;
+    const secondaryMeasured =
+      isMerged && typeof secondaryMeasuredSaved === "number"
+        ? secondaryMeasuredSaved
+        : undefined;
+
+    // Optional annotated screenshots — same shape as the single-item path.
+    const rawKF = e.key_frames;
+    const keyFrames = Array.isArray(rawKF)
+      ? rawKF
+          .map((kf) => {
+            if (!kf || typeof kf !== "object") return null;
+            const k = kf as Record<string, unknown>;
+            const label = typeof k.label === "string" ? k.label : null;
+            const frameIdx =
+              typeof k.frame_index === "number"
+                ? k.frame_index
+                : typeof k.frame_index === "string"
+                  ? parseInt(k.frame_index, 10)
+                  : null;
+            const url = typeof k.image_data_url === "string" ? k.image_data_url : null;
+            return label && frameIdx !== null && !Number.isNaN(frameIdx) && url
+              ? { label, frame_index: frameIdx, image_data_url: url }
+              : null;
+          })
+          .filter((x): x is NonNullable<typeof x> => x !== null)
+      : undefined;
+
+    items.push({
+      bodyPart: bp,
+      movement,
+      side,
+      measured,
+      target,
+      movementName,
+      secondaryMovementName,
+      secondaryMeasured,
+      secondaryTarget,
+      keyFrames: keyFrames && keyFrames.length > 0 ? keyFrames : undefined,
+    });
+  }
+
+  if (items.length === 0) {
+    return (
+      <UnsupportedNotice reason="This batch report has no readable item entries." />
+    );
+  }
+
+  return (
+    <div className="space-y-12">
+      <div className="rounded-card border border-border bg-surface px-5 py-4 text-sm">
+        <p className="font-semibold text-foreground">
+          {patientName?.trim() || "Anonymous patient"}
+        </p>
+        <p className="mt-0.5 text-xs text-muted">
+          Combined biomechanics report · {items.length} movement
+          {items.length === 1 ? "" : "s"} captured · ID: {patientCode ?? "—"} ·{" "}
+          {isoDate}
+        </p>
+      </div>
+
+      {items.map((it, i) => (
+        <div
+          key={`${it.bodyPart}-${it.movement}-${it.side ?? "_"}-${i}`}
+          className="border-t border-border pt-8 first:border-t-0 first:pt-0"
+        >
+          <AssessmentReport
+            bodyPart={it.bodyPart}
+            movementName={it.movementName}
+            movementId={it.movement}
+            measured={it.measured}
+            target={it.target}
+            side={it.side}
+            patientNameOverride={patientName}
+            patientIdOverride={patientCode}
+            dateOverride={isoDate}
+            patientOverride={patient}
+            keyFrames={it.keyFrames}
+            secondaryMovementName={it.secondaryMovementName}
+            secondaryMeasured={it.secondaryMeasured}
+            secondaryTarget={it.secondaryTarget}
+          />
+        </div>
+      ))}
+
       <BackLink patientId={report.patient_id} />
     </div>
   );
