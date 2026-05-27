@@ -13,6 +13,7 @@
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 import { getFourStageBalanceNorm } from "@/lib/orthopedic/normsDatabase";
+import { authedFetch, AuthError } from "@/lib/auth";
 
 const VIS_THRESHOLD = 0.3;
 
@@ -605,3 +606,64 @@ export const CLASSIFICATION_TONE: Record<SessionClassification, string> = {
   elevated_fall_risk: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
   high_fall_risk: "bg-red-500/10 text-red-700 dark:text-red-400",
 };
+
+// ─── Upload-mode API client ─────────────────────────────────────
+interface FourStageBalanceResponseDTO {
+  success: boolean;
+  data: StageResult | null;
+  error: string | null;
+  fps_warning: string | null;
+  duration_warning: string | null;
+}
+
+function humanizeUploadError(raw: string | null): string {
+  if (!raw) return "Analysis failed. Please try again.";
+  const s = raw.toLowerCase();
+  if (s.includes("poor_visibility")) return "Patient not clearly visible. Re-record with full body in frame.";
+  if (s.includes("frame rate too low") || s.includes("fps")) return "Video quality too low. Record at 30 fps or higher.";
+  if (s.includes("too short")) return "Video is too short. Min 5 seconds.";
+  if (s.includes("too long")) return "Video is too long. Max 60 seconds.";
+  if (s.includes("file too large")) return "File too large. Max 100 MB.";
+  return raw;
+}
+
+export async function analyzeFourStageBalanceUpload(
+  file: File,
+  stage: StageIndex,
+  onProgress?: (pct: number) => void,
+): Promise<StageResult> {
+  const form = new FormData();
+  form.append("video", file, file.name || "four_stage_balance.mp4");
+  form.append("stage", String(stage));
+
+  onProgress?.(5);
+  let pulseHandle: ReturnType<typeof setTimeout> | null = null;
+  if (onProgress) {
+    let pct = 5;
+    const pulse = () => {
+      pct = Math.min(90, pct + 5);
+      onProgress(pct);
+      pulseHandle = setTimeout(pulse, 1500);
+    };
+    pulseHandle = setTimeout(pulse, 1500);
+  }
+  try {
+    const res = await authedFetch("/api/analyze-four-stage-balance", {
+      method: "POST",
+      body: form,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+      const detail = typeof body.detail === "string" ? body.detail : `4-stage balance analysis failed (${res.status})`;
+      throw new AuthError(humanizeUploadError(detail), res.status);
+    }
+    const payload = (await res.json()) as FourStageBalanceResponseDTO;
+    if (!payload.success || !payload.data) {
+      throw new AuthError(humanizeUploadError(payload.error), 500);
+    }
+    return payload.data;
+  } finally {
+    if (pulseHandle !== null) clearTimeout(pulseHandle);
+    onProgress?.(100);
+  }
+}

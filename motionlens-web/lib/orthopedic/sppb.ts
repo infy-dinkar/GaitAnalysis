@@ -12,6 +12,7 @@
 
 import type { StageResult } from "@/lib/orthopedic/fourStageBalance";
 import type { SitToStandResult } from "@/lib/orthopedic/sitToStand";
+import { authedFetch, AuthError } from "@/lib/auth";
 
 // ─── Per-component result types ────────────────────────────────
 
@@ -266,4 +267,78 @@ export function buildSPPBResult(
     interpretation: buildInterpretation(balance, gait, chair, total),
     recommendation: buildRecommendation(total),
   };
+}
+
+// ─── Upload-mode API client: SPPB Gait Speed (Component 2) ───────
+// Component 1 (Balance) uses the existing /api/sppb/balance.
+// Component 3 (Chair Stand) reuses /api/analyze-sit-to-stand.
+// Only Gait Speed needed a new backend endpoint.
+export interface SPPBGaitSpeedUploadResult {
+  duration_sec: number;
+  speed_mps: number;
+  score: number;
+  completed: boolean;
+  started_at_ms: number;
+  fps?: number;
+  total_frames?: number;
+  interpretation?: string;
+}
+
+interface SPPBGaitSpeedResponseDTO {
+  success: boolean;
+  data: SPPBGaitSpeedUploadResult | null;
+  error: string | null;
+  fps_warning: string | null;
+  duration_warning: string | null;
+}
+
+function humanizeUploadError(raw: string | null): string {
+  if (!raw) return "Analysis failed. Please try again.";
+  const s = raw.toLowerCase();
+  if (s.includes("poor_visibility")) return "Patient not clearly visible. Re-record with full body in frame.";
+  if (s.includes("walk start")) return "No walk start detected. Ensure the clip begins with the patient stationary, then walking.";
+  if (s.includes("frame rate too low") || s.includes("fps")) return "Video quality too low. Record at 30 fps or higher.";
+  if (s.includes("too short")) return "Video is too short. Min 5 seconds.";
+  if (s.includes("too long")) return "Video is too long. Max 60 seconds.";
+  if (s.includes("file too large")) return "File too large. Max 100 MB.";
+  return raw;
+}
+
+export async function analyzeSPPBGaitSpeedUpload(
+  file: File,
+  onProgress?: (pct: number) => void,
+): Promise<SPPBGaitSpeedUploadResult> {
+  const form = new FormData();
+  form.append("video", file, file.name || "sppb_gait_speed.mp4");
+
+  onProgress?.(5);
+  let pulseHandle: ReturnType<typeof setTimeout> | null = null;
+  if (onProgress) {
+    let pct = 5;
+    const pulse = () => {
+      pct = Math.min(90, pct + 5);
+      onProgress(pct);
+      pulseHandle = setTimeout(pulse, 1500);
+    };
+    pulseHandle = setTimeout(pulse, 1500);
+  }
+  try {
+    const res = await authedFetch("/api/analyze-sppb-gait-speed", {
+      method: "POST",
+      body: form,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+      const detail = typeof body.detail === "string" ? body.detail : `Gait-speed analysis failed (${res.status})`;
+      throw new AuthError(humanizeUploadError(detail), res.status);
+    }
+    const payload = (await res.json()) as SPPBGaitSpeedResponseDTO;
+    if (!payload.success || !payload.data) {
+      throw new AuthError(humanizeUploadError(payload.error), 500);
+    }
+    return payload.data;
+  } finally {
+    if (pulseHandle !== null) clearTimeout(pulseHandle);
+    onProgress?.(100);
+  }
 }

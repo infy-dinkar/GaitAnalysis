@@ -30,10 +30,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Camera,
   CheckCircle2,
   ChevronRight,
+  FileVideo,
+  Loader2,
   Play,
   RotateCcw,
+  Upload,
+  Video,
   XCircle,
 } from "lucide-react";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
@@ -53,6 +58,7 @@ import {
   STAGE_INSTRUCTION,
   STAGE_LABEL,
   STAGE_PROTOCOL,
+  analyzeFourStageBalanceUpload,
   ankleMergeWarning,
   buildInterpretation,
   buildSession,
@@ -69,6 +75,20 @@ import {
   type StageIndex,
   type StageResult,
 } from "@/lib/orthopedic/fourStageBalance";
+
+type Mode = "live" | "upload";
+type UploadPhase = "idle" | "analyzing" | "done" | "error";
+
+const MAX_FILE_MB = 100;
+const ACCEPTED_VIDEO_TYPES = [
+  "video/mp4", "video/webm", "video/quicktime", "video/x-matroska",
+];
+
+function errorMessage(e: unknown): string | null {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  return null;
+}
 
 type StagePhase = "preparing" | "holding" | "passed" | "failed";
 type Phase = "idle" | "running" | "done";
@@ -100,6 +120,8 @@ const STAGES: readonly StageIndex[] = [1, 2, 3, 4];
 
 export function FourStageBalanceCapture() {
   const { isDoctorFlow, patient } = usePatientContext();
+
+  const [mode, setMode] = useState<Mode>("live");
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [stageResults, setStageResults] = useState<SessionResult["stages"]>({});
@@ -291,6 +313,136 @@ export function FourStageBalanceCapture() {
 
   // ─── Lifecycle ───────────────────────────────────────────────
 
+  // ── Upload-mode state ──────────────────────────────────────────
+  const [uploadPhase, setUploadPhase] = useState<UploadPhase>("idle");
+  const [uploadFiles, setUploadFiles] = useState<Record<StageIndex, File | null>>({
+    1: null, 2: null, 3: null, 4: null,
+  });
+  const [uploadProgress, setUploadProgress] = useState<Record<StageIndex, number>>({
+    1: 0, 2: 0, 3: 0, 4: 0,
+  });
+  const [uploadErrors, setUploadErrors] = useState<Record<StageIndex, string | null>>({
+    1: null, 2: null, 3: null, 4: null,
+  });
+  const [filePickError, setFilePickError] = useState<string | null>(null);
+
+  function setStageProgress(stage: StageIndex, pct: number) {
+    setUploadProgress((prev) => ({ ...prev, [stage]: pct }));
+  }
+
+  function validateAndSetStage(stage: StageIndex, file: File | null) {
+    setFilePickError(null);
+    if (!file) {
+      setUploadFiles((prev) => ({ ...prev, [stage]: null }));
+      return;
+    }
+    if (file.size > MAX_FILE_MB * 1024 * 1024) {
+      setFilePickError(`File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Max ${MAX_FILE_MB} MB.`);
+      return;
+    }
+    if (file.type && !ACCEPTED_VIDEO_TYPES.includes(file.type)) {
+      setFilePickError(`Unsupported file type (${file.type}). Use MP4, WebM, MOV, or MKV.`);
+      return;
+    }
+    setUploadFiles((prev) => ({ ...prev, [stage]: file }));
+  }
+
+  async function analyzeUpload() {
+    const stages: StageIndex[] = ([1, 2, 3, 4] as StageIndex[])
+      .filter((s) => uploadFiles[s] !== null);
+    if (stages.length === 0) return;
+
+    setUploadPhase("analyzing");
+    setUploadProgress({ 1: 0, 2: 0, 3: 0, 4: 0 });
+    setUploadErrors({ 1: null, 2: null, 3: null, 4: null });
+    setError(null);
+
+    const tasks = stages.map(async (stage) => {
+      const file = uploadFiles[stage]!;
+      const result = await analyzeFourStageBalanceUpload(
+        file, stage, (pct) => setStageProgress(stage, pct),
+      );
+      return { stage, result };
+    });
+    const settled = await Promise.allSettled(tasks);
+
+    const newResults: SessionResult["stages"] = {};
+    const newErrors: Record<StageIndex, string | null> = { 1: null, 2: null, 3: null, 4: null };
+    let anySuccess = false;
+    settled.forEach((s, i) => {
+      const stage = stages[i];
+      if (s.status === "fulfilled") {
+        newResults[stage] = s.value.result;
+        anySuccess = true;
+      } else {
+        newErrors[stage] = errorMessage(s.reason) ?? `Stage ${stage} analysis failed.`;
+      }
+    });
+
+    // Stop-at-first-failure rule: if stage N failed, mark stages
+    // N+1..4 as not_attempted on the assembled session.
+    let firstFail: StageIndex | null = null;
+    for (const s of [1, 2, 3, 4] as StageIndex[]) {
+      const r = newResults[s];
+      if (r && r.outcome === "fail" && firstFail === null) {
+        firstFail = s;
+        break;
+      }
+    }
+    if (firstFail !== null) {
+      for (const s of [1, 2, 3, 4] as StageIndex[]) {
+        if (s > firstFail && newResults[s] === undefined && newErrors[s] === null) {
+          newResults[s] = {
+            stage: s,
+            outcome: "not_attempted",
+            hold_seconds: 0,
+            failure_mode: null,
+            sway_path_px: 0,
+            sway_95_ellipse_px2: 0,
+            hip_path: [],
+            samples: [],
+            keypoints: [],
+            screenshot_data_url: null,
+            duration_seconds: 0,
+          };
+        }
+      }
+    }
+
+    setStageResults(newResults);
+    setUploadErrors(newErrors);
+    if (anySuccess) {
+      setUploadPhase("done");
+      setPhase("done");
+    } else {
+      setUploadPhase("error");
+    }
+  }
+
+  function resetUpload() {
+    setUploadFiles({ 1: null, 2: null, 3: null, 4: null });
+    setUploadProgress({ 1: 0, 2: 0, 3: 0, 4: 0 });
+    setUploadErrors({ 1: null, 2: null, 3: null, 4: null });
+    setFilePickError(null);
+    setUploadPhase("idle");
+    setStageResults({});
+    setPhase("idle");
+    setError(null);
+  }
+
+  function switchMode(next: Mode) {
+    if (next === mode) return;
+    if (phase === "running" || uploadPhase === "analyzing") return;
+    runRef.current = null;
+    setStageResults({});
+    setCoachMsg("");
+    lastCoachRef.current = "";
+    setPhase("idle");
+    setError(null);
+    resetUpload();
+    setMode(next);
+  }
+
   function startTest() {
     setStageResults({});
     setError(null);
@@ -376,10 +528,131 @@ export function FourStageBalanceCapture() {
   // re-renders when the live timer advances.
   void tick;
 
+  const modeSwitchDisabled =
+    phase === "running" || uploadPhase === "analyzing";
+
   return (
     <div className="space-y-10">
       {isDoctorFlow && <SaveStatusBanner patient={patient} saveStatus={null} />}
 
+      {/* ─── Mode toggle: Live Camera vs Upload Video ───────────── */}
+      <div className="inline-flex rounded-card border border-border bg-surface p-1">
+        <button
+          type="button"
+          onClick={() => switchMode("live")}
+          disabled={modeSwitchDisabled}
+          className={`inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition ${
+            mode === "live"
+              ? "bg-accent text-white shadow-sm"
+              : "text-muted hover:text-foreground"
+          } ${modeSwitchDisabled ? "opacity-50" : ""}`}
+        >
+          <Camera className="h-4 w-4" />
+          Live camera
+        </button>
+        <button
+          type="button"
+          onClick={() => switchMode("upload")}
+          disabled={modeSwitchDisabled}
+          className={`inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition ${
+            mode === "upload"
+              ? "bg-accent text-white shadow-sm"
+              : "text-muted hover:text-foreground"
+          } ${modeSwitchDisabled ? "opacity-50" : ""}`}
+        >
+          <Upload className="h-4 w-4" />
+          Upload video
+        </button>
+      </div>
+
+      {/* ─── UPLOAD MODE ────────────────────────────────────────── */}
+      {mode === "upload" && (
+        <div className="space-y-6">
+          <div className="rounded-card border border-border bg-surface p-5">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+              Setup checklist
+            </p>
+            <ol className="mt-3 space-y-2.5 text-sm text-foreground">
+              {[
+                "Record one short clip per stage (~10–15 seconds each).",
+                "Each clip starts with the patient in position; end after the 10s hold.",
+                "Camera frontal, hip height, full body visible.",
+                "CDC protocol: if a stage fails, downstream stages are skipped on the report.",
+                "All clips upload + analyse in parallel.",
+              ].map((s, i) => (
+                <li key={i} className="flex gap-2.5">
+                  <span className="tabular shrink-0 text-accent">{i + 1}.</span>
+                  <span className="leading-relaxed">{s}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            {([1, 2, 3, 4] as StageIndex[]).map((s) => (
+              <StageSlotPicker
+                key={s}
+                stage={s}
+                label={STAGE_LABEL[s]}
+                file={uploadFiles[s]}
+                onPick={(f) => validateAndSetStage(s, f)}
+                progress={uploadProgress[s]}
+                busy={uploadPhase === "analyzing" && uploadFiles[s] !== null}
+                error={uploadErrors[s]}
+              />
+            ))}
+          </div>
+
+          {filePickError && (
+            <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
+              <p className="text-foreground">{filePickError}</p>
+            </div>
+          )}
+
+          {uploadPhase === "idle" && (
+            <div className="flex flex-wrap items-center gap-3">
+              <Button
+                onClick={analyzeUpload}
+                disabled={!Object.values(uploadFiles).some((f) => f !== null)}
+              >
+                <Upload className="h-4 w-4" />
+                Analyse selected
+              </Button>
+            </div>
+          )}
+
+          {uploadPhase === "analyzing" && (
+            <div className="rounded-card border border-border bg-surface p-5">
+              <div className="flex items-center gap-3">
+                <Loader2 className="h-5 w-5 animate-spin text-accent" />
+                <p className="text-sm text-foreground">
+                  Uploading and analysing each stage in parallel.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {uploadPhase === "error" && (
+            <div className="rounded-card border border-border bg-surface p-5">
+              <div className="flex items-start gap-3 rounded-md border border-error/40 bg-error/5 p-3 text-sm">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
+                <p className="text-foreground">All stages failed — re-check the videos and try again.</p>
+              </div>
+              <div className="mt-3">
+                <Button variant="secondary" onClick={resetUpload}>
+                  <RotateCcw className="h-4 w-4" />
+                  Try again
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ─── LIVE MODE (unchanged behaviour) ─────────────────────── */}
+      {mode === "live" && (
+      <>
       {/* Stage progression strip — full-width, always visible. */}
       <StageProgressStrip
         currentStage={run?.stage ?? null}
@@ -635,6 +908,73 @@ export function FourStageBalanceCapture() {
         <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
           <p className="text-foreground">{error}</p>
+        </div>
+      )}
+      </>
+      )}
+    </div>
+  );
+}
+
+// ─── Upload-mode per-stage picker ────────────────────────────────
+function StageSlotPicker({
+  stage,
+  label,
+  file,
+  onPick,
+  progress,
+  busy,
+  error,
+}: {
+  stage: StageIndex;
+  label: string;
+  file: File | null;
+  onPick: (f: File | null) => void;
+  progress: number;
+  busy: boolean;
+  error: string | null;
+}) {
+  return (
+    <div className="rounded-card border border-border bg-surface p-4">
+      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-accent">
+        Stage {stage}
+      </p>
+      <p className="mt-0.5 text-sm font-medium text-foreground">{label}</p>
+      {!file && (
+        <label className="mt-3 flex cursor-pointer flex-col items-center justify-center gap-2 rounded-card border border-dashed border-border bg-elevated p-4 text-center transition hover:border-accent/60">
+          <FileVideo className="h-6 w-6 text-muted" />
+          <p className="text-xs font-medium text-foreground">Choose video file</p>
+          <input
+            type="file"
+            accept="video/mp4,video/webm,video/quicktime,video/x-matroska"
+            className="hidden"
+            onChange={(e) => onPick(e.target.files?.[0] ?? null)}
+            disabled={busy}
+          />
+        </label>
+      )}
+      {file && (
+        <div className="mt-3 space-y-2">
+          <div className="flex items-center gap-2 rounded-md bg-elevated p-2 text-xs">
+            <Video className="h-3.5 w-3.5 shrink-0 text-accent" />
+            <span className="min-w-0 flex-1 truncate font-medium text-foreground">{file.name}</span>
+            {!busy && (
+              <button type="button" onClick={() => onPick(null)} className="text-[10px] text-muted hover:text-error">
+                remove
+              </button>
+            )}
+          </div>
+          {busy && (
+            <div className="space-y-1">
+              <div className="h-1 w-full overflow-hidden rounded-full bg-elevated">
+                <div className="h-full bg-accent transition-all" style={{ width: `${Math.min(100, Math.max(0, progress))}%` }} />
+              </div>
+              <p className="text-[10px] text-muted">{Math.round(progress)}%</p>
+            </div>
+          )}
+          {error && (
+            <p className="rounded-md border border-error/40 bg-error/5 px-2 py-1.5 text-[10px] text-foreground">{error}</p>
+          )}
         </div>
       )}
     </div>
