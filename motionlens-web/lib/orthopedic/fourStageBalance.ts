@@ -11,7 +11,7 @@
 // only if previous stage held for full 10 s. No retry, no skip.").
 
 import type { Keypoint } from "@tensorflow-models/pose-detection";
-import { LM } from "@/lib/pose/landmarks";
+import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 import { getFourStageBalanceNorm } from "@/lib/orthopedic/normsDatabase";
 
 const VIS_THRESHOLD = 0.3;

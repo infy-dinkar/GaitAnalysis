@@ -8,7 +8,7 @@
 // cycles using both legs. No L/R split.
 
 import type { Keypoint } from "@tensorflow-models/pose-detection";
-import { LM } from "@/lib/pose/landmarks";
+import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 
 const VIS_THRESHOLD = 0.3;
 

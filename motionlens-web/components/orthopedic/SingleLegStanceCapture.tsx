@@ -54,7 +54,7 @@ import {
   type Termination,
   type TrialResult,
 } from "@/lib/orthopedic/singleLegStance";
-import { LM } from "@/lib/pose/landmarks";
+import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 
 type TrialKey = "left_open" | "right_open" | "left_closed" | "right_closed";
 

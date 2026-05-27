@@ -15,7 +15,7 @@
 // the stance leg. See `dropForStance()` below.
 
 import type { Keypoint } from "@tensorflow-models/pose-detection";
-import { LM } from "@/lib/pose/landmarks";
+import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 
 // MoveNet score for a confidently visible joint typically 0.4-0.99.
 // 0.3 lets metric math run on most in-frame joints without false-

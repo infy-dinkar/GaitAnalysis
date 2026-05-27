@@ -15,7 +15,7 @@
 // MoveNet keypoints (consistent with the rest of the SPPB battery).
 
 import type { Keypoint } from "@tensorflow-models/pose-detection";
-import { LM } from "@/lib/pose/landmarks";
+import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 
 const VIS_THRESHOLD = 0.3;
 
