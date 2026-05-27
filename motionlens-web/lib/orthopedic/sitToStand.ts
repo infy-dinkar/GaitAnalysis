@@ -9,6 +9,7 @@
 
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
+import { authedFetch, AuthError } from "@/lib/auth";
 
 const VIS_THRESHOLD = 0.3;
 
@@ -404,3 +405,91 @@ export const CLASSIFICATION_TONE: Record<Classification, string> = {
   borderline: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
   weakness:   "bg-red-500/10 text-red-700 dark:text-red-400",
 };
+
+// ─── Upload-mode API client ─────────────────────────────────────
+//
+// POST /api/analyze-sit-to-stand takes ONE file (no side parameter —
+// 5xSTS is a single-trial test). Backend math + classification
+// cutoffs mirror this file exactly, so the returned SitToStandResult
+// slots straight into `SitToStandReport` without translation.
+
+interface SitToStandResponseDTO {
+  success: boolean;
+  data: SitToStandResult | null;
+  error: string | null;
+  fps_warning: string | null;
+  duration_warning: string | null;
+}
+
+function humanizeUploadError(raw: string | null): string {
+  if (!raw) return "Analysis failed. Please try again.";
+  const s = raw.toLowerCase();
+  if (s.includes("poor_visibility")) {
+    return "Patient is not clearly visible in the recording. Ensure the full body is visible in lateral (side) view.";
+  }
+  if (s.includes("no sit-to-stand") || s.includes("no reps") || s.includes("reps detected")) {
+    return "No sit-to-stand repetitions detected. Ensure the patient performs full sit-to-stand movements with the camera positioned to the side (lateral view).";
+  }
+  if (s.includes("frame rate too low") || s.includes("fps")) {
+    return "Video quality too low. Please record at 30 fps or higher.";
+  }
+  if (s.includes("too short")) {
+    return "Video is too short. Please record at least 5 seconds.";
+  }
+  if (s.includes("too long")) {
+    return "Video is too long. Maximum 60 seconds.";
+  }
+  if (s.includes("file too large")) {
+    return "File too large. Maximum 100 MB.";
+  }
+  return raw;
+}
+
+export async function analyzeSitToStandUpload(
+  file: File,
+  patientAge: number | null,
+  onProgress?: (pct: number) => void,
+): Promise<SitToStandResult> {
+  const form = new FormData();
+  form.append("video", file, file.name || "sit_to_stand.mp4");
+  if (patientAge !== null) {
+    form.append("patient_age", String(patientAge));
+  }
+
+  // Indeterminate-style progress: fetch can't report real upload
+  // progress without XHR/streams, and most of the elapsed time is
+  // server-side. Pulse 5% → ~90% → 100%.
+  onProgress?.(5);
+  let pulseHandle: ReturnType<typeof setTimeout> | null = null;
+  if (onProgress) {
+    let pct = 5;
+    const pulse = () => {
+      pct = Math.min(90, pct + 5);
+      onProgress(pct);
+      pulseHandle = setTimeout(pulse, 1500);
+    };
+    pulseHandle = setTimeout(pulse, 1500);
+  }
+
+  try {
+    const res = await authedFetch("/api/analyze-sit-to-stand", {
+      method: "POST",
+      body: form,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+      const detail = typeof body.detail === "string"
+        ? body.detail
+        : `Sit-to-stand analysis failed (${res.status})`;
+      throw new AuthError(humanizeUploadError(detail), res.status);
+    }
+    const payload = (await res.json()) as SitToStandResponseDTO;
+    if (!payload.success || !payload.data) {
+      throw new AuthError(humanizeUploadError(payload.error), 500);
+    }
+    return payload.data;
+  } finally {
+    if (pulseHandle !== null) clearTimeout(pulseHandle);
+    onProgress?.(100);
+  }
+}

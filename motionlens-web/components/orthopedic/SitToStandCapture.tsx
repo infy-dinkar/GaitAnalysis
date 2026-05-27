@@ -17,9 +17,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Camera,
   CheckCircle2,
+  FileVideo,
+  Loader2,
   Play,
   RotateCcw,
+  Upload,
+  Video,
 } from "lucide-react";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 
@@ -33,6 +38,7 @@ import {
   SAMPLE_INTERVAL_MS,
   TARGET_REP_COUNT,
   TRIAL_TIMEOUT_SEC,
+  analyzeSitToStandUpload,
   areArmsCrossed,
   buildInterpretation,
   computeHipMidY,
@@ -48,7 +54,23 @@ import {
   type Termination,
 } from "@/lib/orthopedic/sitToStand";
 
+type Mode = "live" | "upload";
 type Phase = "idle" | "armed" | "recording" | "done";
+type UploadPhase = "idle" | "analyzing" | "done" | "error";
+
+const MAX_FILE_MB = 100;
+const ACCEPTED_VIDEO_TYPES = [
+  "video/mp4",
+  "video/webm",
+  "video/quicktime",
+  "video/x-matroska",
+];
+
+function errorMessage(e: unknown): string | null {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  return null;
+}
 
 interface RecordingState {
   startedAt: number;
@@ -68,6 +90,11 @@ interface RecordingState {
 
 export function SitToStandCapture() {
   const { isDoctorFlow, patient } = usePatientContext();
+
+  // Mode toggle — live (browser BlazePose WASM, real-time rep detector)
+  // vs upload (backend MediaPipe, single video). Both modes converge
+  // on the same SitToStandResult shape + SitToStandReport.
+  const [mode, setMode] = useState<Mode>("live");
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -200,6 +227,81 @@ export function SitToStandCapture() {
     }
   }, [phase, finishTrial, setCoachIfChanged]);
 
+  // ── Upload-mode state ──────────────────────────────────────────
+  // Single trial — ONE file, ONE result. No L/R split, no
+  // Promise.allSettled. Simpler than the Trendelenburg / SLS pickers.
+  const [uploadPhase, setUploadPhase] = useState<UploadPhase>("idle");
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<number>(0);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [filePickError, setFilePickError] = useState<string | null>(null);
+
+  // ── Upload-mode handlers ───────────────────────────────────────
+  function handleFilePick(file: File | null) {
+    setFilePickError(null);
+    if (!file) {
+      setUploadFile(null);
+      return;
+    }
+    if (file.size > MAX_FILE_MB * 1024 * 1024) {
+      setFilePickError(
+        `File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Max ${MAX_FILE_MB} MB.`,
+      );
+      return;
+    }
+    if (file.type && !ACCEPTED_VIDEO_TYPES.includes(file.type)) {
+      setFilePickError(
+        `Unsupported file type (${file.type}). Use MP4, WebM, MOV, or MKV.`,
+      );
+      return;
+    }
+    setUploadFile(file);
+  }
+
+  async function analyzeUpload() {
+    if (!uploadFile) return;
+    setUploadPhase("analyzing");
+    setUploadProgress(0);
+    setUploadError(null);
+    setError(null);
+
+    const age = patient?.age ?? null;
+    try {
+      const trialResult = await analyzeSitToStandUpload(
+        uploadFile, age, setUploadProgress,
+      );
+      setResult(trialResult);
+      setUploadPhase("done");
+    } catch (e) {
+      const msg = errorMessage(e) ?? "Analysis failed.";
+      setUploadError(msg);
+      setUploadPhase("error");
+    }
+  }
+
+  function resetUpload() {
+    setUploadFile(null);
+    setUploadProgress(0);
+    setUploadError(null);
+    setFilePickError(null);
+    setUploadPhase("idle");
+    setResult(null);
+    setError(null);
+  }
+
+  function switchMode(next: Mode) {
+    if (next === mode) return;
+    if (phase === "recording" || uploadPhase === "analyzing") return;
+    recordingRef.current = null;
+    setResult(null);
+    setCoachMsg("");
+    lastCoachRef.current = "";
+    setPhase("idle");
+    setError(null);
+    resetUpload();
+    setMode(next);
+  }
+
   // Arming + start ----------------------------------------------------
   function arm() {
     setError(null);
@@ -243,8 +345,13 @@ export function SitToStandCapture() {
   }
 
   // Done view ---------------------------------------------------------
-  if (phase === "done" && result) {
+  // Live mode: triggered when 5 reps (or timeout/stop) completes.
+  // Upload mode: triggered when single-file analysis returns success.
+  const isLiveDone = phase === "done" && result !== null;
+  const isUploadDone = uploadPhase === "done" && result !== null;
+  if ((isLiveDone || isUploadDone) && result) {
     const interpretation = buildInterpretation(result);
+    const onRunAgain = isUploadDone ? () => { resetUpload(); } : reset;
     return (
       <div className="space-y-8">
         <SitToStandReport
@@ -263,7 +370,7 @@ export function SitToStandCapture() {
         />
 
         <div className="flex justify-center border-t border-border pt-6">
-          <Button variant="secondary" onClick={reset}>
+          <Button variant="secondary" onClick={onRunAgain}>
             <RotateCcw className="h-4 w-4" />
             Run again
           </Button>
@@ -281,10 +388,166 @@ export function SitToStandCapture() {
   const repsCaptured = recordingRef.current?.reps.length ?? 0;
   const armsFlag = recordingRef.current?.armsUncrossedSeen ?? false;
 
+  const modeSwitchDisabled =
+    phase === "recording" || uploadPhase === "analyzing";
+
   return (
     <div className="space-y-10">
       {isDoctorFlow && <SaveStatusBanner patient={patient} saveStatus={null} />}
 
+      {/* ─── Mode toggle: Live Camera vs Upload Video ───────────── */}
+      <div className="inline-flex rounded-card border border-border bg-surface p-1">
+        <button
+          type="button"
+          onClick={() => switchMode("live")}
+          disabled={modeSwitchDisabled}
+          className={`inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition ${
+            mode === "live"
+              ? "bg-accent text-white shadow-sm"
+              : "text-muted hover:text-foreground"
+          } ${modeSwitchDisabled ? "opacity-50" : ""}`}
+        >
+          <Camera className="h-4 w-4" />
+          Live camera
+        </button>
+        <button
+          type="button"
+          onClick={() => switchMode("upload")}
+          disabled={modeSwitchDisabled}
+          className={`inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition ${
+            mode === "upload"
+              ? "bg-accent text-white shadow-sm"
+              : "text-muted hover:text-foreground"
+          } ${modeSwitchDisabled ? "opacity-50" : ""}`}
+        >
+          <Upload className="h-4 w-4" />
+          Upload video
+        </button>
+      </div>
+
+      {/* ─── UPLOAD MODE ────────────────────────────────────────── */}
+      {mode === "upload" && (
+        <div className="space-y-6">
+          <div className="rounded-card border border-border bg-surface p-5">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+              Setup checklist
+            </p>
+            <ol className="mt-3 space-y-2.5 text-sm text-foreground">
+              {[
+                "Sit the patient on a sturdy chair with no armrests, back against the backrest, feet flat on the floor.",
+                "Cross both arms over the chest — keep them crossed for the whole test.",
+                "Position the camera to the SIDE of the patient (lateral / side view).",
+                `Record the patient performing ${TARGET_REP_COUNT} sit-to-stand repetitions as fast as safely possible.`,
+                "Trim the clip to start with the patient seated at rest and end when the patient sits back down after the final stand.",
+              ].map((s, i) => (
+                <li key={i} className="flex gap-2.5">
+                  <span className="tabular shrink-0 text-accent">{i + 1}.</span>
+                  <span className="leading-relaxed">{s}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+
+          <div className="rounded-card border border-border bg-surface p-5">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+              Upload video
+            </p>
+            <p className="mt-1 text-xs text-muted">
+              MP4, WebM, MOV, or MKV · max {MAX_FILE_MB} MB · 5–{TRIAL_TIMEOUT_SEC * 2} s
+            </p>
+
+            {!uploadFile && uploadPhase === "idle" && (
+              <label className="mt-3 flex cursor-pointer flex-col items-center justify-center gap-3 rounded-card border border-dashed border-border bg-elevated p-8 text-center transition hover:border-accent/60">
+                <FileVideo className="h-10 w-10 text-muted" />
+                <p className="text-sm font-medium text-foreground">
+                  Choose a video file
+                </p>
+                <input
+                  type="file"
+                  accept="video/mp4,video/webm,video/quicktime,video/x-matroska"
+                  className="hidden"
+                  onChange={(e) => handleFilePick(e.target.files?.[0] ?? null)}
+                />
+              </label>
+            )}
+
+            {uploadFile && uploadPhase !== "analyzing" && (
+              <div className="mt-3 flex items-center gap-3 rounded-md bg-elevated p-3 text-sm">
+                <Video className="h-5 w-5 shrink-0 text-accent" />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-medium text-foreground">
+                    {uploadFile.name}
+                  </p>
+                  <p className="text-xs text-muted">
+                    {(uploadFile.size / 1024 / 1024).toFixed(1)} MB
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleFilePick(null)}
+                  className="text-xs text-muted hover:text-error"
+                >
+                  remove
+                </button>
+              </div>
+            )}
+
+            {filePickError && (
+              <div className="mt-3 flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-3 text-sm">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
+                <p className="text-foreground">{filePickError}</p>
+              </div>
+            )}
+
+            {uploadPhase === "idle" && uploadFile && (
+              <div className="mt-4">
+                <Button onClick={analyzeUpload}>
+                  <Upload className="h-4 w-4" />
+                  Analyse video
+                </Button>
+              </div>
+            )}
+
+            {uploadPhase === "analyzing" && uploadFile && (
+              <div className="mt-4 space-y-2">
+                <div className="flex items-center gap-3 rounded-md bg-elevated p-3 text-sm">
+                  <Video className="h-5 w-5 shrink-0 text-accent" />
+                  <p className="min-w-0 flex-1 truncate font-medium text-foreground">
+                    {uploadFile.name}
+                  </p>
+                </div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
+                  <div
+                    className="h-full bg-accent transition-all"
+                    style={{ width: `${Math.min(100, Math.max(0, uploadProgress))}%` }}
+                  />
+                </div>
+                <p className="inline-flex items-center gap-1.5 text-xs text-muted">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  Analysing — {Math.round(uploadProgress)}%
+                </p>
+              </div>
+            )}
+
+            {uploadPhase === "error" && (
+              <div className="mt-4 space-y-3">
+                <div className="flex items-start gap-3 rounded-md border border-error/40 bg-error/5 p-3 text-sm">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
+                  <p className="text-foreground">{uploadError ?? "Analysis failed."}</p>
+                </div>
+                <Button variant="secondary" onClick={resetUpload}>
+                  <RotateCcw className="h-4 w-4" />
+                  Try again
+                </Button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ─── LIVE MODE (unchanged behaviour) ─────────────────────── */}
+      {mode === "live" && (
+      <>
       {/* ─── 2-column layout (instructions+status | camera) ─────── */}
       <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
         {/* LEFT — instructions + controls */}
@@ -414,6 +677,8 @@ export function SitToStandCapture() {
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
           <p className="text-foreground">{error}</p>
         </div>
+      )}
+      </>
       )}
     </div>
   );

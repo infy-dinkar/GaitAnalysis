@@ -16,6 +16,7 @@
 
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
+import { authedFetch, AuthError } from "@/lib/auth";
 
 // MoveNet score for a confidently visible joint typically 0.4-0.99.
 // 0.3 lets metric math run on most in-frame joints without false-
@@ -303,3 +304,100 @@ export const CLASSIFICATION_TONE: Record<Classification, string> = {
   compensated: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
   positive:    "bg-red-500/10 text-red-700 dark:text-red-400",
 };
+
+// ─── Upload-mode API client ─────────────────────────────────────
+//
+// POST /api/analyze-trendelenburg accepts ONE side per call. The
+// frontend uploads the left- and right-stance clips in parallel
+// (Promise.allSettled) and assembles the combined
+// TrendelenburgFullResult { left, right } client-side. Backend
+// math + classification cutoffs mirror this file exactly, so the
+// returned TrendelenburgSideResult slots straight into
+// `TrendelenburgReport` without translation.
+
+interface TrendelenburgResponseDTO {
+  success: boolean;
+  data: TrendelenburgSideResult | null;
+  error: string | null;
+  fps_warning: string | null;
+  duration_warning: string | null;
+}
+
+/** Server-side validation error strings are mostly already user-
+ *  facing; this map covers the short engine sentinels and adds a
+ *  friendlier message for the common upload failure modes. */
+function humanizeUploadError(raw: string | null): string {
+  if (!raw) return "Analysis failed. Please try again.";
+  const s = raw.toLowerCase();
+  if (s.includes("poor_visibility")) {
+    return "Patient is not clearly visible in the recording. Re-record with both hips and ankles in frame.";
+  }
+  if (s.includes("frame rate too low") || s.includes("fps")) {
+    return "Video quality too low. Please record at 30 fps or higher.";
+  }
+  if (s.includes("too short")) {
+    return "Video is too short. Please record at least 5 seconds.";
+  }
+  if (s.includes("too long")) {
+    return "Video is too long. Maximum 60 seconds.";
+  }
+  if (s.includes("file too large")) {
+    return "File too large. Maximum 100 MB.";
+  }
+  return raw;
+}
+
+export async function analyzeTrendelenburgUpload(
+  file: File,
+  side: Side,
+  patientAge: number | null,
+  onProgress?: (pct: number) => void,
+): Promise<TrendelenburgSideResult> {
+  const form = new FormData();
+  form.append("video", file, file.name || "trendelenburg.mp4");
+  form.append("side", side);
+  if (patientAge !== null) {
+    form.append("patient_age", String(patientAge));
+  }
+
+  // Indeterminate-style progress: bump to 5% on dispatch, 60% mid-
+  // request (manually pulsed), 100% on response. The fetch API
+  // doesn't expose real upload progress without XHR/streams, and the
+  // bulk of the elapsed time is server-side analysis anyway.
+  onProgress?.(5);
+  let pulseHandle: ReturnType<typeof setTimeout> | null = null;
+  if (onProgress) {
+    let pct = 5;
+    const pulse = () => {
+      pct = Math.min(90, pct + 5);
+      onProgress(pct);
+      pulseHandle = setTimeout(pulse, 1500);
+    };
+    pulseHandle = setTimeout(pulse, 1500);
+  }
+
+  try {
+    const res = await authedFetch("/api/analyze-trendelenburg", {
+      method: "POST",
+      body: form,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+      const detail = typeof body.detail === "string"
+        ? body.detail
+        : `Trendelenburg analysis failed (${res.status})`;
+      throw new AuthError(humanizeUploadError(detail), res.status);
+    }
+    const payload = (await res.json()) as TrendelenburgResponseDTO;
+    if (!payload.success || !payload.data) {
+      throw new AuthError(
+        humanizeUploadError(payload.error),
+        500,
+      );
+    }
+    return payload.data;
+  } finally {
+    if (pulseHandle !== null) clearTimeout(pulseHandle);
+    onProgress?.(100);
+  }
+}
