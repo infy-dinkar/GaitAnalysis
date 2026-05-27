@@ -45,19 +45,17 @@ export const HIP_MOVEMENTS: HipMovement[] = [
     description: "Move the leg backward behind the body",
     target: [10, 30],
   },
-  // Merged Internal + External rotation. Patient supine, knee bent at
-  // 90° with the lower leg pointing toward the camera. One recording
-  // captures BOTH directions (lower leg falls laterally for internal
-  // rotation at the hip, medially for external — counter-intuitive but
-  // anatomically correct, since rotation happens at the hip and the
-  // ankle is at the far end of the tibia lever). The backend pipeline
-  // mirrors the shoulder rotation flow (calibrated foreshortening with
-  // a baseline locked at the neutral pose).
+  // Merged Internal + External rotation. Seated heel-fixed test:
+  // patient sits upright on a chair with both feet flat on the
+  // ground, then rotates ONE leg at the hip while keeping the heel
+  // planted as the pivot. The toes (foot_index landmark) swing
+  // laterally around the heel — outward = external rotation,
+  // inward = internal rotation. One recording captures both peaks.
   {
     id: "rotation",
     label: "Rotation (Internal + External)",
     description:
-      "Lying on the back with the knee bent at 90° and the lower leg pointing at the camera, rotate the thigh inward then outward. One session captures both peaks.",
+      "Sit upright on a chair with both feet flat on the ground. Keeping the heel planted, rotate one foot outward then inward — the movement should come from the hip. One session captures both peaks.",
     target: [30, 45],
     merged: true,
     primaryLabel: "Internal Rotation",
@@ -108,16 +106,20 @@ function signedAngleBetween(
 
 const SIDE_INDICES = {
   left:  {
-    shoulder: LM.LEFT_SHOULDER,
-    hip:      LM.LEFT_HIP,
-    knee:     LM.LEFT_KNEE,
-    ankle:    LM.LEFT_ANKLE,
+    shoulder:  LM.LEFT_SHOULDER,
+    hip:       LM.LEFT_HIP,
+    knee:      LM.LEFT_KNEE,
+    ankle:     LM.LEFT_ANKLE,
+    heel:      LM.LEFT_HEEL,
+    footIndex: LM.LEFT_FOOT_INDEX,
   },
   right: {
-    shoulder: LM.RIGHT_SHOULDER,
-    hip:      LM.RIGHT_HIP,
-    knee:     LM.RIGHT_KNEE,
-    ankle:    LM.RIGHT_ANKLE,
+    shoulder:  LM.RIGHT_SHOULDER,
+    hip:       LM.RIGHT_HIP,
+    knee:      LM.RIGHT_KNEE,
+    ankle:     LM.RIGHT_ANKLE,
+    heel:      LM.RIGHT_HEEL,
+    footIndex: LM.RIGHT_FOOT_INDEX,
   },
 } as const;
 
@@ -130,7 +132,8 @@ export function computeHipAngle(
   const shoulder = keypoints[idx.shoulder];
   const hip      = keypoints[idx.hip];
   const knee     = keypoints[idx.knee];
-  const ankle    = keypoints[idx.ankle];
+  const heel     = keypoints[idx.heel];
+  const footIdx  = keypoints[idx.footIndex];
 
   const needed: Keypoint[] = [hip, knee];
   if (movement === "flexion" || movement === "extension") needed.push(shoulder);
@@ -139,7 +142,11 @@ export function computeHipAngle(
     movement === "external_rotation" ||
     movement === "rotation"
   ) {
-    needed.push(ankle);
+    // Seated heel-fixed rotation needs the foot landmarks
+    // (heel = pivot, foot_index = swinging end) instead of the
+    // ankle that the legacy supine formula relied on.
+    needed.push(heel);
+    needed.push(footIdx);
   }
   for (const k of needed) {
     if (!k || (k.score ?? 0) < VIS_THRESHOLD) return null;
@@ -164,88 +171,73 @@ export function computeHipAngle(
     return 180 - interior;
   }
 
-  // Rotation: 2D approximation using shin direction (knee → ankle)
-  // relative to vertical. With the patient supine + knee at 90°, foot
-  // pointing at the camera, shin should be ≈ vertical at neutral; any
-  // sideways tilt = rotation. Clipped at HIP_ROTATION_MAX_DEG so
-  // body-posture artefacts (sitting upright, partial framing, etc.)
-  // can't pollute the peak tracker with unrealistic values.
-  const shinX = ankle.x - knee.x;
-  const shinY = ankle.y - knee.y;
-  const rawMag = Math.abs(signedAngleBetween(0, 1, shinX, shinY));
+  // Rotation — seated heel-fixed test. The patient sits upright with
+  // the heel planted as a pivot; the toes (foot_index) swing
+  // laterally as the hip rotates. We measure the angle of the
+  // (heel → foot_index) vector from straight-down in the image:
+  //   • At neutral (foot pointing forward at the camera) the vector
+  //     projects to ≈ vertical (small lateral component) → angle ≈ 0°.
+  //   • As the foot swings outward or inward, the vector tilts in
+  //     the image plane → angle grows.
+  // Clipped at HIP_ROTATION_MAX_DEG (45°, the anatomical ceiling) so
+  // off-test postures or partial framing can't push the peak into
+  // implausible territory.
+  const footX = footIdx.x - heel.x;
+  const footY = footIdx.y - heel.y;
+  const rawMag = Math.abs(signedAngleBetween(0, 1, footX, footY));
   return Math.min(rawMag, HIP_ROTATION_MAX_DEG);
 }
 
 // ─── Direction detection for merged hip rotation ─────────────────
 //
-// Patient supine, knee bent 90°, foot pointing at the camera. The
-// rotation happens at the HIP but the shin is the visible lever —
-// counter-intuitive but anatomically correct:
-//   • Internal rotation at the hip → thigh rotates medially → lower
-//     leg (the lever's far end) swings LATERALLY (away from body
-//     midline).
-//   • External rotation at the hip → thigh rotates laterally → lower
-//     leg swings MEDIALLY (toward body midline).
+// Seated heel-fixed test: patient sits upright with the heel
+// planted and the foot pivots at the hip. The toes (foot_index)
+// swing laterally in the image:
+//   • External rotation → toes swing OUTWARD (away from body midline)
+//   • Internal rotation → toes swing INWARD (toward midline / opposite leg)
 //
-// We project the shin (knee→ankle) onto the image plane and use the
-// SIGNED angle from vertical. The sign depends on which side: for the
-// left leg the outward direction is +x in the typical un-mirrored
-// camera frame, for the right it's −x. Multiplying the raw signed
-// angle by a per-side outwardSign normalises both legs to the same
-// convention: positive = INTERNAL rotation (lateral swing), negative
-// = EXTERNAL rotation (medial swing). Matches the backend convention
-// in hip_engine.py's _analyze_hip_rotation so saved-report viewers
-// and live mode show the same direction labels for the same physical
-// motion.
+// We project (heel → foot_index) onto the image plane and use the
+// SIGNED angle from vertical-down. The sign depends on which leg:
+// the patient's LEFT foot's "outward" is +x in the typical un-
+// mirrored MediaPipe frame, the RIGHT foot's "outward" is −x.
+// Multiplying the raw signed angle by a per-side outwardSign
+// normalises both legs to the same rule. Empirical label
+// assignment confirmed against live patient testing.
 
 export type HipRotationDirection = "internal" | "external";
 
-/** Minimum signed shin-from-vertical magnitude (degrees) before a
- *  direction is committed. Below this the lower leg is too close to
- *  vertical for reliable left/right discrimination — return null so
- *  the peak tracker doesn't flip slots on neutral-pose jitter. */
+/** Minimum signed foot-from-vertical magnitude (degrees) before a
+ *  direction is committed. Below this the foot is too close to
+ *  pointing-at-camera neutral for reliable left/right discrimination
+ *  — return null so the peak tracker doesn't flip slots on neutral-
+ *  pose jitter. */
 const HIP_ROT_DIRECTION_DEADBAND_DEG = 3;
 
-/** Detect internal vs external rotation of the hip from the signed
- *  shin angle from vertical. Counter-intuitive lever convention:
- *    • LEFT hip: shin tilting to +x (image right) ≈ internal rotation
- *    • RIGHT hip: shin tilting to −x (image left) ≈ internal rotation
- *  Wrapped in an outwardSign multiplier so both sides reduce to the
- *  same "positive signed = internal" rule. */
+/** Detect internal vs external rotation of the hip in the seated
+ *  heel-fixed test, from the signed foot-vector angle (heel →
+ *  foot_index) from vertical-down in the image. Per-side outwardSign
+ *  flips for left vs right; the inner conditional then maps "toes
+ *  swung outward" to "external" and "toes swung inward" to
+ *  "internal" — same label/sign convention the supine version used
+ *  after empirical correction, just with the new pivot/lever pair. */
 export function detectHipRotationDirection(
   keypoints: Keypoint[],
   side: "left" | "right",
 ): HipRotationDirection | null {
   const idx = SIDE_INDICES[side];
-  const knee = keypoints[idx.knee];
-  const ankle = keypoints[idx.ankle];
-  if (!knee || !ankle) return null;
-  if ((knee.score ?? 0) < VIS_THRESHOLD || (ankle.score ?? 0) < VIS_THRESHOLD) {
+  const heel = keypoints[idx.heel];
+  const footIdx = keypoints[idx.footIndex];
+  if (!heel || !footIdx) return null;
+  if ((heel.score ?? 0) < VIS_THRESHOLD || (footIdx.score ?? 0) < VIS_THRESHOLD) {
     return null;
   }
-  const shinX = ankle.x - knee.x;
-  const shinY = ankle.y - knee.y;
-  // signedAngleBetween((0, 1), shin) returns positive when the shin
-  // tilts toward −x in image space (because cross = 1*shinY - 0*shinX
-  // wait — that's not right; let me re-derive). atan2(cross, dot)
-  // where cross = v1x*v2y − v1y*v2x = 0*shinY − 1*shinX = −shinX, and
-  // dot = 0*shinX + 1*shinY = shinY. So signedAngle = atan2(−shinX,
-  // shinY). Positive signed → shin tilts to −x (image left).
-  const signedAngle = signedAngleBetween(0, 1, shinX, shinY);
+  const footX = footIdx.x - heel.x;
+  const footY = footIdx.y - heel.y;
+  const signedAngle = signedAngleBetween(0, 1, footX, footY);
   if (Math.abs(signedAngle) < HIP_ROT_DIRECTION_DEADBAND_DEG) return null;
-  // Per-side outward sign: matches hip_engine.py's
-  // `_hip_rotation_outward_sign` — +1 left, −1 right.
+  // Per-side outward sign: +1 left, −1 right (un-mirrored MediaPipe
+  // image: patient's LEFT side appears on image-right, so "outward"
+  // for the left foot lives in +x territory).
   const outwardSign = side === "left" ? 1 : -1;
-  // Empirical label assignment confirmed against live patient testing:
-  // patient seated supine on a chair / table, the in-browser camera
-  // shows a mirrored selfie preview but MediaPipe emits landmarks in
-  // the UN-mirrored image frame. The two conventions land on opposite
-  // sides of vertical compared to the backend's reference frame, so
-  // we flip the labels here. (signed*outwardSign > 0 means the shin
-  // swings to the patient's MEDIAL side in the un-mirrored frame —
-  // which is the lower-leg signature of EXTERNAL hip rotation, not
-  // internal, despite hip_engine.py's positive-signed = internal
-  // convention. Backend works the same way; only the per-frame
-  // detection in live mode needs this sign correction.)
   return signedAngle * outwardSign > 0 ? "external" : "internal";
 }
