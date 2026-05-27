@@ -98,14 +98,22 @@ export function ReportCard({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Build a descriptive subline based on module-specific fields
-  const subline = [
-    report.body_part && capitalize(report.body_part),
-    report.movement && humanize(report.movement),
-    report.side && capitalize(report.side),
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  // Build a descriptive subline based on module-specific fields. The
+  // biomech-batch sentinel ("module=biomech, movement=batch" set by
+  // BatchSession.saveAll) gets a friendlier label so the report list
+  // doesn't show a bare "Batch" — the per-item details live inside
+  // metrics.items and are visible when the row is opened.
+  const isBiomechBatch =
+    report.module === "biomech" && report.movement === "batch";
+  const subline = isBiomechBatch
+    ? "Multi-joint batch"
+    : [
+        report.body_part && capitalize(report.body_part),
+        report.movement && humanize(report.movement),
+        report.side && capitalize(report.side),
+      ]
+        .filter(Boolean)
+        .join(" · ");
 
   async function handleDelete(e: React.MouseEvent) {
     e.preventDefault();

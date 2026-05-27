@@ -9,9 +9,13 @@
 //     touch to the existing upload-mode component or the backend.
 //   • Reuses <AssessmentReport> per completed item — one instance
 //     per joint+movement, stacked vertically.
-//   • Save All → N parallel createReport() calls (one per completed
-//     item). Patient history shows N rows, all with the same minute-
-//     level timestamp so they're visually grouped.
+//   • Save All → ONE createReport() call with all per-item results
+//     packed into metrics.items. The saved-report viewer detects the
+//     `is_batch` sentinel and renders the same stacked layout. Patient
+//     history shows a single "Biomechanics · Batch" row instead of N
+//     individual rows. Zero backend schema changes — body_part is
+//     Optional and movement is Optional<str max 64> on the Pydantic
+//     model, so "batch" + null pass validation as-is.
 //   • Download PDF → exportReportPdf() rasterises the entire stacked
 //     report container into a multi-page A4 PDF.
 //
@@ -142,47 +146,44 @@ function sideLabel(s: "left" | "right" | null): string {
   return s === "left" ? "Left" : "Right";
 }
 
-/** Build the ReportCreatePayload for one completed item — same shape
- *  ApiUploadAssessment produces, so the resulting MongoDB report is
- *  byte-identical to a one-off shoulder/knee/hip/etc. upload. */
-function buildPayload(item: BatchItem): ReportCreatePayload | null {
-  if (!item.result) return null;
-  const r = item.result;
+/** Flatten one completed batch item into the metrics-items entry shape
+ *  the saved-report viewer reads. Same keys ApiUploadAssessment's
+ *  payload uses, just nested inside the batch metrics blob instead of
+ *  being the top-level payload. */
+function buildBatchItemEntry(item: BatchItem): Record<string, unknown> {
+  const r = item.result!;
   const isMerged =
     !!r.primary_label &&
     !!r.secondary_label &&
     !!r.secondary_reference_range;
   return {
-    module: "biomech",
     body_part: item.option.bodyPart,
     movement: item.option.id,
-    side: item.side ?? undefined,
-    metrics: {
-      peak_angle: r.peak_angle,
-      peak_magnitude: r.peak_magnitude,
-      reference_range: r.reference_range,
-      target: r.target,
-      percentage: r.percentage,
-      status: r.status,
-      valid_frames: r.valid_frames,
-      total_frames: r.total_frames,
-      fps: r.fps,
-      ...(isMerged
-        ? {
-            secondary_peak_angle: r.secondary_peak_angle,
-            secondary_peak_magnitude: r.secondary_peak_magnitude,
-            secondary_reference_range: r.secondary_reference_range,
-            primary_label: r.primary_label,
-            secondary_label: r.secondary_label,
-          }
-        : {}),
-      ...(r.key_frames && r.key_frames.length > 0
-        ? { key_frames: r.key_frames }
-        : {}),
-    },
-    observations: { interpretation: r.interpretation },
+    side: item.side ?? null,
+    peak_angle: r.peak_angle,
+    peak_magnitude: r.peak_magnitude,
+    reference_range: r.reference_range,
+    target: r.target,
+    percentage: r.percentage,
+    status: r.status,
+    valid_frames: r.valid_frames,
+    total_frames: r.total_frames,
+    fps: r.fps,
+    interpretation: r.interpretation,
     video_filename: item.file?.name,
     video_size_bytes: item.file?.size,
+    ...(isMerged
+      ? {
+          primary_label: r.primary_label,
+          secondary_label: r.secondary_label,
+          secondary_peak_angle: r.secondary_peak_angle,
+          secondary_peak_magnitude: r.secondary_peak_magnitude,
+          secondary_reference_range: r.secondary_reference_range,
+        }
+      : {}),
+    ...(r.key_frames && r.key_frames.length > 0
+      ? { key_frames: r.key_frames }
+      : {}),
   };
 }
 
@@ -319,34 +320,34 @@ export function BatchSession() {
 
   async function saveAll() {
     if (!patientId || !allDone) return;
-    const completed = queue.filter((it) => it.status === "done" && !it.saved);
-    if (completed.length === 0) return;
-    setSaveState({ kind: "saving", done: 0, total: completed.length });
-    let done = 0;
-    let errored = 0;
-    let errMsg = "";
-    // Save sequentially so a transient error on one doesn't leave a
-    // pile of half-saved reports without clear feedback. 5 round-
-    // trips at ~100ms is acceptable for clinical UX.
-    for (const item of completed) {
-      const payload = buildPayload(item);
-      if (!payload) continue;
-      try {
-        await createReport(patientId, payload);
-        updateItem(item.uid, { saved: true });
-        done += 1;
-        setSaveState({ kind: "saving", done, total: completed.length });
-      } catch (e) {
-        errored += 1;
-        errMsg = e instanceof Error ? e.message : "Could not save report.";
-      }
-    }
-    if (errored === 0) {
-      setSaveState({ kind: "saved", count: done });
-    } else {
+    const completed = queue.filter((it) => it.status === "done");
+    if (completed.length === 0 || queue.some((it) => it.saved)) return;
+    setSaveState({ kind: "saving", done: 0, total: 1 });
+    // ONE createReport call with all per-item entries packed into
+    // metrics.items + an `is_batch` sentinel so the saved-report
+    // viewer can detect the batch shape and render every entry as a
+    // stacked AssessmentReport. body_part / movement / side stay null
+    // on the wrapper row — per-item identity lives inside each entry.
+    const payload: ReportCreatePayload = {
+      module: "biomech",
+      movement: "batch",
+      metrics: {
+        is_batch: true,
+        items: completed.map(buildBatchItemEntry),
+      },
+    };
+    try {
+      await createReport(patientId, payload);
+      setQueue((prev) =>
+        prev.map((it) =>
+          it.status === "done" ? { ...it, saved: true } : it,
+        ),
+      );
+      setSaveState({ kind: "saved", count: completed.length });
+    } catch (e) {
       setSaveState({
         kind: "error",
-        msg: `Saved ${done} of ${completed.length}. Last error: ${errMsg}`,
+        msg: e instanceof Error ? e.message : "Could not save batch report.",
       });
     }
   }
