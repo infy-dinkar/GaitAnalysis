@@ -28,6 +28,10 @@ function HipLiveInner() {
       description={movement.description}
       target={movement.target}
       side={side}
+      merged={movement.merged}
+      primaryLabel={movement.primaryLabel}
+      secondaryLabel={movement.secondaryLabel}
+      secondaryTarget={movement.secondaryTarget}
     />
   );
 }

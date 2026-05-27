@@ -32,6 +32,7 @@ import {
   isShoulderRotationNeutral,
   type ShoulderRotationCalibration,
 } from "@/lib/biomech/shoulder-live";
+import { detectHipRotationDirection } from "@/lib/biomech/hip-live";
 import type { LiveKeypoint as Keypoint } from "@/hooks/usePoseDetectionLive";
 import type { LiveBiomechFrameDataDTO } from "@/lib/api";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
@@ -268,13 +269,16 @@ export function LiveAssessment({
     !!merged && bodyPart === "neck" && movementId === "flexion_extension";
   const isMergedNeckLateral =
     !!merged && bodyPart === "neck" && movementId === "lateral_flexion";
+  const isMergedHipRotation =
+    !!merged && bodyPart === "hip" && movementId === "rotation";
   const isMergedMovement =
     isMergedShoulderRotation ||
     isMergedShoulderAbAd ||
     isMergedShoulderFlexExt ||
     isMergedKneeFE ||
     isMergedNeckFE ||
-    isMergedNeckLateral;
+    isMergedNeckLateral ||
+    isMergedHipRotation;
 
   const stateRef = useRef({
     current: null as number | null,
@@ -451,7 +455,8 @@ export function LiveAssessment({
       isMergedShoulderAbAd ||
       isMergedShoulderFlexExt ||
       isMergedNeckFE ||
-      isMergedNeckLateral
+      isMergedNeckLateral ||
+      isMergedHipRotation
     ) {
       const kpsForDir: Keypoint[] = data.landmarks.map((l) => ({
         x: l.x,
@@ -480,6 +485,15 @@ export function LiveAssessment({
         const lat = detectNeckLateralDirection(kpsForDir);
         if (lat === "right") dir = "primary";
         else if (lat === "left") dir = "secondary";
+      } else if (isMergedHipRotation) {
+        // hip-live.ts: primaryLabel="Internal Rotation",
+        // secondaryLabel="External Rotation". Match that order here so
+        // the report's primary-row stays "Internal" and the secondary
+        // row stays "External" — same as the upload-mode backend
+        // (_analyze_hip_rotation in hip_engine.py).
+        const r = detectHipRotationDirection(kpsForDir, sideOrRight);
+        if (r === "internal") dir = "primary";
+        else if (r === "external") dir = "secondary";
       }
       s.currentDirection = dir;
       if (!dir) return; // deadband — show Current but don't update peaks
