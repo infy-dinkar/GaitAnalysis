@@ -187,12 +187,17 @@ function buildBatchItemEntry(item: BatchItem): Record<string, unknown> {
   };
 }
 
+// Side selection in the chooser. "both" expands into TWO BatchItems
+// (one left + one right) on startSession(); BatchItem.side itself
+// only ever holds "left" | "right" | null.
+type SideSelection = "left" | "right" | "both" | null;
+
 export function BatchSession() {
   const { isDoctorFlow, patient, patientId } = usePatientContext();
 
   const [phase, setPhase] = useState<"select" | "running">("select");
   // Selected movements from the catalogue. Keyed by `${bodyPart}.${id}`.
-  const [selected, setSelected] = useState<Record<string, "left" | "right" | null>>({});
+  const [selected, setSelected] = useState<Record<string, SideSelection>>({});
   // Once "Start session" is clicked, the selection is frozen into
   // this ordered queue of mutable BatchItem objects.
   const [queue, setQueue] = useState<BatchItem[]>([]);
@@ -214,25 +219,42 @@ export function BatchSession() {
       return next;
     });
   }
-  function setItemSide(opt: MovementOption, side: "left" | "right") {
+  function setItemSide(opt: MovementOption, side: "left" | "right" | "both") {
     const k = keyOf(opt.bodyPart, opt.id);
     setSelected((prev) => (k in prev ? { ...prev, [k]: side } : prev));
   }
 
   function startSession() {
-    const items: BatchItem[] = catalogue
-      .filter((opt) => keyOf(opt.bodyPart, opt.id) in selected)
-      .map((opt) => ({
-        uid: `${opt.bodyPart}-${opt.id}-${Math.random().toString(36).slice(2, 8)}`,
-        option: opt,
-        side: selected[keyOf(opt.bodyPart, opt.id)],
-        status: "pending",
-        progress: 0,
-        file: null,
-        result: null,
-        errorMsg: null,
-        saved: false,
-      }));
+    const makeItem = (
+      opt: MovementOption,
+      side: "left" | "right" | null,
+    ): BatchItem => ({
+      uid: `${opt.bodyPart}-${opt.id}-${side ?? "x"}-${Math.random().toString(36).slice(2, 8)}`,
+      option: opt,
+      side,
+      status: "pending",
+      progress: 0,
+      file: null,
+      result: null,
+      errorMsg: null,
+      saved: false,
+    });
+
+    const items: BatchItem[] = [];
+    for (const opt of catalogue) {
+      const k = keyOf(opt.bodyPart, opt.id);
+      if (!(k in selected)) continue;
+      const sel = selected[k];
+      if (sel === "both") {
+        // Expand into two queued items — one per side. The operator
+        // uploads ONE video per item; backend analysis is per-side
+        // so each video produces its own report.
+        items.push(makeItem(opt, "left"));
+        items.push(makeItem(opt, "right"));
+      } else {
+        items.push(makeItem(opt, sel));
+      }
+    }
     if (items.length === 0) return;
     setQueue(items);
     setPhase("running");
@@ -435,7 +457,7 @@ export function BatchSession() {
                           </label>
                           {opt.perSide && isOn && (
                             <div className="flex shrink-0 gap-2">
-                              {(["left", "right"] as const).map((s) => (
+                              {(["left", "right", "both"] as const).map((s) => (
                                 <button
                                   key={s}
                                   type="button"
@@ -446,7 +468,7 @@ export function BatchSession() {
                                       : "border-border bg-surface text-muted hover:border-accent/50"
                                   }`}
                                 >
-                                  {sideLabel(s)}
+                                  {s === "both" ? "Left + Right" : sideLabel(s)}
                                 </button>
                               ))}
                             </div>

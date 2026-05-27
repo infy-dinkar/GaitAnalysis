@@ -18,7 +18,8 @@
 // ends with whatever was captured (marked incomplete).
 
 import type { Keypoint } from "@tensorflow-models/pose-detection";
-import { LM } from "@/lib/pose/landmarks";
+import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
+import { authedFetch, AuthError } from "@/lib/auth";
 
 const VIS_THRESHOLD = 0.3;
 
@@ -450,3 +451,98 @@ export const RISK_TONE: Record<RiskScore, string> = {
   moderate: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
   high:     "bg-red-500/10 text-red-700 dark:text-red-400",
 };
+
+// ─── Upload-mode API client ─────────────────────────────────────
+//
+// POST /api/analyze-single-leg-squat accepts ONE side per call.
+// The frontend uploads the left- and right-stance clips in
+// parallel (Promise.allSettled) and assembles the combined
+// SingleLegSquatFullResult { left, right } client-side. Backend
+// math + classification cutoffs mirror this file exactly, so the
+// returned SingleLegSquatSideResult slots straight into
+// `SingleLegSquatReport` without translation.
+
+interface SingleLegSquatResponseDTO {
+  success: boolean;
+  data: SingleLegSquatSideResult | null;
+  error: string | null;
+  fps_warning: string | null;
+  duration_warning: string | null;
+  squareness_warning: string | null;
+}
+
+function humanizeUploadError(raw: string | null): string {
+  if (!raw) return "Analysis failed. Please try again.";
+  const s = raw.toLowerCase();
+  if (s.includes("poor_visibility")) {
+    return "Patient is not clearly visible in the recording. Re-record with the full body (head to feet) in frame.";
+  }
+  if (s.includes("no single-leg squat reps detected") || s.includes("reps not detected")) {
+    return "No single-leg squat reps detected. Please re-record the patient performing 5 single-leg squats on the test leg.";
+  }
+  if (s.includes("frame rate too low") || s.includes("fps")) {
+    return "Video quality too low. Please record at 30 fps or higher.";
+  }
+  if (s.includes("too short")) {
+    return "Video is too short. Please record at least 5 seconds.";
+  }
+  if (s.includes("too long")) {
+    return "Video is too long. Maximum 60 seconds.";
+  }
+  if (s.includes("file too large")) {
+    return "File too large. Maximum 100 MB.";
+  }
+  return raw;
+}
+
+export async function analyzeSingleLegSquatUpload(
+  file: File,
+  side: Side,
+  patientAge: number | null,
+  onProgress?: (pct: number) => void,
+): Promise<SingleLegSquatSideResult> {
+  const form = new FormData();
+  form.append("video", file, file.name || "single_leg_squat.mp4");
+  form.append("side", side);
+  if (patientAge !== null) {
+    form.append("patient_age", String(patientAge));
+  }
+
+  // Indeterminate-style progress: the fetch API doesn't expose real
+  // upload progress without XHR/streams, and the bulk of the
+  // elapsed time is server-side analysis anyway. Pulse 5% → ~90%
+  // → 100% so the per-side bar feels responsive.
+  onProgress?.(5);
+  let pulseHandle: ReturnType<typeof setTimeout> | null = null;
+  if (onProgress) {
+    let pct = 5;
+    const pulse = () => {
+      pct = Math.min(90, pct + 5);
+      onProgress(pct);
+      pulseHandle = setTimeout(pulse, 1500);
+    };
+    pulseHandle = setTimeout(pulse, 1500);
+  }
+
+  try {
+    const res = await authedFetch("/api/analyze-single-leg-squat", {
+      method: "POST",
+      body: form,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+      const detail = typeof body.detail === "string"
+        ? body.detail
+        : `Single-leg squat analysis failed (${res.status})`;
+      throw new AuthError(humanizeUploadError(detail), res.status);
+    }
+    const payload = (await res.json()) as SingleLegSquatResponseDTO;
+    if (!payload.success || !payload.data) {
+      throw new AuthError(humanizeUploadError(payload.error), 500);
+    }
+    return payload.data;
+  } finally {
+    if (pulseHandle !== null) clearTimeout(pulseHandle);
+    onProgress?.(100);
+  }
+}

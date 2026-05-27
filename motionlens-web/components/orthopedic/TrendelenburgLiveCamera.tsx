@@ -21,9 +21,9 @@ import {
   Loader2,
 } from "lucide-react";
 import { useCamera } from "@/hooks/useCamera";
-import { usePoseDetection } from "@/hooks/usePoseDetection";
+import { usePoseDetectionLive as usePoseDetection } from "@/hooks/usePoseDetectionLive";
 import { Button } from "@/components/ui/Button";
-import { LM, SKELETON_EDGES } from "@/lib/pose/landmarks";
+import { LM_LIVE as LM, SKELETON_EDGES_LIVE as SKELETON_EDGES } from "@/lib/pose/landmarks-live";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 
 const OVERLAY_VIS_THRESHOLD = 0.35;

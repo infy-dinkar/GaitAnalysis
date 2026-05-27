@@ -26,13 +26,14 @@ import queue
 import tempfile
 import threading
 from contextlib import contextmanager
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import cv2
 import mediapipe as mp
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 # Engine imports (no modifications)
 from gait_engine import (
@@ -72,6 +73,27 @@ from api_models import (
 # ─── Timed Up and Go (TUG) — reuses the gait MediaPipe pipeline ───
 from tug_engine import analyze_tug
 from tug_models import TUGResponse
+
+# ─── Trendelenburg — single-leg stance upload mode ───────────────
+# Reuses the gait MediaPipe pipeline + per-side single-leg-stance
+# math in trendelenburg_engine.py. Live mode (browser BlazePose
+# WASM) and upload mode produce the same TrendelenburgSideResult
+# shape so the existing TrendelenburgReport renders both without
+# translation.
+from trendelenburg_engine import analyze_trendelenburg
+
+# ─── Single-Leg Squat — Test B1 upload mode ──────────────────────
+# Same per-side, parallel-analysis pattern as Trendelenburg.
+# Engine math mirrors lib/orthopedic/singleLegSquat.ts so the
+# existing SingleLegSquatReport renders live + upload identically.
+from single_leg_squat_engine import analyze_single_leg_squat
+
+# ─── 5x Sit-to-Stand — Test C2 upload mode ───────────────────────
+# SINGLE trial (no L/R split). Engine math mirrors
+# lib/orthopedic/sitToStand.ts so live + upload produce the same
+# SitToStandResult shape and the existing SitToStandReport renders
+# both without translation.
+from sit_to_stand_engine import analyze_sit_to_stand
 
 # ─── Ankle (dorsi/plantar) — reuses gait MediaPipe pipeline ──────
 from ankle_engine import analyze_ankle as analyze_ankle_engine
@@ -678,6 +700,561 @@ async def analyze_tug_endpoint(
     except Exception as e:
         log.exception("tug analysis failed")
         return TUGResponse(success=False, data=None, error=f"Analysis failed: {e}")
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Trendelenburg — single-leg stance, per-side upload analysis
+# ══════════════════════════════════════════════════════════════════════
+# One POST per side. The frontend uploads the left-stance and right-
+# stance clips in parallel (Promise.allSettled) and assembles the
+# combined TrendelenburgFullResult { left, right } client-side. Math
+# + classification cutoffs mirror lib/orthopedic/trendelenburg.ts so
+# live + upload produce identical reports.
+class TrendelenburgFrameSampleDTO(BaseModel):
+    t_ms: float
+    pelvic_tilt_deg: Optional[float] = None
+    trunk_lean_deg: Optional[float] = None
+
+
+class TrendelenburgKeypointDTO(BaseModel):
+    x: float
+    y: float
+    score: float
+
+
+class TrendelenburgSideResultDTO(BaseModel):
+    side_tested: str
+    hold_seconds: float
+    max_drop_deg: float
+    mean_drop_deg: float
+    max_compensatory_lean_deg: float
+    classification: str
+    short_hold: bool
+    trendelenburg_gait_pattern: bool
+    termination: str
+    samples: List[TrendelenburgFrameSampleDTO]
+    keypoints: List[List[TrendelenburgKeypointDTO]]
+    peak_screenshot_data_url: Optional[str] = None
+
+
+class TrendelenburgResponse(BaseModel):
+    success: bool
+    data: Optional[TrendelenburgSideResultDTO] = None
+    error: Optional[str] = None
+    fps_warning: Optional[str] = None
+    duration_warning: Optional[str] = None
+
+
+@app.post("/api/analyze-trendelenburg", response_model=TrendelenburgResponse)
+async def analyze_trendelenburg_endpoint(
+    video: UploadFile = File(...),
+    side: str = Form(...),                 # "left" or "right" stance
+    patient_age: Optional[int] = Form(None),
+    recording_duration_ms: Optional[int] = Form(None),
+) -> TrendelenburgResponse:
+    """Run the Trendelenburg pipeline on an uploaded single-leg-stance
+    clip. `side` is the STANCE leg (the leg the patient is standing
+    on). Validation gates mirror the TUG endpoint (file size, FPS,
+    duration) — both use the same gait MediaPipe pipeline downstream.
+
+    `recording_duration_ms` is reserved for a future record-mode
+    fallback when MediaRecorder WebMs ship with broken duration
+    headers — currently accepted but unused in this pipeline.
+    """
+    if side not in ("left", "right"):
+        raise HTTPException(
+            status_code=400,
+            detail="Side must be 'left' or 'right'.",
+        )
+
+    tmp_path: Optional[str] = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        # 1) File-size gate
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(contents, video.filename or "trendelenburg.mp4")
+        log.info(
+            "trendelenburg: file=%s side=%s size=%.2f MB age=%s",
+            video.filename, side, size_mb, patient_age,
+        )
+
+        # 2) FPS + duration gate
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not determine video frame rate. "
+                    "Please upload a different file."
+                ),
+            )
+
+        fps_warning: Optional[str] = None
+        duration_warning: Optional[str] = None
+
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video frame rate too low ({probe_fps:.1f} FPS). "
+                    f"Minimum {MIN_REQUIRED_FPS} FPS required. "
+                    f"Recommended: {RECOMMENDED_FPS}+ FPS."
+                ),
+            )
+        if probe_fps < RECOMMENDED_FPS:
+            fps_warning = (
+                f"Note: Video is {probe_fps:.1f} FPS, below recommended "
+                f"{RECOMMENDED_FPS} FPS — results may be less accurate."
+            )
+        if probe_total_frames <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not determine video length. Please upload a different file.",
+            )
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video too long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed."
+                ),
+            )
+        if duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = (
+                f"Video is short ({duration_seconds:.1f}s) — at least "
+                f"{MIN_GAIT_DURATION_SEC} seconds recommended for a complete "
+                f"single-leg-stance hold."
+            )
+
+        # 3) Run the analysis (reuses gait MediaPipe options).
+        pose_options = _build_gait_pose_options()
+        result: Dict[str, Any] = analyze_trendelenburg(
+            video_path=tmp_path,
+            pose_options=pose_options,
+            side=side,
+        )
+
+        return TrendelenburgResponse(
+            success=True,
+            data=TrendelenburgSideResultDTO(**result),
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("trendelenburg validation: %s", e)
+        return TrendelenburgResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("trendelenburg analysis failed")
+        return TrendelenburgResponse(
+            success=False, data=None, error=f"Analysis failed: {e}",
+        )
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Single-Leg Squat — Test B1, per-side upload analysis
+# ══════════════════════════════════════════════════════════════════════
+# One POST per side. The frontend uploads the left-stance and right-
+# stance clips in parallel (Promise.allSettled) and assembles the
+# combined SingleLegSquatFullResult { left, right } client-side.
+# Math + classification cutoffs mirror lib/orthopedic/singleLegSquat.ts
+# so live + upload produce identical reports.
+class SLSRepDTO(BaseModel):
+    rep_index: int
+    t_ms: float
+    kfppa_deg: Optional[float] = None
+    pelvic_drop_deg: Optional[float] = None
+    trunk_lean_deg: Optional[float] = None
+    depth_pct: Optional[float] = None
+
+
+class SLSFrameSampleDTO(BaseModel):
+    t_ms: float
+    hip_mid_y: Optional[float] = None
+    kfppa_deg: Optional[float] = None
+    pelvic_drop_deg: Optional[float] = None
+    trunk_lean_deg: Optional[float] = None
+
+
+class SLSKeypointDTO(BaseModel):
+    x: float
+    y: float
+    score: float
+
+
+class SingleLegSquatSideResultDTO(BaseModel):
+    side_tested: str
+    reps: List[SLSRepDTO]
+    worst_rep_index: Optional[int] = None
+    worst_kfppa_deg: float
+    mean_pelvic_drop_deg: float
+    mean_trunk_lean_deg: float
+    mean_depth_pct: float
+    classification: str
+    risk_score: str
+    duration_seconds: float
+    termination: str
+    incomplete: bool
+    samples: List[SLSFrameSampleDTO]
+    keypoints: List[List[SLSKeypointDTO]]
+    worst_rep_screenshot_data_url: Optional[str] = None
+    # Extras — not in the strict TS SingleLegSquatSideResult shape but
+    # surfaced for the response envelope's per-side annotations.
+    fps: Optional[float] = None
+    total_frames: Optional[int] = None
+    valid_frames: Optional[int] = None
+    interpretation: Optional[str] = None
+    camera_squareness_warning: Optional[bool] = None
+    median_shoulder_tilt_deg: Optional[float] = None
+
+
+class SingleLegSquatResponse(BaseModel):
+    success: bool
+    data: Optional[SingleLegSquatSideResultDTO] = None
+    error: Optional[str] = None
+    fps_warning: Optional[str] = None
+    duration_warning: Optional[str] = None
+    squareness_warning: Optional[str] = None
+
+
+@app.post("/api/analyze-single-leg-squat", response_model=SingleLegSquatResponse)
+async def analyze_single_leg_squat_endpoint(
+    video: UploadFile = File(...),
+    side: str = Form(...),                 # "left" or "right" stance
+    patient_age: Optional[int] = Form(None),
+) -> SingleLegSquatResponse:
+    """Run the Single-Leg Squat (Test B1) pipeline on an uploaded
+    clip. `side` is the STANCE leg (the leg the patient is standing
+    on during the squat). Validation gates mirror the TUG /
+    Trendelenburg endpoints — same gait MediaPipe pipeline downstream.
+    """
+    if side not in ("left", "right"):
+        raise HTTPException(
+            status_code=400,
+            detail="Side must be 'left' or 'right'.",
+        )
+
+    tmp_path: Optional[str] = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        # 1) File-size gate
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(
+            contents, video.filename or "single_leg_squat.mp4",
+        )
+        log.info(
+            "single_leg_squat: file=%s side=%s size=%.2f MB age=%s",
+            video.filename, side, size_mb, patient_age,
+        )
+
+        # 2) FPS + duration gate
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not determine video frame rate. "
+                    "Please upload a different file."
+                ),
+            )
+
+        fps_warning: Optional[str] = None
+        duration_warning: Optional[str] = None
+
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video frame rate too low ({probe_fps:.1f} FPS). "
+                    f"Minimum {MIN_REQUIRED_FPS} FPS required. "
+                    f"Recommended: {RECOMMENDED_FPS}+ FPS."
+                ),
+            )
+        if probe_fps < RECOMMENDED_FPS:
+            fps_warning = (
+                f"Note: Video is {probe_fps:.1f} FPS, below recommended "
+                f"{RECOMMENDED_FPS} FPS — results may be less accurate."
+            )
+        if probe_total_frames <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not determine video length. Please upload a different file.",
+            )
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video too long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed."
+                ),
+            )
+        if duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = (
+                f"Video is short ({duration_seconds:.1f}s) — at least "
+                f"{MIN_GAIT_DURATION_SEC} seconds recommended for a complete "
+                f"single-leg-squat set."
+            )
+
+        # 3) Run the analysis (reuses gait MediaPipe options).
+        pose_options = _build_gait_pose_options()
+        result: Dict[str, Any] = analyze_single_leg_squat(
+            video_path=tmp_path,
+            pose_options=pose_options,
+            side=side,
+        )
+
+        squareness_warning: Optional[str] = None
+        if result.get("camera_squareness_warning"):
+            tilt = result.get("median_shoulder_tilt_deg") or 0.0
+            squareness_warning = (
+                f"Patient was rotated by a median {abs(tilt):.1f}° — "
+                "KFPPA accuracy degrades. For best results, have the "
+                "patient face the camera squarely with both shoulders "
+                "level in frame."
+            )
+
+        return SingleLegSquatResponse(
+            success=True,
+            data=SingleLegSquatSideResultDTO(**result),
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+            squareness_warning=squareness_warning,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("single_leg_squat validation: %s", e)
+        return SingleLegSquatResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("single_leg_squat analysis failed")
+        return SingleLegSquatResponse(
+            success=False, data=None, error=f"Analysis failed: {e}",
+        )
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 5x Sit-to-Stand — Test C2, single-trial upload analysis
+# ══════════════════════════════════════════════════════════════════════
+# SINGLE trial — no `side` form field. The frontend uploads ONE
+# video and renders a flat SitToStandResult (no L/R split). Math +
+# classification cutoffs mirror lib/orthopedic/sitToStand.ts so
+# live + upload produce identical reports.
+class STSRepDTO(BaseModel):
+    rep_index: int
+    duration_seconds: float
+    min_knee_angle_deg: float
+
+
+class STSFrameSampleDTO(BaseModel):
+    t_ms: float
+    hip_mid_y: Optional[float] = None
+    knee_angle_deg: Optional[float] = None
+    arms_crossed: bool
+
+
+class STSKeypointDTO(BaseModel):
+    x: float
+    y: float
+    score: float
+
+
+class SitToStandResultDTO(BaseModel):
+    total_time_seconds: float
+    reps: List[STSRepDTO]
+    rep_durations: List[float]
+    cv_percent: float
+    classification: str
+    fatigue_flag: bool
+    arm_uncrossed_flag: bool
+    termination: str
+    incomplete: bool
+    trial_duration_seconds: float
+    samples: List[STSFrameSampleDTO]
+    keypoints: List[List[STSKeypointDTO]]
+    last_rep_screenshot_data_url: Optional[str] = None
+    # Extras — not in the strict TS SitToStandResult shape but useful
+    # for the response envelope + future report enrichment.
+    fps: Optional[float] = None
+    total_frames: Optional[int] = None
+    valid_frames: Optional[int] = None
+    interpretation: Optional[str] = None
+
+
+class SitToStandResponse(BaseModel):
+    success: bool
+    data: Optional[SitToStandResultDTO] = None
+    error: Optional[str] = None
+    fps_warning: Optional[str] = None
+    duration_warning: Optional[str] = None
+
+
+@app.post("/api/analyze-sit-to-stand", response_model=SitToStandResponse)
+async def analyze_sit_to_stand_endpoint(
+    video: UploadFile = File(...),
+    patient_age: Optional[int] = Form(None),
+) -> SitToStandResponse:
+    """Run the 5x Sit-to-Stand (Test C2) pipeline on an uploaded
+    clip. Single trial — no `side` form field. Validation gates
+    mirror the TUG / Trendelenburg / SLS endpoints (same gait
+    MediaPipe pipeline downstream).
+    """
+    tmp_path: Optional[str] = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        # 1) File-size gate
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(
+            contents, video.filename or "sit_to_stand.mp4",
+        )
+        log.info(
+            "sit_to_stand: file=%s size=%.2f MB age=%s",
+            video.filename, size_mb, patient_age,
+        )
+
+        # 2) FPS + duration gate
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not determine video frame rate. "
+                    "Please upload a different file."
+                ),
+            )
+
+        fps_warning: Optional[str] = None
+        duration_warning: Optional[str] = None
+
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video frame rate too low ({probe_fps:.1f} FPS). "
+                    f"Minimum {MIN_REQUIRED_FPS} FPS required. "
+                    f"Recommended: {RECOMMENDED_FPS}+ FPS."
+                ),
+            )
+        if probe_fps < RECOMMENDED_FPS:
+            fps_warning = (
+                f"Note: Video is {probe_fps:.1f} FPS, below recommended "
+                f"{RECOMMENDED_FPS} FPS — results may be less accurate."
+            )
+        if probe_total_frames <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not determine video length. Please upload a different file.",
+            )
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video too long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed."
+                ),
+            )
+        if duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = (
+                f"Video is short ({duration_seconds:.1f}s) — at least "
+                f"{MIN_GAIT_DURATION_SEC} seconds recommended for a complete "
+                f"5x sit-to-stand trial."
+            )
+
+        # 3) Run the analysis (reuses gait MediaPipe options).
+        pose_options = _build_gait_pose_options()
+        result: Dict[str, Any] = analyze_sit_to_stand(
+            video_path=tmp_path,
+            pose_options=pose_options,
+        )
+
+        return SitToStandResponse(
+            success=True,
+            data=SitToStandResultDTO(**result),
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("sit_to_stand validation: %s", e)
+        return SitToStandResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("sit_to_stand analysis failed")
+        return SitToStandResponse(
+            success=False, data=None, error=f"Analysis failed: {e}",
+        )
     finally:
         cleanup_temp_file(tmp_path)
 

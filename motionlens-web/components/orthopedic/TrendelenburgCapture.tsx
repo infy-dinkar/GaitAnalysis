@@ -16,7 +16,17 @@
 //   - End normally after TARGET_HOLD_SECONDS (30s)
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, Play, RotateCcw } from "lucide-react";
+import {
+  AlertTriangle,
+  Camera,
+  CheckCircle2,
+  FileVideo,
+  Loader2,
+  Play,
+  RotateCcw,
+  Upload,
+  Video,
+} from "lucide-react";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 
 import { Button } from "@/components/ui/Button";
@@ -30,6 +40,7 @@ import {
   PELVIC_SPIKE_TERMINATION_DEG,
   SAMPLE_INTERVAL_MS,
   TARGET_HOLD_SECONDS,
+  analyzeTrendelenburgUpload,
   buildInterpretation,
   computePelvicTilt,
   computeTrunkLean,
@@ -42,11 +53,29 @@ import {
   type TrendelenburgSideResult,
 } from "@/lib/orthopedic/trendelenburg";
 
+type Mode = "live" | "upload";
+
 type Phase =
   | "idle"
   | "ready"
   | "recording"
   | "done";
+
+type UploadPhase = "idle" | "analyzing" | "done" | "error";
+
+const MAX_FILE_MB = 100;
+const ACCEPTED_VIDEO_TYPES = [
+  "video/mp4",
+  "video/webm",
+  "video/quicktime",
+  "video/x-matroska",
+];
+
+function errorMessage(e: unknown): string | null {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  return null;
+}
 
 // Once the patient has reached single-leg stance, a brief loss of
 // the detected stance (foot wobble) is allowed before the test
@@ -77,6 +106,11 @@ interface RecordingState {
 
 export function TrendelenburgCapture() {
   const { isDoctorFlow, patient } = usePatientContext();
+
+  // Mode toggle: live (browser BlazePose WASM, per-side) vs upload
+  // (backend MediaPipe, both sides in parallel). Both modes
+  // converge on the same TrendelenburgFullResult + TrendelenburgReport.
+  const [mode, setMode] = useState<Mode>("live");
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -283,6 +317,120 @@ export function TrendelenburgCapture() {
     void video;
   }, [phase, finishSide, setCoachIfChanged]);
 
+  // ── Upload-mode state ──────────────────────────────────────────
+  // The frontend kicks off both sides in parallel and assembles the
+  // combined result client-side. Errors per side are tracked
+  // independently so one bad clip doesn't lose the other side's
+  // result.
+  const [uploadPhase, setUploadPhase] = useState<UploadPhase>("idle");
+  const [leftFile,  setLeftFile]  = useState<File | null>(null);
+  const [rightFile, setRightFile] = useState<File | null>(null);
+  const [leftProgress,  setLeftProgress]  = useState<number>(0);
+  const [rightProgress, setRightProgress] = useState<number>(0);
+  const [uploadErrors, setUploadErrors] = useState<{
+    left: string | null;
+    right: string | null;
+  }>({ left: null, right: null });
+  const [filePickError, setFilePickError] = useState<string | null>(null);
+
+  // ── Upload-mode handlers ───────────────────────────────────────
+  function validateAndSetFile(side: Side, file: File | null) {
+    setFilePickError(null);
+    if (!file) {
+      if (side === "left") setLeftFile(null);
+      else setRightFile(null);
+      return;
+    }
+    if (file.size > MAX_FILE_MB * 1024 * 1024) {
+      setFilePickError(
+        `File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Max ${MAX_FILE_MB} MB.`,
+      );
+      return;
+    }
+    if (file.type && !ACCEPTED_VIDEO_TYPES.includes(file.type)) {
+      setFilePickError(
+        `Unsupported file type (${file.type}). Use MP4, WebM, MOV, or MKV.`,
+      );
+      return;
+    }
+    if (side === "left") setLeftFile(file);
+    else setRightFile(file);
+  }
+
+  async function analyzeUpload() {
+    if (!leftFile && !rightFile) return;
+    setUploadPhase("analyzing");
+    setLeftProgress(0);
+    setRightProgress(0);
+    setUploadErrors({ left: null, right: null });
+    setError(null);
+
+    const age = patient?.age ?? null;
+    const tasks: Array<Promise<TrendelenburgSideResult | null>> = [
+      leftFile
+        ? analyzeTrendelenburgUpload(leftFile, "left", age, setLeftProgress)
+        : Promise.resolve(null),
+      rightFile
+        ? analyzeTrendelenburgUpload(rightFile, "right", age, setRightProgress)
+        : Promise.resolve(null),
+    ];
+    const [leftSettled, rightSettled] = await Promise.allSettled(tasks);
+
+    let leftResult:  TrendelenburgSideResult | null = null;
+    let rightResult: TrendelenburgSideResult | null = null;
+    let leftErr:  string | null = null;
+    let rightErr: string | null = null;
+
+    if (leftFile) {
+      if (leftSettled.status === "fulfilled") {
+        leftResult = leftSettled.value;
+      } else {
+        leftErr = errorMessage(leftSettled.reason) ?? "Left-side analysis failed.";
+      }
+    }
+    if (rightFile) {
+      if (rightSettled.status === "fulfilled") {
+        rightResult = rightSettled.value;
+      } else {
+        rightErr = errorMessage(rightSettled.reason) ?? "Right-side analysis failed.";
+      }
+    }
+
+    setResult({ left: leftResult, right: rightResult });
+    setUploadErrors({ left: leftErr, right: rightErr });
+    setUploadPhase(leftResult || rightResult ? "done" : "error");
+  }
+
+  function resetUpload() {
+    setLeftFile(null);
+    setRightFile(null);
+    setLeftProgress(0);
+    setRightProgress(0);
+    setUploadErrors({ left: null, right: null });
+    setFilePickError(null);
+    setUploadPhase("idle");
+    setResult({ left: null, right: null });
+    setError(null);
+  }
+
+  function switchMode(next: Mode) {
+    if (next === mode) return;
+    // Block mode switching while either flow is mid-operation.
+    if (phase === "recording" || uploadPhase === "analyzing") return;
+    // Resetting back to a clean slate when switching avoids carrying
+    // a half-finished trial across modes.
+    recordingRef.current = null;
+    setResult({ left: null, right: null });
+    setCompletedSides(new Set());
+    setArmedSide(null);
+    setCoachMsg("");
+    lastCoachMsgRef.current = "";
+    setPhase("idle");
+    setError(null);
+    resetUpload();
+    setMode(next);
+  }
+
   // ── Arming + start ─────────────────────────────────────────────
   function arm(side: Side) {
     setError(null);
@@ -323,11 +471,44 @@ export function TrendelenburgCapture() {
     setError(null);
   }
 
-  // ── Done view ──────────────────────────────────────────────────
-  if (phase === "done") {
+  // ── Done view (shared between live + upload modes) ────────────
+  // Live mode: triggered when both sides have been recorded.
+  // Upload mode: triggered when at least one side analysis succeeded.
+  const isLiveDone = phase === "done";
+  const isUploadDone = uploadPhase === "done";
+  if (isLiveDone || isUploadDone) {
     const interpretation = buildInterpretation(result);
+    const onRunAgain = isUploadDone
+      ? () => { resetUpload(); }
+      : reset;
     return (
       <div className="space-y-8">
+        {/* Per-side upload errors — surface alongside the report so
+            the operator can see which side failed and re-record it
+            without losing the side that succeeded. */}
+        {isUploadDone && (uploadErrors.left || uploadErrors.right) && (
+          <div className="space-y-2">
+            {uploadErrors.left && (
+              <div className="flex items-start gap-3 rounded-card border border-warning/40 bg-warning/5 p-4 text-sm">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+                <p className="text-foreground">
+                  <span className="font-medium">Left-stance video: </span>
+                  {uploadErrors.left}
+                </p>
+              </div>
+            )}
+            {uploadErrors.right && (
+              <div className="flex items-start gap-3 rounded-card border border-warning/40 bg-warning/5 p-4 text-sm">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+                <p className="text-foreground">
+                  <span className="font-medium">Right-stance video: </span>
+                  {uploadErrors.right}
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
         <TrendelenburgReport
           patientName={patient?.name ?? null}
           patient={patient ?? null}
@@ -352,7 +533,7 @@ export function TrendelenburgCapture() {
         />
 
         <div className="flex justify-center border-t border-border pt-6">
-          <Button variant="secondary" onClick={reset}>
+          <Button variant="secondary" onClick={onRunAgain}>
             <RotateCcw className="h-4 w-4" />
             Run again
           </Button>
@@ -372,10 +553,152 @@ export function TrendelenburgCapture() {
     (s) => !completedSides.has(s),
   );
 
+  const modeSwitchDisabled =
+    phase === "recording" || uploadPhase === "analyzing";
+
   return (
     <div className="space-y-10">
       {isDoctorFlow && <SaveStatusBanner patient={patient} saveStatus={null} />}
 
+      {/* ─── Mode toggle: Live Camera vs Upload Video ───────────── */}
+      <div className="inline-flex rounded-card border border-border bg-surface p-1">
+        <button
+          type="button"
+          onClick={() => switchMode("live")}
+          disabled={modeSwitchDisabled}
+          className={`inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition ${
+            mode === "live"
+              ? "bg-accent text-white shadow-sm"
+              : "text-muted hover:text-foreground"
+          } ${modeSwitchDisabled ? "opacity-50" : ""}`}
+        >
+          <Camera className="h-4 w-4" />
+          Live camera
+        </button>
+        <button
+          type="button"
+          onClick={() => switchMode("upload")}
+          disabled={modeSwitchDisabled}
+          className={`inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition ${
+            mode === "upload"
+              ? "bg-accent text-white shadow-sm"
+              : "text-muted hover:text-foreground"
+          } ${modeSwitchDisabled ? "opacity-50" : ""}`}
+        >
+          <Upload className="h-4 w-4" />
+          Upload video
+        </button>
+      </div>
+
+      {/* ─── UPLOAD MODE ────────────────────────────────────────── */}
+      {mode === "upload" && (
+        <div className="space-y-6">
+          <div className="rounded-card border border-border bg-surface p-5">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+              Setup checklist
+            </p>
+            <ol className="mt-3 space-y-2.5 text-sm text-foreground">
+              {[
+                "Patient stands barefoot facing the camera, both hips visible end-to-end.",
+                "Record TWO clips — one for left-leg stance, one for right-leg stance.",
+                `Each clip should show the patient holding the single-leg stance for up to ${TARGET_HOLD_SECONDS} seconds.`,
+                "Both clips are uploaded together and analysed in parallel.",
+              ].map((s, i) => (
+                <li key={i} className="flex gap-2.5">
+                  <span className="tabular shrink-0 text-accent">{i + 1}.</span>
+                  <span className="leading-relaxed">{s}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+
+          {/* Two side-by-side file pickers */}
+          <div className="grid gap-4 md:grid-cols-2">
+            <SidePicker
+              label="Left-leg stance"
+              hint="Patient stands on the RIGHT leg, lifts the LEFT."
+              file={leftFile}
+              onPick={(f) => validateAndSetFile("left", f)}
+              progress={leftProgress}
+              busy={uploadPhase === "analyzing" && leftFile !== null}
+              error={uploadErrors.left}
+            />
+            <SidePicker
+              label="Right-leg stance"
+              hint="Patient stands on the LEFT leg, lifts the RIGHT."
+              file={rightFile}
+              onPick={(f) => validateAndSetFile("right", f)}
+              progress={rightProgress}
+              busy={uploadPhase === "analyzing" && rightFile !== null}
+              error={uploadErrors.right}
+            />
+          </div>
+
+          {filePickError && (
+            <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
+              <p className="text-foreground">{filePickError}</p>
+            </div>
+          )}
+
+          {uploadPhase === "idle" && (
+            <div className="flex flex-wrap items-center gap-3">
+              <Button
+                onClick={analyzeUpload}
+                disabled={!leftFile && !rightFile}
+              >
+                <Upload className="h-4 w-4" />
+                Analyse {leftFile && rightFile ? "both" : "selected"}
+              </Button>
+              {(leftFile || rightFile) && !(leftFile && rightFile) && (
+                <p className="text-xs text-warning">
+                  Only one side selected — the other side will be missing
+                  from the report. For a complete bilateral comparison,
+                  upload both clips.
+                </p>
+              )}
+            </div>
+          )}
+
+          {uploadPhase === "analyzing" && (
+            <div className="rounded-card border border-border bg-surface p-5">
+              <div className="flex items-center gap-3">
+                <Loader2 className="h-5 w-5 animate-spin text-accent" />
+                <p className="text-sm text-foreground">
+                  Uploading and analysing — this can take 10-30 seconds per side.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {uploadPhase === "error" && (
+            <div className="rounded-card border border-border bg-surface p-5">
+              <div className="flex items-start gap-3 rounded-md border border-error/40 bg-error/5 p-3 text-sm">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
+                <div>
+                  <p className="font-medium text-foreground">Analysis failed for both sides.</p>
+                  {uploadErrors.left && (
+                    <p className="mt-1 text-foreground">Left: {uploadErrors.left}</p>
+                  )}
+                  {uploadErrors.right && (
+                    <p className="mt-1 text-foreground">Right: {uploadErrors.right}</p>
+                  )}
+                </div>
+              </div>
+              <div className="mt-3">
+                <Button variant="secondary" onClick={resetUpload}>
+                  <RotateCcw className="h-4 w-4" />
+                  Try again
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ─── LIVE MODE (unchanged behaviour) ─────────────────────── */}
+      {mode === "live" && (
+      <>
       {/* ─── 2-column layout (instructions+status | camera) ─────── */}
       <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
         {/* LEFT — instructions + recording controls */}
@@ -527,6 +850,101 @@ export function TrendelenburgCapture() {
         <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
           <p className="text-foreground">{error}</p>
+        </div>
+      )}
+      </>
+      )}
+    </div>
+  );
+}
+
+// ─── Upload-mode per-side picker ─────────────────────────────────
+function SidePicker({
+  label,
+  hint,
+  file,
+  onPick,
+  progress,
+  busy,
+  error,
+}: {
+  label: string;
+  hint: string;
+  file: File | null;
+  onPick: (f: File | null) => void;
+  progress: number;
+  busy: boolean;
+  error: string | null;
+}) {
+  return (
+    <div className="rounded-card border border-border bg-surface p-5">
+      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+        {label}
+      </p>
+      <p className="mt-1 text-xs text-muted">{hint}</p>
+
+      {!file && (
+        <label className="mt-3 flex cursor-pointer flex-col items-center justify-center gap-2 rounded-card border border-dashed border-border bg-elevated p-6 text-center transition hover:border-accent/60">
+          <FileVideo className="h-7 w-7 text-muted" />
+          <p className="text-sm font-medium text-foreground">
+            Choose video file
+          </p>
+          <p className="text-[11px] text-muted">
+            MP4, WebM, MOV, or MKV
+          </p>
+          <input
+            type="file"
+            accept="video/mp4,video/webm,video/quicktime,video/x-matroska"
+            className="hidden"
+            onChange={(e) => onPick(e.target.files?.[0] ?? null)}
+            disabled={busy}
+          />
+        </label>
+      )}
+
+      {file && (
+        <div className="mt-3 space-y-2">
+          <div className="flex items-center gap-2 rounded-md bg-elevated p-2.5 text-sm">
+            <Video className="h-4 w-4 shrink-0 text-accent" />
+            <div className="min-w-0 flex-1">
+              <p className="truncate font-medium text-foreground">
+                {file.name}
+              </p>
+              <p className="text-[11px] text-muted">
+                {(file.size / 1024 / 1024).toFixed(1)} MB
+              </p>
+            </div>
+            {!busy && (
+              <button
+                type="button"
+                onClick={() => onPick(null)}
+                className="text-[11px] text-muted hover:text-error"
+              >
+                remove
+              </button>
+            )}
+          </div>
+
+          {busy && (
+            <div className="space-y-1.5">
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
+                <div
+                  className="h-full bg-accent transition-all"
+                  style={{ width: `${Math.min(100, Math.max(0, progress))}%` }}
+                />
+              </div>
+              <p className="inline-flex items-center gap-1.5 text-[11px] text-muted">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Analysing — {Math.round(progress)}%
+              </p>
+            </div>
+          )}
+
+          {error && (
+            <p className="rounded-md border border-error/40 bg-error/5 px-2.5 py-2 text-[11px] text-foreground">
+              {error}
+            </p>
+          )}
         </div>
       )}
     </div>
