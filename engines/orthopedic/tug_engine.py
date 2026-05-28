@@ -33,19 +33,19 @@ from scipy.signal import find_peaks
 
 import os
 
-from gait_engine import (
+from engines.gait_engine import (
     LM,
     build_time_series,
     extract_poses,
 )
-from tug_interpretation import (
+from engines.orthopedic.tug_interpretation import (
     AGE_NORMS,
     age_matched_norm,
     build_interpretation,
     classify_total_time,
     compute_flags,
 )
-from tug_models import (
+from engines.orthopedic.tug_models import (
     TUGFlag,
     TUGKeyFrame,
     TUGPhase,

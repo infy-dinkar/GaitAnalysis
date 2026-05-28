@@ -486,7 +486,7 @@ def _grab_neck_key_frame(
         return None
     # Local imports — keep the live-frame surface above import-free.
     import cv2 as _cv2
-    from gait_engine import LM as _LM, apply_rotation as _apply_rot
+    from engines.gait_engine import LM as _LM, apply_rotation as _apply_rot
 
     pose_rot = int(keypoints_normalized.get("_pose_rotation") or 0)
 
@@ -628,7 +628,7 @@ def _analyze_neck_lateral_flexion(
     No direction detector — the sign is the direction. Deadband
     on the angle magnitude (5°) suppresses neutral-pose noise.
     """
-    from gait_engine import build_time_series, extract_poses
+    from engines.gait_engine import build_time_series, extract_poses
 
     raw, fps, _cv_total_frames = extract_poses(video_path, pose_options)
     ts = build_time_series(raw)
@@ -855,7 +855,7 @@ def _analyze_neck_rotation(
         (no 0° contamination at the extreme of rotation where
         one ear can briefly occlude).
     """
-    from gait_engine import build_time_series, extract_poses
+    from engines.gait_engine import build_time_series, extract_poses
 
     raw, fps, _cv_total_frames = extract_poses(video_path, pose_options)
     ts = build_time_series(raw)
@@ -1124,7 +1124,7 @@ def analyze_neck(
         return _analyze_neck_rotation(video_path, pose_options)
 
     # Local imports keep the single-frame surface dependency-light.
-    from gait_engine import build_time_series, extract_poses
+    from engines.gait_engine import build_time_series, extract_poses
 
     if movement != "flexion_extension":
         raise ValueError(f"Unsupported neck movement: {movement!r}")

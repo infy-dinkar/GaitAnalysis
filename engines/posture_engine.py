@@ -188,7 +188,7 @@ def _build_image_pose_options():
     # Imported here so the constant is resolved at first call
     # (avoids touching the model path during module import — same
     # pattern api._build_gait_pose_options uses).
-    from biomech_flow import _ensure_pose_model_file
+    from engines.biomech_flow import _ensure_pose_model_file
     model_path = _ensure_pose_model_file()
     BaseOptions = mp.tasks.BaseOptions
     PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions

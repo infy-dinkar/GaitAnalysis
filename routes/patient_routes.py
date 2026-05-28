@@ -22,9 +22,9 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from auth_utils import get_current_doctor
-from db import get_db
-from patient_models import (
+from utils.auth_utils import get_current_doctor
+from utils.db import get_db
+from models.patient_models import (
     Patient,
     PatientCreate,
     PatientDeleteResponse,

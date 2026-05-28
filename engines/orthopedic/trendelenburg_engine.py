@@ -47,7 +47,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from gait_engine import (
+from engines.gait_engine import (
     LM,
     apply_rotation as _apply_rot,
     build_time_series,

@@ -608,7 +608,7 @@ def _grab_shoulder_key_frame(
     # The screenshot frame is re-read straight from cv2, so we need
     # to apply the SAME rotation here to keep the JPEG and the
     # keypoint overlay aligned.
-    from gait_engine import apply_rotation as _apply_rot
+    from engines.gait_engine import apply_rotation as _apply_rot
     pose_rot = int(keypoints_normalized.get("_pose_rotation") or 0)
 
     cap = cv2.VideoCapture(video_path)
@@ -630,7 +630,7 @@ def _grab_shoulder_key_frame(
         h, w = frame.shape[:2]
 
     # Import LM here to avoid a circular import at module load.
-    from gait_engine import LM
+    from engines.gait_engine import LM
 
     def _draw_dot(name: str) -> Optional[tuple[int, int]]:
         frames = keypoints_normalized.get(name, [])
@@ -732,7 +732,7 @@ def analyze_shoulder(
     # Import gait pipeline here so the legacy math-only helpers above
     # don't pull in MediaPipe / OpenCV at module load (preserves the
     # existing __main__ self-test which only needs the math).
-    from gait_engine import extract_poses, build_time_series
+    from engines.gait_engine import extract_poses, build_time_series
 
     raw, fps, _cv_total_frames = extract_poses(video_path, pose_options)
     ts = build_time_series(raw)

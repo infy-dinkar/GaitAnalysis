@@ -36,32 +36,32 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # Engine imports (no modifications)
-from gait_engine import (
+from engines.gait_engine import (
     extract_poses,
     build_time_series,
     compute_all_features,
     interpret,
 )
-from shoulder_engine import (
+from engines.biomech.shoulder_engine import (
     SHOULDER_NORMAL_RANGES,
     analyze_shoulder as analyze_shoulder_engine,
     compute_shoulder_angle,
 )
-from neck_engine import NECK_NORMAL_RANGES, compute_neck_angle
-from biomech_flow import (
+from engines.biomech.neck_engine import NECK_NORMAL_RANGES, compute_neck_angle
+from engines.biomech_flow import (
     _run_biomech_upload_analysis,
     _ensure_pose_model_file,
     _LandmarkAdapter,
     _wrap_landmarks,
 )
 
-from api_helpers import (
+from utils.api_helpers import (
     save_uploaded_video,
     cleanup_temp_file,
     format_gait_response,
     format_biomech_response,
 )
-from api_models import (
+from models.api_models import (
     BiomechResponse,
     GaitResponse,
     HealthResponse,
@@ -71,8 +71,8 @@ from api_models import (
 )
 
 # ─── Timed Up and Go (TUG) — reuses the gait MediaPipe pipeline ───
-from tug_engine import analyze_tug
-from tug_models import TUGResponse
+from engines.orthopedic.tug_engine import analyze_tug
+from engines.orthopedic.tug_models import TUGResponse
 
 # ─── Trendelenburg — single-leg stance upload mode ───────────────
 # Reuses the gait MediaPipe pipeline + per-side single-leg-stance
@@ -80,70 +80,70 @@ from tug_models import TUGResponse
 # WASM) and upload mode produce the same TrendelenburgSideResult
 # shape so the existing TrendelenburgReport renders both without
 # translation.
-from trendelenburg_engine import analyze_trendelenburg
+from engines.orthopedic.trendelenburg_engine import analyze_trendelenburg
 
 # ─── Single-Leg Squat — Test B1 upload mode ──────────────────────
 # Same per-side, parallel-analysis pattern as Trendelenburg.
 # Engine math mirrors lib/orthopedic/singleLegSquat.ts so the
 # existing SingleLegSquatReport renders live + upload identically.
-from single_leg_squat_engine import analyze_single_leg_squat
+from engines.orthopedic.single_leg_squat_engine import analyze_single_leg_squat
 
 # ─── 5x Sit-to-Stand — Test C2 upload mode ───────────────────────
 # SINGLE trial (no L/R split). Engine math mirrors
 # lib/orthopedic/sitToStand.ts so live + upload produce the same
 # SitToStandResult shape and the existing SitToStandReport renders
 # both without translation.
-from sit_to_stand_engine import analyze_sit_to_stand
+from engines.orthopedic.sit_to_stand_engine import analyze_sit_to_stand
 
 # ─── 30-Second Chair Stand — Test C3 upload mode ─────────────────
 # Single trial, timer-driven (30s). Same sit↔stand state machine
 # as 5xSTS; differs in termination (30s timer) and primary outcome
 # (rep COUNT vs total time). CDC STEADI age + sex norm comparison.
-from chair_stand_30s_engine import analyze_chair_stand_30s
+from engines.orthopedic.chair_stand_30s_engine import analyze_chair_stand_30s
 
 # ─── Single-Leg Stance — Test C5 upload mode ─────────────────────
 # Per-trial analysis (side + condition). Up to 4 trials per session
 # (left_open, right_open, left_closed, right_closed). Frontend
 # parallelises uploads via Promise.allSettled.
-from single_leg_stance_engine import analyze_single_leg_stance
+from engines.orthopedic.single_leg_stance_engine import analyze_single_leg_stance
 
 # ─── 4-Stage Balance — Test C4 upload mode ───────────────────────
 # Per-stage analysis. Frontend uploads up to 4 stages in parallel
 # and applies the stop-at-first-failure rule client-side.
-from four_stage_balance_engine import analyze_four_stage_balance
+from engines.orthopedic.four_stage_balance_engine import analyze_four_stage_balance
 
 # ─── SPPB Component 2 (Gait Speed) — Test C7 upload mode ─────────
 # 4-metre walk gait-speed detection on the backend. Other two SPPB
 # components reuse existing endpoints.
-from sppb_gait_speed_engine import analyze_sppb_gait_speed
+from engines.sppb.sppb_gait_speed_engine import analyze_sppb_gait_speed
 
 # ─── Ankle (dorsi/plantar) — reuses gait MediaPipe pipeline ──────
-from ankle_engine import analyze_ankle as analyze_ankle_engine
+from engines.biomech.ankle_engine import analyze_ankle as analyze_ankle_engine
 
 # ─── Knee (merged flex+ext) — reuses gait MediaPipe pipeline ─────
-from knee_engine import analyze_knee as analyze_knee_engine
+from engines.biomech.knee_engine import analyze_knee as analyze_knee_engine
 
 # ─── Neck (merged flex+ext) — reuses gait MediaPipe pipeline ─────
-from neck_engine import analyze_neck as analyze_neck_engine
+from engines.biomech.neck_engine import analyze_neck as analyze_neck_engine
 
 # ─── Hip (flexion) — reuses gait MediaPipe pipeline ──────────────
-from hip_engine import analyze_hip as analyze_hip_engine
+from engines.biomech.hip_engine import analyze_hip as analyze_hip_engine
 
 # ─── Posture — IMAGE-mode MediaPipe (separate pipeline) ─────────
-from posture_engine import (
+from engines.posture_engine import (
     analyze_posture_combined as analyze_posture_combined_engine,
 )
 
 # ─── SPPB Component 1 (Balance) — reuses gait MediaPipe pipeline ─
-from sppb_balance_engine import analyze_sppb_balance
+from engines.sppb.sppb_balance_engine import analyze_sppb_balance
 
 # ─── Auth + database (Phase 1) ─────────────────────────────────────
-import db as db_module
-from auth_routes import router as auth_router
+from utils import db as db_module
+from routes.auth_routes import router as auth_router
 
 # ─── Patient + report endpoints (Phase 2) ──────────────────────────
-from patient_routes import router as patient_router
-from report_routes import (
+from routes.patient_routes import router as patient_router
+from routes.report_routes import (
     patient_reports_router,
     reports_router,
 )
@@ -1881,7 +1881,7 @@ async def analyze_ankle(
     """
     # Import locally to avoid a top-level cycle and to keep the helper
     # owned by tug_engine (single source of truth for the WebM repair).
-    from tug_engine import _ensure_decodable_video
+    from engines.orthopedic.tug_engine import _ensure_decodable_video
 
     tmp_path: str | None = None
     fixed_path_cleanup: str | None = None
@@ -2004,7 +2004,7 @@ async def analyze_sppb_balance_endpoint(
     path — WebM headers often lack a duration, which makes cv2's
     CAP_PROP_FPS probe return 0. We use the same WebM-repair helper
     TUG uses (tug_engine._ensure_decodable_video)."""
-    from tug_engine import _ensure_decodable_video
+    from engines.orthopedic.tug_engine import _ensure_decodable_video
 
     tmp_path: str | None = None
     fixed_path_cleanup: str | None = None
@@ -2120,7 +2120,7 @@ async def analyze_shoulder(
     """
     # Imported locally to avoid the top-level circular-import risk that
     # the ankle endpoint dodges the same way.
-    from tug_engine import _ensure_decodable_video
+    from engines.orthopedic.tug_engine import _ensure_decodable_video
 
     tmp_path: str | None = None
     fixed_path_cleanup: str | None = None
@@ -2294,7 +2294,7 @@ async def analyze_knee(
     video` helper to rewrite the container before the cv2 probe
     (mirrors the ankle / shoulder endpoints).
     """
-    from tug_engine import _ensure_decodable_video
+    from engines.orthopedic.tug_engine import _ensure_decodable_video
 
     tmp_path: str | None = None
     fixed_path_cleanup: str | None = None
@@ -2444,7 +2444,7 @@ async def analyze_hip(
     repair via tug_engine._ensure_decodable_video (same as ankle /
     shoulder / knee / neck).
     """
-    from tug_engine import _ensure_decodable_video
+    from engines.orthopedic.tug_engine import _ensure_decodable_video
 
     tmp_path: str | None = None
     fixed_path_cleanup: str | None = None
@@ -2754,7 +2754,7 @@ async def analyze_neck(
       • poor_visibility           (engine raises)   → 400
       • Camera angle …            (engine raises)   → 400
     """
-    from tug_engine import _ensure_decodable_video
+    from engines.orthopedic.tug_engine import _ensure_decodable_video
 
     tmp_path: str | None = None
     fixed_path_cleanup: str | None = None
