@@ -55,10 +55,11 @@ DEPLOYMENT.md
 # entries duplicate the globs above, for readability + future-proofing)
 # ═══════════════════════════════════════════════════════════════════
 
-# Streamlit-only files not used by the FastAPI image
+# Streamlit-only files not used by the FastAPI image.
+# NOTE: gait_plots.py and gait_cycle.py are NOT excluded — they are
+# imported by api_helpers.py and gait_engine.py respectively. Only
+# app.py (the Streamlit entry point) is safe to drop from the image.
 app.py
-gait_plots.py
-gait_cycle.py
 
 # Diagnostic / one-off scripts
 _diag_yield_audit.py
