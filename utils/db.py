@@ -54,13 +54,19 @@ async def connect() -> None:
     db_name = os.environ.get("MONGODB_DB_NAME", "motionlens").strip() or "motionlens"
 
     # serverSelectionTimeoutMS keeps app from hanging forever if Atlas
-    # is unreachable; 5 sec is a reasonable failure-fast threshold.
+    # is unreachable; 20 sec covers the first cold-connection round-trip
+    # (DNS SRV resolution + TLS handshake + replica-set discovery) over
+    # variable home/dev networks. Earlier value (5 sec) was tuned for
+    # the HF Space deploy environment but failed on slower local
+    # networks even when the credentials and IP allowlist were correct.
+    # Overridable via MONGODB_TIMEOUT_MS env var if needed.
+    timeout_ms = int(os.environ.get("MONGODB_TIMEOUT_MS", "20000"))
     # tz_aware=True returns tz-aware UTC datetimes from BSON reads — without
     # this, Pydantic emits naive ISO strings that browsers parse as LOCAL
     # time, shifting every saved-report timestamp by the user's tz offset.
     _client = AsyncIOMotorClient(
         uri,
-        serverSelectionTimeoutMS=5000,
+        serverSelectionTimeoutMS=timeout_ms,
         appname="motionlens-api",
         tz_aware=True,
     )

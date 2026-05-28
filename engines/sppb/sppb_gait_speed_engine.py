@@ -18,7 +18,7 @@ import logging
 import math
 from typing import Optional
 
-from gait_engine import (
+from engines.gait_engine import (
     build_time_series,
     extract_poses,
 )

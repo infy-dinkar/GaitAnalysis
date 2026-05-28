@@ -36,7 +36,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from gait_engine import (
+from engines.gait_engine import (
     LM,
     build_time_series,
     extract_poses,
@@ -59,7 +59,7 @@ def _grab_ankle_key_frame(
     # extract_poses stores the pose-based rotation it applied to
     # the keypoints; re-apply the same rotation to the screenshot
     # frame so the JPEG and keypoint overlay stay aligned.
-    from gait_engine import apply_rotation as _apply_rot
+    from engines.gait_engine import apply_rotation as _apply_rot
     pose_rot = int(keypoints_normalized.get("_pose_rotation") or 0)
 
     cap = cv2.VideoCapture(video_path)

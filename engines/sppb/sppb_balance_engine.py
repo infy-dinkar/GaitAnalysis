@@ -33,7 +33,7 @@ from typing import Optional
 
 import numpy as np
 
-from gait_engine import (
+from engines.gait_engine import (
     LM,
     build_time_series,
     extract_poses,
