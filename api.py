@@ -175,7 +175,7 @@ app = FastAPI(
 # CORS: allow the Next.js dev server + any origin in dev. Tighten in prod.
 ALLOWED_ORIGINS = os.environ.get(
     "MOTIONLENS_ALLOWED_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000,*",
+    "http://localhost:3000,http://127.0.0.1:3000",
 ).split(",")
 
 app.add_middleware(

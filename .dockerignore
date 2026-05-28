@@ -49,3 +49,43 @@ _*.png
 
 # Docs that don't need to ship
 DEPLOYMENT.md
+
+# ═══════════════════════════════════════════════════════════════════
+# AWS deployment — Phase 1 cleanup (added explicitly even if some
+# entries duplicate the globs above, for readability + future-proofing)
+# ═══════════════════════════════════════════════════════════════════
+
+# Streamlit-only files not used by the FastAPI image
+app.py
+gait_plots.py
+gait_cycle.py
+
+# Diagnostic / one-off scripts
+_diag_yield_audit.py
+
+# HF Spaces apt-packages manifest (redundant with Dockerfile RUN)
+packages.txt
+
+# Python caches (explicit)
+__pycache__/
+*.pyc
+*.pyo
+
+# Conda venv (explicit)
+Gait/
+
+# Frontend (explicit)
+motionlens-web/
+
+# Repo + CI metadata (explicit)
+.git/
+.github/
+.devcontainer/
+
+# All markdown — keep image lean (Dockerfile + entrypoint don't need docs)
+*.md
+
+# Local env files (explicit; .env.example stays)
+.env
+.env.*
+!.env.example

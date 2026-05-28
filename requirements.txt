@@ -1,14 +1,38 @@
-streamlit>=1.39.0
+# MotionLens API — AWS deployment requirements
+# (replaces the previous Streamlit + FastAPI split:
+#  requirements_streamlit_backup.txt + requirements_api_backup.txt)
+#
+# Streamlit / streamlit-webrtc / matplotlib / plotly are NOT included
+# because the FastAPI image doesn't render any UI — those were only
+# needed by the legacy app.py Streamlit tool.
+
+# Core ML
 mediapipe>=0.10.10
 opencv-python-headless>=4.9.0
 numpy>=1.26.0
 scipy>=1.13.0
-matplotlib>=3.8.0
-plotly>=5.9.0
-streamlit-webrtc>=0.47.0
-av>=10.0.0
-# Pillow — used by posture_engine.py for EXIF-corrected image
-# loading. matplotlib pulls Pillow transitively but listing it
-# explicitly keeps the posture pipeline independent of the
-# matplotlib dependency tree.
 Pillow>=10.0.0
+av>=10.0.0
+
+# API Framework
+fastapi>=0.115
+uvicorn[standard]>=0.30
+gunicorn>=21.0
+python-multipart>=0.0.9
+pydantic>=2.6
+pydantic[email]>=2.6
+
+# Database
+motor>=3.5
+pymongo>=4.6
+
+# Auth
+# bcrypt pinned <5.0 because passlib 1.7.4 reads bcrypt.__about__
+# which was removed in bcrypt 5.0 — without this pin, signup
+# crashes with "module 'bcrypt' has no attribute '__about__'".
+passlib>=1.7.4
+bcrypt>=4.0,<5.0
+python-jose[cryptography]>=3.3
+
+# Utils
+python-dotenv>=1.0

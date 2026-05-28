@@ -1,4 +1,4 @@
-# MotionLens API — HuggingFace Spaces deployment
+# MotionLens API — AWS EC2 deployment
 # Builds a self-contained FastAPI image with MediaPipe + the pose
 # landmarker model pre-baked so cold starts don't pay the network fetch.
 
@@ -42,14 +42,29 @@ RUN wget -q -O /app/pose_landmarker_full.task \
 # .dockerignore excludes motionlens-web/, sample media, caches, etc.
 COPY . /app
 
-# HuggingFace Spaces injects $PORT at runtime.
-ENV PORT=7860 \
+# ── Non-root user — AWS EC2 deployment best practice ──────────────
+# Run as motionlens (uid 1000) instead of root. chown the app dir so
+# the app can read its own files + write to /tmp for video upload
+# scratch space.
+RUN useradd -m -u 1000 motionlens && \
+    chown -R motionlens:motionlens /app
+USER motionlens
+
+# AWS deploys typically inject $PORT via the ECS task definition or
+# the EC2 user-data script; defaults to 8000 for local docker run.
+ENV PORT=8000 \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
-EXPOSE 7860
+EXPOSE 8000
 
-# HuggingFace Spaces dashboard health probe.
+# Health probe — used by AWS ALB target-group health checks and
+# ECS task-level container health checks.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD wget -qO- http://localhost:${PORT:-7860}/api/health || exit 1
+    CMD wget -qO- http://localhost:${PORT:-8000}/api/health || exit 1
 
-CMD ["sh", "-c", "uvicorn api:app --host 0.0.0.0 --port ${PORT:-7860}"]
+CMD gunicorn api:app \
+    --worker-class uvicorn.workers.UvicornWorker \
+    --workers 2 \
+    --bind 0.0.0.0:${PORT:-8000} \
+    --timeout 120 \
+    --keep-alive 5
