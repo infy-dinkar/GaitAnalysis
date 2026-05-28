@@ -1,18 +1,31 @@
-# MotionLens API — AWS deployment requirements
+# MotionLens API — AWS + HuggingFace deployment requirements
 # (replaces the previous Streamlit + FastAPI split:
 #  requirements_streamlit_backup.txt + requirements_api_backup.txt)
 #
-# Streamlit / streamlit-webrtc / matplotlib / plotly are NOT included
-# because the FastAPI image doesn't render any UI — those were only
-# needed by the legacy app.py Streamlit tool.
+# Note: streamlit + matplotlib + plotly are STILL required even though
+# the API doesn't render any UI, because:
+#   • biomech_flow.py imports `streamlit as st` at module top-level
+#     (api.py loads biomech_flow at startup)
+#   • api_helpers.py imports normal_*_reference helpers from
+#     gait_plots.py — which imports matplotlib at module top-level
+#   • biomech_flow lazy-imports plotly inside a chart helper; safest
+#     to keep it installed until the imports are refactored.
+# streamlit-webrtc was dropped — only used by the legacy Streamlit
+# app.py (excluded from the image via .dockerignore).
 
 # Core ML
 mediapipe>=0.10.10
 opencv-python-headless>=4.9.0
 numpy>=1.26.0
 scipy>=1.13.0
+matplotlib>=3.8.0
+plotly>=5.9.0
 Pillow>=10.0.0
 av>=10.0.0
+
+# Streamlit kept ONLY because biomech_flow.py top-level imports it.
+# TODO: refactor biomech_flow to lazy-import streamlit, then drop.
+streamlit>=1.39.0
 
 # API Framework
 fastapi>=0.115
