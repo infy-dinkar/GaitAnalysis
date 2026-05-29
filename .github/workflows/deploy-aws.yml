@@ -1,6 +1,7 @@
 name: Deploy to AWS EC2
 
 on:
+  workflow_dispatch:
   push:
     branches: [clean-deploy, main]
     paths:
@@ -11,6 +12,7 @@ on:
       - 'utils/**'
       - 'Dockerfile.aws'
       - 'requirements.txt'
+      - '.github/workflows/deploy-aws.yml'
 
 jobs:
   deploy:
