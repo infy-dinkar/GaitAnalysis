@@ -1,8 +1,13 @@
 // Thin client for the MotionLens FastAPI backend.
 
+// Empty default => fetch() calls use path-relative URLs (e.g. /api/auth/login)
+// which the Next.js rewrite in next.config.ts proxies to the AWS EC2
+// backend. Override via NEXT_PUBLIC_API_BASE_URL in .env.local when
+// pointing a dev frontend at a remote backend directly (e.g. HF Space
+// or a teammate's tunnelled local backend).
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ||
-  "http://localhost:8000";
+  "";
 
 // ─── DTOs (match api_models.py) ──────────────────────────────────────
 export interface PatientInfoDTO {
