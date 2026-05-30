@@ -145,8 +145,17 @@ def _grab_ankle_key_frame(
     }
 
 
-VIS_THRESHOLD = 0.4         # knee + ankle (anchor landmarks, must be reliable)
-FOOT_VIS_THRESHOLD = 0.25   # foot_index is intrinsically noisier — at peak
+VIS_THRESHOLD = 0.25        # knee + ankle (anchor landmarks). Lowered from
+                            # the original 0.4 because clinically-framed
+                            # close-up shots (leg-only, no head/torso in
+                            # frame) drop MediaPipe BlazePose Full's
+                            # confidence on the lower-body landmarks even
+                            # when they're well-placed — the model is
+                            # trained on full-body images and uses head/
+                            # torso context as a regularising signal. The
+                            # 3-frame median filter + min/max-over-trial
+                            # aggregation downstream absorb the extra noise.
+FOOT_VIS_THRESHOLD = 0.20   # foot_index is intrinsically noisier — at peak
                             # plantarflexion the toes point toward the camera
                             # plane and MediaPipe's confidence drops even when
                             # the landmark is still well-placed. A stricter
@@ -247,12 +256,38 @@ def analyze_ankle(
 
     n = int(min(len(kx), len(ax), len(fx)))
 
-    # Per-frame interior ankle angle. NaN when any required keypoint is
-    # below the visibility threshold.
+    # Pre-compute per-frame "strict visibility" pass — knee + ankle
+    # above VIS_THRESHOLD AND foot_index above FOOT_VIS_THRESHOLD.
+    # Used to decide whether to gate or fall back to unguarded data.
+    strict_pass: list[bool] = [
+        bool(vk[i] >= VIS_THRESHOLD
+             and va[i] >= VIS_THRESHOLD
+             and vf[i] >= FOOT_VIS_THRESHOLD)
+        for i in range(n)
+    ]
+    strict_count = sum(strict_pass)
+    min_frames_floor = max(3, int(fps * 0.3))
+
+    # Adaptive fallback: leg-only close-ups (no head/torso in frame)
+    # depress MediaPipe BlazePose Full's visibility scores on every
+    # landmark because the model uses upper-body context as a
+    # regularising signal. If the strict gate rejects everything (or
+    # almost everything), trust MediaPipe's POSITION predictions even
+    # when its confidence is low — the foot IS in the image, the model
+    # just lacks context. Normal full-body framing keeps the strict
+    # gate in effect because strict_count is plenty.
+    low_confidence_fallback = strict_count < min_frames_floor
+    if low_confidence_fallback:
+        use_frame = [True] * n
+    else:
+        use_frame = strict_pass
+
+    # Per-frame interior ankle angle. NaN when the chosen gate rejects
+    # the frame OR when the angle math degenerates (zero-length vector).
     angles: list[float] = []
     valid_frames = 0
     for i in range(n):
-        if vk[i] < VIS_THRESHOLD or va[i] < VIS_THRESHOLD or vf[i] < FOOT_VIS_THRESHOLD:
+        if not use_frame[i]:
             angles.append(float("nan"))
             continue
         a = _interior_ankle_angle(
@@ -266,17 +301,26 @@ def analyze_ankle(
         angles.append(a)
         valid_frames += 1
 
-    if valid_frames < int(fps * 0.5):
-        # Less than half a second of usable footage — refuse to score.
+    if valid_frames < min_frames_floor:
+        # MediaPipe truly failed to localise the pose in this clip,
+        # even after dropping the visibility gate. Likely cause: the
+        # person isn't in frame at all, or the clip is corrupt.
         raise ValueError(
-            "Not enough frames with visible knee+ankle+foot landmarks. "
-            "Make sure the patient's foot is fully visible throughout."
+            f"MediaPipe could not localise the leg in this clip "
+            f"({valid_frames} usable frames, need {min_frames_floor}+). "
+            f"Re-record with the test leg clearly visible — head + torso "
+            f"in frame too, if possible. Leg-only close-ups work but "
+            f"need the entire leg + foot in shot."
         )
 
     arr = np.asarray(angles, dtype=float)
     finite = arr[~np.isnan(arr)]
     if len(finite) < 3:
-        raise ValueError("Too few usable frames to compute ROM.")
+        raise ValueError(
+            "Too few usable frames to compute ROM. Re-record with the "
+            "full body visible (head, torso, and test leg in the same "
+            "frame) — leg-only close-ups confuse MediaPipe's pose model."
+        )
 
     # ROM strategy: measure the FOOT'S ANGULAR SWEEP around the ankle,
     # NOT the interior shin-foot angle.
@@ -309,7 +353,11 @@ def analyze_ankle(
     # to the actual video frame for the key-frame screenshot.
     rel_frame_indices: list[int] = []
     for i in range(n):
-        if vk[i] < VIS_THRESHOLD or va[i] < VIS_THRESHOLD or vf[i] < FOOT_VIS_THRESHOLD:
+        # Use the same gate selection (`use_frame`) chosen above so
+        # the rel_angle measurement set matches the strict / fallback
+        # decision instead of independently re-applying the strict
+        # gate and ending up with zero frames in the close-up case.
+        if not use_frame[i]:
             continue
         kxi, kyi = float(kx[i]), float(ky[i])
         axi, ayi = float(ax[i]), float(ay[i])
@@ -369,6 +417,39 @@ def analyze_ankle(
     min_rel = float(np.min(rel_smoothed))
     max_rel = float(np.max(rel_smoothed))
     raw_peak_mag = max(0.0, max_rel - min_rel)
+
+    # ── Movement-detection sanity check ──────────────────────────
+    # Catches the failure mode where MediaPipe accepted the clip
+    # (we passed the fallback gate and computed angles for every
+    # frame) but the predicted foot/ankle positions stay locked to
+    # a static body-prior because the framing is too zoomed in for
+    # the model to use upper-body context. Symptom: angle range is
+    # near zero across the entire trial even though the operator
+    # clearly recorded a foot movement. Better to error out with
+    # actionable guidance than to report 0° as if the patient
+    # genuinely has no ROM.
+    #
+    # 3° threshold: comfortably above keypoint jitter (~0.5-1° in
+    # a well-framed clip) but well below any clinically meaningful
+    # ROM (normal plantarflexion is 40-55°, normal dorsiflexion
+    # 15-25°). The check only fires in the low-confidence fallback
+    # path — strict-gated full-body videos are trusted because
+    # MediaPipe's anchor confidence was high enough to mean it
+    # actually saw the body parts.
+    MIN_DETECTABLE_ROM_DEG = 3.0
+    if low_confidence_fallback and raw_peak_mag < MIN_DETECTABLE_ROM_DEG:
+        raise ValueError(
+            f"No detectable ankle movement in this clip "
+            f"({raw_peak_mag:.1f}° measured). Two likely causes:\n"
+            f"  1. Framing too tight — MediaPipe needs to see the full "
+            f"body (head + torso + test leg in the same frame) to "
+            f"track the foot reliably. With only the leg visible, "
+            f"the model locks predicted foot/ankle positions to a "
+            f"static prior and doesn't follow the actual movement.\n"
+            f"  2. The clip didn't capture the full movement — re-record "
+            f"showing NEUTRAL → PLANTARFLEX → BACK TO NEUTRAL so the "
+            f"system has both the resting and peak positions to compare."
+        )
 
     # Apply 2D → 3D-equivalent calibration. See CALIBRATION_FACTORS
     # for the rationale; this is what maps the measured 2D projection
