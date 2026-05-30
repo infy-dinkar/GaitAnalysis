@@ -418,6 +418,39 @@ def analyze_ankle(
     max_rel = float(np.max(rel_smoothed))
     raw_peak_mag = max(0.0, max_rel - min_rel)
 
+    # ── Movement-detection sanity check ──────────────────────────
+    # Catches the failure mode where MediaPipe accepted the clip
+    # (we passed the fallback gate and computed angles for every
+    # frame) but the predicted foot/ankle positions stay locked to
+    # a static body-prior because the framing is too zoomed in for
+    # the model to use upper-body context. Symptom: angle range is
+    # near zero across the entire trial even though the operator
+    # clearly recorded a foot movement. Better to error out with
+    # actionable guidance than to report 0° as if the patient
+    # genuinely has no ROM.
+    #
+    # 3° threshold: comfortably above keypoint jitter (~0.5-1° in
+    # a well-framed clip) but well below any clinically meaningful
+    # ROM (normal plantarflexion is 40-55°, normal dorsiflexion
+    # 15-25°). The check only fires in the low-confidence fallback
+    # path — strict-gated full-body videos are trusted because
+    # MediaPipe's anchor confidence was high enough to mean it
+    # actually saw the body parts.
+    MIN_DETECTABLE_ROM_DEG = 3.0
+    if low_confidence_fallback and raw_peak_mag < MIN_DETECTABLE_ROM_DEG:
+        raise ValueError(
+            f"No detectable ankle movement in this clip "
+            f"({raw_peak_mag:.1f}° measured). Two likely causes:\n"
+            f"  1. Framing too tight — MediaPipe needs to see the full "
+            f"body (head + torso + test leg in the same frame) to "
+            f"track the foot reliably. With only the leg visible, "
+            f"the model locks predicted foot/ankle positions to a "
+            f"static prior and doesn't follow the actual movement.\n"
+            f"  2. The clip didn't capture the full movement — re-record "
+            f"showing NEUTRAL → PLANTARFLEX → BACK TO NEUTRAL so the "
+            f"system has both the resting and peak positions to compare."
+        )
+
     # Apply 2D → 3D-equivalent calibration. See CALIBRATION_FACTORS
     # for the rationale; this is what maps the measured 2D projection
     # onto goniometer-comparable values so the clinical reference
