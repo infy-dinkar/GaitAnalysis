@@ -256,12 +256,38 @@ def analyze_ankle(
 
     n = int(min(len(kx), len(ax), len(fx)))
 
-    # Per-frame interior ankle angle. NaN when any required keypoint is
-    # below the visibility threshold.
+    # Pre-compute per-frame "strict visibility" pass — knee + ankle
+    # above VIS_THRESHOLD AND foot_index above FOOT_VIS_THRESHOLD.
+    # Used to decide whether to gate or fall back to unguarded data.
+    strict_pass: list[bool] = [
+        bool(vk[i] >= VIS_THRESHOLD
+             and va[i] >= VIS_THRESHOLD
+             and vf[i] >= FOOT_VIS_THRESHOLD)
+        for i in range(n)
+    ]
+    strict_count = sum(strict_pass)
+    min_frames_floor = max(3, int(fps * 0.3))
+
+    # Adaptive fallback: leg-only close-ups (no head/torso in frame)
+    # depress MediaPipe BlazePose Full's visibility scores on every
+    # landmark because the model uses upper-body context as a
+    # regularising signal. If the strict gate rejects everything (or
+    # almost everything), trust MediaPipe's POSITION predictions even
+    # when its confidence is low — the foot IS in the image, the model
+    # just lacks context. Normal full-body framing keeps the strict
+    # gate in effect because strict_count is plenty.
+    low_confidence_fallback = strict_count < min_frames_floor
+    if low_confidence_fallback:
+        use_frame = [True] * n
+    else:
+        use_frame = strict_pass
+
+    # Per-frame interior ankle angle. NaN when the chosen gate rejects
+    # the frame OR when the angle math degenerates (zero-length vector).
     angles: list[float] = []
     valid_frames = 0
     for i in range(n):
-        if vk[i] < VIS_THRESHOLD or va[i] < VIS_THRESHOLD or vf[i] < FOOT_VIS_THRESHOLD:
+        if not use_frame[i]:
             angles.append(float("nan"))
             continue
         a = _interior_ankle_angle(
@@ -275,20 +301,16 @@ def analyze_ankle(
         angles.append(a)
         valid_frames += 1
 
-    # Floor scaled by fps but with a hard minimum of 3 frames so short
-    # clips (down to ~5 sec) aren't rejected before the smoothing
-    # filter even gets a chance. 0.3 sec of usable footage is the new
-    # gate (was 0.5 sec) since the median filter + min/max ROM
-    # aggregation are robust to fewer frames.
-    min_frames_floor = max(3, int(fps * 0.3))
     if valid_frames < min_frames_floor:
+        # MediaPipe truly failed to localise the pose in this clip,
+        # even after dropping the visibility gate. Likely cause: the
+        # person isn't in frame at all, or the clip is corrupt.
         raise ValueError(
-            f"Only {valid_frames} frames had reliable knee + ankle + foot "
-            f"landmark detection (need {min_frames_floor}+). Re-record with "
-            f"the FULL BODY visible — head, torso, and the test leg in the "
-            f"same frame. Leg-only close-ups reduce MediaPipe's confidence "
-            f"on the lower-body landmarks because the model relies on "
-            f"upper-body context."
+            f"MediaPipe could not localise the leg in this clip "
+            f"({valid_frames} usable frames, need {min_frames_floor}+). "
+            f"Re-record with the test leg clearly visible — head + torso "
+            f"in frame too, if possible. Leg-only close-ups work but "
+            f"need the entire leg + foot in shot."
         )
 
     arr = np.asarray(angles, dtype=float)
@@ -331,7 +353,11 @@ def analyze_ankle(
     # to the actual video frame for the key-frame screenshot.
     rel_frame_indices: list[int] = []
     for i in range(n):
-        if vk[i] < VIS_THRESHOLD or va[i] < VIS_THRESHOLD or vf[i] < FOOT_VIS_THRESHOLD:
+        # Use the same gate selection (`use_frame`) chosen above so
+        # the rel_angle measurement set matches the strict / fallback
+        # decision instead of independently re-applying the strict
+        # gate and ending up with zero frames in the close-up case.
+        if not use_frame[i]:
             continue
         kxi, kyi = float(kx[i]), float(ky[i])
         axi, ayi = float(ax[i]), float(ay[i])
