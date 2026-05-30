@@ -145,8 +145,17 @@ def _grab_ankle_key_frame(
     }
 
 
-VIS_THRESHOLD = 0.4         # knee + ankle (anchor landmarks, must be reliable)
-FOOT_VIS_THRESHOLD = 0.25   # foot_index is intrinsically noisier — at peak
+VIS_THRESHOLD = 0.25        # knee + ankle (anchor landmarks). Lowered from
+                            # the original 0.4 because clinically-framed
+                            # close-up shots (leg-only, no head/torso in
+                            # frame) drop MediaPipe BlazePose Full's
+                            # confidence on the lower-body landmarks even
+                            # when they're well-placed — the model is
+                            # trained on full-body images and uses head/
+                            # torso context as a regularising signal. The
+                            # 3-frame median filter + min/max-over-trial
+                            # aggregation downstream absorb the extra noise.
+FOOT_VIS_THRESHOLD = 0.20   # foot_index is intrinsically noisier — at peak
                             # plantarflexion the toes point toward the camera
                             # plane and MediaPipe's confidence drops even when
                             # the landmark is still well-placed. A stricter
@@ -266,17 +275,30 @@ def analyze_ankle(
         angles.append(a)
         valid_frames += 1
 
-    if valid_frames < int(fps * 0.5):
-        # Less than half a second of usable footage — refuse to score.
+    # Floor scaled by fps but with a hard minimum of 3 frames so short
+    # clips (down to ~5 sec) aren't rejected before the smoothing
+    # filter even gets a chance. 0.3 sec of usable footage is the new
+    # gate (was 0.5 sec) since the median filter + min/max ROM
+    # aggregation are robust to fewer frames.
+    min_frames_floor = max(3, int(fps * 0.3))
+    if valid_frames < min_frames_floor:
         raise ValueError(
-            "Not enough frames with visible knee+ankle+foot landmarks. "
-            "Make sure the patient's foot is fully visible throughout."
+            f"Only {valid_frames} frames had reliable knee + ankle + foot "
+            f"landmark detection (need {min_frames_floor}+). Re-record with "
+            f"the FULL BODY visible — head, torso, and the test leg in the "
+            f"same frame. Leg-only close-ups reduce MediaPipe's confidence "
+            f"on the lower-body landmarks because the model relies on "
+            f"upper-body context."
         )
 
     arr = np.asarray(angles, dtype=float)
     finite = arr[~np.isnan(arr)]
     if len(finite) < 3:
-        raise ValueError("Too few usable frames to compute ROM.")
+        raise ValueError(
+            "Too few usable frames to compute ROM. Re-record with the "
+            "full body visible (head, torso, and test leg in the same "
+            "frame) — leg-only close-ups confuse MediaPipe's pose model."
+        )
 
     # ROM strategy: measure the FOOT'S ANGULAR SWEEP around the ankle,
     # NOT the interior shin-foot angle.
