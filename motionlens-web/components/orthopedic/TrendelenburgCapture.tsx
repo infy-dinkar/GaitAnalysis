@@ -616,7 +616,7 @@ export function TrendelenburgCapture() {
           <div className="grid gap-4 md:grid-cols-2">
             <SidePicker
               label="Left-leg stance"
-              hint="Patient stands on the RIGHT leg, lifts the LEFT."
+              hint="Patient stands on the LEFT leg, lifts the RIGHT."
               file={leftFile}
               onPick={(f) => validateAndSetFile("left", f)}
               progress={leftProgress}
@@ -625,7 +625,7 @@ export function TrendelenburgCapture() {
             />
             <SidePicker
               label="Right-leg stance"
-              hint="Patient stands on the LEFT leg, lifts the RIGHT."
+              hint="Patient stands on the RIGHT leg, lifts the LEFT."
               file={rightFile}
               onPick={(f) => validateAndSetFile("right", f)}
               progress={rightProgress}
