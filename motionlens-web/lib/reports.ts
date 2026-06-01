@@ -18,7 +18,8 @@ export interface ReportSummaryDTO {
     | "single_leg_stance"
     | "four_stage_balance"
     | "tug"
-    | "sppb";
+    | "sppb"
+    | "slr";
   body_part: string | null;
   movement: string | null;
   side: string | null;
@@ -59,7 +60,8 @@ export interface ReportCreatePayload {
     | "single_leg_stance"
     | "four_stage_balance"
     | "tug"
-    | "sppb";
+    | "sppb"
+    | "slr";
   body_part?: "shoulder" | "neck" | "knee" | "hip" | "ankle";
   movement?: string;
   side?: "left" | "right";

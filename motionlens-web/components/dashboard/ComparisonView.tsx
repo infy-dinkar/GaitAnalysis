@@ -18,6 +18,7 @@ import { SavedSingleLegStanceReport } from "@/components/orthopedic/SavedSingleL
 import { SavedFourStageBalanceReport } from "@/components/orthopedic/SavedFourStageBalanceReport";
 import { SavedTUGReport } from "@/components/orthopedic/SavedTUGReport";
 import { SavedSPPBReport } from "@/components/orthopedic/SavedSPPBReport";
+import { SavedSLRReport } from "@/components/orthopedic/SavedSLRReport";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { formatIST } from "@/lib/format/datetime";
 import type { ReportDTO } from "@/lib/reports";
@@ -362,6 +363,17 @@ function ReportBody({
     );
   }
 
+  if (report.module === "slr") {
+    return (
+      <SavedSLRReport
+        patientName={patient.name}
+        patient={patient}
+        metrics={report.metrics as Record<string, unknown>}
+        observations={report.observations as Record<string, unknown>}
+      />
+    );
+  }
+
   return <Notice>Unsupported module: {report.module}</Notice>;
 }
 
@@ -397,7 +409,33 @@ function buildDeltaRows(left: ReportDTO, right: ReportDTO): DeltaRow[] {
   if (left.module === "four_stage_balance") return fourStageBalanceDeltas(left, right);
   if (left.module === "tug") return tugDeltas(left, right);
   if (left.module === "sppb") return sppbDeltas(left, right);
+  if (left.module === "slr") return slrDeltas(left, right);
   return [];
+}
+
+function slrDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
+  const lm = left.metrics  as Record<string, unknown>;
+  const rm = right.metrics as Record<string, unknown>;
+  const ll = lm.left  as Record<string, unknown> | null;
+  const rl = rm.left  as Record<string, unknown> | null;
+  const lr = lm.right as Record<string, unknown> | null;
+  const rr = rm.right as Record<string, unknown> | null;
+  const rows: DeltaRow[] = [];
+  rows.push(deltaRow(
+    "Left-leg max raise",
+    pickNumber(ll, "max_raise_angle_deg"),
+    pickNumber(rl, "max_raise_angle_deg"),
+    "°",
+    "higher_is_better",
+  ));
+  rows.push(deltaRow(
+    "Right-leg max raise",
+    pickNumber(lr, "max_raise_angle_deg"),
+    pickNumber(rr, "max_raise_angle_deg"),
+    "°",
+    "higher_is_better",
+  ));
+  return rows;
 }
 
 function sppbDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
@@ -845,6 +883,7 @@ function moduleHeading(r: ReportDTO): string {
   if (r.module === "four_stage_balance") return "4-Stage Balance Test";
   if (r.module === "tug") return "Timed Up and Go (TUG)";
   if (r.module === "sppb") return "SPPB (Short Physical Performance Battery)";
+  if (r.module === "slr") return "Straight Leg Raise";
   const bp = r.body_part ? `${r.body_part.charAt(0).toUpperCase()}${r.body_part.slice(1)}` : "";
   const mv = r.movement ? `${r.movement.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}` : "";
   return [bp, mv].filter(Boolean).join(" · ") || "Biomechanics";

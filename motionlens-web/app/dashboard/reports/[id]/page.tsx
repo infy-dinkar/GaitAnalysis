@@ -20,6 +20,7 @@ import {
   Layers,
   Loader2,
   Move3d,
+  MoveUp,
   PersonStanding,
   Scale,
   StretchHorizontal,
@@ -38,6 +39,7 @@ import { SavedSingleLegStanceReport } from "@/components/orthopedic/SavedSingleL
 import { SavedFourStageBalanceReport } from "@/components/orthopedic/SavedFourStageBalanceReport";
 import { SavedTUGReport } from "@/components/orthopedic/SavedTUGReport";
 import { SavedSPPBReport } from "@/components/orthopedic/SavedSPPBReport";
+import { SavedSLRReport } from "@/components/orthopedic/SavedSLRReport";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { getReport, type ReportDTO } from "@/lib/reports";
 import { getPatient, type PatientDTO } from "@/lib/patients";
@@ -65,6 +67,7 @@ const MODULE_META: Record<
   four_stage_balance: { label: "4-Stage Balance Test", icon: Layers },
   tug: { label: "Timed Up and Go (TUG)", icon: Clock },
   sppb: { label: "SPPB (Short Physical Performance Battery)", icon: Award },
+  slr: { label: "Straight Leg Raise", icon: MoveUp },
 };
 
 export default function ReportViewPage({
@@ -292,6 +295,14 @@ function ReportView({ id }: { id: string }) {
         )}
         {report.module === "sppb" && (
           <SavedSPPBReport
+            patientName={patient?.name ?? null}
+            patient={patient}
+            metrics={report.metrics as Record<string, unknown>}
+            observations={report.observations as Record<string, unknown>}
+          />
+        )}
+        {report.module === "slr" && (
+          <SavedSLRReport
             patientName={patient?.name ?? null}
             patient={patient}
             metrics={report.metrics as Record<string, unknown>}

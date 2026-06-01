@@ -15,6 +15,7 @@ import {
   ChevronRight,
   Loader2,
   Move3d,
+  MoveUp,
   Scale,
   StretchHorizontal,
   TimerIcon,
@@ -81,6 +82,11 @@ const MODULE_META: Record<
     label: "SPPB (Short Physical Performance Battery)",
     icon: Award,
     tone: "bg-purple-500/10 text-purple-700 dark:text-purple-400",
+  },
+  slr: {
+    label: "Straight Leg Raise",
+    icon: MoveUp,
+    tone: "bg-lime-500/10 text-lime-700 dark:text-lime-400",
   },
 };
 

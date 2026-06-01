@@ -33,6 +33,7 @@ class ReportCreate(BaseModel):
         "four_stage_balance",
         "tug",
         "sppb",
+        "slr",
     ]
 
     # Biomech-specific (optional for other modules)
