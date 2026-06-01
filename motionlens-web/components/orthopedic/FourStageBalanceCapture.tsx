@@ -357,27 +357,27 @@ export function FourStageBalanceCapture() {
     setUploadErrors({ 1: null, 2: null, 3: null, 4: null });
     setError(null);
 
-    const tasks = stages.map(async (stage) => {
-      const file = uploadFiles[stage]!;
-      const result = await analyzeFourStageBalanceUpload(
-        file, stage, (pct) => setStageProgress(stage, pct),
-      );
-      return { stage, result };
-    });
-    const settled = await Promise.allSettled(tasks);
-
+    // Sequential, not parallel. The backend has only 2 gunicorn workers
+    // and each loads its MediaPipe BlazePose model on the first request
+    // post-deploy; firing up to 4 stages in parallel can blow past
+    // Vercel's ~30 s upstream-response budget on cold workers. Iterating
+    // the stages in order keeps each request comfortably warm. Per-stage
+    // analysis math + result shape unchanged.
     const newResults: SessionResult["stages"] = {};
     const newErrors: Record<StageIndex, string | null> = { 1: null, 2: null, 3: null, 4: null };
     let anySuccess = false;
-    settled.forEach((s, i) => {
-      const stage = stages[i];
-      if (s.status === "fulfilled") {
-        newResults[stage] = s.value.result;
+    for (const stage of stages) {
+      const file = uploadFiles[stage]!;
+      try {
+        const result = await analyzeFourStageBalanceUpload(
+          file, stage, (pct) => setStageProgress(stage, pct),
+        );
+        newResults[stage] = result;
         anySuccess = true;
-      } else {
-        newErrors[stage] = errorMessage(s.reason) ?? `Stage ${stage} analysis failed.`;
+      } catch (e) {
+        newErrors[stage] = errorMessage(e) ?? `Stage ${stage} analysis failed.`;
       }
-    });
+    }
 
     // Stop-at-first-failure rule: if stage N failed, mark stages
     // N+1..4 as not_attempted on the assembled session.
@@ -578,7 +578,7 @@ export function FourStageBalanceCapture() {
                 "Each clip starts with the patient in position; end after the 10s hold.",
                 "Camera frontal, hip height, full body visible.",
                 "CDC protocol: if a stage fails, downstream stages are skipped on the report.",
-                "All clips upload + analyse in parallel.",
+                "Clips are analysed one after the other (stage 1 → 4).",
               ].map((s, i) => (
                 <li key={i} className="flex gap-2.5">
                   <span className="tabular shrink-0 text-accent">{i + 1}.</span>
@@ -627,7 +627,7 @@ export function FourStageBalanceCapture() {
               <div className="flex items-center gap-3">
                 <Loader2 className="h-5 w-5 animate-spin text-accent" />
                 <p className="text-sm text-foreground">
-                  Uploading and analysing each stage in parallel.
+                  Uploading and analysing each stage one after the other.
                 </p>
               </div>
             </div>

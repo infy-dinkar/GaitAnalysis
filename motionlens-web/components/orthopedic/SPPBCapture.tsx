@@ -592,10 +592,20 @@ export function SPPBCapture() {
 
     const age = patient?.age ?? null;
 
+    // Sequential, not parallel. SPPB upload hits THREE different backend
+    // endpoints (/api/sppb/balance, /api/analyze-sppb-gait-speed,
+    // /api/analyze-sit-to-stand), each running MediaPipe BlazePose. With
+    // only 2 gunicorn workers, firing all three in parallel against a
+    // freshly-deployed container can blow past Vercel's ~30 s upstream
+    // budget on cold workers. Running them one after the other keeps
+    // each request comfortably warm. Per-component analysis math +
+    // result shape unchanged.
+
     // Component 1 — Balance via /api/sppb/balance using the existing
     // analyzeSPPBBalance helper. recording_duration_ms = null since
     // the file is a real uploaded clip (not a MediaRecorder Blob).
-    const balancePromise = (async () => {
+    let balanceOk = false;
+    try {
       const { analyzeSPPBBalance, normaliseBalanceStages } = await import(
         "@/lib/orthopedic/sppbBalance"
       );
@@ -608,30 +618,19 @@ export function SPPBCapture() {
       const stages = normaliseBalanceStages(res.data.stages);
       const diagnostics = res.data.diagnostics ?? null;
       setUploadBalanceProgress(100);
-      return { stages, diagnostics };
-    })();
-
-    const gaitPromise = analyzeSPPBGaitSpeedUpload(
-      uploadGaitFile, setUploadGaitProgress,
-    );
-    const chairPromise = analyzeSitToStandUpload(
-      uploadChairFile, age, setUploadChairProgress,
-    );
-
-    const [bSettled, gSettled, cSettled] = await Promise.allSettled([
-      balancePromise, gaitPromise, chairPromise,
-    ]);
-
-    // Apply results / errors per component.
-    if (bSettled.status === "fulfilled") {
-      setBalanceStages(bSettled.value.stages);
-      setBalanceDiagnostics(bSettled.value.diagnostics);
-    } else {
-      setUploadBalanceError(errorMessageStr(bSettled.reason) ?? "Balance analysis failed.");
+      setBalanceStages(stages);
+      setBalanceDiagnostics(diagnostics);
+      balanceOk = true;
+    } catch (e) {
+      setUploadBalanceError(errorMessageStr(e) ?? "Balance analysis failed.");
     }
 
-    if (gSettled.status === "fulfilled") {
-      const g = gSettled.value;
+    // Component 2 — Gait speed (4 m walk).
+    let gaitOk = false;
+    try {
+      const g = await analyzeSPPBGaitSpeedUpload(
+        uploadGaitFile, setUploadGaitProgress,
+      );
       // SPPB stores two trials and takes the best; for upload mode we
       // populate trial1 with the uploaded clip and leave trial2 null.
       // buildGaitSpeedComponent handles the single-trial case.
@@ -643,20 +642,24 @@ export function SPPBCapture() {
         },
         2: null,
       });
-    } else {
-      setUploadGaitError(errorMessageStr(gSettled.reason) ?? "Gait-speed analysis failed.");
+      gaitOk = true;
+    } catch (e) {
+      setUploadGaitError(errorMessageStr(e) ?? "Gait-speed analysis failed.");
     }
 
-    if (cSettled.status === "fulfilled") {
-      setChairResult(cSettled.value);
-    } else {
-      setUploadChairError(errorMessageStr(cSettled.reason) ?? "Chair-stand analysis failed.");
+    // Component 3 — 5x sit-to-stand.
+    let chairOk = false;
+    try {
+      const c = await analyzeSitToStandUpload(
+        uploadChairFile, age, setUploadChairProgress,
+      );
+      setChairResult(c);
+      chairOk = true;
+    } catch (e) {
+      setUploadChairError(errorMessageStr(e) ?? "Chair-stand analysis failed.");
     }
 
-    const anySuccess =
-      bSettled.status === "fulfilled"
-      || gSettled.status === "fulfilled"
-      || cSettled.status === "fulfilled";
+    const anySuccess = balanceOk || gaitOk || chairOk;
     if (anySuccess) {
       setUploadPhase("done");
       setPhase("done");
@@ -788,7 +791,7 @@ export function SPPBCapture() {
               "Balance: frontal view, ~30s, patient progresses side-by-side → semi-tandem → tandem.",
               "Gait Speed: side view, 4-metre walk at usual pace.",
               "Chair Stand: side view, 5x sit-to-stand cycles.",
-              "All three clips upload + analyse in parallel.",
+              "All three clips are analysed one after the other (balance → gait → chair).",
             ].map((s, i) => (
               <li key={i} className="flex gap-2.5">
                 <span className="tabular shrink-0 text-accent">{i + 1}.</span>
@@ -852,7 +855,7 @@ export function SPPBCapture() {
             <div className="flex items-center gap-3">
               <Loader2 className="h-5 w-5 animate-spin text-accent" />
               <p className="text-sm text-foreground">
-                Uploading and analysing all three components in parallel.
+                Uploading and analysing all three components one after the other.
               </p>
             </div>
           </div>

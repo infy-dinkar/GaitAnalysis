@@ -291,7 +291,7 @@ export function SingleLegStanceCapture() {
 
   // ── Upload-mode state ──────────────────────────────────────────
   // 4 file slots × per-slot progress + error. Promise.allSettled
-  // runs all selected slots in parallel; combined SessionResult
+  // runs selected slots one after the other; combined SessionResult
   // assembles client-side.
   const [uploadPhase, setUploadPhase] = useState<UploadPhase>("idle");
   const [uploadFiles, setUploadFiles] = useState<Record<TrialSlot, File | null>>({
@@ -337,31 +337,32 @@ export function SingleLegStanceCapture() {
     setError(null);
 
     const age = patient?.age ?? null;
-    const tasks = slots.map(async (slot) => {
-      const file = uploadFiles[slot]!;
-      const { side, condition } = slotToSideCondition(slot);
-      const result = await analyzeSingleLegStanceUpload(
-        file, side, condition, age,
-        (pct) => setSlotProgress(slot, pct),
-      );
-      return { slot, result };
-    });
-    const settled = await Promise.allSettled(tasks);
 
+    // Sequential, not parallel. The backend has only 2 gunicorn workers
+    // and each loads its MediaPipe BlazePose model on the first request
+    // post-deploy; firing up to 4 trial slots in parallel can blow past
+    // Vercel's ~30 s upstream-response budget on cold workers. Iterating
+    // the slots keeps each request comfortably warm. Per-slot analysis
+    // math + result shape unchanged.
     const newTrials: SessionResult["trials"] = {};
     const newErrors: Record<TrialSlot, string | null> = {
       left_open: null, right_open: null, left_closed: null, right_closed: null,
     };
     let anySuccess = false;
-    settled.forEach((s, i) => {
-      const slot = slots[i];
-      if (s.status === "fulfilled") {
-        newTrials[slot] = s.value.result;
+    for (const slot of slots) {
+      const file = uploadFiles[slot]!;
+      const { side, condition } = slotToSideCondition(slot);
+      try {
+        const result = await analyzeSingleLegStanceUpload(
+          file, side, condition, age,
+          (pct) => setSlotProgress(slot, pct),
+        );
+        newTrials[slot] = result;
         anySuccess = true;
-      } else {
-        newErrors[slot] = errorMessage(s.reason) ?? `${slot} analysis failed.`;
+      } catch (e) {
+        newErrors[slot] = errorMessage(e) ?? `${slot} analysis failed.`;
       }
-    });
+    }
 
     setTrials(newTrials);
     setUploadErrors(newErrors);
@@ -528,7 +529,7 @@ export function SingleLegStanceCapture() {
                 "Camera frontal, hip height, full body in frame.",
                 "Eyes-open trials: max 60 s hold. Eyes-closed trials: max 30 s hold.",
                 "At least one eyes-open trial per side recommended for a complete session.",
-                "All clips upload + analyse in parallel — combined report below.",
+                "Clips are analysed one after the other — combined report below.",
               ].map((s, i) => (
                 <li key={i} className="flex gap-2.5">
                   <span className="tabular shrink-0 text-accent">{i + 1}.</span>
