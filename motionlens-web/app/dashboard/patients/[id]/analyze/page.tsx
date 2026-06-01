@@ -12,6 +12,7 @@ import {
   Activity,
   Layers,
   Move3d,
+  MoveUp,
   PersonStanding,
   Scale,
   StretchHorizontal,
@@ -119,6 +120,15 @@ const MODULES = [
     icon: Award,
     tone: "from-purple-500/15 to-purple-500/5",
     iconTone: "text-purple-600",
+  },
+  {
+    href: "orthopedic/slr",
+    eyebrow: "Orthopedic test",
+    title: "Straight Leg Raise",
+    body: "Passive hip-flexion screen. Supine patient raises one straight leg per side; we capture the maximum angle reached while the knee stayed straight.",
+    icon: MoveUp,
+    tone: "from-lime-500/15 to-lime-500/5",
+    iconTone: "text-lime-600",
   },
 ];
 
