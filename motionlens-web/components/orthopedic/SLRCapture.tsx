@@ -284,29 +284,32 @@ export function SLRCapture() {
     setUploadErrors({ left: null, right: null });
     setError(null);
 
-    const tasks: Array<Promise<SLRSideResult | null>> = [
-      leftFile  ? analyzeSLRUpload(leftFile,  "left",  setLeftProgress)  : Promise.resolve(null),
-      rightFile ? analyzeSLRUpload(rightFile, "right", setRightProgress) : Promise.resolve(null),
-    ];
-    const [leftSettled, rightSettled] = await Promise.allSettled(tasks);
-
+    // Sequential, not parallel. Each backend gunicorn worker loads a
+    // fresh MediaPipe BlazePose model on its first request, which can
+    // push a cold worker past Vercel's ~30 s upstream-response budget
+    // (and gunicorn's 120 s worker timeout under load). With only two
+    // workers on the EC2 box, firing both sides in parallel against a
+    // freshly-deployed container caused both clips to 502 — running
+    // them one after the other keeps each request comfortably warm
+    // and well under the timeout. Total wall-clock is ~2x but still
+    // typically 20-40 s per assessment.
     let leftResult:  SLRSideResult | null = null;
     let rightResult: SLRSideResult | null = null;
     let leftErr:  string | null = null;
     let rightErr: string | null = null;
 
     if (leftFile) {
-      if (leftSettled.status === "fulfilled") {
-        leftResult = leftSettled.value;
-      } else {
-        leftErr = errorMessage(leftSettled.reason) ?? "Left-side analysis failed.";
+      try {
+        leftResult = await analyzeSLRUpload(leftFile, "left", setLeftProgress);
+      } catch (e) {
+        leftErr = errorMessage(e) ?? "Left-side analysis failed.";
       }
     }
     if (rightFile) {
-      if (rightSettled.status === "fulfilled") {
-        rightResult = rightSettled.value;
-      } else {
-        rightErr = errorMessage(rightSettled.reason) ?? "Right-side analysis failed.";
+      try {
+        rightResult = await analyzeSLRUpload(rightFile, "right", setRightProgress);
+      } catch (e) {
+        rightErr = errorMessage(e) ?? "Right-side analysis failed.";
       }
     }
 
@@ -518,7 +521,7 @@ export function SLRCapture() {
                   "For each, place the camera on the SAME side as the leg being raised.",
                 "In each clip, the patient raises the leg slowly from flat to as high as " +
                   "they can comfortably reach, keeping the knee fully straight throughout.",
-                "Both clips are uploaded together and analysed in parallel.",
+                "Both clips are analysed one after the other (left first, then right).",
               ].map((s, i) => (
                 <li key={i} className="flex gap-2.5">
                   <span className="tabular shrink-0 text-accent">{i + 1}.</span>
@@ -576,7 +579,8 @@ export function SLRCapture() {
               <div className="flex items-center gap-3">
                 <Loader2 className="h-5 w-5 animate-spin text-accent" />
                 <p className="text-sm text-foreground">
-                  Uploading and analysing — this can take 10-30 seconds per side.
+                  Uploading and analysing — left side first, then right.
+                  About 15-30 seconds per side.
                 </p>
               </div>
             </div>

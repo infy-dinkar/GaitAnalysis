@@ -94,7 +94,7 @@ export function SingleLegSquatCapture() {
   const { isDoctorFlow, patient } = usePatientContext();
 
   // Mode toggle — live (browser BlazePose WASM, per-side) vs upload
-  // (backend MediaPipe, both sides in parallel). Both modes converge
+  // (backend MediaPipe, both sides sequentially). Both modes converge
   // on the same SingleLegSquatFullResult + SingleLegSquatReport.
   const [mode, setMode] = useState<Mode>("live");
 
@@ -317,33 +317,33 @@ export function SingleLegSquatCapture() {
     setError(null);
 
     const age = patient?.age ?? null;
-    const tasks: Array<Promise<SingleLegSquatSideResult | null>> = [
-      leftFile
-        ? analyzeSingleLegSquatUpload(leftFile, "left", age, setLeftProgress)
-        : Promise.resolve(null),
-      rightFile
-        ? analyzeSingleLegSquatUpload(rightFile, "right", age, setRightProgress)
-        : Promise.resolve(null),
-    ];
-    const [leftSettled, rightSettled] = await Promise.allSettled(tasks);
 
+    // Sequential, not parallel. The backend has only 2 gunicorn workers
+    // and each loads its MediaPipe BlazePose model on the first request
+    // post-deploy; two parallel cold loads can blow past Vercel's ~30 s
+    // upstream-response budget. Running left then right keeps each
+    // request comfortably warm. Analysis math + result shape unchanged.
     let leftResult:  SingleLegSquatSideResult | null = null;
     let rightResult: SingleLegSquatSideResult | null = null;
     let leftErr:  string | null = null;
     let rightErr: string | null = null;
 
     if (leftFile) {
-      if (leftSettled.status === "fulfilled") {
-        leftResult = leftSettled.value;
-      } else {
-        leftErr = errorMessage(leftSettled.reason) ?? "Left-side analysis failed.";
+      try {
+        leftResult = await analyzeSingleLegSquatUpload(
+          leftFile, "left", age, setLeftProgress,
+        );
+      } catch (e) {
+        leftErr = errorMessage(e) ?? "Left-side analysis failed.";
       }
     }
     if (rightFile) {
-      if (rightSettled.status === "fulfilled") {
-        rightResult = rightSettled.value;
-      } else {
-        rightErr = errorMessage(rightSettled.reason) ?? "Right-side analysis failed.";
+      try {
+        rightResult = await analyzeSingleLegSquatUpload(
+          rightFile, "right", age, setRightProgress,
+        );
+      } catch (e) {
+        rightErr = errorMessage(e) ?? "Right-side analysis failed.";
       }
     }
 
@@ -555,7 +555,7 @@ export function SingleLegSquatCapture() {
                 "Patient stands facing the camera squarely — both shoulders level in frame.",
                 "Record TWO clips — one for left-leg squats, one for right-leg squats.",
                 `Each clip should show the patient performing ${TARGET_REP_COUNT} single-leg squats on the test leg at a steady tempo.`,
-                "Both clips are uploaded together and analysed in parallel.",
+                "Both clips are analysed one after the other (left first, then right).",
               ].map((s, i) => (
                 <li key={i} className="flex gap-2.5">
                   <span className="tabular shrink-0 text-accent">{i + 1}.</span>
@@ -614,7 +614,8 @@ export function SingleLegSquatCapture() {
               <div className="flex items-center gap-3">
                 <Loader2 className="h-5 w-5 animate-spin text-accent" />
                 <p className="text-sm text-foreground">
-                  Uploading and analysing — this can take 10-30 seconds per side.
+                  Uploading and analysing — left side first, then right.
+                  About 15-30 seconds per side.
                 </p>
               </div>
             </div>
