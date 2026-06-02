@@ -19,6 +19,7 @@ import { SavedFourStageBalanceReport } from "@/components/orthopedic/SavedFourSt
 import { SavedTUGReport } from "@/components/orthopedic/SavedTUGReport";
 import { SavedSPPBReport } from "@/components/orthopedic/SavedSPPBReport";
 import { SavedSLRReport } from "@/components/orthopedic/SavedSLRReport";
+import { SavedAKEReport } from "@/components/orthopedic/SavedAKEReport";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { formatIST } from "@/lib/format/datetime";
 import type { ReportDTO } from "@/lib/reports";
@@ -374,6 +375,17 @@ function ReportBody({
     );
   }
 
+  if (report.module === "ake") {
+    return (
+      <SavedAKEReport
+        patientName={patient.name}
+        patient={patient}
+        metrics={report.metrics as Record<string, unknown>}
+        observations={report.observations as Record<string, unknown>}
+      />
+    );
+  }
+
   return <Notice>Unsupported module: {report.module}</Notice>;
 }
 
@@ -410,7 +422,33 @@ function buildDeltaRows(left: ReportDTO, right: ReportDTO): DeltaRow[] {
   if (left.module === "tug") return tugDeltas(left, right);
   if (left.module === "sppb") return sppbDeltas(left, right);
   if (left.module === "slr") return slrDeltas(left, right);
+  if (left.module === "ake") return akeDeltas(left, right);
   return [];
+}
+
+function akeDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
+  const lm = left.metrics  as Record<string, unknown>;
+  const rm = right.metrics as Record<string, unknown>;
+  const ll = lm.left  as Record<string, unknown> | null;
+  const rl = rm.left  as Record<string, unknown> | null;
+  const lr = lm.right as Record<string, unknown> | null;
+  const rr = rm.right as Record<string, unknown> | null;
+  const rows: DeltaRow[] = [];
+  rows.push(deltaRow(
+    "Left-leg extension deficit",
+    pickNumber(ll, "deficit_deg"),
+    pickNumber(rl, "deficit_deg"),
+    "°",
+    "lower_is_better",
+  ));
+  rows.push(deltaRow(
+    "Right-leg extension deficit",
+    pickNumber(lr, "deficit_deg"),
+    pickNumber(rr, "deficit_deg"),
+    "°",
+    "lower_is_better",
+  ));
+  return rows;
 }
 
 function slrDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
@@ -884,6 +922,7 @@ function moduleHeading(r: ReportDTO): string {
   if (r.module === "tug") return "Timed Up and Go (TUG)";
   if (r.module === "sppb") return "SPPB (Short Physical Performance Battery)";
   if (r.module === "slr") return "Straight Leg Raise";
+  if (r.module === "ake") return "Active Knee Extension";
   const bp = r.body_part ? `${r.body_part.charAt(0).toUpperCase()}${r.body_part.slice(1)}` : "";
   const mv = r.movement ? `${r.movement.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}` : "";
   return [bp, mv].filter(Boolean).join(" · ") || "Biomechanics";

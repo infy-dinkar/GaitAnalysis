@@ -16,6 +16,7 @@ import {
   Loader2,
   Move3d,
   MoveUp,
+  MoveDiagonal,
   Scale,
   StretchHorizontal,
   TimerIcon,
@@ -87,6 +88,11 @@ const MODULE_META: Record<
     label: "Straight Leg Raise",
     icon: MoveUp,
     tone: "bg-lime-500/10 text-lime-700 dark:text-lime-400",
+  },
+  ake: {
+    label: "Active Knee Extension",
+    icon: MoveDiagonal,
+    tone: "bg-orange-500/10 text-orange-700 dark:text-orange-400",
   },
 };
 

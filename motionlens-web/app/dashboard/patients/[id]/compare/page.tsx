@@ -337,6 +337,7 @@ function moduleLabel(r: ReportSummaryDTO): string {
   if (r.module === "tug") return "Timed Up and Go (TUG)";
   if (r.module === "sppb") return "SPPB (Short Physical Performance Battery)";
   if (r.module === "slr") return "Straight Leg Raise";
+  if (r.module === "ake") return "Active Knee Extension";
   return "Biomechanics";
 }
 

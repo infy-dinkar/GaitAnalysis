@@ -88,6 +88,7 @@ from engines.orthopedic.trendelenburg_engine import analyze_trendelenburg
 # existing SingleLegSquatReport renders live + upload identically.
 from engines.orthopedic.single_leg_squat_engine import analyze_single_leg_squat
 from engines.orthopedic.slr_engine import analyze_slr
+from engines.orthopedic.ake_engine import analyze_ake
 
 # ─── 5x Sit-to-Stand — Test C2 upload mode ───────────────────────
 # SINGLE trial (no L/R split). Engine math mirrors
@@ -1276,6 +1277,184 @@ async def analyze_slr_endpoint(
     except Exception as e:
         log.exception("slr analysis failed")
         return SLRResponse(
+            success=False, data=None, error=f"Analysis failed: {e}",
+        )
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Active Knee Extension (AKE) — per-side upload analysis
+# ══════════════════════════════════════════════════════════════════════
+# One POST per side. The frontend uploads left and right clips
+# sequentially (same cold-worker mitigation as SLR) and assembles
+# AKEFullResult { left, right } client-side. Math + classification
+# cutoffs mirror lib/orthopedic/ake.ts so live + upload produce
+# identical reports.
+class AKEFrameSampleDTO(BaseModel):
+    t_ms: float
+    knee_angle_deg: Optional[float] = None
+    hip_flex_angle_deg: Optional[float] = None
+    thigh_held: bool
+
+
+class AKEKeypointDTO(BaseModel):
+    x: float
+    y: float
+    score: float
+
+
+class AKESideResultDTO(BaseModel):
+    side_tested: str
+    max_knee_angle_deg: float
+    deficit_deg: float
+    max_knee_sample_index: Optional[int] = None
+    hip_flex_angle_at_peak_deg: Optional[float] = None
+    classification: str
+    duration_seconds: float
+    termination: str
+    thigh_held_fraction: float
+    samples: List[AKEFrameSampleDTO]
+    keypoints: List[List[AKEKeypointDTO]]
+    peak_screenshot_data_url: Optional[str] = None
+    # Extras — not in the strict TS AKESideResult shape but surfaced
+    # for the response envelope's per-side annotations.
+    fps: Optional[float] = None
+    total_frames: Optional[int] = None
+    valid_frames: Optional[int] = None
+    interpretation: Optional[str] = None
+
+
+class AKEResponse(BaseModel):
+    success: bool
+    data: Optional[AKESideResultDTO] = None
+    error: Optional[str] = None
+    fps_warning: Optional[str] = None
+    duration_warning: Optional[str] = None
+
+
+@app.post("/api/analyze-ake", response_model=AKEResponse)
+async def analyze_ake_endpoint(
+    video: UploadFile = File(...),
+    side: str = Form(...),
+) -> AKEResponse:
+    """Run the Active Knee Extension pipeline on an uploaded clip.
+    `side` is the LEG being tested (the camera should sit on that same
+    side of the patient for the lateral view). Validation gates mirror
+    the SLR / Single-Leg-Squat endpoints — same gait MediaPipe pipeline
+    downstream.
+    """
+    if side not in ("left", "right"):
+        raise HTTPException(
+            status_code=400,
+            detail="Side must be 'left' or 'right'.",
+        )
+
+    tmp_path: Optional[str] = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        # 1) File-size gate
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(
+            contents, video.filename or "ake.mp4",
+        )
+        log.info(
+            "ake: file=%s side=%s size=%.2f MB",
+            video.filename, side, size_mb,
+        )
+
+        # 2) FPS + duration gate
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not determine video frame rate. "
+                    "Please upload a different file."
+                ),
+            )
+
+        fps_warning: Optional[str] = None
+        duration_warning: Optional[str] = None
+
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video frame rate too low ({probe_fps:.1f} FPS). "
+                    f"Minimum {MIN_REQUIRED_FPS} FPS required. "
+                    f"Recommended: {RECOMMENDED_FPS}+ FPS."
+                ),
+            )
+        if probe_fps < RECOMMENDED_FPS:
+            fps_warning = (
+                f"Note: Video is {probe_fps:.1f} FPS, below recommended "
+                f"{RECOMMENDED_FPS} FPS — results may be less accurate."
+            )
+        if probe_total_frames <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not determine video length. Please upload a different file.",
+            )
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video too long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed."
+                ),
+            )
+        if duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = (
+                f"Video is short ({duration_seconds:.1f}s) — at least "
+                f"{MIN_GAIT_DURATION_SEC} seconds recommended so the engine can capture "
+                f"the full knee extension."
+            )
+
+        # 3) Run the analysis (reuses gait MediaPipe options).
+        pose_options = _build_gait_pose_options()
+        result: Dict[str, Any] = analyze_ake(
+            video_path=tmp_path,
+            pose_options=pose_options,
+            side=side,
+        )
+
+        return AKEResponse(
+            success=True,
+            data=AKESideResultDTO(**result),
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("ake validation: %s", e)
+        return AKEResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("ake analysis failed")
+        return AKEResponse(
             success=False, data=None, error=f"Analysis failed: {e}",
         )
     finally:
