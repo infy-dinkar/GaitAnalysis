@@ -13,6 +13,7 @@ import {
   Layers,
   Move3d,
   MoveUp,
+  MoveDiagonal,
   PersonStanding,
   Scale,
   StretchHorizontal,
@@ -129,6 +130,15 @@ const MODULES = [
     icon: MoveUp,
     tone: "from-lime-500/15 to-lime-500/5",
     iconTone: "text-lime-600",
+  },
+  {
+    href: "orthopedic/ake",
+    eyebrow: "Orthopedic test",
+    title: "Active Knee Extension",
+    body: "Hamstring-length screen via the 90/90 test. Supine patient holds the thigh vertical and slowly extends the knee; we capture max knee angle + extension deficit per side.",
+    icon: MoveDiagonal,
+    tone: "from-orange-500/15 to-orange-500/5",
+    iconTone: "text-orange-600",
   },
 ];
 

@@ -34,6 +34,7 @@ class ReportCreate(BaseModel):
         "tug",
         "sppb",
         "slr",
+        "ake",
     ]
 
     # Biomech-specific (optional for other modules)
