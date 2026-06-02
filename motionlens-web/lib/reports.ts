@@ -20,7 +20,8 @@ export interface ReportSummaryDTO {
     | "tug"
     | "sppb"
     | "slr"
-    | "ake";
+    | "ake"
+    | "modified_thomas";
   body_part: string | null;
   movement: string | null;
   side: string | null;
@@ -63,7 +64,8 @@ export interface ReportCreatePayload {
     | "tug"
     | "sppb"
     | "slr"
-    | "ake";
+    | "ake"
+    | "modified_thomas";
   body_part?: "shoulder" | "neck" | "knee" | "hip" | "ankle";
   movement?: string;
   side?: "left" | "right";

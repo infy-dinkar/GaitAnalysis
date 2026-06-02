@@ -1,5 +1,5 @@
 "use client";
-// Thirteen landing-page module cards.
+// Fourteen landing-page module cards.
 //
 // Why card clicks no longer link directly to bare module routes:
 //   A bare URL like /orthopedic/trendelenburg carries no ?patientId=,
@@ -42,6 +42,7 @@ import {
   Move3d,
   MoveUp,
   MoveDiagonal,
+  Hourglass,
   PersonStanding,
   Scale,
   StretchHorizontal,
@@ -214,6 +215,17 @@ const PRODUCTS: ProductCard[] = [
     icon: MoveDiagonal,
     iconTone: "text-orange-500",
   },
+  {
+    targetRoute: "/orthopedic/modified-thomas",
+    eyebrow: "Orthopedic test",
+    title: "Modified Thomas Test.",
+    body:
+      "Hip-flexor and rectus-femoris length screen. Patient lies on the edge of a table with one knee to chest; the other leg hangs naturally. We auto-capture settled hip + knee angles per side.",
+    gradient:
+      "linear-gradient(135deg, rgba(236,72,153,0.20) 0%, rgba(244,114,182,0.10) 50%, rgba(28,28,33,0.0) 100%)",
+    icon: Hourglass,
+    iconTone: "text-pink-500",
+  },
 ];
 
 export function ProductShowcase() {
@@ -247,9 +259,9 @@ export function ProductShowcase() {
   return (
     <Section id="modules" className="bg-dots">
       <div className="max-w-2xl">
-        <Badge>Thirteen modules</Badge>
+        <Badge>Fourteen modules</Badge>
         <h2 className="mt-5 text-3xl font-semibold tracking-tight md:text-5xl">
-          Movement, measured<br />thirteen ways.
+          Movement, measured<br />fourteen ways.
         </h2>
       </div>
 
