@@ -338,6 +338,7 @@ function moduleLabel(r: ReportSummaryDTO): string {
   if (r.module === "sppb") return "SPPB (Short Physical Performance Battery)";
   if (r.module === "slr") return "Straight Leg Raise";
   if (r.module === "ake") return "Active Knee Extension";
+  if (r.module === "modified_thomas") return "Modified Thomas Test";
   return "Biomechanics";
 }
 

@@ -17,6 +17,7 @@ import {
   Move3d,
   MoveUp,
   MoveDiagonal,
+  Hourglass,
   Scale,
   StretchHorizontal,
   TimerIcon,
@@ -93,6 +94,11 @@ const MODULE_META: Record<
     label: "Active Knee Extension",
     icon: MoveDiagonal,
     tone: "bg-orange-500/10 text-orange-700 dark:text-orange-400",
+  },
+  modified_thomas: {
+    label: "Modified Thomas Test",
+    icon: Hourglass,
+    tone: "bg-pink-500/10 text-pink-700 dark:text-pink-400",
   },
 };
 

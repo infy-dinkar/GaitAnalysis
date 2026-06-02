@@ -89,6 +89,7 @@ from engines.orthopedic.trendelenburg_engine import analyze_trendelenburg
 from engines.orthopedic.single_leg_squat_engine import analyze_single_leg_squat
 from engines.orthopedic.slr_engine import analyze_slr
 from engines.orthopedic.ake_engine import analyze_ake
+from engines.orthopedic.modified_thomas_engine import analyze_modified_thomas
 
 # ─── 5x Sit-to-Stand — Test C2 upload mode ───────────────────────
 # SINGLE trial (no L/R split). Engine math mirrors
@@ -1455,6 +1456,191 @@ async def analyze_ake_endpoint(
     except Exception as e:
         log.exception("ake analysis failed")
         return AKEResponse(
+            success=False, data=None, error=f"Analysis failed: {e}",
+        )
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Modified Thomas Test (MTT) — per-side upload analysis
+# ══════════════════════════════════════════════════════════════════════
+# One POST per side. The frontend uploads left and right clips
+# sequentially (same cold-worker mitigation as SLR / AKE) and
+# assembles ModifiedThomasFullResult { left, right } client-side. Math
+# + classification cutoffs mirror lib/orthopedic/modifiedThomas.ts so
+# live + upload produce identical reports.
+#
+# This test is a STATIC HOLD — the engine looks for the longest
+# stable window in the clip and returns the median hip + knee angles
+# from that window. If no window meets the jitter gate it falls back
+# to the median of the last 1.5 s and flags low_confidence=True.
+class MTTFrameSampleDTO(BaseModel):
+    t_ms: float
+    hip_angle_deg: Optional[float] = None
+    knee_angle_deg: Optional[float] = None
+    stable: bool
+
+
+class MTTKeypointDTO(BaseModel):
+    x: float
+    y: float
+    score: float
+
+
+class ModifiedThomasSideResultDTO(BaseModel):
+    side_tested: str
+    hip_angle_deg: float
+    knee_angle_deg: float
+    hip_classification: str
+    knee_classification: str
+    hip_angle_stddev_deg: float
+    knee_angle_stddev_deg: float
+    low_confidence: bool
+    capture_sample_index: Optional[int] = None
+    duration_seconds: float
+    termination: str
+    samples: List[MTTFrameSampleDTO]
+    keypoints: List[List[MTTKeypointDTO]]
+    capture_screenshot_data_url: Optional[str] = None
+    # Extras — not in the strict TS ModifiedThomasSideResult shape but
+    # surfaced for the response envelope's per-side annotations.
+    fps: Optional[float] = None
+    total_frames: Optional[int] = None
+    valid_frames: Optional[int] = None
+    interpretation: Optional[str] = None
+
+
+class ModifiedThomasResponse(BaseModel):
+    success: bool
+    data: Optional[ModifiedThomasSideResultDTO] = None
+    error: Optional[str] = None
+    fps_warning: Optional[str] = None
+    duration_warning: Optional[str] = None
+
+
+@app.post("/api/analyze-modified-thomas", response_model=ModifiedThomasResponse)
+async def analyze_modified_thomas_endpoint(
+    video: UploadFile = File(...),
+    side: str = Form(...),
+) -> ModifiedThomasResponse:
+    """Run the Modified Thomas Test pipeline on an uploaded clip.
+    `side` is the HANGING (test) leg (the camera should sit on that
+    same side of the patient for the lateral view). Validation gates
+    mirror the SLR / AKE endpoints — same gait MediaPipe pipeline
+    downstream.
+    """
+    if side not in ("left", "right"):
+        raise HTTPException(
+            status_code=400,
+            detail="Side must be 'left' or 'right'.",
+        )
+
+    tmp_path: Optional[str] = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        # 1) File-size gate
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(
+            contents, video.filename or "modified_thomas.mp4",
+        )
+        log.info(
+            "modified_thomas: file=%s side=%s size=%.2f MB",
+            video.filename, side, size_mb,
+        )
+
+        # 2) FPS + duration gate
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not determine video frame rate. "
+                    "Please upload a different file."
+                ),
+            )
+
+        fps_warning: Optional[str] = None
+        duration_warning: Optional[str] = None
+
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video frame rate too low ({probe_fps:.1f} FPS). "
+                    f"Minimum {MIN_REQUIRED_FPS} FPS required. "
+                    f"Recommended: {RECOMMENDED_FPS}+ FPS."
+                ),
+            )
+        if probe_fps < RECOMMENDED_FPS:
+            fps_warning = (
+                f"Note: Video is {probe_fps:.1f} FPS, below recommended "
+                f"{RECOMMENDED_FPS} FPS — results may be less accurate."
+            )
+        if probe_total_frames <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not determine video length. Please upload a different file.",
+            )
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video too long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed."
+                ),
+            )
+        if duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = (
+                f"Video is short ({duration_seconds:.1f}s) — at least "
+                f"{MIN_GAIT_DURATION_SEC} seconds recommended so the engine can find "
+                f"a stable hold window."
+            )
+
+        # 3) Run the analysis (reuses gait MediaPipe options).
+        pose_options = _build_gait_pose_options()
+        result: Dict[str, Any] = analyze_modified_thomas(
+            video_path=tmp_path,
+            pose_options=pose_options,
+            side=side,
+        )
+
+        return ModifiedThomasResponse(
+            success=True,
+            data=ModifiedThomasSideResultDTO(**result),
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("modified_thomas validation: %s", e)
+        return ModifiedThomasResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("modified_thomas analysis failed")
+        return ModifiedThomasResponse(
             success=False, data=None, error=f"Analysis failed: {e}",
         )
     finally:

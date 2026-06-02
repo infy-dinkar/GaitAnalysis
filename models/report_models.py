@@ -35,6 +35,7 @@ class ReportCreate(BaseModel):
         "sppb",
         "slr",
         "ake",
+        "modified_thomas",
     ]
 
     # Biomech-specific (optional for other modules)

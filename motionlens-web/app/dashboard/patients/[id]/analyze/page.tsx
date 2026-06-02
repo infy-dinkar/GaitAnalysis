@@ -14,6 +14,7 @@ import {
   Move3d,
   MoveUp,
   MoveDiagonal,
+  Hourglass,
   PersonStanding,
   Scale,
   StretchHorizontal,
@@ -139,6 +140,15 @@ const MODULES = [
     icon: MoveDiagonal,
     tone: "from-orange-500/15 to-orange-500/5",
     iconTone: "text-orange-600",
+  },
+  {
+    href: "orthopedic/modified-thomas",
+    eyebrow: "Orthopedic test",
+    title: "Modified Thomas Test",
+    body: "Hip-flexor and rectus-femoris length screen. Supine patient holds one knee to chest and lets the other leg hang; we auto-capture settled hip + knee angles per side.",
+    icon: Hourglass,
+    tone: "from-pink-500/15 to-pink-500/5",
+    iconTone: "text-pink-600",
   },
 ];
 
