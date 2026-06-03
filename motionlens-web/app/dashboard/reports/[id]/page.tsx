@@ -23,6 +23,7 @@ import {
   MoveUp,
   MoveDiagonal,
   Hourglass,
+  ChevronsRight,
   PersonStanding,
   Scale,
   StretchHorizontal,
@@ -44,6 +45,7 @@ import { SavedSPPBReport } from "@/components/orthopedic/SavedSPPBReport";
 import { SavedSLRReport } from "@/components/orthopedic/SavedSLRReport";
 import { SavedAKEReport } from "@/components/orthopedic/SavedAKEReport";
 import { SavedModifiedThomasReport } from "@/components/orthopedic/SavedModifiedThomasReport";
+import { SavedForwardLungeReport } from "@/components/orthopedic/SavedForwardLungeReport";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { getReport, type ReportDTO } from "@/lib/reports";
 import { getPatient, type PatientDTO } from "@/lib/patients";
@@ -74,6 +76,7 @@ const MODULE_META: Record<
   slr: { label: "Straight Leg Raise", icon: MoveUp },
   ake: { label: "Active Knee Extension", icon: MoveDiagonal },
   modified_thomas: { label: "Modified Thomas Test", icon: Hourglass },
+  forward_lunge: { label: "Forward Lunge", icon: ChevronsRight },
 };
 
 export default function ReportViewPage({
@@ -325,6 +328,14 @@ function ReportView({ id }: { id: string }) {
         )}
         {report.module === "modified_thomas" && (
           <SavedModifiedThomasReport
+            patientName={patient?.name ?? null}
+            patient={patient}
+            metrics={report.metrics as Record<string, unknown>}
+            observations={report.observations as Record<string, unknown>}
+          />
+        )}
+        {report.module === "forward_lunge" && (
+          <SavedForwardLungeReport
             patientName={patient?.name ?? null}
             patient={patient}
             metrics={report.metrics as Record<string, unknown>}

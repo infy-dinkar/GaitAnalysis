@@ -15,6 +15,7 @@ import {
   MoveUp,
   MoveDiagonal,
   Hourglass,
+  ChevronsRight,
   PersonStanding,
   Scale,
   StretchHorizontal,
@@ -149,6 +150,15 @@ const MODULES = [
     icon: Hourglass,
     tone: "from-pink-500/15 to-pink-500/5",
     iconTone: "text-pink-600",
+  },
+  {
+    href: "orthopedic/forward-lunge",
+    eyebrow: "Functional movement",
+    title: "Forward Lunge",
+    body: "Lateral-view 5-rep lunge screen. Auto-segments each rep and reports front-knee depth, knee-over-toe, trunk forward lean, and depth consistency per side.",
+    icon: ChevronsRight,
+    tone: "from-blue-500/15 to-blue-500/5",
+    iconTone: "text-blue-600",
   },
 ];
 
