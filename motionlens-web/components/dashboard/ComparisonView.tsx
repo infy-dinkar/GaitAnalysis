@@ -21,6 +21,7 @@ import { SavedSPPBReport } from "@/components/orthopedic/SavedSPPBReport";
 import { SavedSLRReport } from "@/components/orthopedic/SavedSLRReport";
 import { SavedAKEReport } from "@/components/orthopedic/SavedAKEReport";
 import { SavedModifiedThomasReport } from "@/components/orthopedic/SavedModifiedThomasReport";
+import { SavedForwardLungeReport } from "@/components/orthopedic/SavedForwardLungeReport";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { formatIST } from "@/lib/format/datetime";
 import type { ReportDTO } from "@/lib/reports";
@@ -398,6 +399,17 @@ function ReportBody({
     );
   }
 
+  if (report.module === "forward_lunge") {
+    return (
+      <SavedForwardLungeReport
+        patientName={patient.name}
+        patient={patient}
+        metrics={report.metrics as Record<string, unknown>}
+        observations={report.observations as Record<string, unknown>}
+      />
+    );
+  }
+
   return <Notice>Unsupported module: {report.module}</Notice>;
 }
 
@@ -436,7 +448,63 @@ function buildDeltaRows(left: ReportDTO, right: ReportDTO): DeltaRow[] {
   if (left.module === "slr") return slrDeltas(left, right);
   if (left.module === "ake") return akeDeltas(left, right);
   if (left.module === "modified_thomas") return modifiedThomasDeltas(left, right);
+  if (left.module === "forward_lunge") return forwardLungeDeltas(left, right);
   return [];
+}
+
+function forwardLungeDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
+  const lm = left.metrics  as Record<string, unknown>;
+  const rm = right.metrics as Record<string, unknown>;
+  const ll = lm.left  as Record<string, unknown> | null;
+  const rl = rm.left  as Record<string, unknown> | null;
+  const lr = lm.right as Record<string, unknown> | null;
+  const rr = rm.right as Record<string, unknown> | null;
+  const rows: DeltaRow[] = [];
+  // For knee depth, target is ~90° — we use "lower_abs_is_better" so
+  // moves toward 90° from either side are flagged as improvements.
+  rows.push(deltaRow(
+    "Left mean knee depth",
+    pickNumber(ll, "mean_knee_angle_deg"),
+    pickNumber(rl, "mean_knee_angle_deg"),
+    "°",
+    "neutral",
+  ));
+  rows.push(deltaRow(
+    "Left max KOT (% leg)",
+    pickNumber(ll, "worst_rep_kot_ratio"),
+    pickNumber(rl, "worst_rep_kot_ratio"),
+    "",
+    "lower_is_better",
+  ));
+  rows.push(deltaRow(
+    "Left max trunk lean",
+    pickNumber(ll, "worst_rep_trunk_lean_deg"),
+    pickNumber(rl, "worst_rep_trunk_lean_deg"),
+    "°",
+    "lower_is_better",
+  ));
+  rows.push(deltaRow(
+    "Right mean knee depth",
+    pickNumber(lr, "mean_knee_angle_deg"),
+    pickNumber(rr, "mean_knee_angle_deg"),
+    "°",
+    "neutral",
+  ));
+  rows.push(deltaRow(
+    "Right max KOT (% leg)",
+    pickNumber(lr, "worst_rep_kot_ratio"),
+    pickNumber(rr, "worst_rep_kot_ratio"),
+    "",
+    "lower_is_better",
+  ));
+  rows.push(deltaRow(
+    "Right max trunk lean",
+    pickNumber(lr, "worst_rep_trunk_lean_deg"),
+    pickNumber(rr, "worst_rep_trunk_lean_deg"),
+    "°",
+    "lower_is_better",
+  ));
+  return rows;
 }
 
 function modifiedThomasDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
@@ -976,6 +1044,7 @@ function moduleHeading(r: ReportDTO): string {
   if (r.module === "slr") return "Straight Leg Raise";
   if (r.module === "ake") return "Active Knee Extension";
   if (r.module === "modified_thomas") return "Modified Thomas Test";
+  if (r.module === "forward_lunge") return "Forward Lunge";
   const bp = r.body_part ? `${r.body_part.charAt(0).toUpperCase()}${r.body_part.slice(1)}` : "";
   const mv = r.movement ? `${r.movement.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}` : "";
   return [bp, mv].filter(Boolean).join(" · ") || "Biomechanics";

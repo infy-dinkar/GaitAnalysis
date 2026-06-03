@@ -90,6 +90,7 @@ from engines.orthopedic.single_leg_squat_engine import analyze_single_leg_squat
 from engines.orthopedic.slr_engine import analyze_slr
 from engines.orthopedic.ake_engine import analyze_ake
 from engines.orthopedic.modified_thomas_engine import analyze_modified_thomas
+from engines.orthopedic.forward_lunge_engine import analyze_forward_lunge
 
 # ─── 5x Sit-to-Stand — Test C2 upload mode ───────────────────────
 # SINGLE trial (no L/R split). Engine math mirrors
@@ -1641,6 +1642,201 @@ async def analyze_modified_thomas_endpoint(
     except Exception as e:
         log.exception("modified_thomas analysis failed")
         return ModifiedThomasResponse(
+            success=False, data=None, error=f"Analysis failed: {e}",
+        )
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Forward Lunge (B3) — per-side upload analysis
+# ══════════════════════════════════════════════════════════════════════
+# One POST per side. The frontend uploads left and right clips
+# sequentially (same cold-worker mitigation as SLR / AKE / MTT) and
+# assembles ForwardLungeFullResult { left, right } client-side. Math
+# + classification cutoffs mirror lib/orthopedic/forwardLunge.ts so
+# live + upload produce identical reports.
+#
+# Rep detection uses scipy.signal.find_peaks on the TEST-side hip Y
+# trajectory with distance + prominence gates bit-identical to the
+# SLS engine — see forward_lunge_engine.py for the full pipeline.
+class FLRepDTO(BaseModel):
+    rep_index: int
+    t_ms: float
+    knee_angle_at_bottom_deg: Optional[float] = None
+    knee_over_toe_ratio: Optional[float] = None
+    trunk_lean_deg: Optional[float] = None
+
+
+class FLFrameSampleDTO(BaseModel):
+    t_ms: float
+    hip_y: Optional[float] = None
+    knee_angle_deg: Optional[float] = None
+    knee_over_toe_ratio: Optional[float] = None
+    trunk_lean_deg: Optional[float] = None
+
+
+class FLKeypointDTO(BaseModel):
+    x: float
+    y: float
+    score: float
+
+
+class ForwardLungeSideResultDTO(BaseModel):
+    side_tested: str
+    reps: List[FLRepDTO]
+    worst_rep_index: Optional[int] = None
+    worst_rep_knee_angle_deg: float
+    worst_rep_kot_ratio: float
+    worst_rep_trunk_lean_deg: float
+    mean_knee_angle_deg: float
+    depth_variation_deg: float
+    depth_out_of_band: bool
+    kot_flagged: bool
+    trunk_lean_flagged: bool
+    fatigue_flagged: bool
+    classification: str
+    duration_seconds: float
+    termination: str
+    incomplete: bool
+    samples: List[FLFrameSampleDTO]
+    keypoints: List[List[FLKeypointDTO]]
+    worst_rep_screenshot_data_url: Optional[str] = None
+    # Extras — not in the strict TS ForwardLungeSideResult shape but
+    # surfaced for the response envelope's per-side annotations.
+    fps: Optional[float] = None
+    total_frames: Optional[int] = None
+    valid_frames: Optional[int] = None
+    interpretation: Optional[str] = None
+
+
+class ForwardLungeResponse(BaseModel):
+    success: bool
+    data: Optional[ForwardLungeSideResultDTO] = None
+    error: Optional[str] = None
+    fps_warning: Optional[str] = None
+    duration_warning: Optional[str] = None
+
+
+@app.post("/api/analyze-forward-lunge", response_model=ForwardLungeResponse)
+async def analyze_forward_lunge_endpoint(
+    video: UploadFile = File(...),
+    side: str = Form(...),
+) -> ForwardLungeResponse:
+    """Run the Forward Lunge (B3) pipeline on an uploaded clip. `side`
+    is the FRONT (test) leg (the camera should sit on that same side
+    of the patient for the lateral view). Validation gates mirror the
+    SLR / AKE / MTT endpoints — same gait MediaPipe pipeline
+    downstream.
+    """
+    if side not in ("left", "right"):
+        raise HTTPException(
+            status_code=400,
+            detail="Side must be 'left' or 'right'.",
+        )
+
+    tmp_path: Optional[str] = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(
+            contents, video.filename or "forward_lunge.mp4",
+        )
+        log.info(
+            "forward_lunge: file=%s side=%s size=%.2f MB",
+            video.filename, side, size_mb,
+        )
+
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not determine video frame rate. "
+                    "Please upload a different file."
+                ),
+            )
+
+        fps_warning: Optional[str] = None
+        duration_warning: Optional[str] = None
+
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video frame rate too low ({probe_fps:.1f} FPS). "
+                    f"Minimum {MIN_REQUIRED_FPS} FPS required. "
+                    f"Recommended: {RECOMMENDED_FPS}+ FPS."
+                ),
+            )
+        if probe_fps < RECOMMENDED_FPS:
+            fps_warning = (
+                f"Note: Video is {probe_fps:.1f} FPS, below recommended "
+                f"{RECOMMENDED_FPS} FPS — results may be less accurate."
+            )
+        if probe_total_frames <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not determine video length. Please upload a different file.",
+            )
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video too long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed."
+                ),
+            )
+        if duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = (
+                f"Video is short ({duration_seconds:.1f}s) — at least "
+                f"{MIN_GAIT_DURATION_SEC} seconds recommended so the engine "
+                f"can capture 5 reps."
+            )
+
+        pose_options = _build_gait_pose_options()
+        result: Dict[str, Any] = analyze_forward_lunge(
+            video_path=tmp_path,
+            pose_options=pose_options,
+            side=side,
+        )
+
+        return ForwardLungeResponse(
+            success=True,
+            data=ForwardLungeSideResultDTO(**result),
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("forward_lunge validation: %s", e)
+        return ForwardLungeResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("forward_lunge analysis failed")
+        return ForwardLungeResponse(
             success=False, data=None, error=f"Analysis failed: {e}",
         )
     finally:

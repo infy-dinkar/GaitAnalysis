@@ -18,6 +18,7 @@ import {
   MoveUp,
   MoveDiagonal,
   Hourglass,
+  ChevronsRight,
   Scale,
   StretchHorizontal,
   TimerIcon,
@@ -99,6 +100,11 @@ const MODULE_META: Record<
     label: "Modified Thomas Test",
     icon: Hourglass,
     tone: "bg-pink-500/10 text-pink-700 dark:text-pink-400",
+  },
+  forward_lunge: {
+    label: "Forward Lunge",
+    icon: ChevronsRight,
+    tone: "bg-blue-500/10 text-blue-700 dark:text-blue-400",
   },
 };
 

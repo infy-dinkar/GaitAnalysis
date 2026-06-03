@@ -339,6 +339,7 @@ function moduleLabel(r: ReportSummaryDTO): string {
   if (r.module === "slr") return "Straight Leg Raise";
   if (r.module === "ake") return "Active Knee Extension";
   if (r.module === "modified_thomas") return "Modified Thomas Test";
+  if (r.module === "forward_lunge") return "Forward Lunge";
   return "Biomechanics";
 }
 
