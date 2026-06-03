@@ -22,7 +22,8 @@ export interface ReportSummaryDTO {
     | "slr"
     | "ake"
     | "modified_thomas"
-    | "forward_lunge";
+    | "forward_lunge"
+    | "sts_quality";
   body_part: string | null;
   movement: string | null;
   side: string | null;
@@ -67,7 +68,8 @@ export interface ReportCreatePayload {
     | "slr"
     | "ake"
     | "modified_thomas"
-    | "forward_lunge";
+    | "forward_lunge"
+    | "sts_quality";
   body_part?: "shoulder" | "neck" | "knee" | "hip" | "ankle";
   movement?: string;
   side?: "left" | "right";

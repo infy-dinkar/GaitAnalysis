@@ -16,6 +16,7 @@ import {
   MoveDiagonal,
   Hourglass,
   ChevronsRight,
+  ArrowUpDown,
   PersonStanding,
   Scale,
   StretchHorizontal,
@@ -159,6 +160,15 @@ const MODULES = [
     icon: ChevronsRight,
     tone: "from-blue-500/15 to-blue-500/5",
     iconTone: "text-blue-600",
+  },
+  {
+    href: "orthopedic/sts-quality",
+    eyebrow: "Functional movement",
+    title: "Sit-to-Stand Quality",
+    body: "Lateral 3-rep quality assessment (post-TKR/THR, geriatric rehab). Phase timing, trunk lean + knee at seat-off, smoothness score, hand-use compensation flag. Separate from the 5xSTS speed test.",
+    icon: ArrowUpDown,
+    tone: "from-green-500/15 to-green-500/5",
+    iconTone: "text-green-600",
   },
 ];
 
