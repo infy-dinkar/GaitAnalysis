@@ -37,6 +37,7 @@ class ReportCreate(BaseModel):
         "ake",
         "modified_thomas",
         "forward_lunge",
+        "sts_quality",
     ]
 
     # Biomech-specific (optional for other modules)

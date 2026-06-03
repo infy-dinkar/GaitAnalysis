@@ -91,6 +91,7 @@ from engines.orthopedic.slr_engine import analyze_slr
 from engines.orthopedic.ake_engine import analyze_ake
 from engines.orthopedic.modified_thomas_engine import analyze_modified_thomas
 from engines.orthopedic.forward_lunge_engine import analyze_forward_lunge
+from engines.orthopedic.sts_quality_engine import analyze_sts_quality
 
 # ─── 5x Sit-to-Stand — Test C2 upload mode ───────────────────────
 # SINGLE trial (no L/R split). Engine math mirrors
@@ -1837,6 +1838,206 @@ async def analyze_forward_lunge_endpoint(
     except Exception as e:
         log.exception("forward_lunge analysis failed")
         return ForwardLungeResponse(
+            success=False, data=None, error=f"Analysis failed: {e}",
+        )
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Sit-to-Stand QUALITY (B4) — single-trial upload analysis
+# ══════════════════════════════════════════════════════════════════════
+# COMPLETELY SEPARATE from the 5x Sit-to-Stand (C2) speed test below.
+# This module measures QUALITY (phase timing, smoothness, hand-use
+# compensation) rather than total cycle time. Uses ONE clip with a
+# camera-facing `side` + optional chair seat height. 3 reps. Math
+# mirrors lib/orthopedic/stsQuality.ts.
+class STSQRepDTO(BaseModel):
+    rep_index: int
+    seat_off_t_ms: Optional[float] = None
+    top_of_stand_t_ms: float
+    start_of_descent_t_ms: Optional[float] = None
+    re_seated_t_ms: Optional[float] = None
+    sit_to_stand_ms: Optional[float] = None
+    pause_ms: Optional[float] = None
+    stand_to_sit_ms: Optional[float] = None
+    trunk_lean_at_seat_off_deg: Optional[float] = None
+    knee_angle_at_seat_off_deg: Optional[float] = None
+    smoothness_score: Optional[float] = None
+    hand_use_detected: bool
+
+
+class STSQFrameSampleDTO(BaseModel):
+    t_ms: float
+    hip_y: Optional[float] = None
+    knee_angle_deg: Optional[float] = None
+    trunk_lean_deg: Optional[float] = None
+    wrist_y: Optional[float] = None
+    shoulder_y: Optional[float] = None
+    leg_length_px: Optional[float] = None
+
+
+class STSQKeypointDTO(BaseModel):
+    x: float
+    y: float
+    score: float
+
+
+class STSQualityResultDTO(BaseModel):
+    camera_side: str
+    chair_seat_height_cm: Optional[float] = None
+    reps: List[STSQRepDTO]
+    median_sit_to_stand_ms: Optional[float] = None
+    median_pause_ms: Optional[float] = None
+    median_stand_to_sit_ms: Optional[float] = None
+    median_trunk_lean_deg: Optional[float] = None
+    median_knee_angle_deg: Optional[float] = None
+    median_smoothness_score: Optional[float] = None
+    hand_use_count: int
+    any_hand_use: bool
+    classification: str
+    duration_seconds: float
+    termination: str
+    incomplete: bool
+    samples: List[STSQFrameSampleDTO]
+    keypoints: List[List[STSQKeypointDTO]]
+    worst_rep_screenshot_data_url: Optional[str] = None
+    # Diagnostic extras — not in the strict TS shape but surfaced for
+    # the response envelope's annotations.
+    fps: Optional[float] = None
+    total_frames: Optional[int] = None
+    valid_frames: Optional[int] = None
+    interpretation: Optional[str] = None
+
+
+class STSQualityResponse(BaseModel):
+    success: bool
+    data: Optional[STSQualityResultDTO] = None
+    error: Optional[str] = None
+    fps_warning: Optional[str] = None
+    duration_warning: Optional[str] = None
+
+
+@app.post("/api/analyze-sts-quality", response_model=STSQualityResponse)
+async def analyze_sts_quality_endpoint(
+    video: UploadFile = File(...),
+    side: str = Form(...),
+    chair_seat_height_cm: Optional[float] = Form(None),
+) -> STSQualityResponse:
+    """Run the B4 Sit-to-Stand Quality pipeline on an uploaded clip.
+    `side` is the CAMERA-FACING side (lateral view). `chair_seat_height_cm`
+    is optional context metadata recorded verbatim. Validation gates
+    mirror the FL / SLR / AKE / MTT endpoints.
+    """
+    if side not in ("left", "right"):
+        raise HTTPException(
+            status_code=400,
+            detail="Side must be 'left' or 'right'.",
+        )
+
+    tmp_path: Optional[str] = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(
+            contents, video.filename or "sts_quality.mp4",
+        )
+        log.info(
+            "sts_quality: file=%s side=%s seat_height=%s size=%.2f MB",
+            video.filename, side, chair_seat_height_cm, size_mb,
+        )
+
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not determine video frame rate. "
+                    "Please upload a different file."
+                ),
+            )
+
+        fps_warning: Optional[str] = None
+        duration_warning: Optional[str] = None
+
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video frame rate too low ({probe_fps:.1f} FPS). "
+                    f"Minimum {MIN_REQUIRED_FPS} FPS required. "
+                    f"Recommended: {RECOMMENDED_FPS}+ FPS."
+                ),
+            )
+        if probe_fps < RECOMMENDED_FPS:
+            fps_warning = (
+                f"Note: Video is {probe_fps:.1f} FPS, below recommended "
+                f"{RECOMMENDED_FPS} FPS — results may be less accurate."
+            )
+        if probe_total_frames <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not determine video length. Please upload a different file.",
+            )
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video too long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed."
+                ),
+            )
+        if duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = (
+                f"Video is short ({duration_seconds:.1f}s) — at least "
+                f"{MIN_GAIT_DURATION_SEC} seconds recommended so the engine "
+                f"can capture 3 reps."
+            )
+
+        pose_options = _build_gait_pose_options()
+        result: Dict[str, Any] = analyze_sts_quality(
+            video_path=tmp_path,
+            pose_options=pose_options,
+            side=side,
+            chair_seat_height_cm=chair_seat_height_cm,
+        )
+
+        return STSQualityResponse(
+            success=True,
+            data=STSQualityResultDTO(**result),
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("sts_quality validation: %s", e)
+        return STSQualityResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("sts_quality analysis failed")
+        return STSQualityResponse(
             success=False, data=None, error=f"Analysis failed: {e}",
         )
     finally:

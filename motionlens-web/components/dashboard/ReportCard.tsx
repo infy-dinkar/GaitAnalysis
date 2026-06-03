@@ -19,6 +19,7 @@ import {
   MoveDiagonal,
   Hourglass,
   ChevronsRight,
+  ArrowUpDown,
   Scale,
   StretchHorizontal,
   TimerIcon,
@@ -105,6 +106,11 @@ const MODULE_META: Record<
     label: "Forward Lunge",
     icon: ChevronsRight,
     tone: "bg-blue-500/10 text-blue-700 dark:text-blue-400",
+  },
+  sts_quality: {
+    label: "Sit-to-Stand Quality",
+    icon: ArrowUpDown,
+    tone: "bg-green-500/10 text-green-700 dark:text-green-400",
   },
 };
 
