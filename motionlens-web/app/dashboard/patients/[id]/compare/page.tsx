@@ -342,6 +342,7 @@ function moduleLabel(r: ReportSummaryDTO): string {
   if (r.module === "forward_lunge") return "Forward Lunge";
   if (r.module === "sts_quality") return "Sit-to-Stand Quality";
   if (r.module === "tandem_walk") return "Tandem Walk";
+  if (r.module === "pronator_drift") return "Pronator Drift";
   return "Biomechanics";
 }
 

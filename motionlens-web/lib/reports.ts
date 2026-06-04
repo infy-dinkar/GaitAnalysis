@@ -24,7 +24,8 @@ export interface ReportSummaryDTO {
     | "modified_thomas"
     | "forward_lunge"
     | "sts_quality"
-    | "tandem_walk";
+    | "tandem_walk"
+    | "pronator_drift";
   body_part: string | null;
   movement: string | null;
   side: string | null;
@@ -71,7 +72,8 @@ export interface ReportCreatePayload {
     | "modified_thomas"
     | "forward_lunge"
     | "sts_quality"
-    | "tandem_walk";
+    | "tandem_walk"
+    | "pronator_drift";
   body_part?: "shoulder" | "neck" | "knee" | "hip" | "ankle";
   movement?: string;
   side?: "left" | "right";

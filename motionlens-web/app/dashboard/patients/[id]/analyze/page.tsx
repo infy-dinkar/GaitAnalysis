@@ -18,6 +18,7 @@ import {
   ChevronsRight,
   ArrowUpDown,
   Ruler,
+  Hand,
   PersonStanding,
   Scale,
   StretchHorizontal,
@@ -179,6 +180,15 @@ const MODULES = [
     icon: Ruler,
     tone: "from-slate-500/15 to-slate-500/5",
     iconTone: "text-slate-600",
+  },
+  {
+    href: "orthopedic/pronator-drift",
+    eyebrow: "Neurological screen",
+    title: "Pronator Drift",
+    body: "Bedside upper-motor-neuron screen. 20-second eyes-closed hold with both arms extended; we track each wrist's vertical drift and flag asymmetric drops. 2D camera measures vertical drop only — rotation NOT assessed.",
+    icon: Hand,
+    tone: "from-zinc-500/15 to-zinc-500/5",
+    iconTone: "text-zinc-600",
   },
 ];
 
