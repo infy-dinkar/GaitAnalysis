@@ -17,6 +17,7 @@ import {
   Hourglass,
   ChevronsRight,
   ArrowUpDown,
+  Ruler,
   PersonStanding,
   Scale,
   StretchHorizontal,
@@ -169,6 +170,15 @@ const MODULES = [
     icon: ArrowUpDown,
     tone: "from-green-500/15 to-green-500/5",
     iconTone: "text-green-600",
+  },
+  {
+    href: "orthopedic/tandem-walk",
+    eyebrow: "Balance / vestibular",
+    title: "Tandem Walk",
+    body: "Heel-to-toe gait screen on a taped line, 10 steps toward the camera. Auto-counts missteps and arm-grabs, measures lateral deviation, step-time variability, and trunk sway.",
+    icon: Ruler,
+    tone: "from-slate-500/15 to-slate-500/5",
+    iconTone: "text-slate-600",
   },
 ];
 

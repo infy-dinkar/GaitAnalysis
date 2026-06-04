@@ -23,6 +23,7 @@ import { SavedAKEReport } from "@/components/orthopedic/SavedAKEReport";
 import { SavedModifiedThomasReport } from "@/components/orthopedic/SavedModifiedThomasReport";
 import { SavedForwardLungeReport } from "@/components/orthopedic/SavedForwardLungeReport";
 import { SavedSTSQualityReport } from "@/components/orthopedic/SavedSTSQualityReport";
+import { SavedTandemWalkReport } from "@/components/orthopedic/SavedTandemWalkReport";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { formatIST } from "@/lib/format/datetime";
 import type { ReportDTO } from "@/lib/reports";
@@ -422,6 +423,17 @@ function ReportBody({
     );
   }
 
+  if (report.module === "tandem_walk") {
+    return (
+      <SavedTandemWalkReport
+        patientName={patient.name}
+        patient={patient}
+        metrics={report.metrics as Record<string, unknown>}
+        observations={report.observations as Record<string, unknown>}
+      />
+    );
+  }
+
   return <Notice>Unsupported module: {report.module}</Notice>;
 }
 
@@ -462,7 +474,50 @@ function buildDeltaRows(left: ReportDTO, right: ReportDTO): DeltaRow[] {
   if (left.module === "modified_thomas") return modifiedThomasDeltas(left, right);
   if (left.module === "forward_lunge") return forwardLungeDeltas(left, right);
   if (left.module === "sts_quality") return stsQualityDeltas(left, right);
+  if (left.module === "tandem_walk") return tandemWalkDeltas(left, right);
   return [];
+}
+
+function tandemWalkDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
+  const lr = ((left.metrics  as Record<string, unknown>).result ?? null) as Record<string, unknown> | null;
+  const rr = ((right.metrics as Record<string, unknown>).result ?? null) as Record<string, unknown> | null;
+  const rows: DeltaRow[] = [];
+  rows.push(deltaRow(
+    "Missteps",
+    pickNumber(lr, "misstep_count"),
+    pickNumber(rr, "misstep_count"),
+    " / 10",
+    "lower_is_better",
+  ));
+  rows.push(deltaRow(
+    "Mean lateral deviation",
+    pickNumber(lr, "mean_deviation_cm"),
+    pickNumber(rr, "mean_deviation_cm"),
+    " cm",
+    "lower_is_better",
+  ));
+  rows.push(deltaRow(
+    "Arm-grab events",
+    pickNumber(lr, "arm_grab_count"),
+    pickNumber(rr, "arm_grab_count"),
+    "",
+    "lower_is_better",
+  ));
+  rows.push(deltaRow(
+    "Step-time CV",
+    pickNumber(lr, "step_time_cv"),
+    pickNumber(rr, "step_time_cv"),
+    "",
+    "lower_is_better",
+  ));
+  rows.push(deltaRow(
+    "Trunk sway range",
+    pickNumber(lr, "trunk_sway_range_cm"),
+    pickNumber(rr, "trunk_sway_range_cm"),
+    " cm",
+    "lower_is_better",
+  ));
+  return rows;
 }
 
 function stsQualityDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
@@ -1094,6 +1149,7 @@ function moduleHeading(r: ReportDTO): string {
   if (r.module === "modified_thomas") return "Modified Thomas Test";
   if (r.module === "forward_lunge") return "Forward Lunge";
   if (r.module === "sts_quality") return "Sit-to-Stand Quality";
+  if (r.module === "tandem_walk") return "Tandem Walk";
   const bp = r.body_part ? `${r.body_part.charAt(0).toUpperCase()}${r.body_part.slice(1)}` : "";
   const mv = r.movement ? `${r.movement.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}` : "";
   return [bp, mv].filter(Boolean).join(" · ") || "Biomechanics";

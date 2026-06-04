@@ -341,6 +341,7 @@ function moduleLabel(r: ReportSummaryDTO): string {
   if (r.module === "modified_thomas") return "Modified Thomas Test";
   if (r.module === "forward_lunge") return "Forward Lunge";
   if (r.module === "sts_quality") return "Sit-to-Stand Quality";
+  if (r.module === "tandem_walk") return "Tandem Walk";
   return "Biomechanics";
 }
 
