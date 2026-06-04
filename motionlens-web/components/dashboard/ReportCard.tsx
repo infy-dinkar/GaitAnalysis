@@ -21,6 +21,7 @@ import {
   ChevronsRight,
   ArrowUpDown,
   Ruler,
+  Hand,
   Scale,
   StretchHorizontal,
   TimerIcon,
@@ -117,6 +118,11 @@ const MODULE_META: Record<
     label: "Tandem Walk",
     icon: Ruler,
     tone: "bg-slate-500/10 text-slate-700 dark:text-slate-400",
+  },
+  pronator_drift: {
+    label: "Pronator Drift",
+    icon: Hand,
+    tone: "bg-zinc-500/10 text-zinc-700 dark:text-zinc-400",
   },
 };
 

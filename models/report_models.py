@@ -39,6 +39,7 @@ class ReportCreate(BaseModel):
         "forward_lunge",
         "sts_quality",
         "tandem_walk",
+        "pronator_drift",
     ]
 
     # Biomech-specific (optional for other modules)

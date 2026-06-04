@@ -93,6 +93,7 @@ from engines.orthopedic.modified_thomas_engine import analyze_modified_thomas
 from engines.orthopedic.forward_lunge_engine import analyze_forward_lunge
 from engines.orthopedic.sts_quality_engine import analyze_sts_quality
 from engines.orthopedic.tandem_walk_engine import analyze_tandem_walk
+from engines.orthopedic.pronator_drift_engine import analyze_pronator_drift
 
 # ─── 5x Sit-to-Stand — Test C2 upload mode ───────────────────────
 # SINGLE trial (no L/R split). Engine math mirrors
@@ -2243,6 +2244,188 @@ async def analyze_tandem_walk_endpoint(
     except Exception as e:
         log.exception("tandem_walk analysis failed")
         return TandemWalkResponse(
+            success=False, data=None, error=f"Analysis failed: {e}",
+        )
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Pronator Drift (E2) — single-trial upload analysis
+# ══════════════════════════════════════════════════════════════════════
+# Frontal-view static hold (~20 s). Patient holds both arms extended
+# forward at shoulder height, eyes closed; engine tracks per-arm
+# vertical wrist drift from a baseline taken in the first stable
+# second. Math mirrors lib/orthopedic/pronatorDrift.ts.
+#
+# 2D LIMITATION (carried through to the frontend report banner):
+# the third classical pronator-drift sign — forearm rotation as
+# the arm drops — is NOT measurable by a single 2D camera.
+class PDArmDriftDTO(BaseModel):
+    baseline_wrist_y_px: Optional[float] = None
+    final_wrist_y_px: Optional[float] = None
+    drift_px: Optional[float] = None
+    drift_cm: Optional[float] = None
+    drift_velocity_cm_per_sec: Optional[float] = None
+    drift_cm_series: List[Optional[float]] = []
+
+
+class PDFrameSampleDTO(BaseModel):
+    t_ms: float
+    left_wrist_y: Optional[float] = None
+    right_wrist_y: Optional[float] = None
+    left_shoulder_y: Optional[float] = None
+    right_shoulder_y: Optional[float] = None
+    shoulder_width_px: Optional[float] = None
+
+
+class PDKeypointDTO(BaseModel):
+    x: float
+    y: float
+    score: float
+
+
+class PronatorDriftResultDTO(BaseModel):
+    hold_duration_seconds: float
+    mean_shoulder_width_px: float
+    left: PDArmDriftDTO
+    right: PDArmDriftDTO
+    t_seconds_series: List[float]
+    max_downward_drift_cm: float
+    min_downward_drift_cm: float
+    asymmetry_ratio: float
+    asymmetry_absolute_cm: float
+    classification: str
+    termination: str
+    incomplete: bool
+    samples: List[PDFrameSampleDTO]
+    keypoints: List[List[PDKeypointDTO]]
+    capture_screenshot_data_url: Optional[str] = None
+    # Diagnostic extras.
+    fps: Optional[float] = None
+    total_frames: Optional[int] = None
+    valid_frames: Optional[int] = None
+    interpretation: Optional[str] = None
+
+
+class PronatorDriftResponse(BaseModel):
+    success: bool
+    data: Optional[PronatorDriftResultDTO] = None
+    error: Optional[str] = None
+    fps_warning: Optional[str] = None
+    duration_warning: Optional[str] = None
+
+
+@app.post("/api/analyze-pronator-drift", response_model=PronatorDriftResponse)
+async def analyze_pronator_drift_endpoint(
+    video: UploadFile = File(...),
+) -> PronatorDriftResponse:
+    """Run the E2 Pronator Drift pipeline on an uploaded clip.
+    Patient holds both arms extended forward at shoulder height with
+    eyes closed; engine measures per-arm vertical drift. 2D system —
+    rotation is not assessed (caveat surfaced in the report).
+    """
+    tmp_path: Optional[str] = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(
+            contents, video.filename or "pronator_drift.mp4",
+        )
+        log.info(
+            "pronator_drift: file=%s size=%.2f MB",
+            video.filename, size_mb,
+        )
+
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not determine video frame rate. "
+                    "Please upload a different file."
+                ),
+            )
+
+        fps_warning: Optional[str] = None
+        duration_warning: Optional[str] = None
+
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video frame rate too low ({probe_fps:.1f} FPS). "
+                    f"Minimum {MIN_REQUIRED_FPS} FPS required. "
+                    f"Recommended: {RECOMMENDED_FPS}+ FPS."
+                ),
+            )
+        if probe_fps < RECOMMENDED_FPS:
+            fps_warning = (
+                f"Note: Video is {probe_fps:.1f} FPS, below recommended "
+                f"{RECOMMENDED_FPS} FPS — results may be less accurate."
+            )
+        if probe_total_frames <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not determine video length. Please upload a different file.",
+            )
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video too long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed."
+                ),
+            )
+        if duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = (
+                f"Video is short ({duration_seconds:.1f}s) — at least "
+                f"{MIN_GAIT_DURATION_SEC} seconds recommended; the spec calls "
+                f"for a 20 s hold."
+            )
+
+        pose_options = _build_gait_pose_options()
+        result: Dict[str, Any] = analyze_pronator_drift(
+            video_path=tmp_path,
+            pose_options=pose_options,
+        )
+
+        return PronatorDriftResponse(
+            success=True,
+            data=PronatorDriftResultDTO(**result),
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("pronator_drift validation: %s", e)
+        return PronatorDriftResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("pronator_drift analysis failed")
+        return PronatorDriftResponse(
             success=False, data=None, error=f"Analysis failed: {e}",
         )
     finally:

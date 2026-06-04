@@ -1,5 +1,5 @@
 "use client";
-// Seventeen landing-page module cards.
+// Eighteen landing-page module cards.
 //
 // Why card clicks no longer link directly to bare module routes:
 //   A bare URL like /orthopedic/trendelenburg carries no ?patientId=,
@@ -46,6 +46,7 @@ import {
   ChevronsRight,
   ArrowUpDown,
   Ruler,
+  Hand,
   PersonStanding,
   Scale,
   StretchHorizontal,
@@ -262,6 +263,17 @@ const PRODUCTS: ProductCard[] = [
     icon: Ruler,
     iconTone: "text-slate-500",
   },
+  {
+    targetRoute: "/orthopedic/pronator-drift",
+    eyebrow: "Neurological screen",
+    title: "Pronator Drift.",
+    body:
+      "Upper-motor-neuron bedside screen. 20-second eyes-closed hold with both arms extended; we track each wrist's vertical drift and flag asymmetric drops. 2D vertical drop only — rotation NOT assessed.",
+    gradient:
+      "linear-gradient(135deg, rgba(113,113,122,0.20) 0%, rgba(161,161,170,0.10) 50%, rgba(28,28,33,0.0) 100%)",
+    icon: Hand,
+    iconTone: "text-zinc-500",
+  },
 ];
 
 export function ProductShowcase() {
@@ -295,9 +307,9 @@ export function ProductShowcase() {
   return (
     <Section id="modules" className="bg-dots">
       <div className="max-w-2xl">
-        <Badge>Seventeen modules</Badge>
+        <Badge>Eighteen modules</Badge>
         <h2 className="mt-5 text-3xl font-semibold tracking-tight md:text-5xl">
-          Movement, measured<br />seventeen ways.
+          Movement, measured<br />eighteen ways.
         </h2>
       </div>
 
