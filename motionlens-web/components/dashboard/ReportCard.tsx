@@ -20,6 +20,7 @@ import {
   Hourglass,
   ChevronsRight,
   ArrowUpDown,
+  Ruler,
   Scale,
   StretchHorizontal,
   TimerIcon,
@@ -111,6 +112,11 @@ const MODULE_META: Record<
     label: "Sit-to-Stand Quality",
     icon: ArrowUpDown,
     tone: "bg-green-500/10 text-green-700 dark:text-green-400",
+  },
+  tandem_walk: {
+    label: "Tandem Walk",
+    icon: Ruler,
+    tone: "bg-slate-500/10 text-slate-700 dark:text-slate-400",
   },
 };
 

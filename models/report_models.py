@@ -38,6 +38,7 @@ class ReportCreate(BaseModel):
         "modified_thomas",
         "forward_lunge",
         "sts_quality",
+        "tandem_walk",
     ]
 
     # Biomech-specific (optional for other modules)

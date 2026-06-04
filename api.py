@@ -92,6 +92,7 @@ from engines.orthopedic.ake_engine import analyze_ake
 from engines.orthopedic.modified_thomas_engine import analyze_modified_thomas
 from engines.orthopedic.forward_lunge_engine import analyze_forward_lunge
 from engines.orthopedic.sts_quality_engine import analyze_sts_quality
+from engines.orthopedic.tandem_walk_engine import analyze_tandem_walk
 
 # ─── 5x Sit-to-Stand — Test C2 upload mode ───────────────────────
 # SINGLE trial (no L/R split). Engine math mirrors
@@ -2038,6 +2039,210 @@ async def analyze_sts_quality_endpoint(
     except Exception as e:
         log.exception("sts_quality analysis failed")
         return STSQualityResponse(
+            success=False, data=None, error=f"Analysis failed: {e}",
+        )
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Tandem Walk (E1) — single-trial upload analysis
+# ══════════════════════════════════════════════════════════════════════
+# Frontal-view heel-to-toe gait screen. Single clip — patient walks
+# 10 steps along a taped line toward the camera. Math mirrors
+# lib/orthopedic/tandemWalk.ts: per-foot velocity-threshold step
+# detector, least-squares walking-line fit on hip-midpoint, lateral
+# deviation per footstrike normalised by shoulder width × 40 cm.
+class TWStepDTO(BaseModel):
+    step_index: int
+    side: str
+    t_ms: float
+    foot_x: float
+    foot_y: float
+    deviation_px: Optional[float] = None
+    # raw deviation in cm (no tolerance subtracted) — kept for
+    # transparency / future re-classification with different cutoffs.
+    raw_deviation_cm: Optional[float] = None
+    # effective deviation = max(0, raw - DEVIATION_TOLERANCE_CM).
+    # Mean / max aggregates, is_misstep, and classification all use
+    # this value.
+    deviation_cm: Optional[float] = None
+    is_misstep: bool
+    shoulder_width_px: Optional[float] = None
+
+
+class TWFrameSampleDTO(BaseModel):
+    t_ms: float
+    hip_mid_x: Optional[float] = None
+    hip_mid_y: Optional[float] = None
+    shoulder_mid_x: Optional[float] = None
+    shoulder_width_px: Optional[float] = None
+    left_foot_x: Optional[float] = None
+    left_foot_y: Optional[float] = None
+    right_foot_x: Optional[float] = None
+    right_foot_y: Optional[float] = None
+    left_arm_abduction_deg: Optional[float] = None
+    right_arm_abduction_deg: Optional[float] = None
+
+
+class TWKeypointDTO(BaseModel):
+    x: float
+    y: float
+    score: float
+
+
+class TWLineDTO(BaseModel):
+    a: float
+    b: float
+
+
+class TandemWalkResultDTO(BaseModel):
+    steps: List[TWStepDTO]
+    misstep_count: int
+    arm_grab_count: int
+    mean_deviation_cm: float
+    max_deviation_cm: float
+    step_time_mean_ms: float
+    step_time_stddev_ms: float
+    step_time_cv: float
+    trunk_sway_range_px: float
+    trunk_sway_range_cm: float
+    classification: str
+    duration_seconds: float
+    termination: str
+    incomplete: bool
+    walking_line: Optional[TWLineDTO] = None
+    mean_shoulder_width_px: float
+    samples: List[TWFrameSampleDTO]
+    keypoints: List[List[TWKeypointDTO]]
+    capture_screenshot_data_url: Optional[str] = None
+    patient_age: Optional[int] = None
+    # Diagnostic extras.
+    fps: Optional[float] = None
+    total_frames: Optional[int] = None
+    valid_frames: Optional[int] = None
+    interpretation: Optional[str] = None
+
+
+class TandemWalkResponse(BaseModel):
+    success: bool
+    data: Optional[TandemWalkResultDTO] = None
+    error: Optional[str] = None
+    fps_warning: Optional[str] = None
+    duration_warning: Optional[str] = None
+
+
+@app.post("/api/analyze-tandem-walk", response_model=TandemWalkResponse)
+async def analyze_tandem_walk_endpoint(
+    video: UploadFile = File(...),
+    patient_age: Optional[int] = Form(None),
+) -> TandemWalkResponse:
+    """Run the E1 Tandem Walk pipeline on an uploaded clip. The
+    patient walks heel-to-toe toward the camera for 10 steps along a
+    taped line. Validation gates mirror the other multi-rep modules.
+    """
+    tmp_path: Optional[str] = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(
+            contents, video.filename or "tandem_walk.mp4",
+        )
+        log.info(
+            "tandem_walk: file=%s age=%s size=%.2f MB",
+            video.filename, patient_age, size_mb,
+        )
+
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not determine video frame rate. "
+                    "Please upload a different file."
+                ),
+            )
+
+        fps_warning: Optional[str] = None
+        duration_warning: Optional[str] = None
+
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video frame rate too low ({probe_fps:.1f} FPS). "
+                    f"Minimum {MIN_REQUIRED_FPS} FPS required. "
+                    f"Recommended: {RECOMMENDED_FPS}+ FPS."
+                ),
+            )
+        if probe_fps < RECOMMENDED_FPS:
+            fps_warning = (
+                f"Note: Video is {probe_fps:.1f} FPS, below recommended "
+                f"{RECOMMENDED_FPS} FPS — results may be less accurate."
+            )
+        if probe_total_frames <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not determine video length. Please upload a different file.",
+            )
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video too long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed."
+                ),
+            )
+        if duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = (
+                f"Video is short ({duration_seconds:.1f}s) — at least "
+                f"{MIN_GAIT_DURATION_SEC} seconds recommended so the engine "
+                f"can capture 10 footstrikes."
+            )
+
+        pose_options = _build_gait_pose_options()
+        result: Dict[str, Any] = analyze_tandem_walk(
+            video_path=tmp_path,
+            pose_options=pose_options,
+            patient_age=patient_age,
+        )
+
+        return TandemWalkResponse(
+            success=True,
+            data=TandemWalkResultDTO(**result),
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("tandem_walk validation: %s", e)
+        return TandemWalkResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("tandem_walk analysis failed")
+        return TandemWalkResponse(
             success=False, data=None, error=f"Analysis failed: {e}",
         )
     finally:
