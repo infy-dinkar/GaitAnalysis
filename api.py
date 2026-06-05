@@ -94,6 +94,7 @@ from engines.orthopedic.forward_lunge_engine import analyze_forward_lunge
 from engines.orthopedic.sts_quality_engine import analyze_sts_quality
 from engines.orthopedic.tandem_walk_engine import analyze_tandem_walk
 from engines.orthopedic.pronator_drift_engine import analyze_pronator_drift
+from engines.orthopedic.functional_reach_engine import analyze_functional_reach
 
 # ─── 5x Sit-to-Stand — Test C2 upload mode ───────────────────────
 # SINGLE trial (no L/R split). Engine math mirrors
@@ -2426,6 +2427,249 @@ async def analyze_pronator_drift_endpoint(
     except Exception as e:
         log.exception("pronator_drift analysis failed")
         return PronatorDriftResponse(
+            success=False, data=None, error=f"Analysis failed: {e}",
+        )
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Functional Reach (C6) — single-trial upload analysis
+# ══════════════════════════════════════════════════════════════════════
+# Lateral view, ~30 s clip. The patient holds an A4 sheet against
+# their chest briefly at the start (backend auto-detects it for
+# scale), then reaches forward 3 times. Math mirrors
+# lib/orthopedic/functionalReach.ts so live + upload produce
+# identical reports.
+#
+# `calibration` is an optional JSON string the frontend can send if
+# it already detected an A4 sheet client-side (live mode). When
+# omitted, the engine runs its own A4 detection on the early frames
+# of the clip. If neither path finds an A4, the engine reports
+# distances in relative pixel units only — no fall-risk
+# classification (the explicit graceful-degradation path the spec
+# calls for).
+class FRFrameSampleDTO(BaseModel):
+    t_ms: float
+    wrist_x_px: Optional[float] = None
+    wrist_y_px: Optional[float] = None
+    shoulder_y_px: Optional[float] = None
+    ankle_x_px: Optional[float] = None
+    heel_y_px: Optional[float] = None
+    foot_index_y_px: Optional[float] = None
+    trunk_angle_deg: Optional[float] = None
+    arm_raised: bool
+
+
+class FRKeypointDTO(BaseModel):
+    x: float
+    y: float
+    score: float
+
+
+class FRTrialDTO(BaseModel):
+    trial_index: int
+    peak_sample_index: int
+    peak_t_ms: float
+    signed_displacement_px: float
+    reach_px: float
+    reach_cm: Optional[float] = None
+    trunk_angle_at_peak_deg: Optional[float] = None
+    validity: str
+    invalidity_detail: Optional[str] = None
+    window_start_index: int
+    window_end_index: int
+    max_heel_drift_px: float
+    max_heel_drift_cm: Optional[float] = None
+    max_ankle_drift_px: float
+    max_ankle_drift_cm: Optional[float] = None
+
+
+class FunctionalReachResultDTO(BaseModel):
+    side_tested: str
+    baseline_locked: bool
+    baseline_locked_at_index: Optional[int] = None
+    baseline_wrist_x_px: Optional[float] = None
+    baseline_ankle_x_px: Optional[float] = None
+    baseline_heel_y_px: Optional[float] = None
+    trials: List[FRTrialDTO]
+    best_valid_trial_index: Optional[int] = None
+    best_valid_reach_px: Optional[float] = None
+    best_valid_reach_cm: Optional[float] = None
+    classification: Optional[str] = None
+    # Step 1 removed the A4-specific calibration DTO. The field is a
+    # provider-agnostic dict so Step 2 can plug in a height-based
+    # calibration without an api.py round-trip.
+    calibration: Optional[Dict[str, Any]] = None
+    duration_seconds: float
+    termination: str
+    samples: List[FRFrameSampleDTO]
+    keypoints: List[List[FRKeypointDTO]]
+    peak_screenshot_data_url: Optional[str] = None
+    # Diagnostic extras.
+    fps: Optional[float] = None
+    total_frames: Optional[int] = None
+    valid_frames: Optional[int] = None
+    interpretation: Optional[str] = None
+
+
+class FunctionalReachResponse(BaseModel):
+    success: bool
+    data: Optional[FunctionalReachResultDTO] = None
+    error: Optional[str] = None
+    fps_warning: Optional[str] = None
+    duration_warning: Optional[str] = None
+
+
+@app.post("/api/analyze-functional-reach", response_model=FunctionalReachResponse)
+async def analyze_functional_reach_endpoint(
+    video: UploadFile = File(...),
+    side: str = Form(...),
+    calibration: Optional[str] = Form(None),
+    patient_height_cm: Optional[float] = Form(None),
+) -> FunctionalReachResponse:
+    """Run the C6 Functional Reach pipeline on an uploaded clip.
+
+    `side` is the test arm (the arm nearest the camera in the
+    lateral view).
+
+    Calibration is supplied in one of two ways:
+      1. `calibration` — a JSON-encoded CalibrationResult (live mode
+         already locked one in via HeightCalibrationStep).
+      2. `patient_height_cm` — the patient's standing height; the
+         engine measures body pixel height from the standing window
+         of the clip and derives pixels_per_cm itself.
+    Neither is required; absent both the test runs in relative-units
+    mode (no fall-risk classification).
+    """
+    if side not in ("left", "right"):
+        raise HTTPException(
+            status_code=400,
+            detail="Side must be 'left' or 'right'.",
+        )
+
+    # Parse optional client-supplied calibration. Accept anything
+    # dict-shaped with a positive pixels_per_cm; the engine ignores
+    # unknown keys.
+    parsed_calibration: Optional[Dict[str, Any]] = None
+    if calibration:
+        import json as _json
+        try:
+            parsed_calibration = _json.loads(calibration)
+            if not isinstance(parsed_calibration, dict):
+                parsed_calibration = None
+            else:
+                ppc = parsed_calibration.get("pixels_per_cm")
+                if not isinstance(ppc, (int, float)) or ppc <= 0:
+                    parsed_calibration = None
+        except (ValueError, TypeError):
+            parsed_calibration = None
+
+    tmp_path: Optional[str] = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(
+            contents, video.filename or "functional_reach.mp4",
+        )
+        log.info(
+            "functional_reach: file=%s side=%s size=%.2f MB calibration=%s",
+            video.filename, side, size_mb,
+            "client" if parsed_calibration else "server-auto",
+        )
+
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not determine video frame rate. "
+                    "Please upload a different file."
+                ),
+            )
+
+        fps_warning: Optional[str] = None
+        duration_warning: Optional[str] = None
+
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video frame rate too low ({probe_fps:.1f} FPS). "
+                    f"Minimum {MIN_REQUIRED_FPS} FPS required. "
+                    f"Recommended: {RECOMMENDED_FPS}+ FPS."
+                ),
+            )
+        if probe_fps < RECOMMENDED_FPS:
+            fps_warning = (
+                f"Note: Video is {probe_fps:.1f} FPS, below recommended "
+                f"{RECOMMENDED_FPS} FPS — results may be less accurate."
+            )
+        if probe_total_frames <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not determine video length. Please upload a different file.",
+            )
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video too long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed."
+                ),
+            )
+        if duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = (
+                f"Video is short ({duration_seconds:.1f}s) — at least "
+                f"{MIN_GAIT_DURATION_SEC} seconds recommended so the engine "
+                f"can capture a baseline + 3 reaches."
+            )
+
+        pose_options = _build_gait_pose_options()
+        result: Dict[str, Any] = analyze_functional_reach(
+            video_path=tmp_path,
+            pose_options=pose_options,
+            side=side,
+            calibration=parsed_calibration,
+            patient_height_cm=patient_height_cm,
+        )
+
+        return FunctionalReachResponse(
+            success=True,
+            data=FunctionalReachResultDTO(**result),
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("functional_reach validation: %s", e)
+        return FunctionalReachResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("functional_reach analysis failed")
+        return FunctionalReachResponse(
             success=False, data=None, error=f"Analysis failed: {e}",
         )
     finally:
