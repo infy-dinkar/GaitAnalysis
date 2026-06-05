@@ -22,6 +22,7 @@ import {
   ArrowUpDown,
   Ruler,
   Hand,
+  MoveRight,
   Scale,
   StretchHorizontal,
   TimerIcon,
@@ -123,6 +124,11 @@ const MODULE_META: Record<
     label: "Pronator Drift",
     icon: Hand,
     tone: "bg-zinc-500/10 text-zinc-700 dark:text-zinc-400",
+  },
+  functional_reach: {
+    label: "Functional Reach",
+    icon: MoveRight,
+    tone: "bg-red-500/10 text-red-700 dark:text-red-400",
   },
 };
 
