@@ -285,51 +285,41 @@ _ABDUCTION_ANATOMICAL_MAX = 180.0
 _ADDUCTION_ANATOMICAL_MAX = 50.0
 
 
-# Merged rotation (internal + external). Patient stands FRONTAL,
-# elbow tucked at side and bent ~90°, forearm initially pointing
-# at the camera (out of the image plane). External rotation swings
-# the forearm laterally OUT; internal rotation swings it medially
-# ACROSS the body. The magnitude is recovered from the forearm's
-# 2D projection (which grows as the forearm leaves the camera-axis
-# plane) via an arcsin formula, calibrated against the patient's
-# upper-arm pixel length captured at neutral. AAOS reference ranges.
-_MERGED_ROT_PRIMARY_TARGET: tuple[float, float] = (60.0, 90.0)   # Internal
-_MERGED_ROT_SECONDARY_TARGET: tuple[float, float] = (60.0, 90.0) # External
+# Merged rotation — LATERAL-VIEW method.
+# Patient stands SIDE-ON to the camera. Arm abducted to 90° (upper
+# arm horizontal, projecting along the camera axis in the lateral
+# view). Elbow bent 90°; forearm sweeps in a plane parallel to the
+# image plane.
+#
+#   • Forearm horizontal forward      → 0° clinical (neutral)
+#   • Forearm rotating UP toward head → External Rotation (60–90°)
+#   • Forearm rotating DOWN toward floor → Internal Rotation (60–80°)
+#
+# Per-frame math (no calibration baseline required):
+#
+#     reference     = (0, 1)              # straight down, image y-down
+#     forearm       = (wrist − elbow)
+#     raw_angle     = |angle_between(reference, forearm)|     # 0–180°
+#     magnitude_deg = |raw_angle − 90°|                       # 0–90° clinical
+#     direction     = "external" if wrist.y < elbow.y else "internal"
+#
+# The clinical conversion (subtract 90°) reports the angle FROM
+# horizontal, matching the AAOS ER 0–90° and IR 0–80° conventions
+# the report header and target ranges already advertise.
+#
+# Mirrors motionlens-web/lib/biomech/shoulder.ts so live and upload
+# modes produce the same per-frame numbers.
+_MERGED_ROT_PRIMARY_TARGET: tuple[float, float] = (60.0, 90.0)   # External
+_MERGED_ROT_SECONDARY_TARGET: tuple[float, float] = (60.0, 80.0) # Internal
 
-# Mirrors the constants in motionlens-web/lib/biomech/shoulder.ts so
-# live and upload modes agree on calibration / direction frame-by-
-# frame. See the comments on each browser-side constant for the
-# rationale; copies here keep the backend file self-contained.
-_ROT_FOREARM_TO_UPPER_ARM_PROXY = 0.88   # adult forearm/upper-arm
-                                          # anatomical ratio. Without
-                                          # this factor, full ROM
-                                          # caps at ~58-65° instead
-                                          # of ~90° because the upper-
-                                          # arm proxy overshoots the
-                                          # real forearm length.
-_ROT_MAX_DEG = 90.0                      # anatomical ceiling.
-_ROT_DIRECTION_DEADBAND_FRAC = 0.03      # deadband on (wrist_lateral
-                                          # − elbow_lateral) ratio to
-                                          # shoulder width, below
-                                          # which neutral pose noise
-                                          # doesn't commit a direction.
-_ROT_NEUTRAL_FOREARM_RATIO_MAX = 0.20    # forearm projects to ≤ 20%
-                                          # of upper-arm length when
-                                          # patient is at neutral
-                                          # (forearm pointing at the
-                                          # camera). Above this the
-                                          # patient is not at neutral.
-_ROT_MIN_UPPER_ARM_PX = 30.0             # baseline calibration floor.
-                                          # Below this the patient is
-                                          # too far from the camera
-                                          # and keypoints are noisy.
-_ROT_CALIBRATION_STABLE_FRAMES = 5       # consecutive neutral-pose
-                                          # frames required before
-                                          # the baseline locks. Once
-                                          # locked, never relock —
-                                          # mid-trial relocks would
-                                          # destabilise the magnitude
-                                          # reading.
+# Direction deadband on (wrist.y − elbow.y) as a fraction of shoulder
+# width — scale-invariant. Suppresses flips at the wrist≈elbow.y
+# horizontal crossover.
+_ROT_DIRECTION_DEADBAND_FRAC = 0.03
+
+# Forearm vector below this many pixels is too short to derive a
+# reliable angle — the peak tracker holds the last good value.
+_ROT_MIN_FOREARM_PX = 4.0
 
 
 def _classify_in_range(value: float, lo: float, hi: float) -> str:
@@ -435,60 +425,27 @@ def _detect_ab_ad_direction(
     return "abduction" if dx_ratio > 0 else "adduction"
 
 
-def _is_rotation_neutral_pose(
-    s_x: float, s_y: float,
-    e_x: float, e_y: float,
-    w_x: float, w_y: float,
-) -> tuple[bool, float]:
-    """Returns (is_neutral, upper_arm_pixel_length).
-
-    Ports isShoulderRotationNeutral from motionlens-web/lib/biomech/
-    shoulder.ts:223-238. The neutral rotation pose has the patient's
-    elbow tucked at the side bent ~90° with the forearm pointing
-    directly at the camera (out of the image plane) — in 2D that
-    means the forearm projects to a much shorter pixel length than
-    the upper arm (≤ _ROT_NEUTRAL_FOREARM_RATIO_MAX of upper-arm
-    length). Also rejects too-far-from-camera frames where the
-    upper-arm pixel length is below the calibration floor."""
-    upper_arm_len = math.hypot(e_x - s_x, e_y - s_y)
-    if upper_arm_len < _ROT_MIN_UPPER_ARM_PX:
-        return False, upper_arm_len
-    forearm_len = math.hypot(w_x - e_x, w_y - e_y)
-    if forearm_len / upper_arm_len > _ROT_NEUTRAL_FOREARM_RATIO_MAX:
-        return False, upper_arm_len
-    return True, upper_arm_len
+# _is_rotation_neutral_pose removed — the lateral-view method does
+# not require a neutral-pose calibration baseline.
 
 
 def _detect_rotation_direction(
-    e_x: float, w_x: float,
-    ls_x: float, rs_x: float,
+    e_y: float, w_y: float,
+    shoulder_width: float,
 ) -> Optional[str]:
-    """Returns 'internal' / 'external' / None.
-
-    Ports detectShoulderRotationDirection from motionlens-web/lib/
-    biomech/shoulder.ts:424-440.
-
-      • External rotation: the wrist swings further OUT (more
-        lateral) than the elbow. (wrist_lateral − elbow_lateral) > 0.
-      • Internal rotation: the wrist crosses INWARD (less lateral,
-        or past the centreline). (wrist_lateral − elbow_lateral) < 0.
-      • Within the deadband (|ratio| < _ROT_DIRECTION_DEADBAND_FRAC)
-        → None, neutral pose, neither peak updated.
-
-    "Lateral distance" is measured from the body's vertical centreline
-    (midpoint between the two shoulders). Both sides reduce to the
-    same |signed offset| sign convention this way, so left vs right
-    don't need separate branches."""
-    shoulder_width = abs(rs_x - ls_x)
+    """Lateral-view direction detector.
+      • Wrist ABOVE elbow on screen (w_y < e_y)  → external
+      • Wrist BELOW elbow on screen (w_y > e_y)  → internal
+      • Within the y-deadband → None.
+    Same left/right convention for both sides (purely vertical
+    comparison; no centreline math needed)."""
     if shoulder_width < 1e-4:
         return None
-    centre_x = (ls_x + rs_x) / 2.0
-    elbow_lateral = abs(e_x - centre_x)
-    wrist_lateral = abs(w_x - centre_x)
-    ratio = (wrist_lateral - elbow_lateral) / shoulder_width
-    if abs(ratio) < _ROT_DIRECTION_DEADBAND_FRAC:
+    dy_ratio = (w_y - e_y) / shoulder_width
+    if abs(dy_ratio) < _ROT_DIRECTION_DEADBAND_FRAC:
         return None
-    return "external" if ratio > 0 else "internal"
+    # Image y grows DOWNWARD: dy_ratio < 0 ⇒ wrist above elbow.
+    return "external" if dy_ratio < 0 else "internal"
 
 
 def _lateral_view_for_ab_ad(ts: dict) -> Optional[str]:
@@ -740,22 +697,18 @@ def analyze_shoulder(
     # Pre-flight sanity checks on the merged ab/ad and rotation
     # paths — fail fast with clear, user-actionable error messages
     # rather than running a full analysis that would produce
-    # garbage values. Scoped to the merged tests that depend on
-    # body-centreline math; flex/ext (already shipped, frontal-or-
-    # lateral agnostic) is unaffected.
-    if is_merged_ab_ad or is_merged_rotation:
-        # 1. Lateral / side-profile rejection. Both ab/ad and
-        # rotation compare wrist/elbow lateral offset to the body
-        # centreline (midpoint of the two shoulders); in lateral
-        # view both shoulders project to the same image-x and the
-        # centreline collapses, producing the spurious 50° / 90°
-        # clamp seen on flexion videos mistagged as ab/ad.
+    # garbage values. Lateral-view rejection NOW applies to ab/ad
+    # ONLY: the lateral-view rotation method REQUIRES side-on
+    # framing (forearm sweeps in a plane parallel to the image),
+    # so a frontal-only gate would block the legitimate case.
+    if is_merged_ab_ad:
         lateral_msg = _lateral_view_for_ab_ad(ts)
         if lateral_msg:
             raise ValueError(lateral_msg)
-        # 2. Wrong-side selection. If the requested side's elbow
-        # is far less visible than the other side's across the
-        # run, the user almost certainly picked the wrong side.
+    if is_merged_ab_ad or is_merged_rotation:
+        # Wrong-side selection. If the requested side's elbow is
+        # far less visible than the other side's across the run,
+        # the user almost certainly picked the wrong side.
         wrong_side_msg = _wrong_side_for_video(ts, side)
         if wrong_side_msg:
             raise ValueError(wrong_side_msg)
@@ -771,16 +724,15 @@ def analyze_shoulder(
     wx = ts[wrist_key]["x_px"];    wy = ts[wrist_key]["y_px"];    vw = ts[wrist_key]["vis"]
 
     # ══════════════════════════════════════════════════════════════
-    # Merged rotation (internal + external)
+    # Merged rotation (external + internal) — LATERAL-VIEW method
     # ══════════════════════════════════════════════════════════════
-    # Rotation magnitude needs a calibration baseline (upper-arm
-    # pixel length captured at neutral pose: elbow at 90°, forearm
-    # pointing at camera). The arcsin formula recovers the true
-    # rotation angle from the forearm's 2D projection. Direction
-    # comes from wrist lateral offset vs elbow lateral offset
-    # relative to the body centreline. Mirrors the browser
-    # streaming flow (motionlens-web/lib/biomech/shoulder.ts) so
-    # live and upload modes give the same peak ± noise.
+    # Patient SIDE-ON, arm abducted 90° (upper arm horizontal along
+    # camera axis), elbow bent 90°. Forearm sweeps in the image
+    # plane. Per-frame magnitude is the angle between the elbow→
+    # wrist vector and the straight-down reference (0, 1); direction
+    # is a pure y-comparison between wrist and elbow. Primary slot =
+    # External (matches the frontend SHOULDER_MOVEMENTS labelling
+    # after STEP 1 alignment).
     # Returns early so the existing per-frame angle loop below
     # (which assumes one of the shoulder_*_extension formulas) is
     # bypassed for rotation.
@@ -796,82 +748,9 @@ def analyze_shoulder(
         n_rot = int(min(len(sx), len(ex), len(wx),
                         len(lsx_arr), len(rsx_arr)))
 
-        # ── Phase 1: lock the baseline as the MEDIAN upper-arm pixel
-        # length across every frame where both shoulder + elbow are
-        # confidently visible.
-        #
-        # Why median-across-all-frames instead of "wait for neutral
-        # pose": for shoulder rotation the patient keeps the elbow
-        # tucked at the side throughout the test — so the upper-arm
-        # vector (shoulder→elbow) barely moves and its pixel length
-        # is essentially constant for every frame, regardless of
-        # whether the forearm is at IR peak, ER peak, or anywhere in
-        # between. The previous logic required the first N
-        # consecutive frames to be at "neutral" (forearm pointing at
-        # camera, projecting to ≤20% of upper-arm length) which
-        # produced HTTP 400 errors whenever the patient started the
-        # recording mid-rotation. Using the elbow point as a stable
-        # reference removes that requirement without touching Phase 2
-        # math — the arcsin formula below sees the exact same
-        # baseline_upper_arm it always did, it's just sourced from a
-        # more robust statistic.
-        upper_arm_samples: list[float] = []
-        for i in range(n_rot):
-            if (vs[i] < _SHOULDER_VIS_THRESHOLD
-                    or ve[i] < _SHOULDER_VIS_THRESHOLD):
-                continue
-            ua_len = math.hypot(
-                float(ex[i]) - float(sx[i]),
-                float(ey[i]) - float(sy[i]),
-            )
-            if ua_len >= _ROT_MIN_UPPER_ARM_PX:
-                upper_arm_samples.append(ua_len)
-
-        baseline_upper_arm: Optional[float] = None
-        if upper_arm_samples:
-            baseline_upper_arm = float(np.median(upper_arm_samples))
-
-        if baseline_upper_arm is None:
-            # Distinct from the legacy "neutral pose" message because
-            # this branch only fires when shoulder + elbow are never
-            # simultaneously visible at a reasonable distance — i.e.
-            # the patient was out of frame / too far from the camera.
-            raise ValueError(
-                "Shoulder + elbow not clearly visible in the video. "
-                "Please re-record with the patient's full upper body "
-                "in frame and good lighting."
-            )
-
-        _rotlog.info(
-            "rotation baseline locked: side=%s upper_arm_px=%.1f "
-            "(median of %d valid frames)",
-            side, baseline_upper_arm, len(upper_arm_samples),
-        )
-
-        # ── Phase 2: per-frame calibrated magnitude + direction.
-        # Process EVERY frame after the baseline lock (no skipping)
-        # so fast rotation movements are captured at the same
-        # fidelity as slow ones. Frames with low elbow/wrist
-        # visibility are skipped — the running peak stays at its
-        # last good value rather than dropping to 0° (critical at
-        # the extreme of external rotation where the wrist can
-        # cross briefly behind the body and lose visibility).
-        effective_ref = baseline_upper_arm * _ROT_FOREARM_TO_UPPER_ARM_PROXY
-        if effective_ref <= 0:
-            # Defensive — baseline_upper_arm is filtered to be ≥
-            # _ROT_MIN_UPPER_ARM_PX and the proxy is a positive
-            # constant, so this branch is unreachable in normal
-            # operation. Kept so a future config change can't silently
-            # divide-by-zero downstream.
-            raise ValueError(
-                "Shoulder + elbow not clearly visible in the video. "
-                "Please re-record with the patient's full upper body "
-                "in frame and good lighting."
-            )
-
-        primary_peak_mag = 0.0      # internal rotation
+        primary_peak_mag = 0.0      # external rotation
         primary_peak_idx = -1
-        secondary_peak_mag = 0.0    # external rotation
+        secondary_peak_mag = 0.0    # internal rotation
         secondary_peak_idx = -1
         valid_frames_rot = 0
         n_internal = 0
@@ -880,8 +759,9 @@ def analyze_shoulder(
         n_skipped_vis = 0
 
         for i in range(n_rot):
-            # Need elbow + wrist for magnitude, plus both shoulders
-            # for the body-centreline direction signal.
+            # Need elbow + wrist for magnitude + direction; both
+            # shoulders supply the shoulder-width unit for the
+            # direction deadband.
             if (ve[i] < _SHOULDER_VIS_THRESHOLD
                     or vw[i] < _SHOULDER_VIS_THRESHOLD
                     or lsv_arr[i] < _SHOULDER_VIS_THRESHOLD
@@ -891,39 +771,44 @@ def analyze_shoulder(
             e_x = float(ex[i]); e_y = float(ey[i])
             w_x = float(wx[i]); w_y = float(wy[i])
             ls_x = float(lsx_arr[i]); rs_x = float(rsx_arr[i])
+            shoulder_width = abs(rs_x - ls_x)
 
-            # Calibrated arcsin magnitude. Clamping the ratio to
-            # [0, 1] is CRITICAL — math.asin raises ValueError on
-            # any input outside that range, and noise can push the
-            # forearm projection slightly past the upper-arm proxy.
-            forearm_proj = math.hypot(w_x - e_x, w_y - e_y)
-            ratio = forearm_proj / effective_ref
-            ratio = max(0.0, min(1.0, ratio))
-            magnitude = math.degrees(math.asin(ratio))
-            if magnitude > _ROT_MAX_DEG:
-                magnitude = _ROT_MAX_DEG
+            ax = w_x - e_x
+            ay = w_y - e_y
+            if math.hypot(ax, ay) < _ROT_MIN_FOREARM_PX:
+                n_skipped_vis += 1
+                continue
+            # angle_between((0, 1), (ax, ay)):
+            #   dot = ay, cross = -ax.
+            # Raw angle is in [0°, 180°] from forearm-down. Clinical
+            # ER/IR is measured FROM HORIZONTAL (anatomical neutral
+            # at shoulder abducted 90°), so subtract 90° and take
+            # |·|: forearm-horizontal → 0°, forearm-vertical-up
+            # → 90° ER, forearm-vertical-down → 90° IR.
+            raw_angle = abs(math.degrees(math.atan2(-ax, ay)))
+            magnitude = abs(raw_angle - 90.0)
 
-            direction = _detect_rotation_direction(e_x, w_x, ls_x, rs_x)
+            direction = _detect_rotation_direction(e_y, w_y, shoulder_width)
             if direction is None:
                 n_deadband += 1
                 continue
             valid_frames_rot += 1
-            if direction == "internal":
-                n_internal += 1
+            if direction == "external":
+                n_external += 1
                 if magnitude > primary_peak_mag:
                     primary_peak_mag = magnitude
                     primary_peak_idx = i
-            else:  # external
-                n_external += 1
+            else:  # internal
+                n_internal += 1
                 if magnitude > secondary_peak_mag:
                     secondary_peak_mag = magnitude
                     secondary_peak_idx = i
 
         _rotlog.info(
-            "rotation summary: side=%s frames=%d valid=%d internal=%d "
-            "external=%d deadband=%d skip_vis=%d peak_int=%.1f "
-            "peak_ext=%.1f",
-            side, n_rot, valid_frames_rot, n_internal, n_external,
+            "rotation summary: side=%s frames=%d valid=%d external=%d "
+            "internal=%d deadband=%d skip_vis=%d peak_ext=%.1f "
+            "peak_int=%.1f",
+            side, n_rot, valid_frames_rot, n_external, n_internal,
             n_deadband, n_skipped_vis,
             primary_peak_mag, secondary_peak_mag,
         )
@@ -938,21 +823,21 @@ def analyze_shoulder(
         p_status = _classify_in_range(primary_peak_mag, p_lo, p_hi)
 
         interpretation_primary = (
-            f"Internal rotation ({side.capitalize()}) measured "
+            f"External rotation ({side.capitalize()}) measured "
             f"{primary_peak_mag:.1f}°, which is {p_pct:.0f}% of the "
             f"{p_lo:.0f}°–{p_hi:.0f}° normal range — {p_status}."
         )
         if secondary_peak_mag > 0:
             s_status = _classify_in_range(secondary_peak_mag, s_lo, s_hi)
             interpretation_secondary = (
-                f"External rotation ({side.capitalize()}) measured "
+                f"Internal rotation ({side.capitalize()}) measured "
                 f"{secondary_peak_mag:.1f}°, which is "
                 f"{(secondary_peak_mag / s_hi) * 100.0:.0f}% of the "
                 f"{s_lo:.0f}°–{s_hi:.0f}° normal range — {s_status}."
             )
         else:
             interpretation_secondary = (
-                "External rotation direction was not detected in this "
+                "Internal rotation direction was not detected in this "
                 "recording."
             )
         interpretation = f"{interpretation_primary} {interpretation_secondary}"
@@ -965,14 +850,14 @@ def analyze_shoulder(
         if primary_peak_idx >= 0 and primary_peak_mag > 0:
             kf = _grab_shoulder_key_frame(
                 video_path, primary_peak_idx, raw,
-                f"Internal rotation ({primary_peak_mag:.1f}°)", side,
+                f"External rotation ({primary_peak_mag:.1f}°)", side,
             )
             if kf:
                 rot_key_frames.append(kf)
         if secondary_peak_idx >= 0 and secondary_peak_mag > 0:
             kf = _grab_shoulder_key_frame(
                 video_path, secondary_peak_idx, raw,
-                f"External rotation ({secondary_peak_mag:.1f}°)", side,
+                f"Internal rotation ({secondary_peak_mag:.1f}°)", side,
             )
             if kf:
                 rot_key_frames.append(kf)
@@ -1001,8 +886,8 @@ def analyze_shoulder(
                 secondary_peak_mag if secondary_peak_mag > 0 else None
             ),
             "secondary_reference_range": [float(s_lo), float(s_hi)],
-            "primary_label": "Internal rotation",
-            "secondary_label": "External rotation",
+            "primary_label": "External rotation",
+            "secondary_label": "Internal rotation",
         }
 
     # Facing-direction sign for flexion/extension. The signed-angle
