@@ -281,15 +281,20 @@ _NECK_LATERAL_PROFILE_MIN_RATIO = 0.25
 #     signed    = angle_between(vertical=(0,−1), neck_vec)
 #
 # Sign convention (image-space, browser-aligned):
-#   • positive signed → ear_mid right of shoulder_mid in image
-#                       → labelled "Left Lateral Flexion" (per
-#                          the spec; matches the patient's
-#                          anatomical left in selfie-mirrored
-#                          view, swaps in non-mirrored uploads —
-#                          same behaviour as live mode)
-#   • negative signed → "Right Lateral Flexion"
-_MERGED_NECKLATERAL_PRIMARY_TARGET:   tuple[float, float] = (35.0, 45.0)  # Left
-_MERGED_NECKLATERAL_SECONDARY_TARGET: tuple[float, float] = (35.0, 45.0)  # Right
+#   • negative signed → ear_mid LEFT of shoulder_mid in image
+#                       → labelled "Right Lateral Flexion" and
+#                          routed to the PRIMARY peak slot so
+#                          the response's primary_label /
+#                          secondary_label match the frontend
+#                          NECK_MOVEMENTS metadata
+#                          (primaryLabel = "Right Lateral
+#                          Flexion"). Behaviour matches the
+#                          selfie-mirrored live view; non-
+#                          mirrored uploads see image-space
+#                          labels, same as live mode.
+#   • positive signed → "Left Lateral Flexion" — secondary slot.
+_MERGED_NECKLATERAL_PRIMARY_TARGET:   tuple[float, float] = (35.0, 45.0)  # Right
+_MERGED_NECKLATERAL_SECONDARY_TARGET: tuple[float, float] = (35.0, 45.0)  # Left
 
 # Deadband on the signed angle — below this magnitude the head is
 # too close to neutral to commit to a side. Same threshold the
@@ -619,11 +624,11 @@ def _analyze_neck_lateral_flexion(
     2D space.
 
     Sign convention:
-      positive → ear_mid right of shoulder_mid in image → labelled
-                  "Left Lateral Flexion" (selfie-mirrored
-                  convention; in non-mirrored uploads the labels
-                  reflect image-space, same as live mode).
-      negative → "Right Lateral Flexion".
+      negative → ear_mid left of shoulder_mid in image → labelled
+                  "Right Lateral Flexion" and routed to the
+                  PRIMARY peak slot (matches the frontend
+                  NECK_MOVEMENTS primaryLabel).
+      positive → "Left Lateral Flexion" — secondary peak slot.
 
     No direction detector — the sign is the direction. Deadband
     on the angle magnitude (5°) suppresses neutral-pose noise.
@@ -697,19 +702,21 @@ def _analyze_neck_lateral_flexion(
     # No direction detector — the sign is the direction. Inside
     # the deadband (|signed| < 5°) the frame is neutral and
     # updates neither peak.
-    primary_peak_signed:   Optional[float] = None  # left  (positive)
+    primary_peak_signed:   Optional[float] = None  # right (negative)
     primary_peak_idx   = -1
-    secondary_peak_signed: Optional[float] = None  # right (negative)
+    secondary_peak_signed: Optional[float] = None  # left  (positive)
     secondary_peak_idx = -1
     for i, a in enumerate(signed_angles):
         if a is None:
             continue
-        if a > _NECK_LATERAL_DEADBAND_DEG:
-            if primary_peak_signed is None or a > primary_peak_signed:
+        if a < -_NECK_LATERAL_DEADBAND_DEG:
+            # Right tilt — primary slot (more-negative angle = larger right ROM).
+            if primary_peak_signed is None or a < primary_peak_signed:
                 primary_peak_signed = a
                 primary_peak_idx = i
-        elif a < -_NECK_LATERAL_DEADBAND_DEG:
-            if secondary_peak_signed is None or a < secondary_peak_signed:
+        elif a > _NECK_LATERAL_DEADBAND_DEG:
+            # Left tilt — secondary slot.
+            if secondary_peak_signed is None or a > secondary_peak_signed:
                 secondary_peak_signed = a
                 secondary_peak_idx = i
         # Else in deadband → neither peak updated.
@@ -718,11 +725,11 @@ def _analyze_neck_lateral_flexion(
     # each side). The raw signed peak is still preserved on the
     # `peak_angle` field for downstream debugging.
     primary_mag = (
-        min(_NECK_LATERAL_ANATOMICAL_MAX_DEG, max(0.0, float(primary_peak_signed)))
+        min(_NECK_LATERAL_ANATOMICAL_MAX_DEG, max(0.0, float(-primary_peak_signed)))
         if primary_peak_signed is not None else 0.0
     )
     secondary_mag = (
-        min(_NECK_LATERAL_ANATOMICAL_MAX_DEG, max(0.0, float(-secondary_peak_signed)))
+        min(_NECK_LATERAL_ANATOMICAL_MAX_DEG, max(0.0, float(secondary_peak_signed)))
         if secondary_peak_signed is not None else 0.0
     )
 
@@ -744,20 +751,20 @@ def _analyze_neck_lateral_flexion(
     p_status = _classify_in_range(primary_mag, p_lo, p_hi)
 
     interpretation_primary = (
-        f"Left lateral flexion measured {primary_mag:.1f}°, which is "
+        f"Right lateral flexion measured {primary_mag:.1f}°, which is "
         f"{p_pct:.0f}% of the {p_lo:.0f}°–{p_hi:.0f}° normal range "
         f"— {p_status}."
     )
     if secondary_mag > 0:
         s_status = _classify_in_range(secondary_mag, s_lo, s_hi)
         interpretation_secondary = (
-            f"Right lateral flexion measured {secondary_mag:.1f}°, "
+            f"Left lateral flexion measured {secondary_mag:.1f}°, "
             f"which is {(secondary_mag / s_hi) * 100.0:.0f}% of the "
             f"{s_lo:.0f}°–{s_hi:.0f}° normal range — {s_status}."
         )
     else:
         interpretation_secondary = (
-            "Right lateral flexion direction was not detected in this "
+            "Left lateral flexion direction was not detected in this "
             "recording."
         )
     interpretation = f"{interpretation_primary} {interpretation_secondary}"
@@ -773,14 +780,14 @@ def _analyze_neck_lateral_flexion(
     if primary_peak_idx >= 0 and primary_mag > 0:
         kf = _grab_neck_key_frame(
             video_path, primary_peak_idx, raw,
-            f"Left lateral flexion ({primary_mag:.1f}°)",
+            f"Right lateral flexion ({primary_mag:.1f}°)",
         )
         if kf:
             key_frames.append(kf)
     if secondary_peak_idx >= 0 and secondary_mag > 0:
         kf = _grab_neck_key_frame(
             video_path, secondary_peak_idx, raw,
-            f"Right lateral flexion ({secondary_mag:.1f}°)",
+            f"Left lateral flexion ({secondary_mag:.1f}°)",
         )
         if kf:
             key_frames.append(kf)
@@ -807,8 +814,8 @@ def _analyze_neck_lateral_flexion(
         ),
         "secondary_peak_magnitude": secondary_mag if secondary_mag > 0 else None,
         "secondary_reference_range": [float(s_lo), float(s_hi)],
-        "primary_label": "Left Lateral Flexion",
-        "secondary_label": "Right Lateral Flexion",
+        "primary_label": "Right Lateral Flexion",
+        "secondary_label": "Left Lateral Flexion",
     }
 
 

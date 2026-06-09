@@ -68,7 +68,16 @@ export const NECK_MOVEMENTS: NeckMovement[] = [
     secondaryLabel: "Left Lateral Flexion",
     secondaryTarget: [20, 45],
   },
-  { id: "rotation",        label: "Rotation",        description: "Turn the head to either side",            target: [70, 90] },
+  {
+    id: "rotation",
+    label: "Rotation",
+    description: "Turn the head to either side",
+    target: [70, 90],
+    merged: true,
+    primaryLabel: "Left Rotation",
+    secondaryLabel: "Right Rotation",
+    secondaryTarget: [60, 80],
+  },
   // Legacy single-direction entries — kept so saved reports
   // referring to them still resolve labels + targets, but hidden
   // from the chooser since the merged version above replaces them.
