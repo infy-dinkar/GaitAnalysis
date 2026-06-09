@@ -80,7 +80,7 @@ export const SHOULDER_MOVEMENTS: ShoulderMovement[] = [
     id: "rotation",
     label: "Rotation (External + Internal)",
     description:
-      "With elbow tucked at the side and bent 90°, rotate the forearm outward (external) and inward (internal). One session captures both peaks.",
+      "Stand side-on to the camera. Raise your arm to shoulder height (90° abduction) and bend your elbow to 90° so the forearm hangs vertical. Rotate the forearm UP toward your head (external) then DOWN toward the floor (internal). One session captures both peaks.",
     target: [70, 90],
     merged: true,
     primaryLabel: "External Rotation",
@@ -170,56 +170,59 @@ export function computeShoulderAngle(
   return shoulderRotation(s, e, w);
 }
 
-// ─── Calibrated rotation (baseline-locked) ──────────────────────
+// ─── Lateral-view shoulder rotation ─────────────────────────────
 //
-// Geometry — same idea as the neck-rotation fix, applied to the
-// shoulder. With the elbow tucked at the side and bent 90°, the
-// forearm sweeps in a horizontal plane around the shoulder axis.
-// At the patient's neutral position (forearm pointing forward at
-// the camera), the forearm projection in the 2D image is near zero.
-// As the patient rotates externally or internally, the forearm
-// projection grows. Mathematically:
+// Setup: patient stands SIDE-ON to the camera. Arm abducted to 90°
+// (upper arm horizontal, projecting toward / away from the camera
+// in the lateral view). Elbow bent 90° so the forearm sweeps in a
+// plane parallel to the image plane:
 //
-//     forearmProjectedLength = R_forearmLength × sin(θ)
-//     ⇒ θ = arcsin(forearmProjectedLength / R_forearmLength)
+//   • Forearm hanging straight down  →  0°  reference
+//   • Forearm rotating UP toward head →  External Rotation (target 60–90°)
+//   • Forearm rotating DOWN toward floor → Internal Rotation (target 60–80°)
 //
-// We can't measure R_forearmLength directly at neutral (projection ≈
-// 0), so we use the upper-arm length as a proxy — anatomically
-// forearm length ≈ upper-arm length for most adults (within ±10%).
-// The upper arm is fully visible in 2D when tucked at the side
-// (vertical pose), so its pixel length is a reliable scale.
+// Math (per frame, no baseline calibration required):
 //
-// Sign is intentionally NOT returned — the operator already selects
-// "external" or "internal" before recording, so direction is known
-// from the test selection. We just report the magnitude (always ≥ 0).
-// This also matches the report-card display, which renders peak
-// magnitude vs target range without a +/- distinction.
+//     reference     = (0, 1)              // straight down, image y-down convention
+//     forearmVector = (wrist − elbow)
+//     magnitude     = |angleBetween(reference, forearmVector)|
+//
+// Direction: pure y comparison of wrist vs elbow.
+//   wrist.y < elbow.y  → External (wrist above elbow on screen)
+//   wrist.y > elbow.y  → Internal (wrist below elbow on screen)
+// A small deadband on |wrist.y - elbow.y| / shoulderWidth suppresses
+// flips at the exact horizontal crossover.
+//
+// The `ShoulderRotationCalibration` type + neutral / baseline helpers
+// below are KEPT for API compatibility with LiveAssessment.tsx,
+// LiveBiomechCamera.tsx and uploadAnalyze.ts — they don't supply real
+// scale information any more; the new compute function ignores their
+// payload aside from the wrong-side guard.
 
 export interface ShoulderRotationCalibration {
-  /** Upper-arm pixel length at calibration (shoulder→elbow). Used
-   *  as a proxy for forearm length in the arcsin formula. */
+  /** Retained for API compatibility — the new lateral-view formula
+   *  does not use a length proxy. Populated from the still-cheap
+   *  shoulder→elbow distance so saved sessions stay readable. */
   R_upperArmLength: number;
   /** Side this baseline was captured for — guards against accidental
    *  cross-side application if the operator switches mid-flow. */
   side: "left" | "right";
 }
 
-/** Maximum forearm-projection-to-upper-arm ratio for "patient is at
- *  neutral rotation" (forearm pointing at the camera). 0.20 = forearm
- *  projects to no more than 20% of the upper-arm length. Generous
- *  enough to tolerate slight angle off-camera but tight enough that
- *  the patient can't be holding the forearm fully sideways. */
-const SHOULDER_NEUTRAL_FOREARM_RATIO_MAX = 0.20;
+/** Minimum forearm vector length (px) below which the angle becomes
+ *  unstable; the peak tracker holds the last good value. */
+const ROTATION_MIN_VECTOR_PX = 4;
 
-/** Minimum upper-arm pixel length to accept calibration. Below this
- *  the patient is too far from the camera, MoveNet's keypoints are
- *  too noisy, and the rotation readings would be unreliable. */
-const MIN_UPPER_ARM_PX = 30;
+/** Direction deadband on (wrist.y − elbow.y) expressed as a fraction
+ *  of shoulder width — scale-invariant. Suppresses direction flips
+ *  when the wrist sits within a thin band of the elbow's image y. */
+const ROTATION_DIRECTION_DEADBAND_FRAC = 0.03;
 
-/** True when MoveNet sees shoulder + elbow + wrist for the given
- *  side AND the forearm is approximately pointing at the camera (low
- *  2D projection). Used by the live-capture flow to decide when to
- *  auto-lock the shoulder-rotation baseline. */
+/** Returns true once the test-side shoulder, elbow and wrist are
+ *  visible. The lateral-view formula needs no baseline lock-in, so
+ *  the live flow can transition to "recording" the moment landmarks
+ *  are visible. Function name retained for API compatibility with
+ *  LiveAssessment.tsx. */
 export function isShoulderRotationNeutral(
   keypoints: Keypoint[],
   side: "left" | "right",
@@ -231,15 +234,14 @@ export function isShoulderRotationNeutral(
   for (const k of [s, e, w]) {
     if (!k || (k.score ?? 0) < VIS_THRESHOLD) return false;
   }
-  const upperArmLen = Math.hypot(e.x - s.x, e.y - s.y);
-  if (upperArmLen < MIN_UPPER_ARM_PX) return false;
-  const forearmLen = Math.hypot(w.x - e.x, w.y - e.y);
-  return forearmLen / upperArmLen <= SHOULDER_NEUTRAL_FOREARM_RATIO_MAX;
+  return true;
 }
 
-/** Snapshot the patient's neutral-position upper-arm length as the
- *  rotation reference. Called once after isShoulderRotationNeutral
- *  has held true for the calibration-stable window. */
+/** Build a calibration handle. The new lateral-view formula doesn't
+ *  use upper-arm length, but we keep the field populated so saved
+ *  sessions and the existing call sites continue to work. The
+ *  `side` field IS still meaningful — it powers the wrong-side
+ *  guard inside computeShoulderRotationFromBaseline. */
 export function captureShoulderRotationBaseline(
   keypoints: Keypoint[],
   side: "left" | "right",
@@ -250,26 +252,28 @@ export function captureShoulderRotationBaseline(
   if (!s || !e) return null;
   if ((s.score ?? 0) < VIS_THRESHOLD || (e.score ?? 0) < VIS_THRESHOLD) return null;
   const len = Math.hypot(e.x - s.x, e.y - s.y);
-  if (len < MIN_UPPER_ARM_PX) return null;
   return { R_upperArmLength: len, side };
 }
 
-/** Typical anatomical ratio of forearm length to upper-arm length in
- *  adults. The arcsin formula uses upper-arm pixel length as a proxy
- *  for forearm length (we can't measure forearm directly at neutral
- *  because the forearm is pointing at the camera and projects to
- *  near zero). Most adults' forearms are ~88% as long as their
- *  upper arms; using the upper-arm length as-is therefore makes
- *  full ROM read low (the projection ratio caps around 0.85-0.90,
- *  so asin returns 58°-65° even when the patient is actually at
- *  90° rotation). Scaling the denominator by this constant brings
- *  the output much closer to the patient's true peak rotation. */
-const FOREARM_TO_UPPER_ARM_PROXY = 0.88;
-
-/** Calibrated rotation magnitude in degrees, capped at 90°.
- *  Returns null when wrist or elbow visibility drops (typical at the
- *  extreme of rotation when the wrist crosses behind the body). The
- *  upstream peak-tracker holds the last good value in that case. */
+/** Lateral-view rotation magnitude in CLINICAL degrees (0–90°).
+ *
+ *  Step 1: compute the raw angle from the straight-down reference
+ *          vector (0, 1) — that puts forearm-down at 0°, forearm-
+ *          horizontal at 90°, forearm-up at 180°.
+ *  Step 2: convert to the clinical reading, which is the angle FROM
+ *          horizontal (anatomical neutral for an abducted-90° arm):
+ *
+ *              clinical = |raw − 90°|
+ *
+ *          Above elbow (ER direction): raw 90→180 maps to clinical
+ *          0→90, matching the AAOS ER range of 0–90°.
+ *          Below elbow (IR direction): raw 90→0 maps to clinical
+ *          0→90 in the same way (anatomical IR max ~70–80°).
+ *
+ *  Returns null when wrist or elbow visibility drops; the upstream
+ *  peak-tracker holds the last good value. The `baseline` parameter
+ *  is retained only for its `side` field (wrong-side guard); its
+ *  R_upperArmLength is ignored. */
 export function computeShoulderRotationFromBaseline(
   keypoints: Keypoint[],
   side: "left" | "right",
@@ -281,14 +285,13 @@ export function computeShoulderRotationFromBaseline(
   const w = keypoints[idx.wrist];
   if (!e || !w) return null;
   if ((e.score ?? 0) < VIS_THRESHOLD || (w.score ?? 0) < VIS_THRESHOLD) return null;
-  const forearmProjLen = Math.hypot(w.x - e.x, w.y - e.y);
-  // arcsin saturates at 1; clamp the ratio. The
-  // FOREARM_TO_UPPER_ARM_PROXY factor compensates for the upper-arm
-  // proxy being anatomically longer than the actual forearm, so full
-  // ROM reads close to 90° instead of 56°-65°.
-  const effectiveRef = baseline.R_upperArmLength * FOREARM_TO_UPPER_ARM_PROXY;
-  const ratio = Math.max(0, Math.min(1, forearmProjLen / effectiveRef));
-  return (Math.asin(ratio) * 180) / Math.PI;
+  const ax = w.x - e.x;
+  const ay = w.y - e.y;
+  if (Math.hypot(ax, ay) < ROTATION_MIN_VECTOR_PX) return null;
+  // angleBetween((0, 1), (ax, ay)) with atan2(cross, dot):
+  //   dot = ay, cross = −ax.
+  const rawAngle = Math.abs(angleBetween(0, 1, ax, ay));
+  return Math.abs(rawAngle - 90);
 }
 
 // ─── Direction detection for merged (dual-direction) movements ──
@@ -415,12 +418,11 @@ function bodyCentreX(keypoints: Keypoint[]): { centreX: number; shoulderWidth: n
   return { centreX: (ls.x + rs.x) / 2, shoulderWidth };
 }
 
-/** Detect external vs internal rotation from wrist position relative
- *  to the elbow's distance from the body centreline. External =
- *  wrist swings further OUT (more lateral) than the elbow. Internal
- *  = wrist crosses INWARD (less lateral, or past the centreline).
- *  Returns null if visibility is insufficient or the lateral signal
- *  is within the deadband (near neutral pose). */
+/** Lateral-view direction detection.
+ *  Wrist ABOVE elbow on screen (image y smaller) → External Rotation.
+ *  Wrist BELOW elbow on screen (image y larger)  → Internal Rotation.
+ *  Within the y-deadband (small fraction of shoulder width) → null,
+ *  neither direction committed. */
 export function detectShoulderRotationDirection(
   keypoints: Keypoint[],
   side: "left" | "right",
@@ -432,11 +434,10 @@ export function detectShoulderRotationDirection(
   if ((e.score ?? 0) < VIS_THRESHOLD || (w.score ?? 0) < VIS_THRESHOLD) return null;
   const body = bodyCentreX(keypoints);
   if (!body) return null;
-  const elbowLateral = Math.abs(e.x - body.centreX);
-  const wristLateral = Math.abs(w.x - body.centreX);
-  const ratio = (wristLateral - elbowLateral) / body.shoulderWidth;
-  if (Math.abs(ratio) < DIRECTION_DEADBAND_FRAC) return null;
-  return ratio > 0 ? "external" : "internal";
+  const dy = (w.y - e.y) / body.shoulderWidth;
+  if (Math.abs(dy) < ROTATION_DIRECTION_DEADBAND_FRAC) return null;
+  // Image y grows DOWNWARD: dy < 0 means wrist above elbow on screen.
+  return dy < 0 ? "external" : "internal";
 }
 
 /** Elbow-above-shoulder threshold (in shoulder-width units) above
