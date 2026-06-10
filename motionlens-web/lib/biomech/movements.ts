@@ -21,6 +21,11 @@ interface MovementMeta {
   primaryLabel?: string;
   secondaryLabel?: string;
   secondaryTarget?: [number, number];
+  /** Optional reference illustration. Lives on the joint movement
+   *  entry (e.g. SHOULDER_MOVEMENTS); passed through here so callers
+   *  like LiveAssessment can resolve it without importing each
+   *  joint's array directly. */
+  imageUrl?: string;
 }
 
 export function resolveMovement(
@@ -46,10 +51,12 @@ export function resolveMovement(
     primaryLabel?: string;
     secondaryLabel?: string;
     secondaryTarget?: [number, number];
+    imageUrl?: string;
   };
   if (shoulderEntry.merged) result.merged = true;
   if (shoulderEntry.primaryLabel) result.primaryLabel = shoulderEntry.primaryLabel;
   if (shoulderEntry.secondaryLabel) result.secondaryLabel = shoulderEntry.secondaryLabel;
   if (shoulderEntry.secondaryTarget) result.secondaryTarget = shoulderEntry.secondaryTarget;
+  if (shoulderEntry.imageUrl) result.imageUrl = shoulderEntry.imageUrl;
   return result;
 }

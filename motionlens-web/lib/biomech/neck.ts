@@ -33,6 +33,9 @@ export interface NeckMovement {
    *  to "flexion" / "extension" alone resolve labels + targets,
    *  but they no longer appear when starting a new trial. */
   hidden?: boolean;
+  /** Optional reference illustration. See MovementGrid's
+   *  MovementOption.imageUrl for the path convention. */
+  imageUrl?: string;
 }
 
 export const NECK_MOVEMENTS: NeckMovement[] = [
@@ -51,6 +54,7 @@ export const NECK_MOVEMENTS: NeckMovement[] = [
     primaryLabel: "Flexion",
     secondaryLabel: "Extension",
     secondaryTarget: [50, 70],
+    imageUrl: "/images/biomech/neck/neck_flexion_extension.png",
   },
   // Lateral flexion is also a merged test — patient tilts head
   // toward each shoulder in turn, and the report captures the peak
@@ -67,6 +71,7 @@ export const NECK_MOVEMENTS: NeckMovement[] = [
     primaryLabel: "Right Lateral Flexion",
     secondaryLabel: "Left Lateral Flexion",
     secondaryTarget: [20, 45],
+    imageUrl: "/images/biomech/neck/neck_lateral_flexion.png",
   },
   {
     id: "rotation",
@@ -77,6 +82,7 @@ export const NECK_MOVEMENTS: NeckMovement[] = [
     primaryLabel: "Left Rotation",
     secondaryLabel: "Right Rotation",
     secondaryTarget: [60, 80],
+    imageUrl: "/images/biomech/neck/neck_rotation.png",
   },
   // Legacy single-direction entries — kept so saved reports
   // referring to them still resolve labels + targets, but hidden

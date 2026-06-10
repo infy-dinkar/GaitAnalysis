@@ -7,6 +7,11 @@ export interface MovementOption {
   label: string;
   description: string;
   target: [number, number];
+  /** Optional reference illustration shown as a thumbnail at the
+   *  top of the tile. One image per exercise (no left/right
+   *  variants); the side selector lives in a separate UI section.
+   *  Asset path convention: /images/biomech/<joint>/<joint>_<id>.png */
+  imageUrl?: string;
 }
 
 interface MovementGridProps<T extends MovementOption> {
@@ -36,6 +41,18 @@ export function MovementGrid<T extends MovementOption>({
                 : "border-border bg-surface hover:border-accent/60",
             )}
           >
+            {opt.imageUrl && (
+              <div className="mb-1 w-full overflow-hidden rounded-md bg-white">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={opt.imageUrl}
+                  alt=""
+                  aria-hidden="true"
+                  loading="lazy"
+                  className="block h-28 w-full object-contain"
+                />
+              </div>
+            )}
             <div className="flex w-full items-start justify-between gap-3">
               <span className="text-sm font-semibold text-foreground">{opt.label}</span>
               {active && (

@@ -33,6 +33,9 @@ export interface AnkleMovement {
   label: string;
   description: string;
   target: [number, number];
+  /** Optional reference illustration. See MovementGrid's
+   *  MovementOption.imageUrl for the path convention. */
+  imageUrl?: string;
 }
 
 export const ANKLE_MOVEMENTS: AnkleMovement[] = [
@@ -41,12 +44,14 @@ export const ANKLE_MOVEMENTS: AnkleMovement[] = [
     label: "Dorsiflexion",
     description: "Pull the foot upward (toes toward shin) — knee-to-wall lean",
     target: [15, 25],
+    imageUrl: "/images/biomech/ankle/ankle_dorsiflexion.png",
   },
   {
     id: "extension",
     label: "Plantarflexion",
     description: "Point the foot down, like pressing a gas pedal",
     target: [40, 55],
+    imageUrl: "/images/biomech/ankle/ankle_plantarflexion.png",
   },
 ];
 
