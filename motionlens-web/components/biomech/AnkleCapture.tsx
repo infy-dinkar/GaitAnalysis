@@ -37,6 +37,7 @@ import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton"
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { BiomechDataDTO } from "@/lib/api";
 import { analyzeAnkleBlob } from "@/lib/biomech/uploadAnalyze";
+import { resolveMovement } from "@/lib/biomech/movements";
 
 type Phase = "idle" | "recording" | "uploading" | "done" | "error";
 type Mode = "record" | "upload";
@@ -87,6 +88,10 @@ export function AnkleCapture({
 }: Props) {
   const { isDoctorFlow, patient } = usePatientContext();
   const reportName = movementLabel.split(" · ").pop() ?? movementLabel;
+  // Reference illustration — same pass-through as the other joints
+  // (resolveMovement reads imageUrl from ANKLE_MOVEMENTS). Renders
+  // above the Setup checklist for both record + upload modes.
+  const movementImageUrl = resolveMovement("ankle", movementId)?.imageUrl ?? null;
 
   const [mode, setMode] = useState<Mode>(initialMode);
   const [phase, setPhase] = useState<Phase>("idle");
@@ -392,6 +397,19 @@ export function AnkleCapture({
             <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
               Setup checklist
             </p>
+            {movementImageUrl && (
+              <div className="mt-3 mx-auto max-w-md overflow-hidden rounded-md border border-border bg-white">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={movementImageUrl}
+                  alt=""
+                  aria-hidden="true"
+                  loading="lazy"
+                  className="block w-full object-contain"
+                  style={{ maxHeight: 280 }}
+                />
+              </div>
+            )}
             <ol className="mt-3 space-y-2.5 text-sm text-foreground">
               {[
                 "Patient sits comfortably with the test leg fully extended forward.",
