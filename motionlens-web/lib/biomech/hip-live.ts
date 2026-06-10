@@ -30,6 +30,9 @@ export interface HipMovement {
    *  direction IDs (`internal_rotation` / `external_rotation`) still
    *  resolve their labels + targets. */
   hidden?: boolean;
+  /** Optional reference illustration. See MovementGrid's
+   *  MovementOption.imageUrl for the path convention. */
+  imageUrl?: string;
 }
 
 export const HIP_MOVEMENTS: HipMovement[] = [
@@ -38,12 +41,14 @@ export const HIP_MOVEMENTS: HipMovement[] = [
     label: "Flexion",
     description: "Lift the leg forward — bringing the thigh toward the chest",
     target: [110, 130],
+    imageUrl: "/images/biomech/hip/hip_flexion.png",
   },
   {
     id: "extension",
     label: "Extension",
     description: "Move the leg backward behind the body",
     target: [10, 30],
+    imageUrl: "/images/biomech/hip/hip_extension.png",
   },
   // Merged Internal + External rotation. Seated heel-fixed test:
   // patient sits upright on a chair with both feet flat on the
@@ -61,6 +66,7 @@ export const HIP_MOVEMENTS: HipMovement[] = [
     primaryLabel: "Internal Rotation",
     secondaryLabel: "External Rotation",
     secondaryTarget: [30, 45],
+    imageUrl: "/images/biomech/hip/hip_rotation.png",
   },
   // Legacy single-direction entries — kept in the lookup table so
   // saved reports that referenced these IDs still resolve labels +

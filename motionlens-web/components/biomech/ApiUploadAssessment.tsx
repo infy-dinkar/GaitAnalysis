@@ -9,6 +9,7 @@ import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton"
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { BiomechDataDTO } from "@/lib/api";
 import { analyzeBiomechVideo } from "@/lib/biomech/uploadAnalyze";
+import { resolveMovement } from "@/lib/biomech/movements";
 
 interface Props {
   bodyPart: "shoulder" | "neck" | "knee" | "hip" | "ankle";
@@ -74,6 +75,10 @@ export function ApiUploadAssessment({
 }: Props) {
   const reportName =
     movementName ?? movementLabel.split(" · ").pop() ?? movementLabel;
+  // Reference illustration — shown for any joint whose movement
+  // entry carries an imageUrl. Returns null for joints/movements
+  // without an asset, so the render stays a no-op there.
+  const movementImageUrl = resolveMovement(bodyPart, movementId)?.imageUrl ?? null;
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);     // 0..1 analysis progress
@@ -257,6 +262,20 @@ export function ApiUploadAssessment({
           )}
         </p>
       </div>
+
+      {movementImageUrl && (
+        <div className="mx-auto max-w-xl overflow-hidden rounded-md border border-border bg-white">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={movementImageUrl}
+            alt=""
+            aria-hidden="true"
+            loading="lazy"
+            className="block w-full object-contain"
+            style={{ maxHeight: 280 }}
+          />
+        </div>
+      )}
 
       <VideoUpload onSelect={onSelect} />
 

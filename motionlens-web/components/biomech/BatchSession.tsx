@@ -25,7 +25,7 @@
 // replaces its file-picker card. The Save All + Download PDF buttons
 // at the bottom enable only when every queued item is `done`.
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -34,6 +34,7 @@ import {
   RotateCcw,
   Save,
   Upload,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { AssessmentReport } from "@/components/biomech/AssessmentReport";
@@ -59,6 +60,9 @@ interface MovementOption {
   /** Neck has no per-side concept (uses both ears + shoulder midline)
    *  — its movements show up with no side selector. */
   perSide: boolean;
+  /** Reference illustration. When set, selecting this movement pops
+   *  up a modal preview; deselecting does not re-open it. */
+  imageUrl?: string;
 }
 
 /** Build the flat catalogue of movements the operator can pick from.
@@ -75,6 +79,7 @@ function getCatalogue(): MovementOption[] {
       label: m.label,
       target: m.target,
       perSide: true,
+      imageUrl: m.imageUrl,
     });
   }
   for (const m of NECK_MOVEMENTS) {
@@ -85,6 +90,7 @@ function getCatalogue(): MovementOption[] {
       label: m.label,
       target: m.target,
       perSide: false,
+      imageUrl: m.imageUrl,
     });
   }
   for (const m of KNEE_MOVEMENTS) {
@@ -95,6 +101,7 @@ function getCatalogue(): MovementOption[] {
       label: m.label,
       target: m.target,
       perSide: true,
+      imageUrl: m.imageUrl,
     });
   }
   for (const m of HIP_MOVEMENTS) {
@@ -105,6 +112,7 @@ function getCatalogue(): MovementOption[] {
       label: m.label,
       target: m.target,
       perSide: true,
+      imageUrl: m.imageUrl,
     });
   }
   for (const m of ANKLE_MOVEMENTS) {
@@ -114,6 +122,7 @@ function getCatalogue(): MovementOption[] {
       label: m.label,
       target: m.target,
       perSide: true,
+      imageUrl: m.imageUrl,
     });
   }
   return out;
@@ -201,6 +210,11 @@ export function BatchSession() {
   // Once "Start session" is clicked, the selection is frozen into
   // this ordered queue of mutable BatchItem objects.
   const [queue, setQueue] = useState<BatchItem[]>([]);
+  // Reference-image preview popup. Opened when the operator newly
+  // selects a movement that has an imageUrl; closed via the X button,
+  // the backdrop click, or the Escape key. Deselect does not re-open
+  // the popup.
+  const [popupImage, setPopupImage] = useState<{ src: string; label: string } | null>(null);
 
   const catalogue = useMemo(() => getCatalogue(), []);
   const reportRootRef = useRef<HTMLDivElement | null>(null);
@@ -209,6 +223,7 @@ export function BatchSession() {
   const keyOf = (bodyPart: BodyPart, id: string) => `${bodyPart}.${id}`;
   function toggleMovement(opt: MovementOption) {
     const k = keyOf(opt.bodyPart, opt.id);
+    const wasOn = k in selected;
     setSelected((prev) => {
       const next = { ...prev };
       if (k in next) {
@@ -218,7 +233,23 @@ export function BatchSession() {
       }
       return next;
     });
+    // Pop up the reference image only when newly SELECTING (not on
+    // deselect). Skipped silently if this movement has no asset.
+    if (!wasOn && opt.imageUrl) {
+      setPopupImage({ src: opt.imageUrl, label: opt.label });
+    }
   }
+
+  // Close the reference-image popup on Escape (in addition to the X
+  // button and the backdrop click).
+  useEffect(() => {
+    if (!popupImage) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setPopupImage(null);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [popupImage]);
   function setItemSide(opt: MovementOption, side: "left" | "right" | "both") {
     const k = keyOf(opt.bodyPart, opt.id);
     setSelected((prev) => (k in prev ? { ...prev, [k]: side } : prev));
@@ -497,6 +528,48 @@ export function BatchSession() {
             Start session
           </Button>
         </div>
+
+        {popupImage && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+            onClick={() => setPopupImage(null)}
+            role="dialog"
+            aria-modal="true"
+            aria-label={`${popupImage.label} reference`}
+          >
+            <div
+              className="relative w-full max-w-2xl overflow-hidden rounded-card border border-border bg-surface shadow-glow-sm"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                type="button"
+                onClick={() => setPopupImage(null)}
+                aria-label="Close reference image"
+                className="absolute right-3 top-3 z-10 flex h-9 w-9 items-center justify-center rounded-full bg-background/90 text-foreground transition hover:bg-background"
+              >
+                <X className="h-4 w-4" />
+              </button>
+              <div className="bg-white">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={popupImage.src}
+                  alt=""
+                  aria-hidden="true"
+                  className="block w-full object-contain"
+                  style={{ maxHeight: "70vh" }}
+                />
+              </div>
+              <div className="border-t border-border bg-surface p-4">
+                <p className="text-sm font-semibold text-foreground">
+                  {popupImage.label}
+                </p>
+                <p className="mt-1 text-xs text-muted">
+                  Reference illustration. Press Esc, click the X, or tap outside to close.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }

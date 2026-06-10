@@ -35,6 +35,9 @@ export interface KneeMovement {
    *  still resolve labels / targets without breaking, but they no
    *  longer appear when starting a new trial. */
   hidden?: boolean;
+  /** Optional reference illustration. See MovementGrid's
+   *  MovementOption.imageUrl for the path convention. */
+  imageUrl?: string;
 }
 
 export const KNEE_MOVEMENTS: KneeMovement[] = [
@@ -62,6 +65,7 @@ export const KNEE_MOVEMENTS: KneeMovement[] = [
     // while not penalising healthy patients for the camera's
     // measurement uncertainty.
     secondaryTarget: [0, 10],
+    imageUrl: "/images/biomech/knee/knee_flexion_extension.png",
   },
   // Legacy single-direction entries — kept so saved reports referring
   // to "flexion" or "extension" alone still resolve a label/target

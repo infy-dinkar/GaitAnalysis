@@ -40,6 +40,9 @@ export interface ShoulderMovement {
    *  legacy saved reports referencing the old (now-merged) directional
    *  IDs can still resolve labels / targets without breaking. */
   hidden?: boolean;
+  /** Optional reference illustration. See MovementGrid's
+   *  MovementOption.imageUrl for the path convention. */
+  imageUrl?: string;
 }
 
 export const SHOULDER_MOVEMENTS: ShoulderMovement[] = [
@@ -58,6 +61,7 @@ export const SHOULDER_MOVEMENTS: ShoulderMovement[] = [
     primaryLabel: "Flexion",
     secondaryLabel: "Extension",
     secondaryTarget: [45, 60],
+    imageUrl: "/images/biomech/shoulder/shoulder_flexion_extension.png",
   },
   // Combined Abduction + Adduction. One recording captures both
   // directions; the live engine detects which way the elbow is
@@ -72,6 +76,7 @@ export const SHOULDER_MOVEMENTS: ShoulderMovement[] = [
     primaryLabel: "Abduction",
     secondaryLabel: "Adduction",
     secondaryTarget: [30, 50],
+    imageUrl: "/images/biomech/shoulder/shoulder_abduction_adduction.png",
   },
   // Combined External + Internal Rotation. Patient rotates outward,
   // returns to neutral, then rotates inward. Both peaks are captured
@@ -86,6 +91,7 @@ export const SHOULDER_MOVEMENTS: ShoulderMovement[] = [
     primaryLabel: "External Rotation",
     secondaryLabel: "Internal Rotation",
     secondaryTarget: [60, 80],
+    imageUrl: "/images/biomech/shoulder/shoulder_rotation.png",
   },
   // Legacy single-direction entries — kept in the lookup table so
   // saved reports that referenced these IDs still resolve their label

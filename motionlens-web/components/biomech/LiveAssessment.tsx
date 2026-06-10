@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/Button";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import { fmt } from "@/lib/utils";
 import { getInstructions } from "@/lib/biomech/instructions";
+import { resolveMovement } from "@/lib/biomech/movements";
 import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
 import {
   captureNeckRotationBaseline,
@@ -864,6 +865,10 @@ export function LiveAssessment({
   const hasAnyPeak = hasPeak || (isMergedMovement && hasPeakB);
 
   const instructions = getInstructions(bodyPart, movementId);
+  // Reference illustration — shown for any joint whose movement
+  // entry carries an imageUrl. Returns null for joints/movements
+  // without an asset, so the render stays a no-op there.
+  const movementImageUrl = resolveMovement(bodyPart, movementId)?.imageUrl ?? null;
 
   const statusPresentation: Record<
     PostureStatus,
@@ -937,6 +942,19 @@ export function LiveAssessment({
             <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
               Movement instructions
             </p>
+            {movementImageUrl && (
+              <div className="mt-3 mx-auto max-w-md overflow-hidden rounded-md border border-border bg-white">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={movementImageUrl}
+                  alt=""
+                  aria-hidden="true"
+                  loading="lazy"
+                  className="block w-full object-contain"
+                  style={{ maxHeight: 280 }}
+                />
+              </div>
+            )}
             <ol className="mt-3 space-y-2.5 text-sm text-foreground">
               {instructions.map((s, i) => (
                 <li key={i} className="flex gap-2.5">
