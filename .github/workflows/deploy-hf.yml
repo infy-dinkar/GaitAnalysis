@@ -52,9 +52,28 @@ jobs:
           echo "HF_TOKEN length: ${#HF_TOKEN}"
           git config --global user.email "actions@github.com"
           git config --global user.name  "GitHub Actions"
-          # Quoting the URL prevents word-splitting if a value still has
-          # whitespace; the trim above should already have handled it.
+          # Build a clean orphan commit that excludes motionlens-web/
+          # before pushing to HF Spaces.
+          #
+          # Why orphan + strip rather than plain push:
+          #   1. HF Spaces only serves the FastAPI backend (engines/,
+          #      api.py, Dockerfile). The frontend (motionlens-web/) is
+          #      deployed separately via Vercel — .dockerignore already
+          #      excludes it from the image build.
+          #   2. HF's pre-receive hook scans the incoming pack for
+          #      binary files and rejects them unless stored via xet
+          #      or git-lfs. The reference-illustration PNGs under
+          #      motionlens-web/public/images/biomech/ trigger this
+          #      rejection.
+          #   3. A plain `git rm` on the existing branch would still
+          #      ship the offending blobs in the pack (since prior
+          #      commits still reference them). An orphan commit has
+          #      no history, so HF only receives the current,
+          #      motionlens-web-free tree.
+          git checkout --orphan hf-mirror
+          git rm -rf motionlens-web 2>/dev/null || true
+          git commit -m "Auto-deploy from GitHub Actions" --quiet
           git push --force \
             "https://${HF_USERNAME}:${HF_TOKEN}@huggingface.co/spaces/${HF_USERNAME}/${HF_SPACE_NAME}" \
-            HEAD:main
+            hf-mirror:main
           echo "✅ Pushed to https://huggingface.co/spaces/${HF_USERNAME}/${HF_SPACE_NAME}"
