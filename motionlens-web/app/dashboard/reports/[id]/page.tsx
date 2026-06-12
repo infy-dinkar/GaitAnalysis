@@ -59,7 +59,7 @@ import { getReport, type ReportDTO } from "@/lib/reports";
 import { getPatient, type PatientDTO } from "@/lib/patients";
 import { formatIST, formatISTIsoDate } from "@/lib/format/datetime";
 import { exportReportPdf } from "@/lib/pdf/exportReportPdf";
-import type { GaitDataDTO } from "@/lib/api";
+import type { BiomechCompensationDTO, GaitDataDTO } from "@/lib/api";
 import type {
   FrontMeasurements,
   SideMeasurements,
@@ -514,6 +514,13 @@ function BiomechBody({
     return items.length > 0 ? items : undefined;
   })();
 
+  // Recover compensation findings from saved metrics. Persisted only
+  // for shoulder flex+ext / ab+ad / rotation today; null/empty for
+  // every other test, so the AssessmentReport's section stays hidden.
+  const savedCompensations = parseSavedCompensations(
+    (m as Record<string, unknown>).compensations,
+  );
+
   return (
     <div className="space-y-8">
       <AssessmentReport
@@ -531,6 +538,7 @@ function BiomechBody({
         secondaryMovementName={secondaryMovementName}
         secondaryMeasured={secondaryMeasured}
         secondaryTarget={secondaryTarget}
+        compensations={savedCompensations}
       />
       {interpretation && (
         <section>
@@ -579,6 +587,7 @@ function BiomechBatchBody({
     secondaryMeasured?: number;
     secondaryTarget?: [number, number];
     keyFrames?: Array<{ label: string; frame_index: number; image_data_url: string }>;
+    compensations?: BiomechCompensationDTO[];
   }> = [];
 
   for (const raw of rawItems) {
@@ -653,6 +662,7 @@ function BiomechBatchBody({
       secondaryMeasured,
       secondaryTarget,
       keyFrames: keyFrames && keyFrames.length > 0 ? keyFrames : undefined,
+      compensations: parseSavedCompensations(e.compensations),
     });
   }
 
@@ -695,6 +705,7 @@ function BiomechBatchBody({
             secondaryMovementName={it.secondaryMovementName}
             secondaryMeasured={it.secondaryMeasured}
             secondaryTarget={it.secondaryTarget}
+            compensations={it.compensations}
           />
         </div>
       ))}
@@ -828,6 +839,51 @@ function pickRange(obj: Record<string, unknown>, key: string): [number, number] 
     return [v[0], v[1]];
   }
   return null;
+}
+
+/** Re-hydrate a saved compensations array from the metrics blob.
+ *  Filters to entries whose required fields match the
+ *  BiomechCompensationDTO shape. Returns undefined when no valid
+ *  entries (so the AssessmentReport's section stays hidden). */
+function parseSavedCompensations(raw: unknown): BiomechCompensationDTO[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: BiomechCompensationDTO[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const e = entry as Record<string, unknown>;
+    const t = e.type;
+    if (
+      typeof e.label !== "string" ||
+      typeof e.severity !== "string" ||
+      typeof e.flagged !== "boolean" ||
+      typeof t !== "string"
+    ) {
+      continue;
+    }
+    if (
+      t !== "trunk_lean" &&
+      t !== "shoulder_elevation" &&
+      t !== "elbow_bend" &&
+      t !== "elbow_drop" &&
+      t !== "elbow_drift_from_side"
+    ) {
+      continue;
+    }
+    const sev = e.severity;
+    if (sev !== "high" && sev !== "medium" && sev !== "low") continue;
+    const details =
+      typeof e.details === "string" ? e.details
+      : e.details === null ? null
+      : undefined;
+    out.push({
+      type: t,
+      label: e.label,
+      severity: sev,
+      flagged: e.flagged,
+      ...(details !== undefined ? { details } : {}),
+    });
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 function UnsupportedNotice({ reason }: { reason: string }) {

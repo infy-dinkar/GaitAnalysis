@@ -1387,6 +1387,21 @@ export function LiveAssessment({
               // Persist annotated screenshots so the saved-report
               // viewer can show the same key-frame strip later.
               key_frames: liveKeyFrames,
+              // Persist compensatory-movement findings from whichever
+              // tracker ran during the trial. Only one is non-null
+              // per recording (only one merged shoulder movement
+              // active at a time), so the resolution chain mirrors
+              // the AssessmentReport prop above.
+              ...(() => {
+                const c = isMergedShoulderFlexExt
+                  ? compTrackerRef.current?.finish()
+                  : isMergedShoulderAbAd
+                    ? compAbAdTrackerRef.current?.finish()
+                    : isMergedShoulderRotation
+                      ? compRotationTrackerRef.current?.finish()
+                      : null;
+                return c && c.length > 0 ? { compensations: c } : {};
+              })(),
             },
           })}
         />

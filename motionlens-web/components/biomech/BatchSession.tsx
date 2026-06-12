@@ -193,6 +193,14 @@ function buildBatchItemEntry(item: BatchItem): Record<string, unknown> {
     ...(r.key_frames && r.key_frames.length > 0
       ? { key_frames: r.key_frames }
       : {}),
+    // Persist compensatory-movement findings so the batch saved-
+    // report viewer renders the Compensations Detected section per
+    // entry on re-open. Backend returns this only for shoulder
+    // flex+ext / ab+ad / rotation today; null/empty for everything
+    // else so the per-item dict stays unchanged for other tests.
+    ...(r.compensations && r.compensations.length > 0
+      ? { compensations: r.compensations }
+      : {}),
   };
 }
 
