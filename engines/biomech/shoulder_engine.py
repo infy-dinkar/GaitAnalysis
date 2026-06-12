@@ -685,6 +685,11 @@ def _interior_angle_deg(
 
 
 _COMP_ELBOW_PEAK_WINDOW_FRAMES = 3
+# Thresholds for the IR/ER (merged rotation) test. See shoulder.ts
+# / shoulder-live.ts ShoulderRotationCompensationTracker docstring
+# for the long-form rationale.
+_COMP_ELBOW_DROP_THRESHOLD_PX = 15.0
+_COMP_ELBOW_DRIFT_THRESHOLD_DEG = 15.0
 
 
 def _track_flexion_extension_compensations(
@@ -835,6 +840,215 @@ def _track_flexion_extension_compensations(
             "details": (
                 f"Minimum elbow angle at peak: {elbow_bend_peak:.0f}° "
                 f"(threshold {_COMP_ELBOW_BEND_THRESHOLD_DEG:.0f}°)"
+            ),
+        },
+    ]
+
+
+def _track_ab_ad_compensations(
+    sx, sy, vs,
+    hx, hy, vh,
+    nx, ny, nv,
+    n: int,
+    primary_peak_idx: int = -1,
+    secondary_peak_idx: int = -1,
+) -> list[dict]:
+    """Track shoulder.abduction_adduction compensations:
+      • Lateral Trunk Tilt (HIGH) — NOSE → HIP angle from vertical.
+      • Shoulder Elevation (HIGH) — SHOULDER → HIP distance, flag
+        on rise > 15 px (shrug).
+    Mirror of the JS ShoulderAbAdCompensationTracker in shoulder.ts.
+    Peak-window args accepted for API parity but currently unused —
+    both ab/ad compensations are peak-independent baseline checks."""
+    _ = (primary_peak_idx, secondary_peak_idx)  # parity, unused
+    trunk_baseline_samples: list[float] = []
+    hip_dist_baseline_samples: list[float] = []
+    trunk_baseline: float | None = None
+    hip_dist_baseline: float | None = None
+    trunk_lean_peak = 0.0
+    shoulder_rise_peak = 0.0
+    trunk_flagged = False
+    elev_flagged = False
+
+    for i in range(n):
+        # Trunk lean — NOSE → HIP
+        if nv[i] >= _SHOULDER_VIS_THRESHOLD and vh[i] >= _SHOULDER_VIS_THRESHOLD:
+            nose_dx = float(nx[i]) - float(hx[i])
+            nose_dy = float(ny[i]) - float(hy[i])
+            if math.hypot(nose_dx, nose_dy) >= 1e-4:
+                trunk = _angle_from_vertical(nose_dx, nose_dy)
+                if len(trunk_baseline_samples) < _COMP_BASELINE_FRAME_COUNT:
+                    trunk_baseline_samples.append(trunk)
+                    if len(trunk_baseline_samples) == _COMP_BASELINE_FRAME_COUNT:
+                        trunk_baseline = sum(trunk_baseline_samples) / _COMP_BASELINE_FRAME_COUNT
+                if trunk_baseline is not None:
+                    deviation = abs(trunk - trunk_baseline)
+                    if deviation > trunk_lean_peak:
+                        trunk_lean_peak = deviation
+                    if deviation > _COMP_TRUNK_LEAN_THRESHOLD_DEG:
+                        trunk_flagged = True
+
+        # Shoulder elevation — SHOULDER → HIP distance (rise)
+        if vs[i] >= _SHOULDER_VIS_THRESHOLD and vh[i] >= _SHOULDER_VIS_THRESHOLD:
+            dx = float(sx[i]) - float(hx[i])
+            dy = float(sy[i]) - float(hy[i])
+            if math.hypot(dx, dy) >= 1e-4:
+                hip_dist = math.hypot(dx, dy)
+                if len(hip_dist_baseline_samples) < _COMP_BASELINE_FRAME_COUNT:
+                    hip_dist_baseline_samples.append(hip_dist)
+                    if len(hip_dist_baseline_samples) == _COMP_BASELINE_FRAME_COUNT:
+                        hip_dist_baseline = sum(hip_dist_baseline_samples) / _COMP_BASELINE_FRAME_COUNT
+                if hip_dist_baseline is not None:
+                    rise = hip_dist - hip_dist_baseline
+                    if rise > shoulder_rise_peak:
+                        shoulder_rise_peak = rise
+                    if rise > _COMP_SHOULDER_ELEVATION_THRESHOLD_PX:
+                        elev_flagged = True
+
+    return [
+        {
+            "type": "trunk_lean",
+            "label": "Lateral Trunk Tilt",
+            "severity": "high",
+            "flagged": trunk_flagged,
+            "details": (
+                f"Peak deviation {trunk_lean_peak:.1f}° from baseline "
+                f"(threshold {_COMP_TRUNK_LEAN_THRESHOLD_DEG:.0f}°)"
+            ),
+        },
+        {
+            "type": "shoulder_elevation",
+            "label": "Shoulder Elevation",
+            "severity": "high",
+            "flagged": elev_flagged,
+            "details": (
+                f"Shoulder-hip distance rose {shoulder_rise_peak:.0f} px "
+                f"above baseline (threshold "
+                f"{_COMP_SHOULDER_ELEVATION_THRESHOLD_PX:.0f} px)"
+            ),
+        },
+    ]
+
+
+def _track_rotation_compensations(
+    sx, sy, vs,
+    ex, ey, ve,
+    hx, hy, vh,
+    nx, ny, nv,
+    n: int,
+    primary_peak_idx: int = -1,
+    secondary_peak_idx: int = -1,
+) -> list[dict]:
+    """Track shoulder.rotation (IR/ER) compensations:
+      • Elbow Drop (HIGH) — test-side elbow image-y. Patient holds arm
+        90° abducted; sagging arm increases image-y. Flag rise > 15 px.
+      • Trunk Lean (HIGH) — NOSE → HIP angle from vertical.
+      • Elbow Drift from Side (HIGH) — interior angle at the shoulder
+        between trunk vector and upper-arm vector. Baseline ≈ 90° in
+        the test setup; absolute deviation > 15° flagged.
+    Mirror of the JS ShoulderRotationCompensationTracker. Peak-window
+    args accepted for API parity but currently unused — all three
+    rotation compensations are peak-independent baseline checks."""
+    _ = (primary_peak_idx, secondary_peak_idx)  # parity, unused
+    elbow_y_baseline_samples: list[float] = []
+    trunk_baseline_samples: list[float] = []
+    drift_baseline_samples: list[float] = []
+    elbow_y_baseline: float | None = None
+    trunk_baseline: float | None = None
+    drift_baseline: float | None = None
+    elbow_drop_peak = 0.0
+    trunk_lean_peak = 0.0
+    drift_peak = 0.0
+    drop_flagged = False
+    trunk_flagged = False
+    drift_flagged = False
+
+    for i in range(n):
+        # Elbow drop — test-side elbow image-y
+        if ve[i] >= _SHOULDER_VIS_THRESHOLD:
+            elbow_y = float(ey[i])
+            if len(elbow_y_baseline_samples) < _COMP_BASELINE_FRAME_COUNT:
+                elbow_y_baseline_samples.append(elbow_y)
+                if len(elbow_y_baseline_samples) == _COMP_BASELINE_FRAME_COUNT:
+                    elbow_y_baseline = sum(elbow_y_baseline_samples) / _COMP_BASELINE_FRAME_COUNT
+            if elbow_y_baseline is not None:
+                # Image y grows DOWNWARD → sagging arm yields drop > 0.
+                drop = elbow_y - elbow_y_baseline
+                if drop > elbow_drop_peak:
+                    elbow_drop_peak = drop
+                if drop > _COMP_ELBOW_DROP_THRESHOLD_PX:
+                    drop_flagged = True
+
+        # Trunk lean — NOSE → HIP
+        if nv[i] >= _SHOULDER_VIS_THRESHOLD and vh[i] >= _SHOULDER_VIS_THRESHOLD:
+            nose_dx = float(nx[i]) - float(hx[i])
+            nose_dy = float(ny[i]) - float(hy[i])
+            if math.hypot(nose_dx, nose_dy) >= 1e-4:
+                trunk = _angle_from_vertical(nose_dx, nose_dy)
+                if len(trunk_baseline_samples) < _COMP_BASELINE_FRAME_COUNT:
+                    trunk_baseline_samples.append(trunk)
+                    if len(trunk_baseline_samples) == _COMP_BASELINE_FRAME_COUNT:
+                        trunk_baseline = sum(trunk_baseline_samples) / _COMP_BASELINE_FRAME_COUNT
+                if trunk_baseline is not None:
+                    deviation = abs(trunk - trunk_baseline)
+                    if deviation > trunk_lean_peak:
+                        trunk_lean_peak = deviation
+                    if deviation > _COMP_TRUNK_LEAN_THRESHOLD_DEG:
+                        trunk_flagged = True
+
+        # Elbow drift from side — interior angle at shoulder between
+        # (shoulder→hip) and (shoulder→elbow). Baseline ≈ 90°.
+        if (
+            vs[i] >= _SHOULDER_VIS_THRESHOLD
+            and ve[i] >= _SHOULDER_VIS_THRESHOLD
+            and vh[i] >= _SHOULDER_VIS_THRESHOLD
+        ):
+            upper_arm_angle = _interior_angle_deg(
+                float(hx[i]), float(hy[i]),
+                float(sx[i]), float(sy[i]),
+                float(ex[i]), float(ey[i]),
+            )
+            if len(drift_baseline_samples) < _COMP_BASELINE_FRAME_COUNT:
+                drift_baseline_samples.append(upper_arm_angle)
+                if len(drift_baseline_samples) == _COMP_BASELINE_FRAME_COUNT:
+                    drift_baseline = sum(drift_baseline_samples) / _COMP_BASELINE_FRAME_COUNT
+            if drift_baseline is not None:
+                deviation = abs(upper_arm_angle - drift_baseline)
+                if deviation > drift_peak:
+                    drift_peak = deviation
+                if deviation > _COMP_ELBOW_DRIFT_THRESHOLD_DEG:
+                    drift_flagged = True
+
+    return [
+        {
+            "type": "elbow_drop",
+            "label": "Elbow Drop",
+            "severity": "high",
+            "flagged": drop_flagged,
+            "details": (
+                f"Elbow image-y rose {elbow_drop_peak:.0f} px below baseline "
+                f"(threshold {_COMP_ELBOW_DROP_THRESHOLD_PX:.0f} px)"
+            ),
+        },
+        {
+            "type": "trunk_lean",
+            "label": "Trunk Lean",
+            "severity": "high",
+            "flagged": trunk_flagged,
+            "details": (
+                f"Peak deviation {trunk_lean_peak:.1f}° from baseline "
+                f"(threshold {_COMP_TRUNK_LEAN_THRESHOLD_DEG:.0f}°)"
+            ),
+        },
+        {
+            "type": "elbow_drift_from_side",
+            "label": "Elbow Drift from Side",
+            "severity": "high",
+            "flagged": drift_flagged,
+            "details": (
+                f"Upper-arm-vs-trunk angle deviated {drift_peak:.1f}° "
+                f"from baseline (threshold "
+                f"{_COMP_ELBOW_DRIFT_THRESHOLD_DEG:.0f}°)"
             ),
         },
     ]
@@ -1060,6 +1274,18 @@ def analyze_shoulder(
             if kf:
                 rot_key_frames.append(kf)
 
+        # Compensatory-movement detection for IR/ER. Reads per-frame
+        # landmarks only; existing peak/magnitude logic above untouched.
+        rot_nx_arr = ts["nose"]["x_px"]
+        rot_ny_arr = ts["nose"]["y_px"]
+        rot_nv_arr = ts["nose"]["vis"]
+        rot_compensations = _track_rotation_compensations(
+            sx, sy, vs, ex, ey, ve, hx, hy, vh,
+            rot_nx_arr, rot_ny_arr, rot_nv_arr, n_rot,
+            primary_peak_idx=primary_peak_idx,
+            secondary_peak_idx=secondary_peak_idx,
+        )
+
         return {
             "body_part": "shoulder",
             "movement": "rotation",
@@ -1086,6 +1312,7 @@ def analyze_shoulder(
             "secondary_reference_range": [float(s_lo), float(s_hi)],
             "primary_label": "External rotation",
             "secondary_label": "Internal rotation",
+            "compensations": rot_compensations,
         }
 
     # Facing-direction sign for flexion/extension. The signed-angle
@@ -1408,6 +1635,18 @@ def analyze_shoulder(
             if kf:
                 ab_key_frames.append(kf)
 
+        # Compensatory-movement detection for ab/ad. Reads per-frame
+        # landmarks only; existing peak/magnitude logic above untouched.
+        abad_nx_arr = ts["nose"]["x_px"]
+        abad_ny_arr = ts["nose"]["y_px"]
+        abad_nv_arr = ts["nose"]["vis"]
+        abad_compensations = _track_ab_ad_compensations(
+            sx, sy, vs, hx, hy, vh,
+            abad_nx_arr, abad_ny_arr, abad_nv_arr, n,
+            primary_peak_idx=primary_peak_idx,
+            secondary_peak_idx=secondary_peak_idx,
+        )
+
         return {
             "body_part": "shoulder",
             "movement": "abduction_adduction",
@@ -1432,6 +1671,7 @@ def analyze_shoulder(
             "secondary_reference_range": [float(s_lo), float(s_hi)],
             "primary_label": "Abduction",
             "secondary_label": "Adduction",
+            "compensations": abad_compensations,
         }
 
     # ── Merged flexion + extension ─────────────────────────────

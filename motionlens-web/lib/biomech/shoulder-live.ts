@@ -550,7 +550,12 @@ export function computeShoulderAbAdWithDirection(
 export type CompensationSeverity = "high" | "medium" | "low";
 
 export interface Compensation {
-  type: "trunk_lean" | "shoulder_elevation" | "elbow_bend";
+  type:
+    | "trunk_lean"
+    | "shoulder_elevation"
+    | "elbow_bend"
+    | "elbow_drop"
+    | "elbow_drift_from_side";
   label: string;
   severity: CompensationSeverity;
   flagged: boolean;
@@ -564,6 +569,9 @@ const COMPENSATION_BASELINE_FRAME_COUNT = 10;
 /** ±N frames around each peak in which the elbow-bend check is run.
  *  See shoulder.ts for the rationale. */
 const ELBOW_PEAK_WINDOW_FRAMES = 3;
+/** See shoulder.ts for full rationale. */
+const ELBOW_DROP_THRESHOLD_PX = 15;
+const ELBOW_DRIFT_THRESHOLD_DEG = 15;
 
 /** Angle between the NOSE → test-side HIP line and image vertical,
  *  in degrees. Upright posture ≈ 0°.
@@ -620,6 +628,41 @@ export function computeElbowAngle(
   ) return null;
   const v1x = s.x - e.x, v1y = s.y - e.y;
   const v2x = w.x - e.x, v2y = w.y - e.y;
+  const dot = v1x * v2x + v1y * v2y;
+  const cross = v1x * v2y - v1y * v2x;
+  return (Math.atan2(Math.abs(cross), dot) * 180) / Math.PI;
+}
+
+/** Test-side elbow's image-y. See shoulder.ts for rationale. */
+export function computeElbowY(
+  keypoints: Keypoint[],
+  side: "left" | "right",
+): number | null {
+  const idx = SIDE_INDICES[side];
+  const e = keypoints[idx.elbow];
+  if (!e) return null;
+  if ((e.score ?? 0) < VIS_THRESHOLD) return null;
+  return e.y;
+}
+
+/** Interior angle at shoulder between trunk vector and upper-arm
+ *  vector. See shoulder.ts for rationale. */
+export function computeUpperArmAbductionAngle(
+  keypoints: Keypoint[],
+  side: "left" | "right",
+): number | null {
+  const idx = SIDE_INDICES[side];
+  const s = keypoints[idx.shoulder];
+  const e = keypoints[idx.elbow];
+  const h = keypoints[idx.hip];
+  if (!s || !e || !h) return null;
+  if (
+    (s.score ?? 0) < VIS_THRESHOLD ||
+    (e.score ?? 0) < VIS_THRESHOLD ||
+    (h.score ?? 0) < VIS_THRESHOLD
+  ) return null;
+  const v1x = h.x - s.x, v1y = h.y - s.y;
+  const v2x = e.x - s.x, v2y = e.y - s.y;
   const dot = v1x * v2x + v1y * v2y;
   const cross = v1x * v2y - v1y * v2x;
   return (Math.atan2(Math.abs(cross), dot) * 180) / Math.PI;
@@ -769,4 +812,235 @@ function compMean(arr: number[]): number {
   let s = 0;
   for (const v of arr) s += v;
   return s / arr.length;
+}
+
+// ─── Ab/Ad compensations (mirror of shoulder.ts) ──
+export class ShoulderAbAdCompensationTracker {
+  private readonly side: "left" | "right";
+  private trunkBaselineSamples: number[] = [];
+  private hipDistBaselineSamples: number[] = [];
+  private trunkBaseline: number | null = null;
+  private hipDistBaseline: number | null = null;
+  private trunkLeanPeak = 0;
+  private shoulderRisePeak = 0;
+  private trunkFlagged = false;
+  private elevFlagged = false;
+  private currentTrunkActive = false;
+  private currentElevActive = false;
+  private frameCounter = 0;
+  private primaryPeakFrame: number | null = null;
+  private secondaryPeakFrame: number | null = null;
+
+  constructor(side: "left" | "right") {
+    this.side = side;
+  }
+
+  feed(keypoints: Keypoint[]): void {
+    this.currentTrunkActive = false;
+    this.currentElevActive = false;
+
+    const trunk = computeTrunkLeanAngle(keypoints, this.side);
+    const hipDist = computeShoulderHipDistance(keypoints, this.side);
+
+    if (trunk !== null && this.trunkBaselineSamples.length < COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.trunkBaselineSamples.push(trunk);
+      if (this.trunkBaselineSamples.length === COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.trunkBaseline = compMean(this.trunkBaselineSamples);
+      }
+    }
+    if (hipDist !== null && this.hipDistBaselineSamples.length < COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.hipDistBaselineSamples.push(hipDist);
+      if (this.hipDistBaselineSamples.length === COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.hipDistBaseline = compMean(this.hipDistBaselineSamples);
+      }
+    }
+
+    if (trunk !== null && this.trunkBaseline !== null) {
+      const deviation = Math.abs(trunk - this.trunkBaseline);
+      if (deviation > this.trunkLeanPeak) this.trunkLeanPeak = deviation;
+      if (deviation > TRUNK_LEAN_THRESHOLD_DEG) {
+        this.trunkFlagged = true;
+        this.currentTrunkActive = true;
+      }
+    }
+    if (hipDist !== null && this.hipDistBaseline !== null) {
+      const rise = hipDist - this.hipDistBaseline;
+      if (rise > this.shoulderRisePeak) this.shoulderRisePeak = rise;
+      if (rise > SHOULDER_ELEVATION_THRESHOLD_PX) {
+        this.elevFlagged = true;
+        this.currentElevActive = true;
+      }
+    }
+
+    this.frameCounter += 1;
+  }
+
+  markPrimaryPeak(): void {
+    this.primaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+
+  markSecondaryPeak(): void {
+    this.secondaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+
+  currentFlags(): Compensation[] {
+    const out: Compensation[] = [];
+    if (this.currentTrunkActive) {
+      out.push({ type: "trunk_lean", label: "Lateral Trunk Tilt", severity: "high", flagged: true });
+    }
+    if (this.currentElevActive) {
+      out.push({ type: "shoulder_elevation", label: "Shoulder Elevation", severity: "high", flagged: true });
+    }
+    return out;
+  }
+
+  finish(): Compensation[] {
+    return [
+      {
+        type: "trunk_lean",
+        label: "Lateral Trunk Tilt",
+        severity: "high",
+        flagged: this.trunkFlagged,
+        details: `Peak deviation ${this.trunkLeanPeak.toFixed(1)}° from baseline (threshold ${TRUNK_LEAN_THRESHOLD_DEG}°)`,
+      },
+      {
+        type: "shoulder_elevation",
+        label: "Shoulder Elevation",
+        severity: "high",
+        flagged: this.elevFlagged,
+        details: `Shoulder-hip distance rose ${this.shoulderRisePeak.toFixed(0)} px above baseline (threshold ${SHOULDER_ELEVATION_THRESHOLD_PX} px)`,
+      },
+    ];
+  }
+}
+
+// ─── Rotation compensations (mirror of shoulder.ts) ──
+export class ShoulderRotationCompensationTracker {
+  private readonly side: "left" | "right";
+  private elbowYBaselineSamples: number[] = [];
+  private elbowYBaseline: number | null = null;
+  private elbowDropPeak = 0;
+  private dropFlagged = false;
+  private currentDropActive = false;
+  private trunkBaselineSamples: number[] = [];
+  private trunkBaseline: number | null = null;
+  private trunkLeanPeak = 0;
+  private trunkFlagged = false;
+  private currentTrunkActive = false;
+  private driftBaselineSamples: number[] = [];
+  private driftBaseline: number | null = null;
+  private driftPeak = 0;
+  private driftFlagged = false;
+  private currentDriftActive = false;
+  private frameCounter = 0;
+  private primaryPeakFrame: number | null = null;
+  private secondaryPeakFrame: number | null = null;
+
+  constructor(side: "left" | "right") {
+    this.side = side;
+  }
+
+  feed(keypoints: Keypoint[]): void {
+    this.currentDropActive = false;
+    this.currentTrunkActive = false;
+    this.currentDriftActive = false;
+
+    const elbowY = computeElbowY(keypoints, this.side);
+    const trunk = computeTrunkLeanAngle(keypoints, this.side);
+    const upperArm = computeUpperArmAbductionAngle(keypoints, this.side);
+
+    if (elbowY !== null && this.elbowYBaselineSamples.length < COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.elbowYBaselineSamples.push(elbowY);
+      if (this.elbowYBaselineSamples.length === COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.elbowYBaseline = compMean(this.elbowYBaselineSamples);
+      }
+    }
+    if (trunk !== null && this.trunkBaselineSamples.length < COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.trunkBaselineSamples.push(trunk);
+      if (this.trunkBaselineSamples.length === COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.trunkBaseline = compMean(this.trunkBaselineSamples);
+      }
+    }
+    if (upperArm !== null && this.driftBaselineSamples.length < COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.driftBaselineSamples.push(upperArm);
+      if (this.driftBaselineSamples.length === COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.driftBaseline = compMean(this.driftBaselineSamples);
+      }
+    }
+
+    if (elbowY !== null && this.elbowYBaseline !== null) {
+      const drop = elbowY - this.elbowYBaseline;
+      if (drop > this.elbowDropPeak) this.elbowDropPeak = drop;
+      if (drop > ELBOW_DROP_THRESHOLD_PX) {
+        this.dropFlagged = true;
+        this.currentDropActive = true;
+      }
+    }
+    if (trunk !== null && this.trunkBaseline !== null) {
+      const deviation = Math.abs(trunk - this.trunkBaseline);
+      if (deviation > this.trunkLeanPeak) this.trunkLeanPeak = deviation;
+      if (deviation > TRUNK_LEAN_THRESHOLD_DEG) {
+        this.trunkFlagged = true;
+        this.currentTrunkActive = true;
+      }
+    }
+    if (upperArm !== null && this.driftBaseline !== null) {
+      const deviation = Math.abs(upperArm - this.driftBaseline);
+      if (deviation > this.driftPeak) this.driftPeak = deviation;
+      if (deviation > ELBOW_DRIFT_THRESHOLD_DEG) {
+        this.driftFlagged = true;
+        this.currentDriftActive = true;
+      }
+    }
+
+    this.frameCounter += 1;
+  }
+
+  markPrimaryPeak(): void {
+    this.primaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+
+  markSecondaryPeak(): void {
+    this.secondaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+
+  currentFlags(): Compensation[] {
+    const out: Compensation[] = [];
+    if (this.currentDropActive) {
+      out.push({ type: "elbow_drop", label: "Elbow Drop", severity: "high", flagged: true });
+    }
+    if (this.currentTrunkActive) {
+      out.push({ type: "trunk_lean", label: "Trunk Lean", severity: "high", flagged: true });
+    }
+    if (this.currentDriftActive) {
+      out.push({ type: "elbow_drift_from_side", label: "Elbow Drift from Side", severity: "high", flagged: true });
+    }
+    return out;
+  }
+
+  finish(): Compensation[] {
+    return [
+      {
+        type: "elbow_drop",
+        label: "Elbow Drop",
+        severity: "high",
+        flagged: this.dropFlagged,
+        details: `Elbow image-y rose ${this.elbowDropPeak.toFixed(0)} px below baseline (threshold ${ELBOW_DROP_THRESHOLD_PX} px)`,
+      },
+      {
+        type: "trunk_lean",
+        label: "Trunk Lean",
+        severity: "high",
+        flagged: this.trunkFlagged,
+        details: `Peak deviation ${this.trunkLeanPeak.toFixed(1)}° from baseline (threshold ${TRUNK_LEAN_THRESHOLD_DEG}°)`,
+      },
+      {
+        type: "elbow_drift_from_side",
+        label: "Elbow Drift from Side",
+        severity: "high",
+        flagged: this.driftFlagged,
+        details: `Upper-arm-vs-trunk angle deviated ${this.driftPeak.toFixed(1)}° from baseline (threshold ${ELBOW_DRIFT_THRESHOLD_DEG}°)`,
+      },
+    ];
+  }
 }

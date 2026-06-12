@@ -225,7 +225,12 @@ export interface BiomechDataDTO {
  *  shows a colored card when `flagged: true`, a green "no issues"
  *  line when ALL flags in the array are false. */
 export interface BiomechCompensationDTO {
-  type: "trunk_lean" | "shoulder_elevation" | "elbow_bend";
+  type:
+    | "trunk_lean"
+    | "shoulder_elevation"
+    | "elbow_bend"
+    | "elbow_drop"
+    | "elbow_drift_from_side";
   label: string;
   severity: "high" | "medium" | "low";
   flagged: boolean;

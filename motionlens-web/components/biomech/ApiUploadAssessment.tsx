@@ -282,6 +282,31 @@ export function ApiUploadAssessment({
             </ul>
           </div>
         )}
+        {/* Compensation warning — shoulder ab/ad (frontal camera). */}
+        {bodyPart === "shoulder" && movementId === "abduction_adduction" && (
+          <div className="mt-4 max-w-xl rounded-md border border-warning/40 bg-warning/5 px-4 py-3">
+            <p className="text-xs font-semibold text-warning">
+              ⚠️ Avoid these common compensations:
+            </p>
+            <ul className="mt-2 space-y-1 text-xs text-foreground">
+              <li>• Do not tilt your trunk sideways to gain extra range</li>
+              <li>• Do not shrug your shoulder up toward your ear</li>
+            </ul>
+          </div>
+        )}
+        {/* Compensation warning — shoulder rotation (IR/ER, lateral). */}
+        {bodyPart === "shoulder" && movementId === "rotation" && (
+          <div className="mt-4 max-w-xl rounded-md border border-warning/40 bg-warning/5 px-4 py-3">
+            <p className="text-xs font-semibold text-warning">
+              ⚠️ Avoid these common compensations:
+            </p>
+            <ul className="mt-2 space-y-1 text-xs text-foreground">
+              <li>• Keep the elbow at shoulder height (don&apos;t let the arm sag)</li>
+              <li>• Do not lean your trunk to cheat the rotation</li>
+              <li>• Keep the upper arm at 90° abduction throughout — don&apos;t let it drift toward the side or overhead</li>
+            </ul>
+          </div>
+        )}
       </div>
 
       {movementImageUrl && (

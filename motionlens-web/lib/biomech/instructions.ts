@@ -59,6 +59,7 @@ export const MOVEMENT_INSTRUCTIONS: Record<Key, string[]> = {
     "Slowly bring the forearm back to the front-facing starting position.",
     "Now slowly rotate the forearm INWARD — across the front of your stomach. Hold the furthest comfortable point for 2 seconds, then return to centre.",
     "Click Show Analysis. The report will show separate peak values and screenshots for both external and internal rotation.",
+    "⚠️ Avoid these common compensations: keep the elbow at shoulder height (don't let the arm sag) · do NOT lean the trunk to cheat the rotation · keep the upper arm at 90° abduction throughout (don't let it drift toward the side or overhead).",
   ],
   "shoulder.flexion_extension": [
     "Stand about 6 feet (2 metres) from the camera, turned so the camera sees your SIDE — the test-side shoulder should point straight at the lens. Both arms hanging at the sides as the starting position.",
@@ -76,6 +77,7 @@ export const MOVEMENT_INSTRUCTIONS: Record<Key, string[]> = {
     "ADDUCTION: From the same starting position, slowly bring the arm across the front of your chest toward the opposite shoulder. Hold the furthest reach for 2 seconds.",
     "Return the arm to your side. Click Show Analysis. The report will show separate peak values and screenshots for both directions.",
     "Keep the trunk upright throughout — don't tilt sideways or twist to gain extra range.",
+    "⚠️ Avoid these common compensations: do NOT tilt your trunk sideways to gain extra range · do NOT shrug your shoulder up toward your ear.",
   ],
 
   // ── Neck (4 movements — engine has no per-side parameter) ─────

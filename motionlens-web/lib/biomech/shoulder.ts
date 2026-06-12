@@ -568,7 +568,12 @@ export function computeShoulderAbAdWithDirection(
 export type CompensationSeverity = "high" | "medium" | "low";
 
 export interface Compensation {
-  type: "trunk_lean" | "shoulder_elevation" | "elbow_bend";
+  type:
+    | "trunk_lean"
+    | "shoulder_elevation"
+    | "elbow_bend"
+    | "elbow_drop"
+    | "elbow_drift_from_side";
   label: string;
   severity: CompensationSeverity;
   flagged: boolean;
@@ -583,6 +588,18 @@ const COMPENSATION_BASELINE_FRAME_COUNT = 10;
  *  See finish() — clinically a transit-motion bend during arm
  *  lowering is not a compensation, only a peak-frame bend is. */
 const ELBOW_PEAK_WINDOW_FRAMES = 3;
+/** Elbow image-y rise threshold for the "elbow drop" compensation in
+ *  the IR/ER test. Patient holds the arm at 90° abduction; if the
+ *  elbow image-y rises (sags) more than this many px above the first-
+ *  10-frames baseline, flag it. Image y grows DOWNWARD so a sagging
+ *  elbow produces a POSITIVE drop value. */
+const ELBOW_DROP_THRESHOLD_PX = 15;
+/** Deviation threshold for "elbow drift from side" in the IR/ER test.
+ *  Tracks the angle at the shoulder between the trunk vector and the
+ *  upper-arm vector. Baseline is ~90° (arm 90°-abducted); ABSOLUTE
+ *  deviation > this many degrees in either direction (arm sagging
+ *  toward side, or drifting toward overhead) flags the compensation. */
+const ELBOW_DRIFT_THRESHOLD_DEG = 15;
 
 /** Angle between the NOSE → test-side HIP line and image vertical,
  *  in degrees. Upright posture ≈ 0°.
@@ -652,6 +669,49 @@ export function computeElbowAngle(
   // Interior angle at vertex E for points S - E - W.
   const v1x = s.x - e.x, v1y = s.y - e.y;
   const v2x = w.x - e.x, v2y = w.y - e.y;
+  const dot = v1x * v2x + v1y * v2y;
+  const cross = v1x * v2y - v1y * v2x;
+  return (Math.atan2(Math.abs(cross), dot) * 180) / Math.PI;
+}
+
+/** Test-side elbow's image-y coordinate, or null when the landmark
+ *  fails visibility. Used by the IR/ER tracker to detect "elbow drop"
+ *  — the upper arm sagging out of the 90°-abducted hold position.
+ *  Image y grows DOWNWARD, so a sagging elbow INCREASES y. */
+export function computeElbowY(
+  keypoints: Keypoint[],
+  side: "left" | "right",
+): number | null {
+  const idx = SIDE_INDICES[side];
+  const e = keypoints[idx.elbow];
+  if (!e) return null;
+  if ((e.score ?? 0) < VIS_THRESHOLD) return null;
+  return e.y;
+}
+
+/** Interior angle at the test-side SHOULDER between the trunk
+ *  vector (shoulder→hip) and the upper-arm vector (shoulder→elbow),
+ *  in degrees in [0, 180]. Arm-at-side ≈ 0°, arm-90°-abducted ≈ 90°,
+ *  arm-overhead ≈ 180°. The IR/ER tracker baselines this in the
+ *  first 10 frames (≈ 90°) and flags absolute deviation > 15° as
+ *  "elbow drift from side". Null when any of S/E/H fail visibility. */
+export function computeUpperArmAbductionAngle(
+  keypoints: Keypoint[],
+  side: "left" | "right",
+): number | null {
+  const idx = SIDE_INDICES[side];
+  const s = keypoints[idx.shoulder];
+  const e = keypoints[idx.elbow];
+  const h = keypoints[idx.hip];
+  if (!s || !e || !h) return null;
+  if (
+    (s.score ?? 0) < VIS_THRESHOLD ||
+    (e.score ?? 0) < VIS_THRESHOLD ||
+    (h.score ?? 0) < VIS_THRESHOLD
+  ) return null;
+  // Interior angle at vertex S between (S→H) and (S→E).
+  const v1x = h.x - s.x, v1y = h.y - s.y;
+  const v2x = e.x - s.x, v2y = e.y - s.y;
   const dot = v1x * v2x + v1y * v2y;
   const cross = v1x * v2y - v1y * v2x;
   return (Math.atan2(Math.abs(cross), dot) * 180) / Math.PI;
@@ -841,4 +901,280 @@ function compMean(arr: number[]): number {
   let s = 0;
   for (const v of arr) s += v;
   return s / arr.length;
+}
+
+// ─── Ab/Ad compensations (shoulder.abduction_adduction, frontal) ──
+//
+// Tracks 2 compensations during shoulder abduction+adduction:
+//
+//   1. Lateral Trunk Tilt (HIGH 🔴): NOSE → test-side HIP angle from
+//      image vertical. Same math as the flex+ext tracker but for the
+//      ab/ad test the lean direction is LATERAL (side-bend) rather
+//      than forward/backward — the |angle from vertical| catches both.
+//
+//   2. Shoulder Elevation (HIGH 🔴): test-side SHOULDER → test-side
+//      HIP euclidean distance. Shrug raises the shoulder away from
+//      the hip → distance INCREASES above baseline. Same math + same
+//      direction convention as the flex+ext fix.
+//
+// Both compensations are HIGH severity for ab/ad per spec. Banner +
+// report behaviour mirrors the flex+ext tracker.
+
+export class ShoulderAbAdCompensationTracker {
+  private readonly side: "left" | "right";
+  private trunkBaselineSamples: number[] = [];
+  private hipDistBaselineSamples: number[] = [];
+  private trunkBaseline: number | null = null;
+  private hipDistBaseline: number | null = null;
+  private trunkLeanPeak = 0;
+  private shoulderRisePeak = 0;
+  private trunkFlagged = false;
+  private elevFlagged = false;
+  private currentTrunkActive = false;
+  private currentElevActive = false;
+  // Frame counter + peak marks kept for API parity with the flex+ext
+  // tracker (LiveAssessment calls markPrimaryPeak/markSecondaryPeak
+  // for any active tracker). Ab/Ad doesn't use peak windowing today
+  // so these are recorded but not read inside finish().
+  private frameCounter = 0;
+  private primaryPeakFrame: number | null = null;
+  private secondaryPeakFrame: number | null = null;
+
+  constructor(side: "left" | "right") {
+    this.side = side;
+  }
+
+  feed(keypoints: Keypoint[]): void {
+    this.currentTrunkActive = false;
+    this.currentElevActive = false;
+
+    const trunk = computeTrunkLeanAngle(keypoints, this.side);
+    const hipDist = computeShoulderHipDistance(keypoints, this.side);
+
+    if (trunk !== null && this.trunkBaselineSamples.length < COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.trunkBaselineSamples.push(trunk);
+      if (this.trunkBaselineSamples.length === COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.trunkBaseline = compMean(this.trunkBaselineSamples);
+      }
+    }
+    if (hipDist !== null && this.hipDistBaselineSamples.length < COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.hipDistBaselineSamples.push(hipDist);
+      if (this.hipDistBaselineSamples.length === COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.hipDistBaseline = compMean(this.hipDistBaselineSamples);
+      }
+    }
+
+    if (trunk !== null && this.trunkBaseline !== null) {
+      const deviation = Math.abs(trunk - this.trunkBaseline);
+      if (deviation > this.trunkLeanPeak) this.trunkLeanPeak = deviation;
+      if (deviation > TRUNK_LEAN_THRESHOLD_DEG) {
+        this.trunkFlagged = true;
+        this.currentTrunkActive = true;
+      }
+    }
+    if (hipDist !== null && this.hipDistBaseline !== null) {
+      const rise = hipDist - this.hipDistBaseline;
+      if (rise > this.shoulderRisePeak) this.shoulderRisePeak = rise;
+      if (rise > SHOULDER_ELEVATION_THRESHOLD_PX) {
+        this.elevFlagged = true;
+        this.currentElevActive = true;
+      }
+    }
+
+    this.frameCounter += 1;
+  }
+
+  markPrimaryPeak(): void {
+    this.primaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+
+  markSecondaryPeak(): void {
+    this.secondaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+
+  currentFlags(): Compensation[] {
+    const out: Compensation[] = [];
+    if (this.currentTrunkActive) {
+      out.push({ type: "trunk_lean", label: "Lateral Trunk Tilt", severity: "high", flagged: true });
+    }
+    if (this.currentElevActive) {
+      out.push({ type: "shoulder_elevation", label: "Shoulder Elevation", severity: "high", flagged: true });
+    }
+    return out;
+  }
+
+  finish(): Compensation[] {
+    return [
+      {
+        type: "trunk_lean",
+        label: "Lateral Trunk Tilt",
+        severity: "high",
+        flagged: this.trunkFlagged,
+        details: `Peak deviation ${this.trunkLeanPeak.toFixed(1)}° from baseline (threshold ${TRUNK_LEAN_THRESHOLD_DEG}°)`,
+      },
+      {
+        type: "shoulder_elevation",
+        label: "Shoulder Elevation",
+        severity: "high",
+        flagged: this.elevFlagged,
+        details: `Shoulder-hip distance rose ${this.shoulderRisePeak.toFixed(0)} px above baseline (threshold ${SHOULDER_ELEVATION_THRESHOLD_PX} px)`,
+      },
+    ];
+  }
+}
+
+// ─── Rotation compensations (shoulder.rotation, lateral + 90° abd) ─
+//
+// Tracks 3 compensations during shoulder external+internal rotation:
+//
+//   1. Elbow Drop (HIGH 🔴): test-side elbow IMAGE-Y position. Arm
+//      starts 90°-abducted (elbow shoulder-height); if it sags toward
+//      the side, image-y INCREASES. Flag rise > 15 px above baseline.
+//
+//   2. Trunk Lean (HIGH 🔴): NOSE → test-side HIP angle from vertical.
+//      Same math as flex+ext + ab/ad trackers — patient leaning to
+//      cheat rotation range.
+//
+//   3. Elbow Drift from Side (HIGH 🔴): interior angle at the test-
+//      side SHOULDER between the trunk vector and the upper-arm
+//      vector. Baseline ≈ 90° in the test setup; absolute deviation
+//      > 15° in either direction (arm sagging below the abducted hold
+//      OR drifting overhead) is flagged.
+//
+// All 3 are HIGH severity per spec. Banner + report behaviour mirrors
+// the flex+ext tracker.
+
+export class ShoulderRotationCompensationTracker {
+  private readonly side: "left" | "right";
+  // Elbow drop
+  private elbowYBaselineSamples: number[] = [];
+  private elbowYBaseline: number | null = null;
+  private elbowDropPeak = 0;
+  private dropFlagged = false;
+  private currentDropActive = false;
+  // Trunk lean
+  private trunkBaselineSamples: number[] = [];
+  private trunkBaseline: number | null = null;
+  private trunkLeanPeak = 0;
+  private trunkFlagged = false;
+  private currentTrunkActive = false;
+  // Upper-arm drift from side
+  private driftBaselineSamples: number[] = [];
+  private driftBaseline: number | null = null;
+  private driftPeak = 0;
+  private driftFlagged = false;
+  private currentDriftActive = false;
+  // Frame counter + peak marks (parity with flex+ext tracker).
+  private frameCounter = 0;
+  private primaryPeakFrame: number | null = null;
+  private secondaryPeakFrame: number | null = null;
+
+  constructor(side: "left" | "right") {
+    this.side = side;
+  }
+
+  feed(keypoints: Keypoint[]): void {
+    this.currentDropActive = false;
+    this.currentTrunkActive = false;
+    this.currentDriftActive = false;
+
+    const elbowY = computeElbowY(keypoints, this.side);
+    const trunk = computeTrunkLeanAngle(keypoints, this.side);
+    const upperArm = computeUpperArmAbductionAngle(keypoints, this.side);
+
+    if (elbowY !== null && this.elbowYBaselineSamples.length < COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.elbowYBaselineSamples.push(elbowY);
+      if (this.elbowYBaselineSamples.length === COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.elbowYBaseline = compMean(this.elbowYBaselineSamples);
+      }
+    }
+    if (trunk !== null && this.trunkBaselineSamples.length < COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.trunkBaselineSamples.push(trunk);
+      if (this.trunkBaselineSamples.length === COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.trunkBaseline = compMean(this.trunkBaselineSamples);
+      }
+    }
+    if (upperArm !== null && this.driftBaselineSamples.length < COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.driftBaselineSamples.push(upperArm);
+      if (this.driftBaselineSamples.length === COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.driftBaseline = compMean(this.driftBaselineSamples);
+      }
+    }
+
+    if (elbowY !== null && this.elbowYBaseline !== null) {
+      // Sagging elbow = image y INCREASES above baseline.
+      const drop = elbowY - this.elbowYBaseline;
+      if (drop > this.elbowDropPeak) this.elbowDropPeak = drop;
+      if (drop > ELBOW_DROP_THRESHOLD_PX) {
+        this.dropFlagged = true;
+        this.currentDropActive = true;
+      }
+    }
+    if (trunk !== null && this.trunkBaseline !== null) {
+      const deviation = Math.abs(trunk - this.trunkBaseline);
+      if (deviation > this.trunkLeanPeak) this.trunkLeanPeak = deviation;
+      if (deviation > TRUNK_LEAN_THRESHOLD_DEG) {
+        this.trunkFlagged = true;
+        this.currentTrunkActive = true;
+      }
+    }
+    if (upperArm !== null && this.driftBaseline !== null) {
+      const deviation = Math.abs(upperArm - this.driftBaseline);
+      if (deviation > this.driftPeak) this.driftPeak = deviation;
+      if (deviation > ELBOW_DRIFT_THRESHOLD_DEG) {
+        this.driftFlagged = true;
+        this.currentDriftActive = true;
+      }
+    }
+
+    this.frameCounter += 1;
+  }
+
+  markPrimaryPeak(): void {
+    this.primaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+
+  markSecondaryPeak(): void {
+    this.secondaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+
+  currentFlags(): Compensation[] {
+    const out: Compensation[] = [];
+    if (this.currentDropActive) {
+      out.push({ type: "elbow_drop", label: "Elbow Drop", severity: "high", flagged: true });
+    }
+    if (this.currentTrunkActive) {
+      out.push({ type: "trunk_lean", label: "Trunk Lean", severity: "high", flagged: true });
+    }
+    if (this.currentDriftActive) {
+      out.push({ type: "elbow_drift_from_side", label: "Elbow Drift from Side", severity: "high", flagged: true });
+    }
+    return out;
+  }
+
+  finish(): Compensation[] {
+    return [
+      {
+        type: "elbow_drop",
+        label: "Elbow Drop",
+        severity: "high",
+        flagged: this.dropFlagged,
+        details: `Elbow image-y rose ${this.elbowDropPeak.toFixed(0)} px below baseline (threshold ${ELBOW_DROP_THRESHOLD_PX} px)`,
+      },
+      {
+        type: "trunk_lean",
+        label: "Trunk Lean",
+        severity: "high",
+        flagged: this.trunkFlagged,
+        details: `Peak deviation ${this.trunkLeanPeak.toFixed(1)}° from baseline (threshold ${TRUNK_LEAN_THRESHOLD_DEG}°)`,
+      },
+      {
+        type: "elbow_drift_from_side",
+        label: "Elbow Drift from Side",
+        severity: "high",
+        flagged: this.driftFlagged,
+        details: `Upper-arm-vs-trunk angle deviated ${this.driftPeak.toFixed(1)}° from baseline (threshold ${ELBOW_DRIFT_THRESHOLD_DEG}°)`,
+      },
+    ];
+  }
 }
