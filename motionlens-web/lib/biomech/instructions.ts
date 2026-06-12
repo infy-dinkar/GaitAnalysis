@@ -67,6 +67,7 @@ export const MOVEMENT_INSTRUCTIONS: Record<Key, string[]> = {
     "EXTENSION: keeping the elbow straight, slowly move the same arm backward behind your body — like reaching for something behind you. Don't lean forward to cheat the movement. Hold the furthest comfortable point for ~2 seconds.",
     "Slowly bring the arm back to your side. Click Show Analysis — the report shows separate Flexion and Extension peak values, normal ranges for each, and screenshots of both moments.",
     "Keep your shoulders relaxed throughout — don't shrug; don't arch your lower back to gain extra range.",
+    "⚠️ Avoid these common compensations: do NOT lean the trunk backward during flexion · keep the elbow straight throughout · do NOT shrug the shoulder.",
   ],
   "shoulder.abduction_adduction": [
     "Stand about 6 feet (2 metres) from the camera, facing the camera straight on so it sees both arms and your full torso.",

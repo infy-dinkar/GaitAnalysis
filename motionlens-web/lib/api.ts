@@ -211,6 +211,28 @@ export interface BiomechDataDTO {
   secondary_reference_range?: [number, number];
   primary_label?: string;
   secondary_label?: string;
+  // ── Compensatory-movement detection (optional) ──────────────────
+  // Populated only for movements that run compensation tracking
+  // (shoulder flexion+extension today). Empty/undefined for every
+  // other (bodyPart, movement) pair, so other surfaces silently
+  // render no compensation section. Mirrors the dict shape returned
+  // by _track_flexion_extension_compensations() in shoulder_engine.py
+  // and the Compensation type in lib/biomech/shoulder.ts.
+  compensations?: BiomechCompensationDTO[];
+}
+
+/** One compensation tracked during a recording. The report renderer
+ *  shows a colored card when `flagged: true`, a green "no issues"
+ *  line when ALL flags in the array are false. */
+export interface BiomechCompensationDTO {
+  type: "trunk_lean" | "shoulder_elevation" | "elbow_bend";
+  label: string;
+  severity: "high" | "medium" | "low";
+  flagged: boolean;
+  /** Human-readable peak measurement when `flagged: true`; omitted
+   *  when not flagged. e.g. "Peak deviation 22.4° from baseline
+   *  (threshold 15°)". */
+  details?: string | null;
 }
 
 // ─── Live biomech (per-frame) ────────────────────────────────────────

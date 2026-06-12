@@ -642,6 +642,204 @@ def _grab_shoulder_key_frame(
     }
 
 
+# ─── Compensatory movement detection (Shoulder Flexion+Extension) ──
+#
+# Mirror of the TS tracker in lib/biomech/shoulder.ts. Three checks:
+#
+#   • Trunk Lean (HIGH 🔴): angle between shoulder→hip line and
+#     image vertical. Baseline = mean of first 10 valid frames. Flag
+#     if any frame deviates > 15° from baseline.
+#
+#   • Shoulder Elevation (MEDIUM 🟡): pixel distance between the
+#     test-side shoulder and hip landmarks. Baseline = mean of first
+#     10 valid frames. Flag if distance drops > 15 px below baseline.
+#
+#   • Elbow Bend (MEDIUM 🟡): interior angle at the elbow
+#     (shoulder→elbow→wrist). No baseline. Flag if angle < 160°.
+
+_COMP_TRUNK_LEAN_THRESHOLD_DEG = 15.0
+_COMP_SHOULDER_ELEVATION_THRESHOLD_PX = 15.0
+_COMP_ELBOW_BEND_THRESHOLD_DEG = 160.0
+_COMP_BASELINE_FRAME_COUNT = 10
+
+
+def _angle_from_vertical(dx: float, dy: float) -> float:
+    """Angle (degrees) between vector (dx, dy) and the image-up
+    reference (0, -1). Image y grows DOWNWARD, so for an upright
+    trunk (shoulder above hip) dy < 0 and the result ≈ 0°. Forward
+    and backward leans both increase the value (absolute deviation).
+    """
+    return abs(math.degrees(math.atan2(dx, -dy)))
+
+
+def _interior_angle_deg(
+    ax: float, ay: float, bx: float, by: float, cx: float, cy: float,
+) -> float:
+    """Interior angle at vertex B for points A-B-C, in degrees,
+    in [0, 180]."""
+    v1x, v1y = ax - bx, ay - by
+    v2x, v2y = cx - bx, cy - by
+    dot = v1x * v2x + v1y * v2y
+    cross = v1x * v2y - v1y * v2x
+    return math.degrees(math.atan2(abs(cross), dot))
+
+
+_COMP_ELBOW_PEAK_WINDOW_FRAMES = 3
+
+
+def _track_flexion_extension_compensations(
+    sx, sy, vs,
+    ex, ey, ve,
+    hx, hy, vh,
+    wx, wy, vw,
+    nx, ny, nv,
+    n: int,
+    primary_peak_idx: int = -1,
+    secondary_peak_idx: int = -1,
+) -> list[dict]:
+    """Return 3 compensation entries for the merged shoulder
+    flexion+extension test. Each entry has `flagged: bool`; the
+    report renderer decides green-check vs colored-card display.
+
+    Landmark choices:
+      • Trunk lean   → NOSE → HIP. The shoulder acromion moves
+        substantially during shoulder ROM tests (scapular elevation
+        + protraction), so a shoulder→hip line would conflate trunk
+        motion with shoulder motion. The nose stays put as the arm
+        moves, so a nose→hip line rotates only when the trunk does.
+      • Shoulder elevation (shrug) → SHOULDER → HIP. The shrug is
+        defined by the shoulder rising toward the head, so the
+        shoulder landmark is the right place to measure it.
+      • Elbow bend → SHOULDER → ELBOW → WRIST. Standard interior
+        angle at the elbow joint."""
+    trunk_baseline_samples: list[float] = []
+    hip_dist_baseline_samples: list[float] = []
+    trunk_baseline: float | None = None
+    hip_dist_baseline: float | None = None
+    trunk_lean_peak = 0.0
+    shoulder_rise_peak = 0.0
+    elbow_bend_peak = 180.0
+    trunk_flagged = False
+    elev_flagged = False
+    bend_flagged = False
+
+    for i in range(n):
+        # Trunk lean — NOSE → HIP. Decoupled from shoulder motion.
+        if nv[i] >= _SHOULDER_VIS_THRESHOLD and vh[i] >= _SHOULDER_VIS_THRESHOLD:
+            nose_dx = float(nx[i]) - float(hx[i])
+            nose_dy = float(ny[i]) - float(hy[i])
+            if math.hypot(nose_dx, nose_dy) >= 1e-4:
+                trunk = _angle_from_vertical(nose_dx, nose_dy)
+                if len(trunk_baseline_samples) < _COMP_BASELINE_FRAME_COUNT:
+                    trunk_baseline_samples.append(trunk)
+                    if len(trunk_baseline_samples) == _COMP_BASELINE_FRAME_COUNT:
+                        trunk_baseline = sum(trunk_baseline_samples) / _COMP_BASELINE_FRAME_COUNT
+                if trunk_baseline is not None:
+                    deviation = abs(trunk - trunk_baseline)
+                    if deviation > trunk_lean_peak:
+                        trunk_lean_peak = deviation
+                    if deviation > _COMP_TRUNK_LEAN_THRESHOLD_DEG:
+                        trunk_flagged = True
+
+        # Shoulder elevation (shrug) — SHOULDER → HIP. Measures the
+        # actual shrug at its anatomical location.
+        if vs[i] >= _SHOULDER_VIS_THRESHOLD and vh[i] >= _SHOULDER_VIS_THRESHOLD:
+            dx = float(sx[i]) - float(hx[i])
+            dy = float(sy[i]) - float(hy[i])
+            if math.hypot(dx, dy) >= 1e-4:
+                hip_dist = math.hypot(dx, dy)
+                if len(hip_dist_baseline_samples) < _COMP_BASELINE_FRAME_COUNT:
+                    hip_dist_baseline_samples.append(hip_dist)
+                    if len(hip_dist_baseline_samples) == _COMP_BASELINE_FRAME_COUNT:
+                        hip_dist_baseline = sum(hip_dist_baseline_samples) / _COMP_BASELINE_FRAME_COUNT
+                if hip_dist_baseline is not None:
+                    # Shrug: shoulder rises away from hip → euclidean
+                    # shoulder→hip distance INCREASES.
+                    rise = hip_dist - hip_dist_baseline
+                    if rise > shoulder_rise_peak:
+                        shoulder_rise_peak = rise
+                    if rise > _COMP_SHOULDER_ELEVATION_THRESHOLD_PX:
+                        elev_flagged = True
+
+    # Elbow bend — PEAK-WINDOWED check. Instead of flagging any single
+    # frame below threshold (which fires on transit-motion bends + on
+    # single-frame landmark jitter), collect per-frame elbow angles
+    # and only check the small window of frames AROUND the flexion
+    # and extension peaks. Clinically a compensation only matters AT
+    # the peak — bending the elbow during the lowering transit is
+    # not a compensation and should not be flagged. Two-pass loop.
+    elbow_angles: list[float | None] = []
+    for i in range(n):
+        if (
+            vs[i] >= _SHOULDER_VIS_THRESHOLD
+            and ve[i] >= _SHOULDER_VIS_THRESHOLD
+            and vw[i] >= _SHOULDER_VIS_THRESHOLD
+        ):
+            elbow_angles.append(_interior_angle_deg(
+                float(sx[i]), float(sy[i]),
+                float(ex[i]), float(ey[i]),
+                float(wx[i]), float(wy[i]),
+            ))
+        else:
+            elbow_angles.append(None)
+
+    # Check elbow only in ±_COMP_ELBOW_PEAK_WINDOW_FRAMES around each
+    # tracked peak (flexion = primary_peak_idx, extension = secondary).
+    # Index < 0 means that direction wasn't captured this trial; skip.
+    for peak_idx in (primary_peak_idx, secondary_peak_idx):
+        if peak_idx < 0:
+            continue
+        lo = max(0, peak_idx - _COMP_ELBOW_PEAK_WINDOW_FRAMES)
+        hi = min(n, peak_idx + _COMP_ELBOW_PEAK_WINDOW_FRAMES + 1)
+        for i in range(lo, hi):
+            ang = elbow_angles[i]
+            if ang is None:
+                continue
+            if ang < elbow_bend_peak:
+                elbow_bend_peak = ang
+            if ang < _COMP_ELBOW_BEND_THRESHOLD_DEG:
+                bend_flagged = True
+
+    # Always populate `details` with the actual peak measured value
+    # (even when not flagged), so the report can show diagnostic
+    # readings under each compensation. Lets clinicians see WHERE the
+    # measurement landed relative to threshold — "lean was 8° / 15°"
+    # is much more actionable than a silent "not detected".
+    return [
+        {
+            "type": "trunk_lean",
+            "label": "Trunk Lean",
+            "severity": "high",
+            "flagged": trunk_flagged,
+            "details": (
+                f"Peak deviation {trunk_lean_peak:.1f}° from baseline "
+                f"(threshold {_COMP_TRUNK_LEAN_THRESHOLD_DEG:.0f}°)"
+            ),
+        },
+        {
+            "type": "shoulder_elevation",
+            "label": "Shoulder Elevation",
+            "severity": "medium",
+            "flagged": elev_flagged,
+            "details": (
+                f"Shoulder-hip distance rose {shoulder_rise_peak:.0f} px "
+                f"above baseline (threshold "
+                f"{_COMP_SHOULDER_ELEVATION_THRESHOLD_PX:.0f} px)"
+            ),
+        },
+        {
+            "type": "elbow_bend",
+            "label": "Elbow Bend",
+            "severity": "medium",
+            "flagged": bend_flagged,
+            "details": (
+                f"Minimum elbow angle at peak: {elbow_bend_peak:.0f}° "
+                f"(threshold {_COMP_ELBOW_BEND_THRESHOLD_DEG:.0f}°)"
+            ),
+        },
+    ]
+
+
 def analyze_shoulder(
     video_path: str,
     pose_options,
@@ -1323,6 +1521,25 @@ def analyze_shoulder(
         if kf:
             key_frames.append(kf)
 
+    # Compensatory-movement detection. Runs on the same per-frame
+    # arrays the peak-angle loop above already iterated, but tracks
+    # an independent set of signals (trunk lean, shoulder elevation,
+    # elbow bend). Trunk lean uses NOSE → HIP rather than the
+    # SHOULDER → HIP line specified in the original spec — the
+    # shoulder acromion moves substantially during shoulder ROM
+    # (scapular elevation + protraction) and contaminates the
+    # signal; the nose stays put while the trunk actually rotates.
+    # See `_track_flexion_extension_compensations` docstring.
+    nx_arr = ts["nose"]["x_px"]
+    ny_arr = ts["nose"]["y_px"]
+    nv_arr = ts["nose"]["vis"]
+    compensations = _track_flexion_extension_compensations(
+        sx, sy, vs, ex, ey, ve, hx, hy, vh, wx, wy, vw,
+        nx_arr, ny_arr, nv_arr, n,
+        primary_peak_idx=primary_peak_idx,
+        secondary_peak_idx=secondary_peak_idx,
+    )
+
     return {
         "body_part": "shoulder",
         "movement": "flexion_extension",
@@ -1345,6 +1562,7 @@ def analyze_shoulder(
         "secondary_reference_range": [float(s_lo), float(s_hi)],
         "primary_label": "Flexion",
         "secondary_label": "Extension",
+        "compensations": compensations,
     }
 
 

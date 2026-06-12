@@ -6,6 +6,7 @@ import { PatientHeader } from "@/components/dashboard/PatientHeader";
 import { fmt } from "@/lib/utils";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { PatientDTO } from "@/lib/patients";
+import type { BiomechCompensationDTO } from "@/lib/api";
 
 interface KeyFrame {
   label: string;
@@ -43,6 +44,13 @@ interface Props {
   secondaryMovementName?: string;
   secondaryMeasured?: number;
   secondaryTarget?: [number, number];
+  /** Compensatory-movement findings from the recording. Renders as
+   *  a "Compensations Detected" section between the Plotly chart
+   *  and Key frames. When undefined or empty, the section is hidden
+   *  entirely. When set, ALL entries are shown — flagged ones as
+   *  colored cards, unflagged ones contribute to a green "no
+   *  compensations detected" line if EVERY entry is unflagged. */
+  compensations?: BiomechCompensationDTO[];
 }
 
 // Educational text — direct port of biomech_flow.py SHOULDER_EDU / NECK_EDU.
@@ -175,6 +183,7 @@ export function AssessmentReport({
   secondaryMovementName,
   secondaryMeasured,
   secondaryTarget,
+  compensations,
 }: Props) {
   // Merged tests always render BOTH direction rows (so the operator
   // gets a clear "Internal Rotation: Not detected" line when only
@@ -452,6 +461,88 @@ export function AssessmentReport({
           <PlotlyChart data={chartData} layout={chartLayout} height={220} />
         </div>
       </section>
+
+      {/* ── Compensations Detected ─────────────────────────────── */}
+      {/* Always renders all 3 compensation entries when present —
+          flagged ones as colored cards with severity tag, unflagged
+          ones as muted "within range" rows. Both styles include the
+          peak measured value (in `details`) so clinicians can see how
+          close to the threshold the trial landed, and sub-threshold
+          movement is visible rather than silently hidden. */}
+      {compensations && compensations.length > 0 && (
+        <section>
+          <h3 className="text-base font-semibold tracking-tight">
+            Compensations Detected
+          </h3>
+          <div className="mt-3 space-y-3">
+            {compensations.map((c) => {
+              if (c.flagged) {
+                const styles =
+                  c.severity === "high"
+                    ? "border-error/40 bg-error/5"
+                    : c.severity === "medium"
+                      ? "border-warning/40 bg-warning/5"
+                      : "border-border bg-surface";
+                const dot =
+                  c.severity === "high"
+                    ? "bg-error"
+                    : c.severity === "medium"
+                      ? "bg-warning"
+                      : "bg-muted";
+                const tag =
+                  c.severity === "high"
+                    ? "HIGH"
+                    : c.severity === "medium"
+                      ? "MEDIUM"
+                      : "LOW";
+                return (
+                  <div
+                    key={c.type}
+                    className={`rounded-card border p-4 ${styles}`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        <span className={`h-2 w-2 rounded-full ${dot}`} />
+                        <span className="text-sm font-semibold text-foreground">
+                          {c.label}
+                        </span>
+                      </div>
+                      <span className="rounded-full bg-foreground/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-foreground">
+                        {tag}
+                      </span>
+                    </div>
+                    {c.details && (
+                      <p className="mt-2 text-xs text-muted">{c.details}</p>
+                    )}
+                  </div>
+                );
+              }
+              // Unflagged — muted row showing the measured peak value.
+              return (
+                <div
+                  key={c.type}
+                  className="rounded-card border border-border bg-surface p-4"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <span className="h-2 w-2 rounded-full bg-accent" />
+                      <span className="text-sm font-semibold text-foreground">
+                        {c.label}
+                      </span>
+                    </div>
+                    <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-accent">
+                      Within range
+                    </span>
+                  </div>
+                  {c.details && (
+                    <p className="mt-2 text-xs text-muted">{c.details}</p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       {/* ── Annotated key frames (images only, no captions) ─────── */}
       {keyFrames && keyFrames.length > 0 && (
