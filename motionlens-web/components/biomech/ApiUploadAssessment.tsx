@@ -213,6 +213,12 @@ export function ApiUploadAssessment({
               ...(result.key_frames && result.key_frames.length > 0
                 ? { key_frames: result.key_frames }
                 : {}),
+              // Persist compensatory-movement findings so the saved
+              // report renders the same Compensations Detected
+              // section when re-opened from patient history.
+              ...(result.compensations && result.compensations.length > 0
+                ? { compensations: result.compensations }
+                : {}),
             },
             observations: { interpretation: result.interpretation },
             video_filename: file?.name,
