@@ -243,6 +243,22 @@ class BiomechKeyFrame(BaseModel):
     image_data_url: str
 
 
+class BiomechCompensation(BaseModel):
+    """One compensatory-movement finding from the analyser. Mirrors
+    the dict shape returned by _track_flexion_extension_compensations
+    in engines/biomech/shoulder_engine.py and the
+    BiomechCompensationDTO type in motionlens-web/lib/api.ts.
+
+    Frontend renders flagged entries as colored cards in a new
+    "Compensations Detected" section, and a green "no compensations
+    detected" line when every entry's `flagged` is false."""
+    type: str         # "trunk_lean" | "shoulder_elevation" | "elbow_bend"
+    label: str        # human-facing label e.g. "Trunk Lean"
+    severity: str     # "high" | "medium" | "low"
+    flagged: bool
+    details: Optional[str] = None
+
+
 class BiomechData(BaseModel):
     body_part: str
     movement: str
@@ -273,6 +289,12 @@ class BiomechData(BaseModel):
     secondary_reference_range: Optional[list[float]] = None
     primary_label: Optional[str] = None
     secondary_label: Optional[str] = None
+    # Compensatory-movement findings. Populated only for movements
+    # whose analyser runs compensation tracking (shoulder flexion+
+    # extension today). Null/empty for every other test, so existing
+    # endpoints continue to serialise unchanged and the frontend
+    # report section stays hidden where it doesn't apply.
+    compensations: Optional[list[BiomechCompensation]] = None
 
 
 class BiomechResponse(BaseModel):

@@ -31,6 +31,8 @@ import {
   detectShoulderFlexExtDirection,
   detectShoulderRotationDirection,
   isShoulderRotationNeutral,
+  ShoulderFlexExtCompensationTracker,
+  type Compensation,
   type ShoulderRotationCalibration,
 } from "@/lib/biomech/shoulder-live";
 import { detectHipRotationDirection } from "@/lib/biomech/hip-live";
@@ -323,7 +325,18 @@ export function LiveAssessment({
     // Last detected direction (for the live "Current" readout tag in
     // merged mode). null = inside the deadband / undetermined.
     currentDirection: null as "primary" | "secondary" | null,
+    // Compensations currently active on the latest frame. Populated
+    // only for shoulder flexion+extension; empty for everything else.
+    // Read by the live banner; the final-report compensations come
+    // from compTrackerRef.current?.finish() at report-render time.
+    currentCompensations: [] as Compensation[],
   });
+
+  // Compensatory-movement tracker — scoped to shoulder flexion+
+  // extension. Lazy-initialised on first frame inside onResult so the
+  // side prop is locked at construction. Null for all other (bodyPart,
+  // movementId) pairs.
+  const compTrackerRef = useRef<ShoulderFlexExtCompensationTracker | null>(null);
 
   // Annotated-frame screenshots for the report. Captured on the
   // composite canvas exposed by LiveBiomechCamera (via
@@ -478,6 +491,17 @@ export function LiveAssessment({
         const fe = detectShoulderFlexExtDirection(kpsForDir, sideOrRight);
         if (fe === "flexion") dir = "primary";
         else if (fe === "extension") dir = "secondary";
+        // Compensation tracker — same per-frame landmarks. Tracker
+        // builds its own baseline from the first 10 valid frames and
+        // flags any subsequent frame whose trunk-lean / shoulder-hip-
+        // distance / elbow-bend signals cross threshold. Independent
+        // of the peak/direction state machine above. Lazy-init keeps
+        // the side prop in scope at construction.
+        if (!compTrackerRef.current) {
+          compTrackerRef.current = new ShoulderFlexExtCompensationTracker(sideOrRight);
+        }
+        compTrackerRef.current.feed(kpsForDir);
+        s.currentCompensations = compTrackerRef.current.currentFlags();
       } else if (isMergedNeckFE) {
         const fe = detectNeckFlexExtDirection(kpsForDir);
         if (fe === "flexion") dir = "primary";
@@ -686,14 +710,31 @@ export function LiveAssessment({
       confirmedUrl = candUrl;
     }
 
-    // Write back to the slot.
+    // Write back to the slot. For shoulder flexion+extension, also
+    // mark the compensation tracker so its peak-windowed elbow
+    // check focuses on the holding window around this peak — and
+    // ignores transit-motion bends elsewhere in the recording.
     if (slot === "primary") {
+      if (
+        isMergedShoulderFlexExt &&
+        confirmedPeak !== null &&
+        confirmedPeak !== s.peakSigned
+      ) {
+        compTrackerRef.current?.markPrimaryPeak();
+      }
       s.peakCandidateSigned = candSigned;
       s.peakCandidateHeld = candHeld;
       s.peakCandidateUrl = candUrl;
       s.peakSigned = confirmedPeak;
       keyFramesRef.current.peakUrl = confirmedUrl;
     } else {
+      if (
+        isMergedShoulderFlexExt &&
+        confirmedPeak !== null &&
+        confirmedPeak !== s.peakSignedB
+      ) {
+        compTrackerRef.current?.markSecondaryPeak();
+      }
       s.peakCandidateSignedB = candSigned;
       s.peakCandidateHeldB = candHeld;
       s.peakCandidateUrlB = candUrl;
@@ -1050,6 +1091,31 @@ export function LiveAssessment({
             )}
           </div>
 
+          {/* Real-time compensation warning banner. Renders only for
+              shoulder flexion+extension (the only test that runs the
+              tracker today) and only while at least one compensation
+              is active on the latest frame. Disappears as soon as the
+              patient corrects form. */}
+          {isMergedShoulderFlexExt && stateRef.current.currentCompensations.length > 0 && (
+            <div className="mt-4 rounded-md border border-warning/40 bg-warning/5 px-3 py-2">
+              <p className="text-[10px] uppercase tracking-[0.12em] text-warning">
+                Compensation detected
+              </p>
+              <ul className="mt-1 space-y-0.5 text-xs text-foreground">
+                {stateRef.current.currentCompensations.map((c) => (
+                  <li key={c.type} className="flex items-center gap-2">
+                    <span
+                      className={`h-1.5 w-1.5 rounded-full ${
+                        c.severity === "high" ? "bg-error" : "bg-warning"
+                      }`}
+                    />
+                    <span>{c.label}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           <p className="mt-5 text-xs text-muted">
             {isMergedMovement ? (
               <>
@@ -1249,6 +1315,11 @@ export function LiveAssessment({
             isMergedMovement && hasPeakB ? peakMagB : undefined
           }
           secondaryTarget={isMergedMovement ? secondaryTarget : undefined}
+          /* Final compensations summary — populated only when the
+             shoulder flex+ext tracker ran during this trial; null
+             on every other movement so the report's section
+             stays hidden there. */
+          compensations={compTrackerRef.current?.finish()}
         />
 
         {/* Explicit save button — only renders in doctor flow */}

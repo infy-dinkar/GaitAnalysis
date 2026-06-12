@@ -170,6 +170,11 @@ export function ApiUploadAssessment({
             hasSecondaryValue ? result.secondary_peak_magnitude : undefined
           }
           secondaryTarget={isMerged ? result.secondary_reference_range : undefined}
+          /* Compensations from the backend response. Populated only
+             for movements that ran compensation tracking (shoulder
+             flexion+extension today). Undefined for other tests so
+             the report's section stays hidden. */
+          compensations={result.compensations}
         />
 
         {/* Explicit "Save to patient history" — only shows in doctor flow */}
@@ -261,6 +266,22 @@ export function ApiUploadAssessment({
             </>
           )}
         </p>
+        {/* Compensation warning — shoulder flexion+extension only.
+            Tells the operator what to watch out for in the recording
+            BEFORE upload. The report will then flag any compensations
+            the analyser actually detected. */}
+        {bodyPart === "shoulder" && movementId === "flexion_extension" && (
+          <div className="mt-4 max-w-xl rounded-md border border-warning/40 bg-warning/5 px-4 py-3">
+            <p className="text-xs font-semibold text-warning">
+              ⚠️ Avoid these common compensations:
+            </p>
+            <ul className="mt-2 space-y-1 text-xs text-foreground">
+              <li>• Do not lean trunk backward during flexion</li>
+              <li>• Keep elbow straight throughout</li>
+              <li>• Do not shrug your shoulder</li>
+            </ul>
+          </div>
+        )}
       </div>
 
       {movementImageUrl && (

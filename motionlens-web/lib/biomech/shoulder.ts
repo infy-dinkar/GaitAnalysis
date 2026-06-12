@@ -541,3 +541,304 @@ export function computeShoulderAbAdWithDirection(
   if (magnitude === null) return null;
   return { magnitude, direction };
 }
+
+// ─── Compensatory movement detection (Shoulder Flexion+Extension) ─
+//
+// Tracks 3 common compensations during shoulder flexion/extension:
+//
+//   1. Trunk Lean (HIGH 🔴): angle between the test-side shoulder→hip
+//      line and image vertical. Baseline = mean of first 10 valid
+//      frames. Flag if any frame deviates > 15° from baseline.
+//
+//   2. Shoulder Elevation (MEDIUM 🟡): pixel distance between the
+//      test-side shoulder and hip landmarks. Baseline = mean of first
+//      10 valid frames. Flag if distance drops > 15 px below
+//      baseline (patient is shrugging).
+//
+//   3. Elbow Bend (MEDIUM 🟡): interior angle at the elbow
+//      (shoulder→elbow→wrist). No baseline — absolute threshold.
+//      Flag if any frame's angle < 160°.
+//
+// Per-frame compute fns are pure. The tracker class accumulates state
+// across the recording. .feed(keypoints) ingests each frame;
+// .currentFlags() returns compensations active on the latest frame
+// (live banner); .finish() returns the full Compensation[] for the
+// AssessmentReport.
+
+export type CompensationSeverity = "high" | "medium" | "low";
+
+export interface Compensation {
+  type: "trunk_lean" | "shoulder_elevation" | "elbow_bend";
+  label: string;
+  severity: CompensationSeverity;
+  flagged: boolean;
+  details?: string;
+}
+
+const TRUNK_LEAN_THRESHOLD_DEG = 15;
+const SHOULDER_ELEVATION_THRESHOLD_PX = 15;
+const ELBOW_BEND_THRESHOLD_DEG = 160;
+const COMPENSATION_BASELINE_FRAME_COUNT = 10;
+/** ±N frames around each peak in which the elbow-bend check is run.
+ *  See finish() — clinically a transit-motion bend during arm
+ *  lowering is not a compensation, only a peak-frame bend is. */
+const ELBOW_PEAK_WINDOW_FRAMES = 3;
+
+/** Angle between the NOSE → test-side HIP line and image vertical,
+ *  in degrees. Upright posture ≈ 0°.
+ *
+ *  Why NOSE rather than the test-side shoulder (which the spec
+ *  literally names): during shoulder flexion/extension the SHOULDER
+ *  acromion landmark itself moves significantly — scapular elevation
+ *  raises it 5-10 cm when the arm goes overhead, scapular protraction
+ *  shifts it forward 3-5 cm at the extension end. That motion is
+ *  totally independent of trunk lean and contaminates the
+ *  shoulder→hip signal during exactly the test we're trying to
+ *  monitor. The nose stays put as the arm moves, so a nose→hip line
+ *  rotates only when the trunk actually rotates. Same threshold
+ *  (15°), same baseline-as-mean-of-first-10-valid-frames logic.
+ *
+ *  Returns null when either landmark fails the visibility threshold. */
+export function computeTrunkLeanAngle(
+  keypoints: Keypoint[],
+  side: "left" | "right",
+): number | null {
+  const idx = SIDE_INDICES[side];
+  const nose = keypoints[LM.NOSE];
+  const h = keypoints[idx.hip];
+  if (!nose || !h) return null;
+  if ((nose.score ?? 0) < VIS_THRESHOLD || (h.score ?? 0) < VIS_THRESHOLD) return null;
+  // Vector from hip → nose. Upright posture: nose far above hip
+  // → (≈ 0, large negative in image-y-down space). Reference =
+  // (0, −1) image-up direction.
+  const dx = nose.x - h.x;
+  const dy = nose.y - h.y;
+  if (Math.hypot(dx, dy) < 1e-4) return null;
+  return Math.abs(angleBetween(0, -1, dx, dy));
+}
+
+/** Pixel distance between the test-side shoulder and hip landmarks.
+ *  Decreases when the patient shrugs (shoulder rises). Returns null
+ *  when either landmark fails the visibility threshold. */
+export function computeShoulderHipDistance(
+  keypoints: Keypoint[],
+  side: "left" | "right",
+): number | null {
+  const idx = SIDE_INDICES[side];
+  const s = keypoints[idx.shoulder];
+  const h = keypoints[idx.hip];
+  if (!s || !h) return null;
+  if ((s.score ?? 0) < VIS_THRESHOLD || (h.score ?? 0) < VIS_THRESHOLD) return null;
+  return Math.hypot(s.x - h.x, s.y - h.y);
+}
+
+/** Interior angle at the elbow (shoulder → elbow → wrist), in
+ *  degrees. Fully extended arm ≈ 180°; 90° bend ≈ 90°. Returns null
+ *  when any of the three required landmarks fail visibility. */
+export function computeElbowAngle(
+  keypoints: Keypoint[],
+  side: "left" | "right",
+): number | null {
+  const idx = SIDE_INDICES[side];
+  const s = keypoints[idx.shoulder];
+  const e = keypoints[idx.elbow];
+  const w = keypoints[idx.wrist];
+  if (!s || !e || !w) return null;
+  if (
+    (s.score ?? 0) < VIS_THRESHOLD ||
+    (e.score ?? 0) < VIS_THRESHOLD ||
+    (w.score ?? 0) < VIS_THRESHOLD
+  ) return null;
+  // Interior angle at vertex E for points S - E - W.
+  const v1x = s.x - e.x, v1y = s.y - e.y;
+  const v2x = w.x - e.x, v2y = w.y - e.y;
+  const dot = v1x * v2x + v1y * v2y;
+  const cross = v1x * v2y - v1y * v2x;
+  return (Math.atan2(Math.abs(cross), dot) * 180) / Math.PI;
+}
+
+/** Stateful per-trial compensation tracker for shoulder flexion+
+ *  extension. First COMPENSATION_BASELINE_FRAME_COUNT valid frames
+ *  build the trunk-lean + shoulder-hip-distance baselines (elbow
+ *  bend uses an absolute threshold, no baseline). Every subsequent
+ *  frame is checked against thresholds at the top of this section.
+ *  Frames where any required landmark is invisible are silently
+ *  skipped for that metric. */
+export class ShoulderFlexExtCompensationTracker {
+  private readonly side: "left" | "right";
+  private trunkBaselineSamples: number[] = [];
+  private hipDistBaselineSamples: number[] = [];
+  private trunkBaseline: number | null = null;
+  private hipDistBaseline: number | null = null;
+  private trunkLeanPeak = 0;       // max absolute deviation observed
+  private shoulderRisePeak = 0;    // max rise above hip-dist baseline
+  private elbowBendPeak = 180;     // min elbow angle in peak windows (filled by finish())
+  private trunkFlagged = false;
+  private elevFlagged = false;
+  private bendFlagged = false;     // filled by finish() — peak-windowed
+  // Current-frame flags — reset each .feed(). Drives the live banner.
+  private currentTrunkActive = false;
+  private currentElevActive = false;
+  private currentBendActive = false;
+  // Per-frame elbow-angle history. The peak-windowed check in
+  // finish() reads slices of this around the marked peak indices.
+  // null entries = landmarks not visible that frame.
+  private elbowAnglesPerFrame: (number | null)[] = [];
+  // Total frames .feed() has been called with. Used by markPrimary/
+  // SecondaryPeak() to record the current-frame index.
+  private frameCounter = 0;
+  private primaryPeakFrame: number | null = null;
+  private secondaryPeakFrame: number | null = null;
+
+  constructor(side: "left" | "right") {
+    this.side = side;
+  }
+
+  /** Feed one frame. Trunk lean + shrug are checked inline (baseline-
+   *  relative, every-frame). Elbow angle is collected for the
+   *  peak-windowed check that runs in finish() — but the per-frame
+   *  threshold-cross is still reflected in currentBendActive so the
+   *  live banner can show real-time coaching feedback. No-op for any
+   *  metric whose required landmarks aren't visible this frame. */
+  feed(keypoints: Keypoint[]): void {
+    this.currentTrunkActive = false;
+    this.currentElevActive = false;
+    this.currentBendActive = false;
+
+    const trunk = computeTrunkLeanAngle(keypoints, this.side);
+    const hipDist = computeShoulderHipDistance(keypoints, this.side);
+    const elbow = computeElbowAngle(keypoints, this.side);
+
+    if (trunk !== null && this.trunkBaselineSamples.length < COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.trunkBaselineSamples.push(trunk);
+      if (this.trunkBaselineSamples.length === COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.trunkBaseline = compMean(this.trunkBaselineSamples);
+      }
+    }
+    if (hipDist !== null && this.hipDistBaselineSamples.length < COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.hipDistBaselineSamples.push(hipDist);
+      if (this.hipDistBaselineSamples.length === COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.hipDistBaseline = compMean(this.hipDistBaselineSamples);
+      }
+    }
+
+    if (trunk !== null && this.trunkBaseline !== null) {
+      const deviation = Math.abs(trunk - this.trunkBaseline);
+      if (deviation > this.trunkLeanPeak) this.trunkLeanPeak = deviation;
+      if (deviation > TRUNK_LEAN_THRESHOLD_DEG) {
+        this.trunkFlagged = true;
+        this.currentTrunkActive = true;
+      }
+    }
+    if (hipDist !== null && this.hipDistBaseline !== null) {
+      // Shrug detection: shoulder rises away from the hip, so the
+      // euclidean shoulder→hip distance INCREASES above baseline.
+      const rise = hipDist - this.hipDistBaseline;
+      if (rise > this.shoulderRisePeak) this.shoulderRisePeak = rise;
+      if (rise > SHOULDER_ELEVATION_THRESHOLD_PX) {
+        this.elevFlagged = true;
+        this.currentElevActive = true;
+      }
+    }
+    // Elbow: collect now, evaluate in finish(). Banner still shows
+    // current-frame state so the operator gets real-time coaching.
+    this.elbowAnglesPerFrame.push(elbow);
+    if (elbow !== null && elbow < ELBOW_BEND_THRESHOLD_DEG) {
+      this.currentBendActive = true;
+    }
+    this.frameCounter += 1;
+  }
+
+  /** Mark the most-recently-fed frame as the FLEXION (primary) peak.
+   *  Call this from LiveAssessment at the moment the primary peak
+   *  is committed so finish() knows which window to check the elbow
+   *  in. Safe to call repeatedly — the latest call wins (matches
+   *  the upload-mode behaviour of using the LAST highest-angle
+   *  frame as the peak). */
+  markPrimaryPeak(): void {
+    this.primaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+
+  /** Mark the most-recently-fed frame as the EXTENSION (secondary)
+   *  peak. See markPrimaryPeak. */
+  markSecondaryPeak(): void {
+    this.secondaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+
+  /** Compensations currently active on the most recent frame.
+   *  Used by LiveAssessment to drive the real-time warning banner. */
+  currentFlags(): Compensation[] {
+    const out: Compensation[] = [];
+    if (this.currentTrunkActive) {
+      out.push({ type: "trunk_lean", label: "Trunk Lean", severity: "high", flagged: true });
+    }
+    if (this.currentElevActive) {
+      out.push({ type: "shoulder_elevation", label: "Shoulder Elevation", severity: "medium", flagged: true });
+    }
+    if (this.currentBendActive) {
+      out.push({ type: "elbow_bend", label: "Elbow Bend", severity: "medium", flagged: true });
+    }
+    return out;
+  }
+
+  /** Final summary: 3 entries (one per compensation type). Each
+   *  carries a `flagged` boolean (true if it triggered at any point
+   *  during the recording) and a human-readable `details` string when
+   *  flagged. AssessmentReport renders flagged entries as colored
+   *  cards and shows a green "no compensations detected" line when
+   *  none flagged. */
+  finish(): Compensation[] {
+    // Peak-windowed elbow scan. The flagged status + details string
+    // for elbow bend are computed HERE (not during .feed()) so a
+    // transit-motion bend doesn't trigger the report flag. The check
+    // runs only on ±ELBOW_PEAK_WINDOW_FRAMES frames around each
+    // marked peak. Without any peak marks (no .markPrimaryPeak() /
+    // .markSecondaryPeak() calls), elbow stays unflagged — the live
+    // banner already conveyed any per-frame coaching signal.
+    for (const peakIdx of [this.primaryPeakFrame, this.secondaryPeakFrame]) {
+      if (peakIdx === null) continue;
+      const lo = Math.max(0, peakIdx - ELBOW_PEAK_WINDOW_FRAMES);
+      const hi = Math.min(this.elbowAnglesPerFrame.length, peakIdx + ELBOW_PEAK_WINDOW_FRAMES + 1);
+      for (let i = lo; i < hi; i++) {
+        const ang = this.elbowAnglesPerFrame[i];
+        if (ang === null || ang === undefined) continue;
+        if (ang < this.elbowBendPeak) this.elbowBendPeak = ang;
+        if (ang < ELBOW_BEND_THRESHOLD_DEG) this.bendFlagged = true;
+      }
+    }
+
+    // Always populate `details` with the peak measured value — see
+    // shoulder_engine.py for rationale (diagnostic visibility into
+    // sub-threshold readings).
+    return [
+      {
+        type: "trunk_lean",
+        label: "Trunk Lean",
+        severity: "high",
+        flagged: this.trunkFlagged,
+        details: `Peak deviation ${this.trunkLeanPeak.toFixed(1)}° from baseline (threshold ${TRUNK_LEAN_THRESHOLD_DEG}°)`,
+      },
+      {
+        type: "shoulder_elevation",
+        label: "Shoulder Elevation",
+        severity: "medium",
+        flagged: this.elevFlagged,
+        details: `Shoulder-hip distance rose ${this.shoulderRisePeak.toFixed(0)} px above baseline (threshold ${SHOULDER_ELEVATION_THRESHOLD_PX} px)`,
+      },
+      {
+        type: "elbow_bend",
+        label: "Elbow Bend",
+        severity: "medium",
+        flagged: this.bendFlagged,
+        details: `Minimum elbow angle at peak: ${this.elbowBendPeak.toFixed(0)}° (threshold ${ELBOW_BEND_THRESHOLD_DEG}°)`,
+      },
+    ];
+  }
+}
+
+function compMean(arr: number[]): number {
+  if (arr.length === 0) return 0;
+  let s = 0;
+  for (const v of arr) s += v;
+  return s / arr.length;
+}
