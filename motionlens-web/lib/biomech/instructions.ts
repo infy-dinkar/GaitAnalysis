@@ -102,6 +102,7 @@ export const MOVEMENT_INSTRUCTIONS: Record<Key, string[]> = {
     "Return the head to neutral (looking straight ahead).",
     "EXTENSION: slowly tilt your head back to look up at the ceiling. Stop if it feels uncomfortable or causes dizziness. Hold the furthest comfortable position for ~2 seconds.",
     "Return the head to neutral. Click Show Analysis — the report shows separate Flexion and Extension peak values plus screenshots of both moments.",
+    "⚠️ Avoid these common compensations: keep your trunk still — only the head should move (don't lean forward / backward) · do NOT shrug your shoulders up toward your ears.",
   ],
   "neck.lateral_flexion": [
     "Sit upright on a chair, facing the camera straight on so it can see both ears and both shoulders.",
@@ -109,6 +110,7 @@ export const MOVEMENT_INSTRUCTIONS: Record<Key, string[]> = {
     "Slowly tip your head sideways so the ear moves toward the same-side shoulder. Keep the nose pointing forward — this is a tilt, not a turn.",
     "Hold for 2 seconds at the lowest comfortable point, then bring the head back to upright.",
     "If you want to measure both sides, repeat the movement to the opposite side.",
+    "⚠️ Avoid these common compensations: do NOT lift your shoulder up toward your ear (the ear comes to the shoulder) · keep both shoulders level — do not tilt your whole trunk to one side.",
   ],
   "neck.rotation": [
     "Sit upright on a chair, facing the camera straight on so it can see both ears.",
@@ -116,6 +118,7 @@ export const MOVEMENT_INSTRUCTIONS: Record<Key, string[]> = {
     "Slowly turn your head to look over one shoulder — keep the chin level (don't tilt or drop it). Stop when it feels tight.",
     "Hold for 2 seconds, then turn smoothly back to centre.",
     "If you want to measure both sides, repeat the movement to the opposite side.",
+    "⚠️ Avoid these common compensations: keep your shoulders facing forward — do NOT twist your trunk to help the head turn · keep your shoulders level and relaxed (don't shrug).",
   ],
 
   // ── Knee ─────────────────────────────────────────────────────

@@ -243,6 +243,34 @@ _MERGED_NECKFLEXEXT_SECONDARY_TARGET: tuple[float, float] = (50.0, 70.0)  # Exte
 # don't kill a well-smoothed signal.
 _NECK_VIS_THRESHOLD = 0.4
 
+# ── Neck compensation thresholds (mirror of the JS values in
+#    motionlens-web/lib/biomech/neck.ts; identical numbers in
+#    parallel code).
+#
+#    Trunk Lean (flex/ext only) — shoulder midpoint x-displacement
+#    normalised by NECK HEIGHT (ear-mid to shoulder-mid vertical
+#    distance). Was shoulder-width but that collapses in lateral
+#    profile (both shoulders project to ~same x), so any small real
+#    displacement looked like a huge fraction. Neck height is stable
+#    across views.
+#
+#    Shoulder Hike (all 3 trackers) — signal is the most-elevated
+#    shoulder's Y RISE above its first-10-frame baseline (image y
+#    decreases as the shoulder moves up). Was ear-shoulder gap
+#    shrink, which false-fired during the test's natural head motion
+#    (chin-to-chest moves the ear down → gap shrinks even with no
+#    hike). Decoupling from ear motion removes that confound.
+#    Normalised by neck height.
+#
+#    Trunk Rotation (rotation only) — shoulder pixel-width shrinks
+#    as torso twists out of the frontal plane. Frontal-view test, so
+#    shoulder-width is genuinely the shoulder anatomy here.
+_NECK_COMP_TRUNK_LEAN_THRESHOLD_FRAC = 0.20
+_NECK_COMP_SHOULDER_HIKE_THRESHOLD_FRAC = 0.15
+_NECK_COMP_TRUNK_TILT_THRESHOLD_DEG = 8.0
+_NECK_COMP_TRUNK_ROTATION_THRESHOLD_FRAC = 0.15
+_NECK_COMP_BASELINE_FRAME_COUNT = 10
+
 # 10° baseline subtraction — the typical neutral pose has the nose
 # sitting slightly below the ear-axis line (ear-tragus to nose-tip
 # vector points ~10° below horizontal in a relaxed head). Recenters
@@ -608,6 +636,417 @@ def _lateral_profile_for_neck_lateral_flexion(ts: dict) -> Optional[str]:
     return None
 
 
+# ─── Neck compensation helpers ─────────────────────────────────
+#
+# Three helpers — one per neck test — mirroring the JS tracker
+# classes in motionlens-web/lib/biomech/neck.ts. Each reads only the
+# 5 reliably-visible seated-half-body landmarks (NOSE + L/R EAR +
+# L/R SHOULDER) — hips are unavailable in the seated neck framing
+# so no nose→hip math anywhere. Each returns a list[dict] of always-
+# all-entries compensation results with a populated details string
+# (flagged or not) so the report can show diagnostic peak values
+# under each entry.
+#
+# Peak-window args are accepted on each helper for parity with the
+# shoulder helpers, but are not consumed — all neck compensations
+# are baseline-relative whole-trial checks, not peak-windowed.
+
+
+def _track_neck_flex_ext_compensations(
+    lsx, lsy, lsv,
+    rsx, rsy, rsv,
+    lex, ley, lev,
+    rex, rey, rev,
+    n: int,
+    primary_peak_idx: int = -1,
+    secondary_peak_idx: int = -1,
+) -> list[dict]:
+    """Neck flexion+extension (LATERAL view). Two compensations:
+      • Trunk Lean (HIGH) — shoulder midpoint x-displacement from
+        the first-10-frames baseline normalised by baseline NECK
+        HEIGHT (ear-mid → shoulder-mid). Was shoulder-width but that
+        collapses in lateral profile; neck height is stable.
+      • Shoulder Hike (MEDIUM) — most-elevated shoulder.y RISE above
+        first-10-frame baseline (image-y decreases as a shoulder
+        moves up). Normalised by baseline neck height. Was ear-
+        shoulder gap shrink, which false-fired during natural chin-
+        to-chest motion (ear moves down → gap shrinks even with no
+        hike); shoulder.y is decoupled from head motion."""
+    _ = (primary_peak_idx, secondary_peak_idx)
+
+    sm_x_samples: list[float] = []
+    left_sh_y_samples: list[float] = []
+    right_sh_y_samples: list[float] = []
+    neck_h_samples: list[float] = []
+    baseline_sm_x: Optional[float] = None
+    baseline_left_sh_y: Optional[float] = None
+    baseline_right_sh_y: Optional[float] = None
+    baseline_neck_h: Optional[float] = None
+    trunk_lean_peak_norm = 0.0
+    hike_peak_norm = 0.0
+    trunk_flagged = False
+    hike_flagged = False
+
+    for i in range(n):
+        ls_visible = lsv[i] >= _NECK_VIS_THRESHOLD
+        rs_visible = rsv[i] >= _NECK_VIS_THRESHOLD
+        le_visible = lev[i] >= _NECK_VIS_THRESHOLD
+        re_visible = rev[i] >= _NECK_VIS_THRESHOLD
+        all_visible = ls_visible and rs_visible and le_visible and re_visible
+
+        # Per-frame measurements (only when all 4 landmarks visible
+        # → samples stay in temporal lock-step)
+        sm_x = None
+        ls_y = None
+        rs_y = None
+        neck_h = None
+        if all_visible:
+            ls_x_f = float(lsx[i]); rs_x_f = float(rsx[i])
+            ls_y_f = float(lsy[i]); rs_y_f = float(rsy[i])
+            ear_mid_y = (float(ley[i]) + float(rey[i])) / 2.0
+            sh_mid_y = (ls_y_f + rs_y_f) / 2.0
+            sm_x = (ls_x_f + rs_x_f) / 2.0
+            ls_y = ls_y_f
+            rs_y = rs_y_f
+            neck_h_candidate = abs(ear_mid_y - sh_mid_y)
+            if neck_h_candidate > 1e-3:
+                neck_h = neck_h_candidate
+
+        # Baseline accumulation
+        if (
+            all_visible and neck_h is not None
+            and len(sm_x_samples) < _NECK_COMP_BASELINE_FRAME_COUNT
+        ):
+            sm_x_samples.append(sm_x)
+            left_sh_y_samples.append(ls_y)
+            right_sh_y_samples.append(rs_y)
+            neck_h_samples.append(neck_h)
+            if len(sm_x_samples) == _NECK_COMP_BASELINE_FRAME_COUNT:
+                baseline_sm_x = sum(sm_x_samples) / _NECK_COMP_BASELINE_FRAME_COUNT
+                baseline_left_sh_y = sum(left_sh_y_samples) / _NECK_COMP_BASELINE_FRAME_COUNT
+                baseline_right_sh_y = sum(right_sh_y_samples) / _NECK_COMP_BASELINE_FRAME_COUNT
+                baseline_neck_h = sum(neck_h_samples) / _NECK_COMP_BASELINE_FRAME_COUNT
+
+        # Threshold checks — gated on baseline lock
+        if baseline_neck_h is not None and baseline_neck_h > 1e-3:
+            # Trunk lean
+            if ls_visible and rs_visible and baseline_sm_x is not None:
+                current_sm_x = (float(lsx[i]) + float(rsx[i])) / 2.0
+                deviation = abs(current_sm_x - baseline_sm_x)
+                norm = deviation / baseline_neck_h
+                if norm > trunk_lean_peak_norm:
+                    trunk_lean_peak_norm = norm
+                if norm > _NECK_COMP_TRUNK_LEAN_THRESHOLD_FRAC:
+                    trunk_flagged = True
+            # Shoulder hike — per-side, take max rise
+            max_rise = 0.0
+            had_rise = False
+            if ls_visible and baseline_left_sh_y is not None:
+                rise = baseline_left_sh_y - float(lsy[i])
+                if rise > max_rise:
+                    max_rise = rise
+                had_rise = True
+            if rs_visible and baseline_right_sh_y is not None:
+                rise = baseline_right_sh_y - float(rsy[i])
+                if rise > max_rise:
+                    max_rise = rise
+                had_rise = True
+            if had_rise:
+                norm = max_rise / baseline_neck_h
+                if norm > hike_peak_norm:
+                    hike_peak_norm = norm
+                if norm > _NECK_COMP_SHOULDER_HIKE_THRESHOLD_FRAC:
+                    hike_flagged = True
+
+    return [
+        {
+            "type": "trunk_lean",
+            "label": "Trunk Lean",
+            "severity": "high",
+            "flagged": trunk_flagged,
+            "details": (
+                f"Peak shoulder-midpoint displacement "
+                f"{trunk_lean_peak_norm * 100:.1f} % of neck-height "
+                f"(threshold {_NECK_COMP_TRUNK_LEAN_THRESHOLD_FRAC * 100:.0f} %)"
+            ),
+        },
+        {
+            "type": "shoulder_hike",
+            "label": "Shoulder Hike",
+            "severity": "medium",
+            "flagged": hike_flagged,
+            "details": (
+                f"Peak shoulder rise "
+                f"{hike_peak_norm * 100:.1f} % of neck-height "
+                f"(threshold {_NECK_COMP_SHOULDER_HIKE_THRESHOLD_FRAC * 100:.0f} %)"
+            ),
+        },
+    ]
+
+
+def _track_neck_lateral_flexion_compensations(
+    lsx, lsy, lsv,
+    rsx, rsy, rsv,
+    lex, ley, lev,
+    rex, rey, rev,
+    n: int,
+    primary_peak_idx: int = -1,
+    secondary_peak_idx: int = -1,
+) -> list[dict]:
+    """Neck lateral_flexion (FRONTAL view). Both HIGH:
+      • Shoulder Hike — most-elevated shoulder.y RISE above first-
+        10-frame baseline, normalised by baseline neck height.
+        Decoupled from head/ear motion (the test itself drops the
+        ear toward the shoulder; we now flag only when the SHOULDER
+        moves up, which is the actual compensation).
+      • Trunk Tilt — shoulder line absolute angle from horizontal
+        deviating from baseline. Patient leaning whole torso side-
+        ways instead of tilting only the head."""
+    _ = (primary_peak_idx, secondary_peak_idx)
+
+    left_sh_y_samples: list[float] = []
+    right_sh_y_samples: list[float] = []
+    neck_h_samples: list[float] = []
+    baseline_left_sh_y: Optional[float] = None
+    baseline_right_sh_y: Optional[float] = None
+    baseline_neck_h: Optional[float] = None
+    hike_peak_norm = 0.0
+    hike_flagged = False
+
+    tilt_samples: list[float] = []
+    tilt_baseline: Optional[float] = None
+    tilt_peak_deg = 0.0
+    tilt_flagged = False
+
+    for i in range(n):
+        ls_visible = lsv[i] >= _NECK_VIS_THRESHOLD
+        rs_visible = rsv[i] >= _NECK_VIS_THRESHOLD
+        le_visible = lev[i] >= _NECK_VIS_THRESHOLD
+        re_visible = rev[i] >= _NECK_VIS_THRESHOLD
+        all_visible = ls_visible and rs_visible and le_visible and re_visible
+
+        # Tilt signal (only needs both shoulders)
+        tilt_deg: Optional[float] = None
+        if ls_visible and rs_visible:
+            ls_x_f = float(lsx[i]); rs_x_f = float(rsx[i])
+            ls_y_f = float(lsy[i]); rs_y_f = float(rsy[i])
+            dx = rs_x_f - ls_x_f
+            dy = rs_y_f - ls_y_f
+            if math.hypot(dx, dy) >= 1e-4:
+                tilt_deg = abs(math.degrees(math.atan2(dy, dx)))
+
+        # Per-frame neck-height + shoulder.y (needs all 4 visible)
+        neck_h = None
+        if all_visible:
+            ear_mid_y = (float(ley[i]) + float(rey[i])) / 2.0
+            sh_mid_y = (float(lsy[i]) + float(rsy[i])) / 2.0
+            neck_h_candidate = abs(ear_mid_y - sh_mid_y)
+            if neck_h_candidate > 1e-3:
+                neck_h = neck_h_candidate
+
+        # Hike baseline accumulation
+        if (
+            all_visible and neck_h is not None
+            and len(neck_h_samples) < _NECK_COMP_BASELINE_FRAME_COUNT
+        ):
+            left_sh_y_samples.append(float(lsy[i]))
+            right_sh_y_samples.append(float(rsy[i]))
+            neck_h_samples.append(neck_h)
+            if len(neck_h_samples) == _NECK_COMP_BASELINE_FRAME_COUNT:
+                baseline_left_sh_y = sum(left_sh_y_samples) / _NECK_COMP_BASELINE_FRAME_COUNT
+                baseline_right_sh_y = sum(right_sh_y_samples) / _NECK_COMP_BASELINE_FRAME_COUNT
+                baseline_neck_h = sum(neck_h_samples) / _NECK_COMP_BASELINE_FRAME_COUNT
+
+        # Tilt baseline + check
+        if tilt_deg is not None and len(tilt_samples) < _NECK_COMP_BASELINE_FRAME_COUNT:
+            tilt_samples.append(tilt_deg)
+            if len(tilt_samples) == _NECK_COMP_BASELINE_FRAME_COUNT:
+                tilt_baseline = sum(tilt_samples) / _NECK_COMP_BASELINE_FRAME_COUNT
+        if tilt_deg is not None and tilt_baseline is not None:
+            deviation = abs(tilt_deg - tilt_baseline)
+            if deviation > tilt_peak_deg:
+                tilt_peak_deg = deviation
+            if deviation > _NECK_COMP_TRUNK_TILT_THRESHOLD_DEG:
+                tilt_flagged = True
+
+        # Hike check — per-side rise, take max
+        if baseline_neck_h is not None and baseline_neck_h > 1e-3:
+            max_rise = 0.0
+            had_rise = False
+            if ls_visible and baseline_left_sh_y is not None:
+                rise = baseline_left_sh_y - float(lsy[i])
+                if rise > max_rise:
+                    max_rise = rise
+                had_rise = True
+            if rs_visible and baseline_right_sh_y is not None:
+                rise = baseline_right_sh_y - float(rsy[i])
+                if rise > max_rise:
+                    max_rise = rise
+                had_rise = True
+            if had_rise:
+                norm = max_rise / baseline_neck_h
+                if norm > hike_peak_norm:
+                    hike_peak_norm = norm
+                if norm > _NECK_COMP_SHOULDER_HIKE_THRESHOLD_FRAC:
+                    hike_flagged = True
+
+    return [
+        {
+            "type": "shoulder_hike",
+            "label": "Shoulder Hike",
+            "severity": "high",
+            "flagged": hike_flagged,
+            "details": (
+                f"Peak shoulder rise "
+                f"{hike_peak_norm * 100:.1f} % of neck-height "
+                f"(threshold {_NECK_COMP_SHOULDER_HIKE_THRESHOLD_FRAC * 100:.0f} %)"
+            ),
+        },
+        {
+            "type": "trunk_tilt",
+            "label": "Trunk Tilt",
+            "severity": "high",
+            "flagged": tilt_flagged,
+            "details": (
+                f"Peak shoulder-line tilt {tilt_peak_deg:.1f}° from baseline "
+                f"(threshold {_NECK_COMP_TRUNK_TILT_THRESHOLD_DEG:.0f}°)"
+            ),
+        },
+    ]
+
+
+def _track_neck_rotation_compensations(
+    lsx, lsy, lsv,
+    rsx, rsy, rsv,
+    lex, ley, lev,
+    rex, rey, rev,
+    n: int,
+    primary_peak_idx: int = -1,
+    secondary_peak_idx: int = -1,
+) -> list[dict]:
+    """Neck rotation (FRONTAL view). Two compensations:
+      • Trunk Rotation (HIGH) — shoulder pixel-width shrinks below
+        baseline (frontal view, so width is genuinely anatomical).
+        Body twist foreshortens the shoulder line in 2D.
+      • Shoulder Hike (MEDIUM) — most-elevated shoulder.y RISE above
+        first-10-frame baseline, normalised by baseline neck height.
+        Decoupled from head/ear motion."""
+    _ = (primary_peak_idx, secondary_peak_idx)
+
+    width_samples: list[float] = []
+    width_baseline: Optional[float] = None
+    rotation_peak_norm = 0.0
+    rotation_flagged = False
+
+    left_sh_y_samples: list[float] = []
+    right_sh_y_samples: list[float] = []
+    neck_h_samples: list[float] = []
+    baseline_left_sh_y: Optional[float] = None
+    baseline_right_sh_y: Optional[float] = None
+    baseline_neck_h: Optional[float] = None
+    hike_peak_norm = 0.0
+    hike_flagged = False
+
+    for i in range(n):
+        ls_visible = lsv[i] >= _NECK_VIS_THRESHOLD
+        rs_visible = rsv[i] >= _NECK_VIS_THRESHOLD
+        le_visible = lev[i] >= _NECK_VIS_THRESHOLD
+        re_visible = rev[i] >= _NECK_VIS_THRESHOLD
+        all_visible = ls_visible and rs_visible and le_visible and re_visible
+
+        width: Optional[float] = None
+        if ls_visible and rs_visible:
+            width = abs(float(rsx[i]) - float(lsx[i]))
+
+        # Per-frame neck height
+        neck_h = None
+        if all_visible:
+            ear_mid_y = (float(ley[i]) + float(rey[i])) / 2.0
+            sh_mid_y = (float(lsy[i]) + float(rsy[i])) / 2.0
+            neck_h_candidate = abs(ear_mid_y - sh_mid_y)
+            if neck_h_candidate > 1e-3:
+                neck_h = neck_h_candidate
+
+        # Width baseline (trunk-rotation signal)
+        if width is not None and width >= 1e-3 \
+                and len(width_samples) < _NECK_COMP_BASELINE_FRAME_COUNT:
+            width_samples.append(width)
+            if len(width_samples) == _NECK_COMP_BASELINE_FRAME_COUNT:
+                width_baseline = sum(width_samples) / _NECK_COMP_BASELINE_FRAME_COUNT
+
+        # Hike baseline (per-side shoulder.y + neck height)
+        if (
+            all_visible and neck_h is not None
+            and len(neck_h_samples) < _NECK_COMP_BASELINE_FRAME_COUNT
+        ):
+            left_sh_y_samples.append(float(lsy[i]))
+            right_sh_y_samples.append(float(rsy[i]))
+            neck_h_samples.append(neck_h)
+            if len(neck_h_samples) == _NECK_COMP_BASELINE_FRAME_COUNT:
+                baseline_left_sh_y = sum(left_sh_y_samples) / _NECK_COMP_BASELINE_FRAME_COUNT
+                baseline_right_sh_y = sum(right_sh_y_samples) / _NECK_COMP_BASELINE_FRAME_COUNT
+                baseline_neck_h = sum(neck_h_samples) / _NECK_COMP_BASELINE_FRAME_COUNT
+
+        # Trunk rotation — width shrinks
+        if (
+            width is not None
+            and width_baseline is not None
+            and width_baseline > 1e-3
+        ):
+            shrink = width_baseline - width
+            norm = shrink / width_baseline
+            if norm > rotation_peak_norm:
+                rotation_peak_norm = norm
+            if norm > _NECK_COMP_TRUNK_ROTATION_THRESHOLD_FRAC:
+                rotation_flagged = True
+
+        # Shoulder hike — per-side rise; take max
+        if baseline_neck_h is not None and baseline_neck_h > 1e-3:
+            max_rise = 0.0
+            had_rise = False
+            if ls_visible and baseline_left_sh_y is not None:
+                rise = baseline_left_sh_y - float(lsy[i])
+                if rise > max_rise:
+                    max_rise = rise
+                had_rise = True
+            if rs_visible and baseline_right_sh_y is not None:
+                rise = baseline_right_sh_y - float(rsy[i])
+                if rise > max_rise:
+                    max_rise = rise
+                had_rise = True
+            if had_rise:
+                norm = max_rise / baseline_neck_h
+                if norm > hike_peak_norm:
+                    hike_peak_norm = norm
+                if norm > _NECK_COMP_SHOULDER_HIKE_THRESHOLD_FRAC:
+                    hike_flagged = True
+
+    return [
+        {
+            "type": "trunk_rotation",
+            "label": "Trunk Rotation",
+            "severity": "high",
+            "flagged": rotation_flagged,
+            "details": (
+                f"Peak shoulder-width shrink "
+                f"{rotation_peak_norm * 100:.1f} % of baseline "
+                f"(threshold {_NECK_COMP_TRUNK_ROTATION_THRESHOLD_FRAC * 100:.0f} %)"
+            ),
+        },
+        {
+            "type": "shoulder_hike",
+            "label": "Shoulder Hike",
+            "severity": "medium",
+            "flagged": hike_flagged,
+            "details": (
+                f"Peak shoulder rise "
+                f"{hike_peak_norm * 100:.1f} % of neck-height "
+                f"(threshold {_NECK_COMP_SHOULDER_HIKE_THRESHOLD_FRAC * 100:.0f} %)"
+            ),
+        },
+    ]
+
+
 def _analyze_neck_lateral_flexion(
     video_path: str,
     pose_options,
@@ -792,6 +1231,16 @@ def _analyze_neck_lateral_flexion(
         if kf:
             key_frames.append(kf)
 
+    # Compensatory-movement detection. Reads only the 5 reliably-
+    # visible neck-test landmarks (no hip — unavailable seated).
+    compensations = _track_neck_lateral_flexion_compensations(
+        lsx, lsy, lsv, rsx, rsy, rsv,
+        lex, ley, lev, rex, rey, rev,
+        n,
+        primary_peak_idx=primary_peak_idx,
+        secondary_peak_idx=secondary_peak_idx,
+    )
+
     return {
         "body_part": "neck",
         "movement": "lateral_flexion",
@@ -816,6 +1265,7 @@ def _analyze_neck_lateral_flexion(
         "secondary_reference_range": [float(s_lo), float(s_hi)],
         "primary_label": "Right Lateral Flexion",
         "secondary_label": "Left Lateral Flexion",
+        "compensations": compensations,
     }
 
 
@@ -1063,6 +1513,23 @@ def _analyze_neck_rotation(
         if kf:
             key_frames.append(kf)
 
+    # Compensatory-movement detection. Reads only the 5 reliably-
+    # visible neck-test landmarks (no hip). Loads the shoulder/ear
+    # x+y arrays here since the rotation-angle math only needed
+    # x for nose/ears and vis for shoulders — the compensation
+    # tracker needs the full coordinates.
+    lsx_rot = ls_entry["x_px"]; lsy_rot = ls_entry["y_px"]
+    rsx_rot = rs_entry["x_px"]; rsy_rot = rs_entry["y_px"]
+    ley_rot = le_entry["y_px"]
+    rey_rot = re_entry["y_px"]
+    compensations = _track_neck_rotation_compensations(
+        lsx_rot, lsy_rot, lsv, rsx_rot, rsy_rot, rsv,
+        lex, ley_rot, lev, rex, rey_rot, rev,
+        n,
+        primary_peak_idx=primary_peak_idx,
+        secondary_peak_idx=secondary_peak_idx,
+    )
+
     return {
         "body_part": "neck",
         "movement": "rotation",
@@ -1087,6 +1554,7 @@ def _analyze_neck_rotation(
         "secondary_reference_range": [float(s_lo), float(s_hi)],
         "primary_label": "Left Rotation",
         "secondary_label": "Right Rotation",
+        "compensations": compensations,
     }
 
 
@@ -1281,6 +1749,20 @@ def analyze_neck(
         if kf:
             key_frames.append(kf)
 
+    # Compensatory-movement detection. The flex/ext branch loaded
+    # ear y/vis + shoulder vis above but not shoulder x/y. Load
+    # them here for the tracker only — existing angle math
+    # untouched.
+    lsx_fe = ls_entry["x_px"]; lsy_fe = ls_entry["y_px"]
+    rsx_fe = rs_entry["x_px"]; rsy_fe = rs_entry["y_px"]
+    compensations = _track_neck_flex_ext_compensations(
+        lsx_fe, lsy_fe, lsv, rsx_fe, rsy_fe, rsv,
+        lex, ley, lev, rex, rey, rev,
+        n,
+        primary_peak_idx=primary_peak_idx,
+        secondary_peak_idx=secondary_peak_idx,
+    )
+
     return {
         "body_part": "neck",
         "movement": "flexion_extension",
@@ -1308,6 +1790,7 @@ def analyze_neck(
         "secondary_reference_range": [float(s_lo), float(s_hi)],
         "primary_label": "Flexion",
         "secondary_label": "Extension",
+        "compensations": compensations,
     }
 
 

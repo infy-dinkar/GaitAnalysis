@@ -313,6 +313,42 @@ export function ApiUploadAssessment({
             </ul>
           </div>
         )}
+        {/* Compensation warning — neck flex/ext (seated, lateral view). */}
+        {bodyPart === "neck" && movementId === "flexion_extension" && (
+          <div className="mt-4 max-w-xl rounded-md border border-warning/40 bg-warning/5 px-4 py-3">
+            <p className="text-xs font-semibold text-warning">
+              ⚠️ Avoid these common compensations:
+            </p>
+            <ul className="mt-2 space-y-1 text-xs text-foreground">
+              <li>• Keep your trunk still — only the head should move (don&apos;t lean forward or backward to cheat the range)</li>
+              <li>• Do not shrug your shoulders up toward your ears</li>
+            </ul>
+          </div>
+        )}
+        {/* Compensation warning — neck lateral_flexion (seated, frontal). */}
+        {bodyPart === "neck" && movementId === "lateral_flexion" && (
+          <div className="mt-4 max-w-xl rounded-md border border-warning/40 bg-warning/5 px-4 py-3">
+            <p className="text-xs font-semibold text-warning">
+              ⚠️ Avoid these common compensations:
+            </p>
+            <ul className="mt-2 space-y-1 text-xs text-foreground">
+              <li>• Do NOT lift your shoulder up toward your ear — the ear comes to the shoulder, not the other way around</li>
+              <li>• Keep your shoulders level — do not tilt your whole trunk to one side</li>
+            </ul>
+          </div>
+        )}
+        {/* Compensation warning — neck rotation (seated, frontal). */}
+        {bodyPart === "neck" && movementId === "rotation" && (
+          <div className="mt-4 max-w-xl rounded-md border border-warning/40 bg-warning/5 px-4 py-3">
+            <p className="text-xs font-semibold text-warning">
+              ⚠️ Avoid these common compensations:
+            </p>
+            <ul className="mt-2 space-y-1 text-xs text-foreground">
+              <li>• Keep your shoulders facing forward — do not twist the trunk to help the head turn</li>
+              <li>• Keep your shoulders level and relaxed — don&apos;t shrug</li>
+            </ul>
+          </div>
+        )}
       </div>
 
       {movementImageUrl && (
