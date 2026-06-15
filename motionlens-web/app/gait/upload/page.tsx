@@ -2,13 +2,14 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
-import { Play, RotateCcw, AlertCircle } from "lucide-react";
+import { Play, RotateCcw, AlertCircle, Upload, Video } from "lucide-react";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
 import { Section } from "@/components/ui/Section";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { VideoUpload } from "@/components/analysis/VideoUpload";
+import { GaitRecordCapture } from "@/components/gait/GaitRecordCapture";
 import { analyzeGait } from "@/lib/api";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
 import { usePatientContext } from "@/hooks/usePatientContext";
@@ -17,6 +18,7 @@ const STORAGE_KEY = "motionlens.gait_api_result";
 const HEIGHT_KEY = "motionlens.height_cm";
 
 type Phase = "idle" | "uploading" | "analysing" | "error";
+type Mode = "upload" | "record";
 
 export default function GaitUploadPage() {
   const router = useRouter();
@@ -24,6 +26,12 @@ export default function GaitUploadPage() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  // Mode toggle — "upload" keeps the existing file-picker flow exactly
+  // as before; "record" reveals the in-browser camera + recorder and
+  // auto-uploads the recorded blob through the same analyzeGait
+  // pipeline. Defaults to "upload" so existing users land on the
+  // unchanged flow.
+  const [mode, setMode] = useState<Mode>("upload");
 
   const { isDoctorFlow, patientId, patient } = usePatientContext();
 
@@ -91,6 +99,71 @@ export default function GaitUploadPage() {
     }
   }
 
+  // Record-mode handler. Called by <GaitRecordCapture> when the
+  // operator stops the recording. Mirrors the upload-mode `run()`
+  // flow but with the recorded File + the wall-clock duration so the
+  // backend can repair a MediaRecorder WebM with broken duration
+  // header before its FPS gate runs. We don't go through `run()` here
+  // because that would require waiting for setFile() to commit before
+  // reading state — passing the File explicitly is simpler and keeps
+  // `run()` untouched.
+  async function handleRecorded(recordedFile: File, recDurationMs: number) {
+    setFile(recordedFile);
+    setError(null);
+    setProgress(0);
+    setPhase("uploading");
+
+    const heightStr = sessionStorage.getItem(HEIGHT_KEY);
+    const heightCm = heightStr ? parseFloat(heightStr) : (patient?.height_cm ?? 170);
+    const patientName = patient?.name?.trim() || null;
+
+    try {
+      const res = await analyzeGait(
+        {
+          video: recordedFile,
+          heightCm,
+          patientName,
+          recordingDurationMs: recDurationMs,
+        },
+        (loaded, total) => {
+          setProgress(total > 0 ? loaded / total : 0);
+          if (loaded >= total) setPhase("analysing");
+        },
+      );
+
+      if (!res.success || !res.data) {
+        setPhase("error");
+        setError(res.error || "Analysis failed");
+        return;
+      }
+
+      sessionStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          ...res.data,
+          patient_info: {
+            ...res.data.patient_info,
+            name: patientName,
+          },
+          _video_filename: recordedFile.name,
+          _video_size_bytes: recordedFile.size,
+        }),
+      );
+
+      const url = isDoctorFlow
+        ? `/gait/results?patientId=${patientId}`
+        : "/gait/results";
+      router.push(url);
+    } catch (e) {
+      setPhase("error");
+      setError(
+        e instanceof Error
+          ? `${e.message}. Please try again or contact support.`
+          : "Network error",
+      );
+    }
+  }
+
   function reset() {
     setFile(null);
     setError(null);
@@ -122,9 +195,48 @@ export default function GaitUploadPage() {
           <div className="mt-10 space-y-8">
             {isDoctorFlow && <SaveStatusBanner patient={patient} saveStatus={null} />}
 
-            <VideoUpload onSelect={onSelect} />
+            {/* Mode toggle — Upload (existing flow) vs Record (new in-
+                browser camera + recorder). The progress + error UI
+                further down is shared, so only the input mechanism
+                differs between the two modes. */}
+            <div className="inline-flex rounded-card border border-border bg-surface p-1">
+              <button
+                type="button"
+                onClick={() => setMode("upload")}
+                disabled={phase === "uploading" || phase === "analysing"}
+                className={`inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition ${
+                  mode === "upload"
+                    ? "bg-accent text-white shadow-sm"
+                    : "text-muted hover:text-foreground"
+                }`}
+              >
+                <Upload className="h-4 w-4" />
+                Upload video
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode("record")}
+                disabled={phase === "uploading" || phase === "analysing"}
+                className={`inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition ${
+                  mode === "record"
+                    ? "bg-accent text-white shadow-sm"
+                    : "text-muted hover:text-foreground"
+                }`}
+              >
+                <Video className="h-4 w-4" />
+                Record live
+              </button>
+            </div>
 
-            {file && phase === "idle" && (
+            {mode === "upload" && <VideoUpload onSelect={onSelect} />}
+            {mode === "record" && (
+              <GaitRecordCapture
+                onRecorded={handleRecorded}
+                disabled={phase === "uploading" || phase === "analysing"}
+              />
+            )}
+
+            {mode === "upload" && file && phase === "idle" && (
               <Button onClick={run}>
                 <Play className="h-4 w-4" />
                 Analyse on server

@@ -293,13 +293,27 @@ async function postMultipart<T>(
 
 // ─── public api ─────────────────────────────────────────────────────
 export async function analyzeGait(
-  args: { video: File; heightCm: number; patientName?: string | null },
+  args: {
+    video: File;
+    heightCm: number;
+    patientName?: string | null;
+    /** When set, signals to the backend that this upload came from
+     *  the in-browser record-then-upload flow. Wall-clock duration in
+     *  ms between MediaRecorder.start() and stop(). Lets the backend
+     *  repair MediaRecorder WebMs that ship with broken duration
+     *  headers before its FPS/duration gates run. Normal file uploads
+     *  omit this field; the backend then skips the repair (no-op). */
+    recordingDurationMs?: number | null;
+  },
   onProgress?: (uploaded: number, total: number) => void,
 ) {
   const fd = new FormData();
   fd.append("video", args.video);
   fd.append("height_cm", String(args.heightCm));
   if (args.patientName) fd.append("patient_name", args.patientName);
+  if (args.recordingDurationMs && args.recordingDurationMs > 0) {
+    fd.append("recording_duration_ms", String(args.recordingDurationMs));
+  }
   return postMultipart<GaitDataDTO>("/api/analyze-gait", fd, onProgress);
 }
 
