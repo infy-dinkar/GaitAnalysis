@@ -456,9 +456,25 @@ async def analyze_gait(
     video: UploadFile = File(...),
     height_cm: float = Form(170.0),
     patient_name: Optional[str] = Form(None),
+    recording_duration_ms: Optional[int] = Form(None),
 ) -> GaitResponse:
-    """Run the full gait pipeline on an uploaded clip."""
+    """Run the full gait pipeline on an uploaded clip.
+
+    `recording_duration_ms` is supplied by the in-browser "record then
+    upload" path on the frontend — wall-clock duration between
+    MediaRecorder.start() and stop(). MediaRecorder-produced WebMs
+    often ship with broken / missing duration metadata, which makes
+    cv2's CAP_PROP_FPS probe return 0 (or a bogus low frame count)
+    and would falsely reject otherwise-valid live recordings at the
+    FPS gate. When set we re-mux the file with a clean header via
+    tug_engine._ensure_decodable_video BEFORE the gates run. Normal
+    file uploads pass recording_duration_ms=None and the helper is
+    a safe no-op (returns the original path unchanged).
+    """
+    from engines.orthopedic.tug_engine import _ensure_decodable_video
+
     tmp_path: str | None = None
+    fixed_path_cleanup: str | None = None
     try:
         contents = await video.read()
         if not contents:
@@ -478,14 +494,23 @@ async def analyze_gait(
 
         tmp_path = save_uploaded_video(contents, video.filename or "video.mp4")
         log.info(
-            "gait: file=%s size=%.2f MB height=%scm",
-            video.filename, size_mb, height_cm,
+            "gait: file=%s size=%.2f MB height=%scm recording_ms=%s",
+            video.filename, size_mb, height_cm, recording_duration_ms,
+        )
+
+        # ── 1.5) Repair MediaRecorder WebMs with broken duration
+        # headers BEFORE the cv2 FPS probe — otherwise the probe
+        # returns 0 and we'd reject otherwise-valid live recordings.
+        # For normal uploads (recording_duration_ms=None) this is a
+        # no-op and returns (tmp_path, None).
+        processed_path, fixed_path_cleanup = _ensure_decodable_video(
+            tmp_path, recording_duration_ms,
         )
 
         # ── 2) FPS + DURATION GATE — peek at the container before the
         # full pose-extraction pass. A bad clip should fail in <100 ms,
         # not after 30 sec of MediaPipe work.
-        probe = cv2.VideoCapture(tmp_path)
+        probe = cv2.VideoCapture(processed_path)
         try:
             probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
             probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
@@ -553,7 +578,7 @@ async def analyze_gait(
 
         # ── 3) Validation passed — run the full pipeline ─────────────
         pose_options = _build_gait_pose_options()
-        raw, fps, total_frames = extract_poses(tmp_path, pose_options)
+        raw, fps, total_frames = extract_poses(processed_path, pose_options)
         ts = build_time_series(raw)
         features = compute_all_features(
             ts, fps, total_frames, user_height_cm=float(height_cm),
@@ -585,6 +610,10 @@ async def analyze_gait(
         return GaitResponse(success=False, data=None, error=f"Analysis failed: {e}")
     finally:
         cleanup_temp_file(tmp_path)
+        # _ensure_decodable_video returns a second path only when it
+        # actually wrote a repaired file — clean that up too.
+        if fixed_path_cleanup and fixed_path_cleanup != tmp_path:
+            cleanup_temp_file(fixed_path_cleanup)
 
 
 # ══════════════════════════════════════════════════════════════════════
