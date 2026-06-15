@@ -230,7 +230,10 @@ export interface BiomechCompensationDTO {
     | "shoulder_elevation"
     | "elbow_bend"
     | "elbow_drop"
-    | "elbow_drift_from_side";
+    | "elbow_drift_from_side"
+    | "shoulder_hike"
+    | "trunk_tilt"
+    | "trunk_rotation";
   label: string;
   severity: "high" | "medium" | "low";
   flagged: boolean;

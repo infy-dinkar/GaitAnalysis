@@ -37,6 +37,12 @@ import {
   type Compensation,
   type ShoulderRotationCalibration,
 } from "@/lib/biomech/shoulder-live";
+import {
+  NeckFlexExtCompensationTracker,
+  NeckLateralFlexionCompensationTracker,
+  NeckRotationCompensationTracker,
+} from "@/lib/biomech/neck-live";
+import type { BiomechCompensationDTO } from "@/lib/api";
 import { detectHipRotationDirection } from "@/lib/biomech/hip-live";
 import type { LiveKeypoint as Keypoint } from "@/hooks/usePoseDetectionLive";
 import type { LiveBiomechFrameDataDTO } from "@/lib/api";
@@ -328,10 +334,13 @@ export function LiveAssessment({
     // merged mode). null = inside the deadband / undetermined.
     currentDirection: null as "primary" | "secondary" | null,
     // Compensations currently active on the latest frame. Populated
-    // only for shoulder flexion+extension; empty for everything else.
-    // Read by the live banner; the final-report compensations come
-    // from compTrackerRef.current?.finish() at report-render time.
-    currentCompensations: [] as Compensation[],
+    // by whichever per-test tracker is active (shoulder flex+ext,
+    // ab+ad, rotation; neck flex+ext, lateral_flexion, rotation —
+    // any movement that runs a tracker). Read by the live banner.
+    // Typed as the widest cross-joint DTO so both shoulder's
+    // narrower Compensation interface and neck's narrower one are
+    // assignment-compatible here.
+    currentCompensations: [] as BiomechCompensationDTO[],
   });
 
   // Compensatory-movement tracker — scoped to shoulder flexion+
@@ -345,6 +354,11 @@ export function LiveAssessment({
   // null for a given trial because only one merged movement is active.
   const compAbAdTrackerRef = useRef<ShoulderAbAdCompensationTracker | null>(null);
   const compRotationTrackerRef = useRef<ShoulderRotationCompensationTracker | null>(null);
+  // Neck compensation trackers — one per merged neck test. Same
+  // lazy-init pattern; only one is ever populated per trial.
+  const compNeckFlexExtTrackerRef = useRef<NeckFlexExtCompensationTracker | null>(null);
+  const compNeckLateralTrackerRef = useRef<NeckLateralFlexionCompensationTracker | null>(null);
+  const compNeckRotationTrackerRef = useRef<NeckRotationCompensationTracker | null>(null);
 
   // Annotated-frame screenshots for the report. Captured on the
   // composite canvas exposed by LiveBiomechCamera (via
@@ -528,10 +542,25 @@ export function LiveAssessment({
         const fe = detectNeckFlexExtDirection(kpsForDir);
         if (fe === "flexion") dir = "primary";
         else if (fe === "extension") dir = "secondary";
+        // Neck flex/ext compensation tracker — lazy-init mirroring
+        // the shoulder pattern. Feeds independently of the direction
+        // state machine. Constructor takes no side (neck tests are
+        // symmetric — both ears + both shoulders used).
+        if (!compNeckFlexExtTrackerRef.current) {
+          compNeckFlexExtTrackerRef.current = new NeckFlexExtCompensationTracker();
+        }
+        compNeckFlexExtTrackerRef.current.feed(kpsForDir);
+        s.currentCompensations = compNeckFlexExtTrackerRef.current.currentFlags();
       } else if (isMergedNeckLateral) {
         const lat = detectNeckLateralDirection(kpsForDir);
         if (lat === "right") dir = "primary";
         else if (lat === "left") dir = "secondary";
+        // Neck lateral_flexion compensation tracker.
+        if (!compNeckLateralTrackerRef.current) {
+          compNeckLateralTrackerRef.current = new NeckLateralFlexionCompensationTracker();
+        }
+        compNeckLateralTrackerRef.current.feed(kpsForDir);
+        s.currentCompensations = compNeckLateralTrackerRef.current.currentFlags();
       } else if (isMergedHipRotation) {
         // hip-live.ts: primaryLabel="Internal Rotation",
         // secondaryLabel="External Rotation". Match that order here so
@@ -557,6 +586,26 @@ export function LiveAssessment({
       }
     } else {
       s.currentDirection = null;
+    }
+
+    // Neck rotation compensation tracker — runs OUTSIDE the merged-
+    // direction routing block above because neck rotation uses the
+    // calibrated-rotation path (its own angle math doesn't fit the
+    // direction-routing paradigm). The tracker only needs per-frame
+    // landmarks. Feeds on every valid frame regardless of the
+    // calibration phase so baseline = first 10 valid frames during
+    // the neutral hold + subsequent frames flagged against it.
+    if (isNeckRotation) {
+      const kpsForNR: Keypoint[] = data.landmarks.map((l) => ({
+        x: l.x,
+        y: l.y,
+        score: l.visibility,
+      }));
+      if (!compNeckRotationTrackerRef.current) {
+        compNeckRotationTrackerRef.current = new NeckRotationCompensationTracker();
+      }
+      compNeckRotationTrackerRef.current.feed(kpsForNR);
+      s.currentCompensations = compNeckRotationTrackerRef.current.currentFlags();
     }
 
     s.validFrames += 1;
@@ -741,6 +790,8 @@ export function LiveAssessment({
         if (isMergedShoulderFlexExt) compTrackerRef.current?.markPrimaryPeak();
         else if (isMergedShoulderAbAd) compAbAdTrackerRef.current?.markPrimaryPeak();
         else if (isMergedShoulderRotation) compRotationTrackerRef.current?.markPrimaryPeak();
+        else if (isMergedNeckFE) compNeckFlexExtTrackerRef.current?.markPrimaryPeak();
+        else if (isMergedNeckLateral) compNeckLateralTrackerRef.current?.markPrimaryPeak();
       }
       s.peakCandidateSigned = candSigned;
       s.peakCandidateHeld = candHeld;
@@ -752,6 +803,8 @@ export function LiveAssessment({
         if (isMergedShoulderFlexExt) compTrackerRef.current?.markSecondaryPeak();
         else if (isMergedShoulderAbAd) compAbAdTrackerRef.current?.markSecondaryPeak();
         else if (isMergedShoulderRotation) compRotationTrackerRef.current?.markSecondaryPeak();
+        else if (isMergedNeckFE) compNeckFlexExtTrackerRef.current?.markSecondaryPeak();
+        else if (isMergedNeckLateral) compNeckLateralTrackerRef.current?.markSecondaryPeak();
       }
       s.peakCandidateSignedB = candSigned;
       s.peakCandidateHeldB = candHeld;
@@ -1109,13 +1162,18 @@ export function LiveAssessment({
             )}
           </div>
 
-          {/* Real-time compensation warning banner. Renders for any of
-              the three merged shoulder tests (flex+ext, ab/ad,
-              rotation) when at least one compensation is active on
-              the latest frame. Disappears as soon as the patient
-              corrects form. */}
-          {(isMergedShoulderFlexExt || isMergedShoulderAbAd || isMergedShoulderRotation)
-            && stateRef.current.currentCompensations.length > 0 && (
+          {/* Real-time compensation warning banner. Renders for any
+              merged shoulder OR merged neck test when at least one
+              compensation is active on the latest frame. Disappears
+              as soon as the patient corrects form. */}
+          {(
+            isMergedShoulderFlexExt ||
+            isMergedShoulderAbAd ||
+            isMergedShoulderRotation ||
+            isMergedNeckFE ||
+            isMergedNeckLateral ||
+            isNeckRotation
+          ) && stateRef.current.currentCompensations.length > 0 && (
             <div className="mt-4 rounded-md border border-warning/40 bg-warning/5 px-3 py-2">
               <p className="text-[10px] uppercase tracking-[0.12em] text-warning">
                 Compensation detected
@@ -1335,11 +1393,13 @@ export function LiveAssessment({
           }
           secondaryTarget={isMergedMovement ? secondaryTarget : undefined}
           /* Final compensations summary — resolve from whichever
-             tracker matches the active merged shoulder movement.
-             Only one of the three trackers ever runs per trial, so
-             at most one finish() result is non-undefined. Every
-             other (bodyPart, movement) pair leaves all three null
-             and the report's section stays hidden. */
+             tracker matches the active merged movement (shoulder
+             flex+ext / ab+ad / rotation, or neck flex+ext /
+             lateral_flexion / rotation). Only one tracker is ever
+             populated per trial, so at most one finish() result is
+             non-undefined. Every other (bodyPart, movement) pair
+             leaves all trackers null and the report's section stays
+             hidden. */
           compensations={
             isMergedShoulderFlexExt
               ? compTrackerRef.current?.finish()
@@ -1347,7 +1407,13 @@ export function LiveAssessment({
                 ? compAbAdTrackerRef.current?.finish()
                 : isMergedShoulderRotation
                   ? compRotationTrackerRef.current?.finish()
-                  : undefined
+                  : isMergedNeckFE
+                    ? compNeckFlexExtTrackerRef.current?.finish()
+                    : isMergedNeckLateral
+                      ? compNeckLateralTrackerRef.current?.finish()
+                      : isNeckRotation
+                        ? compNeckRotationTrackerRef.current?.finish()
+                        : undefined
           }
         />
 
@@ -1389,9 +1455,9 @@ export function LiveAssessment({
               key_frames: liveKeyFrames,
               // Persist compensatory-movement findings from whichever
               // tracker ran during the trial. Only one is non-null
-              // per recording (only one merged shoulder movement
-              // active at a time), so the resolution chain mirrors
-              // the AssessmentReport prop above.
+              // per recording (only one merged movement active at a
+              // time across shoulder + neck). Resolution chain
+              // mirrors the AssessmentReport prop above.
               ...(() => {
                 const c = isMergedShoulderFlexExt
                   ? compTrackerRef.current?.finish()
@@ -1399,7 +1465,13 @@ export function LiveAssessment({
                     ? compAbAdTrackerRef.current?.finish()
                     : isMergedShoulderRotation
                       ? compRotationTrackerRef.current?.finish()
-                      : null;
+                      : isMergedNeckFE
+                        ? compNeckFlexExtTrackerRef.current?.finish()
+                        : isMergedNeckLateral
+                          ? compNeckLateralTrackerRef.current?.finish()
+                          : isNeckRotation
+                            ? compNeckRotationTrackerRef.current?.finish()
+                            : null;
                 return c && c.length > 0 ? { compensations: c } : {};
               })(),
             },

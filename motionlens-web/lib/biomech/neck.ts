@@ -372,3 +372,589 @@ export function computeNeckRotationFromBaseline(
 
   return sign * magnitudeDeg;
 }
+
+// ─── Compensatory movement detection (Neck) ─────────────────────
+//
+// Seated half-body framing means HIPS ARE NOT VISIBLE. All neck
+// compensation math operates on the same 5 landmarks the existing
+// neck angle calculation uses: NOSE, LEFT_EAR, RIGHT_EAR,
+// LEFT_SHOULDER, RIGHT_SHOULDER. Existing math is untouched.
+//
+// Scale-normalization: pixel distances are divided by the baseline
+// shoulder pixel-width so the same threshold works regardless of
+// patient distance from camera / zoom level.
+
+export type CompensationSeverity = "high" | "medium" | "low";
+
+export interface Compensation {
+  type:
+    | "trunk_lean"
+    | "shoulder_hike"
+    | "trunk_tilt"
+    | "trunk_rotation";
+  label: string;
+  severity: CompensationSeverity;
+  flagged: boolean;
+  details?: string;
+}
+
+/** Flag when |shoulder_mid_x − baseline_mid_x| / baseline_neck_height
+ *  exceeds this fraction. Normalised by NECK HEIGHT (ear-mid to
+ *  shoulder-mid vertical distance) rather than shoulder width
+ *  because the neck flex/ext test is filmed in LATERAL profile —
+ *  shoulder pixel-width collapses there as both shoulders project
+ *  to near-identical image x, blowing up any shoulder-width-
+ *  normalised ratio. Neck height is stable in both lateral and
+ *  frontal views. 0.20 ≈ a noticeable upper-torso shift seated. */
+const NECK_TRUNK_LEAN_THRESHOLD_FRAC = 0.20;
+/** Flag when the most-elevated shoulder has risen above its first-
+ *  10-frames baseline by more than this fraction of baseline neck
+ *  height. Signal is shoulder.y DECREASE (image y grows downward;
+ *  shoulder moving up = y shrinking) — explicitly decoupled from
+ *  any head/ear motion so it doesn't false-fire when the patient
+ *  brings the ear down toward the shoulder as part of the test
+ *  motion itself (which the previous ear↔shoulder gap signal
+ *  conflated with a genuine shoulder hike). */
+const NECK_SHOULDER_HIKE_THRESHOLD_FRAC = 0.15;
+/** Flag when shoulder line tilts more than this many degrees from
+ *  the first-10-frames baseline. Patient leaning the whole torso to
+ *  one side instead of tilting only the head produces this. */
+const NECK_TRUNK_TILT_THRESHOLD_DEG = 8;
+/** Flag when (baseline_shoulder_width − current_shoulder_width) /
+ *  baseline_shoulder_width > 0.15. Torso rotation foreshortens the
+ *  shoulder line in 2D projection. */
+const NECK_TRUNK_ROTATION_THRESHOLD_FRAC = 0.15;
+/** First N valid frames used to build the per-signal baselines. */
+const NECK_COMPENSATION_BASELINE_FRAME_COUNT = 10;
+
+/** Image-space x of the midpoint between the two shoulders. Null
+ *  when either shoulder fails the visibility gate. */
+export function computeShoulderMidpointX(
+  keypoints: Keypoint[],
+): number | null {
+  const lSh = keypoints[LM.LEFT_SHOULDER];
+  const rSh = keypoints[LM.RIGHT_SHOULDER];
+  if (!lSh || !rSh) return null;
+  if ((lSh.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rSh.score ?? 0) < VIS_THRESHOLD) return null;
+  return (lSh.x + rSh.x) / 2;
+}
+
+/** Image-space pixel width between the two shoulders. Used as the
+ *  scale normaliser for the displacement-based neck compensations
+ *  and as the signal itself for the rotation test (foreshortening). */
+export function computeShoulderWidth(
+  keypoints: Keypoint[],
+): number | null {
+  const lSh = keypoints[LM.LEFT_SHOULDER];
+  const rSh = keypoints[LM.RIGHT_SHOULDER];
+  if (!lSh || !rSh) return null;
+  if ((lSh.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rSh.score ?? 0) < VIS_THRESHOLD) return null;
+  return Math.abs(rSh.x - lSh.x);
+}
+
+/** Vertical (image-y) distance between the same-side ear and
+ *  shoulder. Shrinks when the patient hikes that shoulder upward
+ *  toward the ear. Returns null when either landmark fails
+ *  visibility — the tracker silently skips that side for that frame. */
+export function computeEarShoulderVerticalDistance(
+  keypoints: Keypoint[],
+  side: "left" | "right",
+): number | null {
+  const earIdx = side === "left" ? LM.LEFT_EAR : LM.RIGHT_EAR;
+  const shIdx = side === "left" ? LM.LEFT_SHOULDER : LM.RIGHT_SHOULDER;
+  const ear = keypoints[earIdx];
+  const sh = keypoints[shIdx];
+  if (!ear || !sh) return null;
+  if ((ear.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((sh.score ?? 0) < VIS_THRESHOLD) return null;
+  return Math.abs(sh.y - ear.y);
+}
+
+/** Absolute angle (degrees) of the line left_shoulder→right_shoulder
+ *  from image horizontal. Level shoulders read ≈ 0°; whole-torso
+ *  side-tilt makes it grow. Range [0, 90]. */
+export function computeShoulderLineAngleFromHorizontal(
+  keypoints: Keypoint[],
+): number | null {
+  const lSh = keypoints[LM.LEFT_SHOULDER];
+  const rSh = keypoints[LM.RIGHT_SHOULDER];
+  if (!lSh || !rSh) return null;
+  if ((lSh.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rSh.score ?? 0) < VIS_THRESHOLD) return null;
+  const dx = rSh.x - lSh.x;
+  const dy = rSh.y - lSh.y;
+  if (Math.hypot(dx, dy) < 1e-4) return null;
+  // atan2(dy, dx) returns the signed angle of (dx, dy) from the
+  // +x axis. abs() folds left-tilt and right-tilt onto the same
+  // magnitude axis — direction doesn't matter for the "shoulders
+  // are not level" compensation, only the deviation magnitude.
+  return Math.abs((Math.atan2(dy, dx) * 180) / Math.PI);
+}
+
+/** Vertical pixel distance from the ear midpoint to the shoulder
+ *  midpoint — a stable anatomical scale that works in BOTH lateral
+ *  and frontal views (unlike shoulder-width which collapses in
+ *  lateral profile). Used as the denominator for trunk-lean and
+ *  shoulder-hike normalisation across all 3 neck trackers. Null
+ *  when any of L/R ear or L/R shoulder fails visibility. */
+export function computeNeckHeight(keypoints: Keypoint[]): number | null {
+  const lSh = keypoints[LM.LEFT_SHOULDER];
+  const rSh = keypoints[LM.RIGHT_SHOULDER];
+  const lEar = keypoints[LM.LEFT_EAR];
+  const rEar = keypoints[LM.RIGHT_EAR];
+  if (!lSh || !rSh || !lEar || !rEar) return null;
+  if ((lSh.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rSh.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((lEar.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rEar.score ?? 0) < VIS_THRESHOLD) return null;
+  const earMidY = (lEar.y + rEar.y) / 2;
+  const shMidY = (lSh.y + rSh.y) / 2;
+  return Math.abs(earMidY - shMidY);
+}
+
+function neckCompMean(arr: number[]): number {
+  if (arr.length === 0) return 0;
+  let s = 0;
+  for (const v of arr) s += v;
+  return s / arr.length;
+}
+
+// ─── flexion_extension tracker ─────────────────────────────────
+//
+// Patient is in LATERAL profile. Two compensations:
+//
+//   1. Trunk Lean (HIGH) — shoulder midpoint x-displacement from
+//      baseline normalised by baseline shoulder width. The user
+//      audit confirmed hip is not available seated; shoulder
+//      midpoint substitutes as the upper-torso reference.
+//
+//   2. Shoulder Hike (MEDIUM) — ear↔shoulder vertical distance
+//      shrinks on either side, normalised by baseline shoulder
+//      width.
+
+export class NeckFlexExtCompensationTracker {
+  // Baseline samples (locked once first BASELINE_FRAME_COUNT valid
+  // frames collected). Trunk-lean signal = shoulder midpoint x
+  // displacement; shoulder-hike signal = SHOULDER.Y RISE above
+  // baseline (decoupled from ear motion so the test's natural
+  // chin-down doesn't false-fire). Both normalised by NECK HEIGHT
+  // (stable across views, unlike shoulder-width in lateral profile).
+  private smXSamples: number[] = [];
+  private leftShYSamples: number[] = [];
+  private rightShYSamples: number[] = [];
+  private neckHeightSamples: number[] = [];
+  private baselineSmX: number | null = null;
+  private baselineLeftShY: number | null = null;
+  private baselineRightShY: number | null = null;
+  private baselineNeckHeight: number | null = null;
+  // Peak measurements (normalised by baseline neck height)
+  private trunkLeanPeakNormalized = 0;
+  private hikePeakNormalized = 0;
+  private trunkFlagged = false;
+  private hikeFlagged = false;
+  private currentTrunkActive = false;
+  private currentHikeActive = false;
+  // Peak markers (parity with shoulder trackers; not used in finish
+  // because all neck compensations are baseline-relative, not peak-
+  // windowed)
+  private frameCounter = 0;
+  private primaryPeakFrame: number | null = null;
+  private secondaryPeakFrame: number | null = null;
+
+  feed(keypoints: Keypoint[]): void {
+    this.currentTrunkActive = false;
+    this.currentHikeActive = false;
+
+    const smX = computeShoulderMidpointX(keypoints);
+    const neckH = computeNeckHeight(keypoints);
+    const lSh = keypoints[LM.LEFT_SHOULDER];
+    const rSh = keypoints[LM.RIGHT_SHOULDER];
+    const leftShY = lSh && (lSh.score ?? 0) >= VIS_THRESHOLD ? lSh.y : null;
+    const rightShY = rSh && (rSh.score ?? 0) >= VIS_THRESHOLD ? rSh.y : null;
+
+    // Baseline accumulation — need all four signals visible together
+    // to keep the samples in temporal lock-step.
+    if (smX !== null && neckH !== null && leftShY !== null && rightShY !== null
+        && this.smXSamples.length < NECK_COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.smXSamples.push(smX);
+      this.leftShYSamples.push(leftShY);
+      this.rightShYSamples.push(rightShY);
+      this.neckHeightSamples.push(neckH);
+      if (this.smXSamples.length === NECK_COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.baselineSmX = neckCompMean(this.smXSamples);
+        this.baselineLeftShY = neckCompMean(this.leftShYSamples);
+        this.baselineRightShY = neckCompMean(this.rightShYSamples);
+        this.baselineNeckHeight = neckCompMean(this.neckHeightSamples);
+      }
+    }
+
+    // Threshold checks gated on baseline lock
+    if (this.baselineNeckHeight !== null && this.baselineNeckHeight > 1e-3) {
+      // Trunk lean — shoulder midpoint x displacement, normalised
+      // by neck height
+      if (smX !== null && this.baselineSmX !== null) {
+        const deviation = Math.abs(smX - this.baselineSmX);
+        const norm = deviation / this.baselineNeckHeight;
+        if (norm > this.trunkLeanPeakNormalized) this.trunkLeanPeakNormalized = norm;
+        if (norm > NECK_TRUNK_LEAN_THRESHOLD_FRAC) {
+          this.trunkFlagged = true;
+          this.currentTrunkActive = true;
+        }
+      }
+      // Shoulder hike — per side shoulder.y rise above baseline.
+      // max() over the two sides catches asymmetric hikes.
+      let maxRise = 0;
+      let hadValidRise = false;
+      if (leftShY !== null && this.baselineLeftShY !== null) {
+        const rise = this.baselineLeftShY - leftShY;
+        if (rise > maxRise) maxRise = rise;
+        hadValidRise = true;
+      }
+      if (rightShY !== null && this.baselineRightShY !== null) {
+        const rise = this.baselineRightShY - rightShY;
+        if (rise > maxRise) maxRise = rise;
+        hadValidRise = true;
+      }
+      if (hadValidRise) {
+        const norm = maxRise / this.baselineNeckHeight;
+        if (norm > this.hikePeakNormalized) this.hikePeakNormalized = norm;
+        if (norm > NECK_SHOULDER_HIKE_THRESHOLD_FRAC) {
+          this.hikeFlagged = true;
+          this.currentHikeActive = true;
+        }
+      }
+    }
+
+    this.frameCounter += 1;
+  }
+
+  markPrimaryPeak(): void {
+    this.primaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+
+  markSecondaryPeak(): void {
+    this.secondaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+
+  currentFlags(): Compensation[] {
+    const out: Compensation[] = [];
+    if (this.currentTrunkActive) {
+      out.push({ type: "trunk_lean", label: "Trunk Lean", severity: "high", flagged: true });
+    }
+    if (this.currentHikeActive) {
+      out.push({ type: "shoulder_hike", label: "Shoulder Hike", severity: "medium", flagged: true });
+    }
+    return out;
+  }
+
+  finish(): Compensation[] {
+    return [
+      {
+        type: "trunk_lean",
+        label: "Trunk Lean",
+        severity: "high",
+        flagged: this.trunkFlagged,
+        details: `Peak shoulder-midpoint displacement ${(this.trunkLeanPeakNormalized * 100).toFixed(1)} % of neck-height (threshold ${(NECK_TRUNK_LEAN_THRESHOLD_FRAC * 100).toFixed(0)} %)`,
+      },
+      {
+        type: "shoulder_hike",
+        label: "Shoulder Hike",
+        severity: "medium",
+        flagged: this.hikeFlagged,
+        details: `Peak shoulder rise ${(this.hikePeakNormalized * 100).toFixed(1)} % of neck-height (threshold ${(NECK_SHOULDER_HIKE_THRESHOLD_FRAC * 100).toFixed(0)} %)`,
+      },
+    ];
+  }
+}
+
+// ─── lateral_flexion tracker ────────────────────────────────────
+//
+// Patient FRONTAL to camera. Two compensations, both HIGH because
+// they each defeat the test's clinical meaning:
+//
+//   1. Shoulder Hike (HIGH) — the exact compensation the test
+//      instructions warn against ("do NOT lift your shoulder up
+//      toward your ear"). Same math as flex/ext.
+//
+//   2. Trunk Tilt (HIGH) — shoulder line angle deviation from
+//      baseline. Patient leans whole torso to one side instead of
+//      tilting only the head.
+
+export class NeckLateralFlexionCompensationTracker {
+  // Shoulder hike — SHOULDER.Y RISE above baseline (decoupled from
+  // ear motion so the test's natural ear-toward-shoulder doesn't
+  // false-fire), normalised by NECK HEIGHT
+  private leftShYSamples: number[] = [];
+  private rightShYSamples: number[] = [];
+  private neckHeightSamples: number[] = [];
+  private baselineLeftShY: number | null = null;
+  private baselineRightShY: number | null = null;
+  private baselineNeckHeight: number | null = null;
+  private hikePeakNormalized = 0;
+  private hikeFlagged = false;
+  private currentHikeActive = false;
+  // Trunk tilt — baseline-relative shoulder line angle (unchanged)
+  private tiltSamples: number[] = [];
+  private tiltBaseline: number | null = null;
+  private tiltPeakDeg = 0;
+  private tiltFlagged = false;
+  private currentTiltActive = false;
+  // Peak markers (parity)
+  private frameCounter = 0;
+  private primaryPeakFrame: number | null = null;
+  private secondaryPeakFrame: number | null = null;
+
+  feed(keypoints: Keypoint[]): void {
+    this.currentHikeActive = false;
+    this.currentTiltActive = false;
+
+    const neckH = computeNeckHeight(keypoints);
+    const lSh = keypoints[LM.LEFT_SHOULDER];
+    const rSh = keypoints[LM.RIGHT_SHOULDER];
+    const leftShY = lSh && (lSh.score ?? 0) >= VIS_THRESHOLD ? lSh.y : null;
+    const rightShY = rSh && (rSh.score ?? 0) >= VIS_THRESHOLD ? rSh.y : null;
+    const tilt = computeShoulderLineAngleFromHorizontal(keypoints);
+
+    // Hike baseline (per-side shoulder.y + neck height in
+    // temporal lock-step)
+    if (neckH !== null && leftShY !== null && rightShY !== null
+        && this.neckHeightSamples.length < NECK_COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.leftShYSamples.push(leftShY);
+      this.rightShYSamples.push(rightShY);
+      this.neckHeightSamples.push(neckH);
+      if (this.neckHeightSamples.length === NECK_COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.baselineLeftShY = neckCompMean(this.leftShYSamples);
+        this.baselineRightShY = neckCompMean(this.rightShYSamples);
+        this.baselineNeckHeight = neckCompMean(this.neckHeightSamples);
+      }
+    }
+    // Tilt baseline
+    if (tilt !== null
+        && this.tiltSamples.length < NECK_COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.tiltSamples.push(tilt);
+      if (this.tiltSamples.length === NECK_COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.tiltBaseline = neckCompMean(this.tiltSamples);
+      }
+    }
+
+    // Hike check — per-side shoulder.y rise; max() over sides
+    // catches the typical one-sided shrug
+    if (this.baselineNeckHeight !== null && this.baselineNeckHeight > 1e-3) {
+      let maxRise = 0;
+      let hadValidRise = false;
+      if (leftShY !== null && this.baselineLeftShY !== null) {
+        const rise = this.baselineLeftShY - leftShY;
+        if (rise > maxRise) maxRise = rise;
+        hadValidRise = true;
+      }
+      if (rightShY !== null && this.baselineRightShY !== null) {
+        const rise = this.baselineRightShY - rightShY;
+        if (rise > maxRise) maxRise = rise;
+        hadValidRise = true;
+      }
+      if (hadValidRise) {
+        const norm = maxRise / this.baselineNeckHeight;
+        if (norm > this.hikePeakNormalized) this.hikePeakNormalized = norm;
+        if (norm > NECK_SHOULDER_HIKE_THRESHOLD_FRAC) {
+          this.hikeFlagged = true;
+          this.currentHikeActive = true;
+        }
+      }
+    }
+    // Tilt check
+    if (tilt !== null && this.tiltBaseline !== null) {
+      const deviation = Math.abs(tilt - this.tiltBaseline);
+      if (deviation > this.tiltPeakDeg) this.tiltPeakDeg = deviation;
+      if (deviation > NECK_TRUNK_TILT_THRESHOLD_DEG) {
+        this.tiltFlagged = true;
+        this.currentTiltActive = true;
+      }
+    }
+
+    this.frameCounter += 1;
+  }
+
+  markPrimaryPeak(): void {
+    this.primaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+
+  markSecondaryPeak(): void {
+    this.secondaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+
+  currentFlags(): Compensation[] {
+    const out: Compensation[] = [];
+    if (this.currentHikeActive) {
+      out.push({ type: "shoulder_hike", label: "Shoulder Hike", severity: "high", flagged: true });
+    }
+    if (this.currentTiltActive) {
+      out.push({ type: "trunk_tilt", label: "Trunk Tilt", severity: "high", flagged: true });
+    }
+    return out;
+  }
+
+  finish(): Compensation[] {
+    return [
+      {
+        type: "shoulder_hike",
+        label: "Shoulder Hike",
+        severity: "high",
+        flagged: this.hikeFlagged,
+        details: `Peak shoulder rise ${(this.hikePeakNormalized * 100).toFixed(1)} % of neck-height (threshold ${(NECK_SHOULDER_HIKE_THRESHOLD_FRAC * 100).toFixed(0)} %)`,
+      },
+      {
+        type: "trunk_tilt",
+        label: "Trunk Tilt",
+        severity: "high",
+        flagged: this.tiltFlagged,
+        details: `Peak shoulder-line tilt ${this.tiltPeakDeg.toFixed(1)}° from baseline (threshold ${NECK_TRUNK_TILT_THRESHOLD_DEG}°)`,
+      },
+    ];
+  }
+}
+
+// ─── rotation tracker ───────────────────────────────────────────
+//
+// Patient FRONTAL to camera. Two compensations:
+//
+//   1. Trunk Rotation (HIGH) — shoulder pixel-width shrinks below
+//      baseline. Body twist foreshortens the shoulder line.
+//
+//   2. Shoulder Hike (MEDIUM) — same ear↔shoulder Y-distance signal
+//      used in the other neck trackers.
+
+export class NeckRotationCompensationTracker {
+  // Trunk rotation — shoulder-width shrink (foreshortening as torso
+  // twists out of the frontal plane). This signal works in frontal
+  // view where shoulder-width is genuinely anatomical.
+  private widthSamples: number[] = [];
+  private widthBaseline: number | null = null;
+  private rotationPeakNormalized = 0;
+  private rotationFlagged = false;
+  private currentRotationActive = false;
+  // Shoulder hike — SHOULDER.Y RISE above baseline normalised by
+  // NECK HEIGHT (consistent across the 3 neck trackers; doesn't
+  // confound with head/ear motion)
+  private leftShYSamples: number[] = [];
+  private rightShYSamples: number[] = [];
+  private neckHeightSamples: number[] = [];
+  private baselineLeftShY: number | null = null;
+  private baselineRightShY: number | null = null;
+  private baselineNeckHeight: number | null = null;
+  private hikePeakNormalized = 0;
+  private hikeFlagged = false;
+  private currentHikeActive = false;
+  // Peak markers (parity)
+  private frameCounter = 0;
+  private primaryPeakFrame: number | null = null;
+  private secondaryPeakFrame: number | null = null;
+
+  feed(keypoints: Keypoint[]): void {
+    this.currentRotationActive = false;
+    this.currentHikeActive = false;
+
+    const width = computeShoulderWidth(keypoints);
+    const neckH = computeNeckHeight(keypoints);
+    const lSh = keypoints[LM.LEFT_SHOULDER];
+    const rSh = keypoints[LM.RIGHT_SHOULDER];
+    const leftShY = lSh && (lSh.score ?? 0) >= VIS_THRESHOLD ? lSh.y : null;
+    const rightShY = rSh && (rSh.score ?? 0) >= VIS_THRESHOLD ? rSh.y : null;
+
+    // Width baseline (trunk-rotation signal)
+    if (width !== null
+        && this.widthSamples.length < NECK_COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.widthSamples.push(width);
+      if (this.widthSamples.length === NECK_COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.widthBaseline = neckCompMean(this.widthSamples);
+      }
+    }
+    // Hike baseline (per-side shoulder.y + neck height in lock-step)
+    if (neckH !== null && leftShY !== null && rightShY !== null
+        && this.neckHeightSamples.length < NECK_COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.leftShYSamples.push(leftShY);
+      this.rightShYSamples.push(rightShY);
+      this.neckHeightSamples.push(neckH);
+      if (this.neckHeightSamples.length === NECK_COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.baselineLeftShY = neckCompMean(this.leftShYSamples);
+        this.baselineRightShY = neckCompMean(this.rightShYSamples);
+        this.baselineNeckHeight = neckCompMean(this.neckHeightSamples);
+      }
+    }
+
+    // Trunk rotation check — shoulder-width shrinks
+    if (width !== null && this.widthBaseline !== null && this.widthBaseline > 1e-3) {
+      const shrink = this.widthBaseline - width;
+      const norm = shrink / this.widthBaseline;
+      if (norm > this.rotationPeakNormalized) this.rotationPeakNormalized = norm;
+      if (norm > NECK_TRUNK_ROTATION_THRESHOLD_FRAC) {
+        this.rotationFlagged = true;
+        this.currentRotationActive = true;
+      }
+    }
+    // Shoulder hike check — per-side shoulder.y rise
+    if (this.baselineNeckHeight !== null && this.baselineNeckHeight > 1e-3) {
+      let maxRise = 0;
+      let hadValidRise = false;
+      if (leftShY !== null && this.baselineLeftShY !== null) {
+        const rise = this.baselineLeftShY - leftShY;
+        if (rise > maxRise) maxRise = rise;
+        hadValidRise = true;
+      }
+      if (rightShY !== null && this.baselineRightShY !== null) {
+        const rise = this.baselineRightShY - rightShY;
+        if (rise > maxRise) maxRise = rise;
+        hadValidRise = true;
+      }
+      if (hadValidRise) {
+        const norm = maxRise / this.baselineNeckHeight;
+        if (norm > this.hikePeakNormalized) this.hikePeakNormalized = norm;
+        if (norm > NECK_SHOULDER_HIKE_THRESHOLD_FRAC) {
+          this.hikeFlagged = true;
+          this.currentHikeActive = true;
+        }
+      }
+    }
+
+    this.frameCounter += 1;
+  }
+
+  markPrimaryPeak(): void {
+    this.primaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+
+  markSecondaryPeak(): void {
+    this.secondaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+
+  currentFlags(): Compensation[] {
+    const out: Compensation[] = [];
+    if (this.currentRotationActive) {
+      out.push({ type: "trunk_rotation", label: "Trunk Rotation", severity: "high", flagged: true });
+    }
+    if (this.currentHikeActive) {
+      out.push({ type: "shoulder_hike", label: "Shoulder Hike", severity: "medium", flagged: true });
+    }
+    return out;
+  }
+
+  finish(): Compensation[] {
+    return [
+      {
+        type: "trunk_rotation",
+        label: "Trunk Rotation",
+        severity: "high",
+        flagged: this.rotationFlagged,
+        details: `Peak shoulder-width shrink ${(this.rotationPeakNormalized * 100).toFixed(1)} % of baseline (threshold ${(NECK_TRUNK_ROTATION_THRESHOLD_FRAC * 100).toFixed(0)} %)`,
+      },
+      {
+        type: "shoulder_hike",
+        label: "Shoulder Hike",
+        severity: "medium",
+        flagged: this.hikeFlagged,
+        details: `Peak shoulder rise ${(this.hikePeakNormalized * 100).toFixed(1)} % of neck-height (threshold ${(NECK_SHOULDER_HIKE_THRESHOLD_FRAC * 100).toFixed(0)} %)`,
+      },
+    ];
+  }
+}
