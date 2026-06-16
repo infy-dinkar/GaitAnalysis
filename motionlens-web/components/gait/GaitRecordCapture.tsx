@@ -43,6 +43,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { useCamera } from "@/hooks/useCamera";
+import { useSecondaryCamera } from "@/hooks/useSecondaryCamera";
 import { usePoseDetectionLive } from "@/hooks/usePoseDetectionLive";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 
@@ -143,6 +144,23 @@ export function GaitRecordCapture({ onRecorded, disabled }: Props) {
   const [recordingMs, setRecordingMs] = useState(0);
   const [localError, setLocalError] = useState<string | null>(null);
 
+  // ── Secondary camera (live preview only — no recording) ──────
+  // useSecondaryCamera mirrors useCamera's shape but is deviceId-
+  // driven and never feeds MediaRecorder. The recorded blob still
+  // pulls from streamRef.current (primary only), so the upload
+  // path stays byte-identical.
+  const secondaryVideoRef = useRef<HTMLVideoElement | null>(null);
+  const {
+    active: secActive,
+    error: secError,
+    start: startSecondary,
+    stop: stopSecondary,
+  } = useSecondaryCamera(secondaryVideoRef);
+
+  const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [primaryDeviceId, setPrimaryDeviceId] = useState<string>("");
+  const [secondaryDeviceId, setSecondaryDeviceId] = useState<string>("");
+
   // ── Skeleton overlay rAF loop ─────────────────────────────────
   // Runs only while the camera is active AND the detector is ready.
   // Reads each frame from the <video>, runs MediaPipe BlazePose,
@@ -219,6 +237,106 @@ export function GaitRecordCapture({ onRecorded, disabled }: Props) {
       }
     };
   }, [active, poseReady, detect, videoRef]);
+
+  // ── Device enumeration + primary auto-detect ──────────────────
+  // Populate enumerated videoinput devices once the primary camera
+  // is active (browsers blank `label` until at least one
+  // getUserMedia call has succeeded). Also detect which device the
+  // browser actually picked for the primary so the dropdown
+  // reflects reality before the operator interacts with it.
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const all = await navigator.mediaDevices.enumerateDevices();
+        if (cancelled) return;
+        setDevices(all.filter((d) => d.kind === "videoinput"));
+      } catch {
+        /* enumeration failure isn't fatal */
+      }
+      if (cancelled) return;
+      const track = streamRef.current?.getVideoTracks()[0];
+      const settings = track?.getSettings();
+      if (settings?.deviceId && !primaryDeviceId) {
+        setPrimaryDeviceId(settings.deviceId);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [active, streamRef, primaryDeviceId]);
+
+  // ── Primary-camera device swap ────────────────────────────────
+  // When the operator picks a different primary camera, we mutate
+  // the exposed streamRef + videoRef that useCamera() returns —
+  // useCamera.ts itself is untouched (10 other capture screens
+  // depend on it). The MediaRecorder reads streamRef.current at
+  // the moment of rec.start(), and the primary dropdown is
+  // disabled while phase === "recording" (see JSX below), so this
+  // swap can only happen between recordings; the recorded blob
+  // stays clean.
+  const overridePrimary = useCallback(
+    async (deviceId: string) => {
+      if (!streamRef.current) return;
+      const current = streamRef.current
+        .getVideoTracks()[0]
+        ?.getSettings()?.deviceId;
+      if (current === deviceId) return;
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+      try {
+        const newStream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            deviceId: { exact: deviceId },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        });
+        streamRef.current = newStream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = newStream;
+          await videoRef.current.play().catch(() => {});
+        }
+      } catch (e) {
+        setLocalError(
+          e instanceof Error
+            ? e.message
+            : "Could not switch primary camera.",
+        );
+      }
+    },
+    [streamRef, videoRef],
+  );
+
+  useEffect(() => {
+    if (!active || !primaryDeviceId) return;
+    overridePrimary(primaryDeviceId);
+  }, [primaryDeviceId, active, overridePrimary]);
+
+  // ── Secondary lifecycle (lock-step with primary) ──────────────
+  // Start when primary is active AND a valid (different-from-
+  // primary) deviceId is picked. Stop on any of: primary stops,
+  // deviceId cleared, deviceId equals primary. One Start/Stop
+  // button thereby controls both cameras.
+  useEffect(() => {
+    if (
+      !active ||
+      !secondaryDeviceId ||
+      secondaryDeviceId === primaryDeviceId
+    ) {
+      stopSecondary();
+      return;
+    }
+    startSecondary(secondaryDeviceId);
+  }, [
+    active,
+    secondaryDeviceId,
+    primaryDeviceId,
+    startSecondary,
+    stopSecondary,
+  ]);
 
   // ── Recording control ─────────────────────────────────────────
   const startRecording = useCallback(() => {
@@ -306,53 +424,138 @@ export function GaitRecordCapture({ onRecorded, disabled }: Props) {
   return (
     <div className="space-y-4">
       <div className="rounded-card border border-border bg-surface p-4">
-        {/* Camera box. `max-w-2xl` caps the width which, paired with
-            `aspect-video`, caps the height at ~378 px so the Start/
-            Stop buttons + caption below stay above the fold without
-            scrolling. `bg-black` provides the dark backdrop that the
-            skeleton canvas draws against. Mirrors biomech's
-            LiveBiomechCamera approach (canvas-primary, dark bg) but
-            without the corner PiP — gait shows only the skeleton on
-            black per the spec. */}
-        <div className="relative aspect-video w-full max-w-2xl mx-auto overflow-hidden rounded-md bg-black">
-          {/* The <video> element renders the raw camera stream
-              internally (so usePoseDetectionLive.detect(v) can read
-              `videoWidth`/`videoHeight` + sample pixels every frame),
-              but is visually hidden via `opacity-0`. The skeleton
-              canvas above is the only thing the operator sees.
-              DISPLAY-ONLY: MediaRecorder(streamRef.current) still
-              reads the RAW camera MediaStream — opacity has zero
-              effect on the recorded blob, which stays clean raw
-              footage for the backend to re-analyse. */}
-          {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-          <video
-            ref={videoRef}
-            playsInline
-            muted
-            className="absolute inset-0 h-full w-full object-contain opacity-0"
-          />
-          <canvas
-            ref={overlayRef}
-            className="pointer-events-none absolute inset-0 h-full w-full object-contain"
-          />
-          {!active && (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-xs text-subtle">
-              <CameraOff className="h-8 w-8 text-subtle" />
-              <p>Camera off — click Start camera below.</p>
+        {/* Two-column camera grid. LEFT = primary (skeleton-on-
+            black, unchanged behaviour and recorded). RIGHT =
+            secondary (plain reference preview, no recording, no
+            skeleton). max-w-4xl keeps each tile around ~370 px wide
+            at md+ so the controls below stay above the fold. */}
+        <div className="mx-auto grid w-full max-w-4xl grid-cols-1 gap-4 md:grid-cols-2">
+          {/* ── Primary tile ─────────────────────────────────── */}
+          <div className="space-y-2">
+            <span className="inline-flex items-center gap-1.5 rounded-md bg-elevated px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-subtle">
+              Primary · side view
+            </span>
+            <select
+              value={primaryDeviceId}
+              onChange={(e) => setPrimaryDeviceId(e.target.value)}
+              disabled={!active || phase === "recording" || devices.length === 0}
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+            >
+              {devices.length === 0 && (
+                <option value="">No cameras enumerated yet</option>
+              )}
+              {devices.map((d) => (
+                <option
+                  key={d.deviceId}
+                  value={d.deviceId}
+                  disabled={d.deviceId === secondaryDeviceId && d.deviceId !== ""}
+                >
+                  {d.label || `Camera ${d.deviceId.slice(0, 8)}…`}
+                </option>
+              ))}
+            </select>
+            <div className="relative aspect-video w-full overflow-hidden rounded-md bg-black">
+              {/* The <video> renders the raw camera stream
+                  internally (so usePoseDetectionLive.detect(v) can
+                  read videoWidth/videoHeight + sample pixels every
+                  frame), but is visually hidden via `opacity-0`.
+                  The skeleton canvas above is the only thing the
+                  operator sees. DISPLAY-ONLY: MediaRecorder reads
+                  the RAW MediaStream from streamRef.current —
+                  opacity has zero effect on the recorded blob. */}
+              {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+              <video
+                ref={videoRef}
+                playsInline
+                muted
+                className="absolute inset-0 h-full w-full object-contain opacity-0"
+              />
+              <canvas
+                ref={overlayRef}
+                className="pointer-events-none absolute inset-0 h-full w-full object-contain"
+              />
+              {!active && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-xs text-subtle">
+                  <CameraOff className="h-8 w-8 text-subtle" />
+                  <p>Camera off — click Start camera below.</p>
+                </div>
+              )}
+              {active && !poseReady && (
+                <div className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-background/80 px-2 py-1 text-[10px] text-subtle">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  Loading skeleton…
+                </div>
+              )}
+              {phase === "recording" && (
+                <div className="absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-error/90 px-2 py-1 text-[11px] font-semibold text-white">
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-white" />
+                  REC · {seconds}s
+                </div>
+              )}
             </div>
-          )}
-          {active && !poseReady && (
-            <div className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-background/80 px-2 py-1 text-[10px] text-subtle">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              Loading skeleton…
+          </div>
+
+          {/* ── Secondary tile (preview only — no recording) ──── */}
+          <div className="space-y-2">
+            <span className="inline-flex items-center gap-1.5 rounded-md bg-elevated px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-subtle">
+              Reference · front / back
+            </span>
+            <select
+              value={secondaryDeviceId}
+              onChange={(e) => setSecondaryDeviceId(e.target.value)}
+              disabled={!active || phase === "recording" || devices.length < 2}
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+            >
+              <option value="">— None (no reference) —</option>
+              {devices.map((d) => (
+                <option
+                  key={d.deviceId}
+                  value={d.deviceId}
+                  disabled={d.deviceId === primaryDeviceId}
+                >
+                  {d.label || `Camera ${d.deviceId.slice(0, 8)}…`}
+                </option>
+              ))}
+            </select>
+            <div className="relative aspect-video w-full overflow-hidden rounded-md bg-black">
+              {/* Plain visible preview. No opacity-0, no canvas
+                  overlay, no skeleton. Stream is held in
+                  useSecondaryCamera's streamRef and is NEVER
+                  passed to MediaRecorder — secondary produces no
+                  blob, touches no backend. autoPlay deliberately
+                  omitted; useSecondaryCamera.start() handles the
+                  explicit play() once srcObject is attached. */}
+              {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+              <video
+                ref={secondaryVideoRef}
+                playsInline
+                muted
+                className="absolute inset-0 h-full w-full object-contain"
+              />
+              {(!active || !secondaryDeviceId) && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-xs text-subtle">
+                  <CameraOff className="h-8 w-8 text-subtle" />
+                  <p>
+                    {!active
+                      ? "Reference preview activates with primary."
+                      : devices.length < 2
+                        ? "Only one camera detected."
+                        : "Pick a reference camera above."}
+                  </p>
+                </div>
+              )}
+              {active && secondaryDeviceId && secError && (
+                <div className="absolute inset-0 flex items-center justify-center bg-error/10 p-3 text-center text-xs text-error">
+                  <span>{secError}</span>
+                </div>
+              )}
+              {active && secActive && secondaryDeviceId && !secError && (
+                <div className="absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-background/80 px-2 py-1 text-[10px] text-subtle">
+                  LIVE
+                </div>
+              )}
             </div>
-          )}
-          {phase === "recording" && (
-            <div className="absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md bg-error/90 px-2 py-1 text-[11px] font-semibold text-white">
-              <span className="h-2 w-2 animate-pulse rounded-full bg-white" />
-              REC · {seconds}s
-            </div>
-          )}
+          </div>
         </div>
 
         <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -396,9 +599,10 @@ export function GaitRecordCapture({ onRecorded, disabled }: Props) {
         </div>
 
         <p className="mt-3 text-xs text-muted">
-          Stand fully in frame, side-on to the camera, and walk back-and-forth
-          for 4–6 cycles (~10 s). The skeleton overlay is for framing only —
-          the raw clip is what gets analysed.
+          Stand fully in frame, side-on to the primary camera, and walk back-
+          and-forth for 4–6 cycles (~10 s). The skeleton overlay and
+          reference preview are for framing only — only the primary clip is
+          uploaded and analysed.
         </p>
       </div>
 
