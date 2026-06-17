@@ -43,7 +43,17 @@ import {
   NeckRotationCompensationTracker,
 } from "@/lib/biomech/neck-live";
 import type { BiomechCompensationDTO } from "@/lib/api";
-import { detectHipRotationDirection } from "@/lib/biomech/hip-live";
+import {
+  detectHipRotationDirection,
+  HipFlexionCompensationTracker,
+  HipExtensionCompensationTracker,
+  HipRotationCompensationTracker,
+} from "@/lib/biomech/hip-live";
+import { KneeFlexExtCompensationTracker } from "@/lib/biomech/knee-live";
+import {
+  AnkleFlexionCompensationTracker,
+  AnkleExtensionCompensationTracker,
+} from "@/lib/biomech/ankle-live";
 import type { LiveKeypoint as Keypoint } from "@/hooks/usePoseDetectionLive";
 import type { LiveBiomechFrameDataDTO } from "@/lib/api";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
@@ -291,6 +301,15 @@ export function LiveAssessment({
     isMergedNeckLateral ||
     isMergedHipRotation;
 
+  // Single-direction movements that ALSO run compensation tracking
+  // (hip flex/ext, ankle flex/ext). These don't share the merged
+  // direction-routing path but they still need their tracker to
+  // receive every valid frame and emit compensations.
+  const isHipFlexion = bodyPart === "hip" && movementId === "flexion";
+  const isHipExtension = bodyPart === "hip" && movementId === "extension";
+  const isAnkleFlexion = bodyPart === "ankle" && movementId === "flexion";
+  const isAnkleExtension = bodyPart === "ankle" && movementId === "extension";
+
   const stateRef = useRef({
     current: null as number | null,
     peakSigned: null as number | null,
@@ -359,6 +378,15 @@ export function LiveAssessment({
   const compNeckFlexExtTrackerRef = useRef<NeckFlexExtCompensationTracker | null>(null);
   const compNeckLateralTrackerRef = useRef<NeckLateralFlexionCompensationTracker | null>(null);
   const compNeckRotationTrackerRef = useRef<NeckRotationCompensationTracker | null>(null);
+  // Knee + hip + ankle compensation trackers — lazy-init per the
+  // same pattern. Only one is non-null per trial (only one exercise
+  // active at a time across knee/hip/ankle).
+  const compKneeFETrackerRef = useRef<KneeFlexExtCompensationTracker | null>(null);
+  const compHipFlexionTrackerRef = useRef<HipFlexionCompensationTracker | null>(null);
+  const compHipExtensionTrackerRef = useRef<HipExtensionCompensationTracker | null>(null);
+  const compHipRotationTrackerRef = useRef<HipRotationCompensationTracker | null>(null);
+  const compAnkleFlexionTrackerRef = useRef<AnkleFlexionCompensationTracker | null>(null);
+  const compAnkleExtensionTrackerRef = useRef<AnkleExtensionCompensationTracker | null>(null);
 
   // Annotated-frame screenshots for the report. Captured on the
   // composite canvas exposed by LiveBiomechCamera (via
@@ -570,6 +598,12 @@ export function LiveAssessment({
         const r = detectHipRotationDirection(kpsForDir, sideOrRight);
         if (r === "internal") dir = "primary";
         else if (r === "external") dir = "secondary";
+        // Hip rotation compensation tracker — lazy-init.
+        if (!compHipRotationTrackerRef.current) {
+          compHipRotationTrackerRef.current = new HipRotationCompensationTracker(sideOrRight);
+        }
+        compHipRotationTrackerRef.current.feed(kpsForDir);
+        s.currentCompensations = compHipRotationTrackerRef.current.currentFlags();
       }
       s.currentDirection = dir;
       if (!dir) return; // deadband — show Current but don't update peaks
@@ -584,8 +618,56 @@ export function LiveAssessment({
         else if (trend < -0.5) s.currentDirection = "secondary"; // extending
         // else keep previous direction so the tag doesn't flicker
       }
+      // Knee FE compensation tracker — feed every valid frame so its
+      // baseline forms from the first 10 frames and subsequent
+      // deviations get flagged.
+      const kpsForComp: Keypoint[] = data.landmarks.map((l) => ({
+        x: l.x, y: l.y, score: l.visibility,
+      }));
+      const sideOrRight = side ?? "right";
+      if (!compKneeFETrackerRef.current) {
+        compKneeFETrackerRef.current = new KneeFlexExtCompensationTracker(sideOrRight);
+      }
+      compKneeFETrackerRef.current.feed(kpsForComp);
+      s.currentCompensations = compKneeFETrackerRef.current.currentFlags();
     } else {
       s.currentDirection = null;
+    }
+
+    // Single-direction compensation feeds (hip flex/ext, ankle
+    // flex/ext). These movements don't go through the merged
+    // direction routing above, but their compensation trackers
+    // still need every valid frame.
+    if (isHipFlexion || isHipExtension || isAnkleFlexion || isAnkleExtension) {
+      const kpsForComp: Keypoint[] = data.landmarks.map((l) => ({
+        x: l.x, y: l.y, score: l.visibility,
+      }));
+      const sideOrRight = side ?? "right";
+      if (isHipFlexion) {
+        if (!compHipFlexionTrackerRef.current) {
+          compHipFlexionTrackerRef.current = new HipFlexionCompensationTracker();
+        }
+        compHipFlexionTrackerRef.current.feed(kpsForComp);
+        s.currentCompensations = compHipFlexionTrackerRef.current.currentFlags();
+      } else if (isHipExtension) {
+        if (!compHipExtensionTrackerRef.current) {
+          compHipExtensionTrackerRef.current = new HipExtensionCompensationTracker();
+        }
+        compHipExtensionTrackerRef.current.feed(kpsForComp);
+        s.currentCompensations = compHipExtensionTrackerRef.current.currentFlags();
+      } else if (isAnkleFlexion) {
+        if (!compAnkleFlexionTrackerRef.current) {
+          compAnkleFlexionTrackerRef.current = new AnkleFlexionCompensationTracker(sideOrRight);
+        }
+        compAnkleFlexionTrackerRef.current.feed(kpsForComp);
+        s.currentCompensations = compAnkleFlexionTrackerRef.current.currentFlags();
+      } else if (isAnkleExtension) {
+        if (!compAnkleExtensionTrackerRef.current) {
+          compAnkleExtensionTrackerRef.current = new AnkleExtensionCompensationTracker(sideOrRight);
+        }
+        compAnkleExtensionTrackerRef.current.feed(kpsForComp);
+        s.currentCompensations = compAnkleExtensionTrackerRef.current.currentFlags();
+      }
     }
 
     // Neck rotation compensation tracker — runs OUTSIDE the merged-
@@ -792,6 +874,8 @@ export function LiveAssessment({
         else if (isMergedShoulderRotation) compRotationTrackerRef.current?.markPrimaryPeak();
         else if (isMergedNeckFE) compNeckFlexExtTrackerRef.current?.markPrimaryPeak();
         else if (isMergedNeckLateral) compNeckLateralTrackerRef.current?.markPrimaryPeak();
+        else if (isMergedKneeFE) compKneeFETrackerRef.current?.markPrimaryPeak();
+        else if (isMergedHipRotation) compHipRotationTrackerRef.current?.markPrimaryPeak();
       }
       s.peakCandidateSigned = candSigned;
       s.peakCandidateHeld = candHeld;
@@ -805,6 +889,8 @@ export function LiveAssessment({
         else if (isMergedShoulderRotation) compRotationTrackerRef.current?.markSecondaryPeak();
         else if (isMergedNeckFE) compNeckFlexExtTrackerRef.current?.markSecondaryPeak();
         else if (isMergedNeckLateral) compNeckLateralTrackerRef.current?.markSecondaryPeak();
+        else if (isMergedKneeFE) compKneeFETrackerRef.current?.markSecondaryPeak();
+        else if (isMergedHipRotation) compHipRotationTrackerRef.current?.markSecondaryPeak();
       }
       s.peakCandidateSignedB = candSigned;
       s.peakCandidateHeldB = candHeld;
@@ -826,6 +912,12 @@ export function LiveAssessment({
     isMergedKneeFE,
     isMergedNeckFE,
     isMergedNeckLateral,
+    isMergedHipRotation,
+    isNeckRotation,
+    isHipFlexion,
+    isHipExtension,
+    isAnkleFlexion,
+    isAnkleExtension,
   ]);
 
   // Clears every per-trial peak-tracking field on the state ref —
@@ -1163,8 +1255,7 @@ export function LiveAssessment({
           </div>
 
           {/* Real-time compensation warning banner. Renders for any
-              merged shoulder OR merged neck test when at least one
-              compensation is active on the latest frame. Disappears
+              movement that runs a compensation tracker. Disappears
               as soon as the patient corrects form. */}
           {(
             isMergedShoulderFlexExt ||
@@ -1172,7 +1263,13 @@ export function LiveAssessment({
             isMergedShoulderRotation ||
             isMergedNeckFE ||
             isMergedNeckLateral ||
-            isNeckRotation
+            isNeckRotation ||
+            isMergedKneeFE ||
+            isMergedHipRotation ||
+            isHipFlexion ||
+            isHipExtension ||
+            isAnkleFlexion ||
+            isAnkleExtension
           ) && stateRef.current.currentCompensations.length > 0 && (
             <div className="mt-4 rounded-md border border-warning/40 bg-warning/5 px-3 py-2">
               <p className="text-[10px] uppercase tracking-[0.12em] text-warning">
@@ -1413,7 +1510,19 @@ export function LiveAssessment({
                       ? compNeckLateralTrackerRef.current?.finish()
                       : isNeckRotation
                         ? compNeckRotationTrackerRef.current?.finish()
-                        : undefined
+                        : isMergedKneeFE
+                          ? compKneeFETrackerRef.current?.finish()
+                          : isMergedHipRotation
+                            ? compHipRotationTrackerRef.current?.finish()
+                            : isHipFlexion
+                              ? compHipFlexionTrackerRef.current?.finish()
+                              : isHipExtension
+                                ? compHipExtensionTrackerRef.current?.finish()
+                                : isAnkleFlexion
+                                  ? compAnkleFlexionTrackerRef.current?.finish()
+                                  : isAnkleExtension
+                                    ? compAnkleExtensionTrackerRef.current?.finish()
+                                    : undefined
           }
         />
 
@@ -1471,7 +1580,19 @@ export function LiveAssessment({
                           ? compNeckLateralTrackerRef.current?.finish()
                           : isNeckRotation
                             ? compNeckRotationTrackerRef.current?.finish()
-                            : null;
+                            : isMergedKneeFE
+                              ? compKneeFETrackerRef.current?.finish()
+                              : isMergedHipRotation
+                                ? compHipRotationTrackerRef.current?.finish()
+                                : isHipFlexion
+                                  ? compHipFlexionTrackerRef.current?.finish()
+                                  : isHipExtension
+                                    ? compHipExtensionTrackerRef.current?.finish()
+                                    : isAnkleFlexion
+                                      ? compAnkleFlexionTrackerRef.current?.finish()
+                                      : isAnkleExtension
+                                        ? compAnkleExtensionTrackerRef.current?.finish()
+                                        : null;
                 return c && c.length > 0 ? { compensations: c } : {};
               })(),
             },

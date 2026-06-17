@@ -124,3 +124,168 @@ export function computeKneeAngle(
   // 0° flexion = perfectly straight, ~140° = fully bent.
   return 180 - interior;
 }
+
+// ─── Compensation detection (Knee FE) — mirror of knee.ts ────────
+//
+// Same math, same thresholds, same tracker class. Only difference is
+// the keypoint source (BlazePose-tfjs LiveKeypoint).
+
+export type CompensationSeverity = "high" | "medium" | "low";
+
+export interface Compensation {
+  type: "thigh_movement" | "knee_trunk_lean";
+  label: string;
+  severity: CompensationSeverity;
+  flagged: boolean;
+  details?: string;
+}
+
+const KNEE_THIGH_MOVEMENT_THRESHOLD_DEG = 15;
+const KNEE_TRUNK_LEAN_THRESHOLD_DEG = 12;
+const KNEE_COMPENSATION_BASELINE_FRAME_COUNT = 10;
+
+export function computeKneeThighAngleDeg(
+  keypoints: Keypoint[],
+  side: "left" | "right",
+): number | null {
+  const idx = SIDE_INDICES[side];
+  const hip = keypoints[idx.hip];
+  const knee = keypoints[idx.knee];
+  if (!hip || !knee) return null;
+  if ((hip.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((knee.score ?? 0) < VIS_THRESHOLD) return null;
+  const dx = knee.x - hip.x;
+  const dy = knee.y - hip.y;
+  if (Math.hypot(dx, dy) < 1e-4) return null;
+  return (Math.atan2(dx, dy) * 180) / Math.PI;
+}
+
+export function computeKneeTrunkAngleDeg(
+  keypoints: Keypoint[],
+): number | null {
+  const lSh = keypoints[LM.LEFT_SHOULDER];
+  const rSh = keypoints[LM.RIGHT_SHOULDER];
+  const lHip = keypoints[LM.LEFT_HIP];
+  const rHip = keypoints[LM.RIGHT_HIP];
+  if (!lSh || !rSh || !lHip || !rHip) return null;
+  if ((lSh.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rSh.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((lHip.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rHip.score ?? 0) < VIS_THRESHOLD) return null;
+  const shMidX = (lSh.x + rSh.x) / 2;
+  const shMidY = (lSh.y + rSh.y) / 2;
+  const hpMidX = (lHip.x + rHip.x) / 2;
+  const hpMidY = (lHip.y + rHip.y) / 2;
+  const dx = shMidX - hpMidX;
+  const dy = -(shMidY - hpMidY);
+  if (Math.hypot(dx, dy) < 1e-4) return null;
+  return (Math.atan2(dx, dy) * 180) / Math.PI;
+}
+
+function kneeCompMean(arr: number[]): number {
+  if (arr.length === 0) return 0;
+  let s = 0;
+  for (const v of arr) s += v;
+  return s / arr.length;
+}
+
+export class KneeFlexExtCompensationTracker {
+  private readonly side: "left" | "right";
+  private thighSamples: number[] = [];
+  private trunkSamples: number[] = [];
+  private baselineThigh: number | null = null;
+  private baselineTrunk: number | null = null;
+  private thighPeakDev = 0;
+  private trunkPeakDev = 0;
+  private thighFlagged = false;
+  private trunkFlagged = false;
+  private currentThighActive = false;
+  private currentTrunkActive = false;
+  private frameCounter = 0;
+  private primaryPeakFrame: number | null = null;
+  private secondaryPeakFrame: number | null = null;
+
+  constructor(side: "left" | "right") {
+    this.side = side;
+  }
+
+  feed(keypoints: Keypoint[]): void {
+    this.currentThighActive = false;
+    this.currentTrunkActive = false;
+
+    const thigh = computeKneeThighAngleDeg(keypoints, this.side);
+    const trunk = computeKneeTrunkAngleDeg(keypoints);
+
+    if (thigh !== null
+        && this.thighSamples.length < KNEE_COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.thighSamples.push(thigh);
+      if (this.thighSamples.length === KNEE_COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.baselineThigh = kneeCompMean(this.thighSamples);
+      }
+    }
+    if (trunk !== null
+        && this.trunkSamples.length < KNEE_COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.trunkSamples.push(trunk);
+      if (this.trunkSamples.length === KNEE_COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.baselineTrunk = kneeCompMean(this.trunkSamples);
+      }
+    }
+
+    if (thigh !== null && this.baselineThigh !== null) {
+      const dev = Math.abs(thigh - this.baselineThigh);
+      if (dev > this.thighPeakDev) this.thighPeakDev = dev;
+      if (dev > KNEE_THIGH_MOVEMENT_THRESHOLD_DEG) {
+        this.thighFlagged = true;
+        this.currentThighActive = true;
+      }
+    }
+    if (trunk !== null && this.baselineTrunk !== null) {
+      const dev = Math.abs(trunk - this.baselineTrunk);
+      if (dev > this.trunkPeakDev) this.trunkPeakDev = dev;
+      if (dev > KNEE_TRUNK_LEAN_THRESHOLD_DEG) {
+        this.trunkFlagged = true;
+        this.currentTrunkActive = true;
+      }
+    }
+
+    this.frameCounter += 1;
+  }
+
+  markPrimaryPeak(): void {
+    this.primaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+
+  markSecondaryPeak(): void {
+    this.secondaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+
+  currentFlags(): Compensation[] {
+    const out: Compensation[] = [];
+    if (this.currentThighActive) {
+      out.push({ type: "thigh_movement", label: "Thigh Movement", severity: "high", flagged: true });
+    }
+    if (this.currentTrunkActive) {
+      out.push({ type: "knee_trunk_lean", label: "Trunk Lean", severity: "medium", flagged: true });
+    }
+    return out;
+  }
+
+  finish(): Compensation[] {
+    return [
+      {
+        type: "thigh_movement",
+        label: "Thigh Movement",
+        severity: "high",
+        flagged: this.thighFlagged,
+        details: `Peak thigh-angle deviation ${this.thighPeakDev.toFixed(1)}° from baseline (threshold ${KNEE_THIGH_MOVEMENT_THRESHOLD_DEG}°)`,
+      },
+      {
+        type: "knee_trunk_lean",
+        label: "Trunk Lean",
+        severity: "medium",
+        flagged: this.trunkFlagged,
+        details: `Peak trunk-angle deviation ${this.trunkPeakDev.toFixed(1)}° from baseline (threshold ${KNEE_TRUNK_LEAN_THRESHOLD_DEG}°)`,
+      },
+    ];
+  }
+}

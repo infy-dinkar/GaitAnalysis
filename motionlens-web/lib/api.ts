@@ -233,7 +233,16 @@ export interface BiomechCompensationDTO {
     | "elbow_drift_from_side"
     | "shoulder_hike"
     | "trunk_tilt"
-    | "trunk_rotation";
+    | "trunk_rotation"
+    | "thigh_movement"
+    | "knee_trunk_lean"
+    | "pelvic_tilt_posterior"
+    | "pelvic_tilt_anterior"
+    | "hip_trunk_lean"
+    | "hip_trunk_rotation"
+    | "knee_tilt"
+    | "ankle_knee_movement"
+    | "ankle_leg_lift";
   label: string;
   severity: "high" | "medium" | "low";
   flagged: boolean;

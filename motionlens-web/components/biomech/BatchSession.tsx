@@ -666,6 +666,7 @@ export function BatchSession() {
                   secondaryTarget={
                     isMerged ? r.secondary_reference_range : undefined
                   }
+                  compensations={r.compensations}
                 />
               </div>
             );

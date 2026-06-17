@@ -349,6 +349,78 @@ export function ApiUploadAssessment({
             </ul>
           </div>
         )}
+        {/* Compensation warning — knee flex/ext (lateral, stand-or-sit). */}
+        {bodyPart === "knee" && movementId === "flexion_extension" && (
+          <div className="mt-4 max-w-xl rounded-md border border-warning/40 bg-warning/5 px-4 py-3">
+            <p className="text-xs font-semibold text-warning">
+              ⚠️ Avoid these common compensations:
+            </p>
+            <ul className="mt-2 space-y-1 text-xs text-foreground">
+              <li>• Keep the thigh roughly stationary — only the lower leg should move</li>
+              <li>• Do not lean your trunk forward or backward to assist the bend</li>
+            </ul>
+          </div>
+        )}
+        {/* Compensation warning — hip flexion (standing, lateral). */}
+        {bodyPart === "hip" && movementId === "flexion" && (
+          <div className="mt-4 max-w-xl rounded-md border border-warning/40 bg-warning/5 px-4 py-3">
+            <p className="text-xs font-semibold text-warning">
+              ⚠️ Avoid these common compensations:
+            </p>
+            <ul className="mt-2 space-y-1 text-xs text-foreground">
+              <li>• Do not lean your trunk back to gain extra leg height</li>
+              <li>• Keep the standing leg straight and trunk upright</li>
+            </ul>
+          </div>
+        )}
+        {/* Compensation warning — hip extension (standing, lateral). */}
+        {bodyPart === "hip" && movementId === "extension" && (
+          <div className="mt-4 max-w-xl rounded-md border border-warning/40 bg-warning/5 px-4 py-3">
+            <p className="text-xs font-semibold text-warning">
+              ⚠️ Avoid these common compensations:
+            </p>
+            <ul className="mt-2 space-y-1 text-xs text-foreground">
+              <li>• Do not arch your lower back / lean your trunk forward to throw the leg back</li>
+              <li>• Keep the standing leg straight and trunk upright</li>
+            </ul>
+          </div>
+        )}
+        {/* Compensation warning — hip rotation (seated, frontal). */}
+        {bodyPart === "hip" && movementId === "rotation" && (
+          <div className="mt-4 max-w-xl rounded-md border border-warning/40 bg-warning/5 px-4 py-3">
+            <p className="text-xs font-semibold text-warning">
+              ⚠️ Avoid these common compensations:
+            </p>
+            <ul className="mt-2 space-y-1 text-xs text-foreground">
+              <li>• Do not twist your trunk to help the leg rotate — shoulders stay facing the camera</li>
+              <li>• Keep the test-side knee still over the hip; only the foot pivots around the heel</li>
+            </ul>
+          </div>
+        )}
+        {/* Compensation warning — ankle dorsiflexion (knee-to-wall). */}
+        {bodyPart === "ankle" && movementId === "flexion" && (
+          <div className="mt-4 max-w-xl rounded-md border border-warning/40 bg-warning/5 px-4 py-3">
+            <p className="text-xs font-semibold text-warning">
+              ⚠️ Avoid these common compensations:
+            </p>
+            <ul className="mt-2 space-y-1 text-xs text-foreground">
+              <li>• Keep the heel firmly on the ground — do not lift it</li>
+              <li>• Do not over-bend the knee or shift your whole leg to fake the lean</li>
+            </ul>
+          </div>
+        )}
+        {/* Compensation warning — ankle plantarflexion (seated leg-out). */}
+        {bodyPart === "ankle" && movementId === "extension" && (
+          <div className="mt-4 max-w-xl rounded-md border border-warning/40 bg-warning/5 px-4 py-3">
+            <p className="text-xs font-semibold text-warning">
+              ⚠️ Avoid these common compensations:
+            </p>
+            <ul className="mt-2 space-y-1 text-xs text-foreground">
+              <li>• Keep the leg fully extended — do not bend the knee</li>
+              <li>• Only the ankle should move — keep the thigh still on the support</li>
+            </ul>
+          </div>
+        )}
       </div>
 
       {movementImageUrl && (

@@ -868,7 +868,16 @@ function parseSavedCompensations(raw: unknown): BiomechCompensationDTO[] | undef
       t !== "elbow_drift_from_side" &&
       t !== "shoulder_hike" &&
       t !== "trunk_tilt" &&
-      t !== "trunk_rotation"
+      t !== "trunk_rotation" &&
+      t !== "thigh_movement" &&
+      t !== "knee_trunk_lean" &&
+      t !== "pelvic_tilt_posterior" &&
+      t !== "pelvic_tilt_anterior" &&
+      t !== "hip_trunk_lean" &&
+      t !== "hip_trunk_rotation" &&
+      t !== "knee_tilt" &&
+      t !== "ankle_knee_movement" &&
+      t !== "ankle_leg_lift"
     ) {
       continue;
     }

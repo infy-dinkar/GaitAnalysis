@@ -247,3 +247,360 @@ export function detectHipRotationDirection(
   const outwardSign = side === "left" ? 1 : -1;
   return signedAngle * outwardSign > 0 ? "external" : "internal";
 }
+
+// ─── Compensation detection (Hip flex / ext / rotation) — mirror ─
+
+export type CompensationSeverity = "high" | "medium" | "low";
+
+export interface Compensation {
+  type:
+    | "pelvic_tilt_posterior"
+    | "pelvic_tilt_anterior"
+    | "hip_trunk_lean"
+    | "hip_trunk_rotation"
+    | "knee_tilt";
+  label: string;
+  severity: CompensationSeverity;
+  flagged: boolean;
+  details?: string;
+}
+
+const HIP_PELVIC_TILT_THRESHOLD_DEG = 8;
+const HIP_TRUNK_LEAN_THRESHOLD_FRAC = 0.15;
+const HIP_TRUNK_ROTATION_THRESHOLD_FRAC = 0.15;
+const HIP_KNEE_TILT_THRESHOLD_FRAC = 0.12;
+const HIP_COMPENSATION_BASELINE_FRAME_COUNT = 10;
+
+export function computeHipTrunkAngleDeg(keypoints: Keypoint[]): number | null {
+  const lSh = keypoints[LM.LEFT_SHOULDER];
+  const rSh = keypoints[LM.RIGHT_SHOULDER];
+  const lHip = keypoints[LM.LEFT_HIP];
+  const rHip = keypoints[LM.RIGHT_HIP];
+  if (!lSh || !rSh || !lHip || !rHip) return null;
+  if ((lSh.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rSh.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((lHip.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rHip.score ?? 0) < VIS_THRESHOLD) return null;
+  const shMidX = (lSh.x + rSh.x) / 2;
+  const shMidY = (lSh.y + rSh.y) / 2;
+  const hpMidX = (lHip.x + rHip.x) / 2;
+  const hpMidY = (lHip.y + rHip.y) / 2;
+  const dx = shMidX - hpMidX;
+  const dy = -(shMidY - hpMidY);
+  if (Math.hypot(dx, dy) < 1e-4) return null;
+  return (Math.atan2(dx, dy) * 180) / Math.PI;
+}
+
+export function computeHipShoulderMidX(keypoints: Keypoint[]): number | null {
+  const lSh = keypoints[LM.LEFT_SHOULDER];
+  const rSh = keypoints[LM.RIGHT_SHOULDER];
+  if (!lSh || !rSh) return null;
+  if ((lSh.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rSh.score ?? 0) < VIS_THRESHOLD) return null;
+  return (lSh.x + rSh.x) / 2;
+}
+
+export function computeHipShoulderWidth(keypoints: Keypoint[]): number | null {
+  const lSh = keypoints[LM.LEFT_SHOULDER];
+  const rSh = keypoints[LM.RIGHT_SHOULDER];
+  if (!lSh || !rSh) return null;
+  if ((lSh.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rSh.score ?? 0) < VIS_THRESHOLD) return null;
+  return Math.abs(rSh.x - lSh.x);
+}
+
+function hipCompMean(arr: number[]): number {
+  if (arr.length === 0) return 0;
+  let s = 0;
+  for (const v of arr) s += v;
+  return s / arr.length;
+}
+
+abstract class HipBaseTracker {
+  protected frameCounter = 0;
+  protected primaryPeakFrame: number | null = null;
+  protected secondaryPeakFrame: number | null = null;
+
+  markPrimaryPeak(): void {
+    this.primaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+  markSecondaryPeak(): void {
+    this.secondaryPeakFrame = Math.max(0, this.frameCounter - 1);
+  }
+}
+
+export class HipFlexionCompensationTracker extends HipBaseTracker {
+  private trunkSamples: number[] = [];
+  private shoulderXSamples: number[] = [];
+  private widthSamples: number[] = [];
+  private baselineTrunk: number | null = null;
+  private baselineShoulderX: number | null = null;
+  private baselineWidth: number | null = null;
+  private pelvicPeakDev = 0;
+  private leanPeakFrac = 0;
+  private pelvicFlagged = false;
+  private leanFlagged = false;
+  private currentPelvicActive = false;
+  private currentLeanActive = false;
+
+  feed(keypoints: Keypoint[]): void {
+    this.currentPelvicActive = false;
+    this.currentLeanActive = false;
+    const trunk = computeHipTrunkAngleDeg(keypoints);
+    const shX = computeHipShoulderMidX(keypoints);
+    const width = computeHipShoulderWidth(keypoints);
+
+    if (trunk !== null && this.trunkSamples.length < HIP_COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.trunkSamples.push(trunk);
+      if (this.trunkSamples.length === HIP_COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.baselineTrunk = hipCompMean(this.trunkSamples);
+      }
+    }
+    if (shX !== null && width !== null
+        && this.shoulderXSamples.length < HIP_COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.shoulderXSamples.push(shX);
+      this.widthSamples.push(width);
+      if (this.shoulderXSamples.length === HIP_COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.baselineShoulderX = hipCompMean(this.shoulderXSamples);
+        this.baselineWidth = hipCompMean(this.widthSamples);
+      }
+    }
+
+    if (trunk !== null && this.baselineTrunk !== null) {
+      const dev = Math.abs(trunk - this.baselineTrunk);
+      if (dev > this.pelvicPeakDev) this.pelvicPeakDev = dev;
+      if (dev > HIP_PELVIC_TILT_THRESHOLD_DEG) {
+        this.pelvicFlagged = true;
+        this.currentPelvicActive = true;
+      }
+    }
+    if (shX !== null && this.baselineShoulderX !== null
+        && this.baselineWidth !== null && this.baselineWidth > 1e-3) {
+      const dev = Math.abs(shX - this.baselineShoulderX);
+      const frac = dev / this.baselineWidth;
+      if (frac > this.leanPeakFrac) this.leanPeakFrac = frac;
+      if (frac > HIP_TRUNK_LEAN_THRESHOLD_FRAC) {
+        this.leanFlagged = true;
+        this.currentLeanActive = true;
+      }
+    }
+
+    this.frameCounter += 1;
+  }
+
+  currentFlags(): Compensation[] {
+    const out: Compensation[] = [];
+    if (this.currentPelvicActive) {
+      out.push({ type: "pelvic_tilt_posterior", label: "Posterior Pelvic Tilt", severity: "high", flagged: true });
+    }
+    if (this.currentLeanActive) {
+      out.push({ type: "hip_trunk_lean", label: "Trunk Lean", severity: "medium", flagged: true });
+    }
+    return out;
+  }
+
+  finish(): Compensation[] {
+    return [
+      {
+        type: "pelvic_tilt_posterior",
+        label: "Posterior Pelvic Tilt",
+        severity: "high",
+        flagged: this.pelvicFlagged,
+        details: `Peak trunk-angle deviation ${this.pelvicPeakDev.toFixed(1)}° from baseline (threshold ${HIP_PELVIC_TILT_THRESHOLD_DEG}°)`,
+      },
+      {
+        type: "hip_trunk_lean",
+        label: "Trunk Lean",
+        severity: "medium",
+        flagged: this.leanFlagged,
+        details: `Peak shoulder displacement ${(this.leanPeakFrac * 100).toFixed(1)} % of shoulder-width (threshold ${(HIP_TRUNK_LEAN_THRESHOLD_FRAC * 100).toFixed(0)} %)`,
+      },
+    ];
+  }
+}
+
+export class HipExtensionCompensationTracker extends HipBaseTracker {
+  private trunkSamples: number[] = [];
+  private shoulderXSamples: number[] = [];
+  private widthSamples: number[] = [];
+  private baselineTrunk: number | null = null;
+  private baselineShoulderX: number | null = null;
+  private baselineWidth: number | null = null;
+  private pelvicPeakDev = 0;
+  private leanPeakFrac = 0;
+  private pelvicFlagged = false;
+  private leanFlagged = false;
+  private currentPelvicActive = false;
+  private currentLeanActive = false;
+
+  feed(keypoints: Keypoint[]): void {
+    this.currentPelvicActive = false;
+    this.currentLeanActive = false;
+    const trunk = computeHipTrunkAngleDeg(keypoints);
+    const shX = computeHipShoulderMidX(keypoints);
+    const width = computeHipShoulderWidth(keypoints);
+
+    if (trunk !== null && this.trunkSamples.length < HIP_COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.trunkSamples.push(trunk);
+      if (this.trunkSamples.length === HIP_COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.baselineTrunk = hipCompMean(this.trunkSamples);
+      }
+    }
+    if (shX !== null && width !== null
+        && this.shoulderXSamples.length < HIP_COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.shoulderXSamples.push(shX);
+      this.widthSamples.push(width);
+      if (this.shoulderXSamples.length === HIP_COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.baselineShoulderX = hipCompMean(this.shoulderXSamples);
+        this.baselineWidth = hipCompMean(this.widthSamples);
+      }
+    }
+
+    if (trunk !== null && this.baselineTrunk !== null) {
+      const dev = Math.abs(trunk - this.baselineTrunk);
+      if (dev > this.pelvicPeakDev) this.pelvicPeakDev = dev;
+      if (dev > HIP_PELVIC_TILT_THRESHOLD_DEG) {
+        this.pelvicFlagged = true;
+        this.currentPelvicActive = true;
+      }
+    }
+    if (shX !== null && this.baselineShoulderX !== null
+        && this.baselineWidth !== null && this.baselineWidth > 1e-3) {
+      const dev = Math.abs(shX - this.baselineShoulderX);
+      const frac = dev / this.baselineWidth;
+      if (frac > this.leanPeakFrac) this.leanPeakFrac = frac;
+      if (frac > HIP_TRUNK_LEAN_THRESHOLD_FRAC) {
+        this.leanFlagged = true;
+        this.currentLeanActive = true;
+      }
+    }
+
+    this.frameCounter += 1;
+  }
+
+  currentFlags(): Compensation[] {
+    const out: Compensation[] = [];
+    if (this.currentPelvicActive) {
+      out.push({ type: "pelvic_tilt_anterior", label: "Anterior Pelvic Tilt", severity: "high", flagged: true });
+    }
+    if (this.currentLeanActive) {
+      out.push({ type: "hip_trunk_lean", label: "Trunk Lean", severity: "medium", flagged: true });
+    }
+    return out;
+  }
+
+  finish(): Compensation[] {
+    return [
+      {
+        type: "pelvic_tilt_anterior",
+        label: "Anterior Pelvic Tilt",
+        severity: "high",
+        flagged: this.pelvicFlagged,
+        details: `Peak trunk-angle deviation ${this.pelvicPeakDev.toFixed(1)}° from baseline (threshold ${HIP_PELVIC_TILT_THRESHOLD_DEG}°)`,
+      },
+      {
+        type: "hip_trunk_lean",
+        label: "Trunk Lean",
+        severity: "medium",
+        flagged: this.leanFlagged,
+        details: `Peak shoulder displacement ${(this.leanPeakFrac * 100).toFixed(1)} % of shoulder-width (threshold ${(HIP_TRUNK_LEAN_THRESHOLD_FRAC * 100).toFixed(0)} %)`,
+      },
+    ];
+  }
+}
+
+export class HipRotationCompensationTracker extends HipBaseTracker {
+  private readonly side: "left" | "right";
+  private widthSamples: number[] = [];
+  private baselineWidth: number | null = null;
+  private rotationPeakFrac = 0;
+  private rotationFlagged = false;
+  private currentRotationActive = false;
+  private kneeXSamples: number[] = [];
+  private baselineKneeX: number | null = null;
+  private kneeTiltPeakFrac = 0;
+  private kneeFlagged = false;
+  private currentKneeActive = false;
+
+  constructor(side: "left" | "right") {
+    super();
+    this.side = side;
+  }
+
+  feed(keypoints: Keypoint[]): void {
+    this.currentRotationActive = false;
+    this.currentKneeActive = false;
+
+    const width = computeHipShoulderWidth(keypoints);
+    const idx = SIDE_INDICES[this.side];
+    const knee = keypoints[idx.knee];
+    const kneeX = knee && (knee.score ?? 0) >= VIS_THRESHOLD ? knee.x : null;
+
+    if (width !== null
+        && this.widthSamples.length < HIP_COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.widthSamples.push(width);
+      if (this.widthSamples.length === HIP_COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.baselineWidth = hipCompMean(this.widthSamples);
+      }
+    }
+    if (kneeX !== null
+        && this.kneeXSamples.length < HIP_COMPENSATION_BASELINE_FRAME_COUNT) {
+      this.kneeXSamples.push(kneeX);
+      if (this.kneeXSamples.length === HIP_COMPENSATION_BASELINE_FRAME_COUNT) {
+        this.baselineKneeX = hipCompMean(this.kneeXSamples);
+      }
+    }
+
+    if (width !== null && this.baselineWidth !== null && this.baselineWidth > 1e-3) {
+      const shrink = this.baselineWidth - width;
+      const frac = shrink / this.baselineWidth;
+      if (frac > this.rotationPeakFrac) this.rotationPeakFrac = frac;
+      if (frac > HIP_TRUNK_ROTATION_THRESHOLD_FRAC) {
+        this.rotationFlagged = true;
+        this.currentRotationActive = true;
+      }
+    }
+    if (kneeX !== null && this.baselineKneeX !== null
+        && this.baselineWidth !== null && this.baselineWidth > 1e-3) {
+      const dev = Math.abs(kneeX - this.baselineKneeX);
+      const frac = dev / this.baselineWidth;
+      if (frac > this.kneeTiltPeakFrac) this.kneeTiltPeakFrac = frac;
+      if (frac > HIP_KNEE_TILT_THRESHOLD_FRAC) {
+        this.kneeFlagged = true;
+        this.currentKneeActive = true;
+      }
+    }
+
+    this.frameCounter += 1;
+  }
+
+  currentFlags(): Compensation[] {
+    const out: Compensation[] = [];
+    if (this.currentRotationActive) {
+      out.push({ type: "hip_trunk_rotation", label: "Trunk Rotation", severity: "high", flagged: true });
+    }
+    if (this.currentKneeActive) {
+      out.push({ type: "knee_tilt", label: "Knee Tilt", severity: "medium", flagged: true });
+    }
+    return out;
+  }
+
+  finish(): Compensation[] {
+    return [
+      {
+        type: "hip_trunk_rotation",
+        label: "Trunk Rotation",
+        severity: "high",
+        flagged: this.rotationFlagged,
+        details: `Peak shoulder-width shrink ${(this.rotationPeakFrac * 100).toFixed(1)} % of baseline (threshold ${(HIP_TRUNK_ROTATION_THRESHOLD_FRAC * 100).toFixed(0)} %)`,
+      },
+      {
+        type: "knee_tilt",
+        label: "Knee Tilt",
+        severity: "medium",
+        flagged: this.kneeFlagged,
+        details: `Peak knee lateral deviation ${(this.kneeTiltPeakFrac * 100).toFixed(1)} % of shoulder-width (threshold ${(HIP_KNEE_TILT_THRESHOLD_FRAC * 100).toFixed(0)} %)`,
+      },
+    ];
+  }
+}
