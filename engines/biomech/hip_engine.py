@@ -327,6 +327,205 @@ def _grab_hip_key_frame(
     }
 
 
+# ─── Compensation detection ─────────────────────────────────────
+# Three helpers — one per hip exercise — mirroring the JS trackers
+# in motionlens-web/lib/biomech/hip.ts. All are baseline-relative
+# whole-trial checks; no peak-windowing.
+_HIP_PELVIC_TILT_THRESHOLD_DEG = 8.0
+_HIP_TRUNK_LEAN_THRESHOLD_FRAC = 0.15
+_HIP_TRUNK_ROTATION_THRESHOLD_FRAC = 0.15
+_HIP_KNEE_TILT_THRESHOLD_FRAC = 0.12
+_HIP_COMP_BASELINE_FRAME_COUNT = 10
+
+
+def _hip_trunk_angle_deg(
+    sh_mid_x: float, sh_mid_y: float,
+    hp_mid_x: float, hp_mid_y: float,
+) -> Optional[float]:
+    dx = sh_mid_x - hp_mid_x
+    dy = -(sh_mid_y - hp_mid_y)
+    if math.hypot(dx, dy) < 1e-4:
+        return None
+    return math.degrees(math.atan2(dx, dy))
+
+
+def _track_hip_flexext_compensations(
+    movement: str,    # "flexion" | "extension"
+    lhx, lhy, lhv, rhx, rhy, rhv,
+    lsx, lsy, lsv, rsx, rsy, rsv,
+    n: int,
+) -> list[dict]:
+    trunk_samples: list[float] = []
+    shoulder_x_samples: list[float] = []
+    width_samples: list[float] = []
+    baseline_trunk: Optional[float] = None
+    baseline_sh_x: Optional[float] = None
+    baseline_width: Optional[float] = None
+    pelvic_peak_dev = 0.0
+    lean_peak_frac = 0.0
+    pelvic_flagged = False
+    lean_flagged = False
+
+    for i in range(n):
+        all_v = (lhv[i] >= _HIP_VIS_THRESHOLD
+                 and rhv[i] >= _HIP_VIS_THRESHOLD
+                 and lsv[i] >= _HIP_VIS_THRESHOLD
+                 and rsv[i] >= _HIP_VIS_THRESHOLD)
+        trunk_deg: Optional[float] = None
+        sh_mid_x: Optional[float] = None
+        width: Optional[float] = None
+        if all_v:
+            sh_mid_x_local = (float(lsx[i]) + float(rsx[i])) / 2.0
+            sh_mid_y = (float(lsy[i]) + float(rsy[i])) / 2.0
+            hp_mid_x = (float(lhx[i]) + float(rhx[i])) / 2.0
+            hp_mid_y = (float(lhy[i]) + float(rhy[i])) / 2.0
+            trunk_deg = _hip_trunk_angle_deg(
+                sh_mid_x_local, sh_mid_y, hp_mid_x, hp_mid_y,
+            )
+            sh_mid_x = sh_mid_x_local
+            width = abs(float(rsx[i]) - float(lsx[i]))
+
+        if (trunk_deg is not None
+                and len(trunk_samples) < _HIP_COMP_BASELINE_FRAME_COUNT):
+            trunk_samples.append(trunk_deg)
+            if len(trunk_samples) == _HIP_COMP_BASELINE_FRAME_COUNT:
+                baseline_trunk = sum(trunk_samples) / _HIP_COMP_BASELINE_FRAME_COUNT
+        if (sh_mid_x is not None and width is not None
+                and len(shoulder_x_samples) < _HIP_COMP_BASELINE_FRAME_COUNT):
+            shoulder_x_samples.append(sh_mid_x)
+            width_samples.append(width)
+            if len(shoulder_x_samples) == _HIP_COMP_BASELINE_FRAME_COUNT:
+                baseline_sh_x = sum(shoulder_x_samples) / _HIP_COMP_BASELINE_FRAME_COUNT
+                baseline_width = sum(width_samples) / _HIP_COMP_BASELINE_FRAME_COUNT
+
+        if trunk_deg is not None and baseline_trunk is not None:
+            dev = abs(trunk_deg - baseline_trunk)
+            if dev > pelvic_peak_dev:
+                pelvic_peak_dev = dev
+            if dev > _HIP_PELVIC_TILT_THRESHOLD_DEG:
+                pelvic_flagged = True
+        if (sh_mid_x is not None and baseline_sh_x is not None
+                and baseline_width is not None and baseline_width > 1e-3):
+            dev = abs(sh_mid_x - baseline_sh_x)
+            frac = dev / baseline_width
+            if frac > lean_peak_frac:
+                lean_peak_frac = frac
+            if frac > _HIP_TRUNK_LEAN_THRESHOLD_FRAC:
+                lean_flagged = True
+
+    if movement == "extension":
+        primary_type = "pelvic_tilt_anterior"
+        primary_label = "Anterior Pelvic Tilt"
+    else:
+        primary_type = "pelvic_tilt_posterior"
+        primary_label = "Posterior Pelvic Tilt"
+
+    return [
+        {
+            "type": primary_type,
+            "label": primary_label,
+            "severity": "high",
+            "flagged": pelvic_flagged,
+            "details": (
+                f"Peak trunk-angle deviation {pelvic_peak_dev:.1f}° "
+                f"from baseline "
+                f"(threshold {_HIP_PELVIC_TILT_THRESHOLD_DEG:.0f}°)"
+            ),
+        },
+        {
+            "type": "hip_trunk_lean",
+            "label": "Trunk Lean",
+            "severity": "medium",
+            "flagged": lean_flagged,
+            "details": (
+                f"Peak shoulder displacement "
+                f"{lean_peak_frac * 100:.1f} % of shoulder-width "
+                f"(threshold {_HIP_TRUNK_LEAN_THRESHOLD_FRAC * 100:.0f} %)"
+            ),
+        },
+    ]
+
+
+def _track_hip_rotation_compensations(
+    side: str,
+    lsx, lsy, lsv, rsx, rsy, rsv,
+    side_kx, side_ky, side_kv,
+    n: int,
+) -> list[dict]:
+    _ = side
+    width_samples: list[float] = []
+    knee_x_samples: list[float] = []
+    baseline_width: Optional[float] = None
+    baseline_knee_x: Optional[float] = None
+    rotation_peak_frac = 0.0
+    knee_peak_frac = 0.0
+    rotation_flagged = False
+    knee_flagged = False
+
+    for i in range(n):
+        # Width baseline + rotation signal
+        width: Optional[float] = None
+        if lsv[i] >= _HIP_VIS_THRESHOLD and rsv[i] >= _HIP_VIS_THRESHOLD:
+            width = abs(float(rsx[i]) - float(lsx[i]))
+            if width < 1e-3:
+                width = None
+        # Knee.x signal
+        knee_x: Optional[float] = None
+        if side_kv[i] >= _HIP_VIS_THRESHOLD:
+            knee_x = float(side_kx[i])
+
+        if width is not None and len(width_samples) < _HIP_COMP_BASELINE_FRAME_COUNT:
+            width_samples.append(width)
+            if len(width_samples) == _HIP_COMP_BASELINE_FRAME_COUNT:
+                baseline_width = sum(width_samples) / _HIP_COMP_BASELINE_FRAME_COUNT
+        if knee_x is not None and len(knee_x_samples) < _HIP_COMP_BASELINE_FRAME_COUNT:
+            knee_x_samples.append(knee_x)
+            if len(knee_x_samples) == _HIP_COMP_BASELINE_FRAME_COUNT:
+                baseline_knee_x = sum(knee_x_samples) / _HIP_COMP_BASELINE_FRAME_COUNT
+
+        if (width is not None and baseline_width is not None
+                and baseline_width > 1e-3):
+            shrink = baseline_width - width
+            frac = shrink / baseline_width
+            if frac > rotation_peak_frac:
+                rotation_peak_frac = frac
+            if frac > _HIP_TRUNK_ROTATION_THRESHOLD_FRAC:
+                rotation_flagged = True
+        if (knee_x is not None and baseline_knee_x is not None
+                and baseline_width is not None and baseline_width > 1e-3):
+            dev = abs(knee_x - baseline_knee_x)
+            frac = dev / baseline_width
+            if frac > knee_peak_frac:
+                knee_peak_frac = frac
+            if frac > _HIP_KNEE_TILT_THRESHOLD_FRAC:
+                knee_flagged = True
+
+    return [
+        {
+            "type": "hip_trunk_rotation",
+            "label": "Trunk Rotation",
+            "severity": "high",
+            "flagged": rotation_flagged,
+            "details": (
+                f"Peak shoulder-width shrink "
+                f"{rotation_peak_frac * 100:.1f} % of baseline "
+                f"(threshold {_HIP_TRUNK_ROTATION_THRESHOLD_FRAC * 100:.0f} %)"
+            ),
+        },
+        {
+            "type": "knee_tilt",
+            "label": "Knee Tilt",
+            "severity": "medium",
+            "flagged": knee_flagged,
+            "details": (
+                f"Peak knee lateral deviation "
+                f"{knee_peak_frac * 100:.1f} % of shoulder-width "
+                f"(threshold {_HIP_KNEE_TILT_THRESHOLD_FRAC * 100:.0f} %)"
+            ),
+        },
+    ]
+
+
 def _analyze_hip_rotation(
     video_path: str,
     pose_options,
@@ -374,6 +573,14 @@ def _analyze_hip_rotation(
 
     hex_ = ts[heel_key]["x_px"];  hey = ts[heel_key]["y_px"];  vhe = ts[heel_key]["vis"]
     fx_  = ts[foot_key]["x_px"];  fy_ = ts[foot_key]["y_px"];  vfi = ts[foot_key]["vis"]
+
+    # Compensation tracker inputs — additive, not consumed by the
+    # existing rotation pipeline.
+    lsx_r = ts["left_shoulder"]["x_px"];  lsy_r = ts["left_shoulder"]["y_px"];  lsv_r = ts["left_shoulder"]["vis"]
+    rsx_r = ts["right_shoulder"]["x_px"]; rsy_r = ts["right_shoulder"]["y_px"]; rsv_r = ts["right_shoulder"]["vis"]
+    side_kx_r = ts[f"{side}_knee"]["x_px"]
+    side_ky_r = ts[f"{side}_knee"]["y_px"]
+    side_kv_r = ts[f"{side}_knee"]["vis"]
 
     n = int(min(len(hex_), len(fx_)))
 
@@ -536,6 +743,13 @@ def _analyze_hip_rotation(
         "secondary_reference_range": [float(s_lo), float(s_hi)],
         "primary_label": "Internal Rotation",
         "secondary_label": "External Rotation",
+        "compensations": _track_hip_rotation_compensations(
+            side,
+            lsx_r, lsy_r, lsv_r,
+            rsx_r, rsy_r, rsv_r,
+            side_kx_r, side_ky_r, side_kv_r,
+            n,
+        ),
     }
 
 
@@ -620,6 +834,12 @@ def analyze_hip(
     sx = ts[shoulder_key]["x_px"]; sy = ts[shoulder_key]["y_px"]; vs = ts[shoulder_key]["vis"]
     hx = ts[hip_key]["x_px"];      hy = ts[hip_key]["y_px"];      vh = ts[hip_key]["vis"]
     kx = ts[knee_key]["x_px"];     ky = ts[knee_key]["y_px"];     vk = ts[knee_key]["vis"]
+
+    # Compensation tracker inputs — additive
+    lhx_c = ts["left_hip"]["x_px"];      lhy_c = ts["left_hip"]["y_px"];      lhv_c = ts["left_hip"]["vis"]
+    rhx_c = ts["right_hip"]["x_px"];     rhy_c = ts["right_hip"]["y_px"];     rhv_c = ts["right_hip"]["vis"]
+    lsx_c = ts["left_shoulder"]["x_px"]; lsy_c = ts["left_shoulder"]["y_px"]; lsv_c = ts["left_shoulder"]["vis"]
+    rsx_c = ts["right_shoulder"]["x_px"]; rsy_c = ts["right_shoulder"]["y_px"]; rsv_c = ts["right_shoulder"]["vis"]
 
     n = int(min(len(sx), len(hx), len(kx)))
 
@@ -743,4 +963,10 @@ def analyze_hip(
         "fps": float(fps),
         "interpretation": interpretation,
         "key_frames": key_frames,
+        "compensations": _track_hip_flexext_compensations(
+            movement,
+            lhx_c, lhy_c, lhv_c, rhx_c, rhy_c, rhv_c,
+            lsx_c, lsy_c, lsv_c, rsx_c, rsy_c, rsv_c,
+            n,
+        ),
     }

@@ -146,6 +146,7 @@ export const MOVEMENT_INSTRUCTIONS: Record<Key, string[]> = {
     "Hold the most-bent position for ~2 seconds — this captures the FLEXION peak.",
     "Slowly straighten the leg back to fully extended. Don't push past pain — pain-free range only.",
     "Click Show Analysis. The report will show separate Flexion and Extension peak values, normal ranges for each, and screenshots of both moments.",
+    "Avoid these compensations: keep the thigh roughly stationary (only the lower leg should move), and don't lean your trunk forward or backward to assist the bend.",
   ],
 
   // ── Hip ──────────────────────────────────────────────────────
@@ -155,6 +156,7 @@ export const MOVEMENT_INSTRUCTIONS: Record<Key, string[]> = {
     "Slowly lift the test-side knee forward and upward, bringing the thigh toward your chest. Keep the standing leg straight and trunk upright.",
     "Hold the highest comfortable position for 2 seconds. Don't lean back to gain extra range.",
     "Slowly lower the leg back to standing. Repeat on the other side if assessing both.",
+    "Avoid these compensations: don't lean your trunk back to gain extra leg height (posterior pelvic tilt), and keep the trunk upright throughout.",
   ],
   "hip.extension": [
     "Stand about 6 feet (2 metres) from the camera, turned so the camera sees your side. Use a wall or chair for balance if needed.",
@@ -162,6 +164,7 @@ export const MOVEMENT_INSTRUCTIONS: Record<Key, string[]> = {
     "Slowly move the test-side leg backward, keeping the knee straight. The thigh should travel behind the body line.",
     "Hold the furthest backward position for 2 seconds. Important: don't arch your lower back — that fakes the movement.",
     "Slowly bring the leg back to standing. Repeat on the other side if assessing both.",
+    "Avoid these compensations: don't arch your lower back / lean trunk forward (anterior pelvic tilt), and keep the trunk upright throughout.",
   ],
   "hip.rotation": [
     "Sit upright on a chair facing the camera, with both feet flat on the floor and the lower legs roughly vertical. The camera should see both feet clearly.",
@@ -171,6 +174,7 @@ export const MOVEMENT_INSTRUCTIONS: Record<Key, string[]> = {
     "Return to neutral, then slowly rotate the foot INWARD (toes swing TOWARD / across the other leg) — this is internal rotation. Hold the end-range for 2 seconds.",
     "Important: the rotation must come from the HIP, not from twisting the knee. The thigh and pelvis stay still — only the leg swings as a whole around the heel.",
     "Note: 2D camera measurement of hip rotation is approximate. Keep the heel down throughout.",
+    "Avoid these compensations: don't twist your trunk (shoulders must stay facing the camera), and keep the test-side knee still over the hip — only the foot pivots.",
   ],
   "hip.internal_rotation": [
     "Sit on a chair facing the camera, with the camera showing both legs from the front. Both feet flat on the floor.",
@@ -194,6 +198,7 @@ export const MOVEMENT_INSTRUCTIONS: Record<Key, string[]> = {
     "Slowly bend the knee forward, trying to make the knee touch the wall while keeping your heel on the floor. The shin will tilt forward over the foot.",
     "Hold the deepest comfortable lean for 2 seconds. Don't lift the heel off the ground at any point.",
     "Slowly straighten back to standing. This is the standard knee-to-wall dorsiflexion test.",
+    "Avoid these compensations: keep the heel down (no heel lift), and don't shift your whole leg / over-bend the knee to fake the lean.",
   ],
   "ankle.extension": [
     "Sit on a chair with one leg extended out, turned so the camera sees the side of that leg. Use a stool or another chair to support the leg if needed.",
@@ -201,6 +206,7 @@ export const MOVEMENT_INSTRUCTIONS: Record<Key, string[]> = {
     "Slowly point the foot downward as far as you can — like pressing a gas pedal. Move only at the ankle, keeping the leg still.",
     "Hold the most-pointed position for 2 seconds.",
     "Slowly bring the foot back to neutral (90° to the leg). Repeat on the other side if assessing both.",
+    "Avoid these compensations: keep the leg fully extended (don't bend the knee), and only the ankle should move — keep the thigh still on the support.",
   ],
 };
 

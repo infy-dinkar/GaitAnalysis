@@ -219,6 +219,140 @@ def _interior_ankle_angle(
     return math.degrees(math.acos(cos_t))
 
 
+# ─── Compensation detection ─────────────────────────────────────
+# Two generic compensations, both baseline-relative whole-trial.
+# Defined WITHOUT foot landmarks so the same compensation contract
+# applies in live MoveNet mode (no heel / foot_index there) — the
+# foot-bearing math stays in the existing angle pipeline above.
+#
+#   • Ankle Knee Movement (HIGH) — interior knee angle (hip, knee,
+#     ankle) deviation from first-10-frame baseline. Threshold per
+#     exercise: 40° dorsi, 15° plantar.
+#   • Ankle Leg Lift (MEDIUM) — mean of (hip.y + knee.y) shift
+#     from baseline / baseline shoulder-width.
+_ANKLE_KNEE_MOVE_DORSI_THRESHOLD_DEG = 40.0
+_ANKLE_KNEE_MOVE_PLANTAR_THRESHOLD_DEG = 15.0
+_ANKLE_LEG_LIFT_THRESHOLD_FRAC = 0.10
+_ANKLE_COMP_BASELINE_FRAME_COUNT = 10
+_ANKLE_COMP_VIS_THRESHOLD = 0.4
+
+
+def _knee_interior_angle_for_ankle(
+    hip_x: float, hip_y: float,
+    knee_x: float, knee_y: float,
+    ankle_x: float, ankle_y: float,
+) -> Optional[float]:
+    v1x = hip_x - knee_x; v1y = hip_y - knee_y
+    v2x = ankle_x - knee_x; v2y = ankle_y - knee_y
+    n1 = math.hypot(v1x, v1y); n2 = math.hypot(v2x, v2y)
+    if n1 < 1e-6 or n2 < 1e-6:
+        return None
+    cos_t = (v1x * v2x + v1y * v2y) / (n1 * n2)
+    cos_t = max(-1.0, min(1.0, cos_t))
+    return math.degrees(math.acos(cos_t))
+
+
+def _track_ankle_compensations(
+    movement: str,    # "flexion" (dorsi) | "extension" (plantar)
+    side_hx, side_hy, side_hv,    # test-side hip
+    side_kx, side_ky, side_kv,    # test-side knee
+    side_ax, side_ay, side_av,    # test-side ankle
+    lsx, lsy, lsv,                # left shoulder
+    rsx, rsy, rsv,                # right shoulder
+    n: int,
+) -> list[dict]:
+    knee_threshold_deg = (
+        _ANKLE_KNEE_MOVE_DORSI_THRESHOLD_DEG if movement == "flexion"
+        else _ANKLE_KNEE_MOVE_PLANTAR_THRESHOLD_DEG
+    )
+
+    knee_samples: list[float] = []
+    leg_y_samples: list[float] = []
+    width_samples: list[float] = []
+    baseline_knee: Optional[float] = None
+    baseline_leg_y: Optional[float] = None
+    baseline_width: Optional[float] = None
+    knee_peak_dev = 0.0
+    leg_lift_peak_frac = 0.0
+    knee_flagged = False
+    leg_lift_flagged = False
+
+    for i in range(n):
+        knee_interior: Optional[float] = None
+        if (side_hv[i] >= _ANKLE_COMP_VIS_THRESHOLD
+                and side_kv[i] >= _ANKLE_COMP_VIS_THRESHOLD
+                and side_av[i] >= _ANKLE_COMP_VIS_THRESHOLD):
+            knee_interior = _knee_interior_angle_for_ankle(
+                float(side_hx[i]), float(side_hy[i]),
+                float(side_kx[i]), float(side_ky[i]),
+                float(side_ax[i]), float(side_ay[i]),
+            )
+
+        leg_y: Optional[float] = None
+        width: Optional[float] = None
+        if (side_hv[i] >= _ANKLE_COMP_VIS_THRESHOLD
+                and side_kv[i] >= _ANKLE_COMP_VIS_THRESHOLD):
+            leg_y = (float(side_hy[i]) + float(side_ky[i])) / 2.0
+        if (lsv[i] >= _ANKLE_COMP_VIS_THRESHOLD
+                and rsv[i] >= _ANKLE_COMP_VIS_THRESHOLD):
+            w = abs(float(rsx[i]) - float(lsx[i]))
+            if w > 1e-3:
+                width = w
+
+        if (knee_interior is not None
+                and len(knee_samples) < _ANKLE_COMP_BASELINE_FRAME_COUNT):
+            knee_samples.append(knee_interior)
+            if len(knee_samples) == _ANKLE_COMP_BASELINE_FRAME_COUNT:
+                baseline_knee = sum(knee_samples) / _ANKLE_COMP_BASELINE_FRAME_COUNT
+        if (leg_y is not None and width is not None
+                and len(leg_y_samples) < _ANKLE_COMP_BASELINE_FRAME_COUNT):
+            leg_y_samples.append(leg_y)
+            width_samples.append(width)
+            if len(leg_y_samples) == _ANKLE_COMP_BASELINE_FRAME_COUNT:
+                baseline_leg_y = sum(leg_y_samples) / _ANKLE_COMP_BASELINE_FRAME_COUNT
+                baseline_width = sum(width_samples) / _ANKLE_COMP_BASELINE_FRAME_COUNT
+
+        if knee_interior is not None and baseline_knee is not None:
+            dev = abs(knee_interior - baseline_knee)
+            if dev > knee_peak_dev:
+                knee_peak_dev = dev
+            if dev > knee_threshold_deg:
+                knee_flagged = True
+        if (leg_y is not None and baseline_leg_y is not None
+                and baseline_width is not None and baseline_width > 1e-3):
+            dev = abs(leg_y - baseline_leg_y)
+            frac = dev / baseline_width
+            if frac > leg_lift_peak_frac:
+                leg_lift_peak_frac = frac
+            if frac > _ANKLE_LEG_LIFT_THRESHOLD_FRAC:
+                leg_lift_flagged = True
+
+    return [
+        {
+            "type": "ankle_knee_movement",
+            "label": "Knee Movement",
+            "severity": "high",
+            "flagged": knee_flagged,
+            "details": (
+                f"Peak knee-angle deviation {knee_peak_dev:.1f}° "
+                f"from baseline "
+                f"(threshold {knee_threshold_deg:.0f}°)"
+            ),
+        },
+        {
+            "type": "ankle_leg_lift",
+            "label": "Leg Lift",
+            "severity": "medium",
+            "flagged": leg_lift_flagged,
+            "details": (
+                f"Peak hip+knee vertical shift "
+                f"{leg_lift_peak_frac * 100:.1f} % of shoulder-width "
+                f"(threshold {_ANKLE_LEG_LIFT_THRESHOLD_FRAC * 100:.0f} %)"
+            ),
+        },
+    ]
+
+
 # ─── Main entry point ───────────────────────────────────────────
 def analyze_ankle(
     video_path: str,
@@ -245,6 +379,7 @@ def analyze_ankle(
     knee_key  = f"{side}_knee"
     ankle_key = f"{side}_ankle"
     foot_key  = f"{side}_foot_index"
+    hip_key   = f"{side}_hip"
 
     # Pixel-space coordinates (already smoothed by build_time_series).
     kx = ts[knee_key]["x_px"];   ky = ts[knee_key]["y_px"]
@@ -253,6 +388,11 @@ def analyze_ankle(
     vk = ts[knee_key]["vis"]
     va = ts[ankle_key]["vis"]
     vf = ts[foot_key]["vis"]
+
+    # Compensation tracker inputs — additive
+    hx_c = ts[hip_key]["x_px"];           hy_c = ts[hip_key]["y_px"];           vh_c = ts[hip_key]["vis"]
+    lsx_c = ts["left_shoulder"]["x_px"];  lsy_c = ts["left_shoulder"]["y_px"];  lsv_c = ts["left_shoulder"]["vis"]
+    rsx_c = ts["right_shoulder"]["x_px"]; rsy_c = ts["right_shoulder"]["y_px"]; rsv_c = ts["right_shoulder"]["vis"]
 
     n = int(min(len(kx), len(ax), len(fx)))
 
@@ -542,4 +682,13 @@ def analyze_ankle(
         "fps": float(fps),
         "interpretation": interpretation,
         "key_frames": key_frames,
+        "compensations": _track_ankle_compensations(
+            movement,
+            hx_c, hy_c, vh_c,
+            kx, ky, vk,
+            ax, ay, va,
+            lsx_c, lsy_c, lsv_c,
+            rsx_c, rsy_c, rsv_c,
+            n,
+        ),
     }

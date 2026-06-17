@@ -279,6 +279,7 @@ export function AnkleCapture({
           target={[result.reference_range[0], result.reference_range[1]]}
           side={side}
           keyFrames={result.key_frames}
+          compensations={result.compensations}
         />
 
         <SaveToPatientButton
@@ -301,6 +302,13 @@ export function AnkleCapture({
               // viewer can render them later (mirrors how TUG saves
               // its annotated screenshots).
               key_frames: result.key_frames ?? [],
+              // Persist compensations so saved reports re-render
+              // them (parseSavedCompensations in reports/[id]/page
+              // re-hydrates them on open). Conditional to keep the
+              // blob unchanged when the backend returns nothing.
+              ...(result.compensations && result.compensations.length > 0
+                ? { compensations: result.compensations }
+                : {}),
             },
             observations: { interpretation: result.interpretation },
           })}

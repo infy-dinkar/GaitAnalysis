@@ -244,6 +244,119 @@ def _grab_knee_key_frame(
     }
 
 
+# ─── Compensation detection ─────────────────────────────────────
+# Two compensations, both baseline-relative whole-trial checks:
+#   • Thigh Movement (HIGH) — thigh-vector (hip → knee) angle
+#     deviation from first-10-frame baseline. Thigh should stay
+#     roughly stationary while only the lower leg bends.
+#   • Knee Trunk Lean (MEDIUM) — trunk vector (hip-mid → shoulder-
+#     mid) angle change from baseline.
+#
+# Lenient thresholds (15° thigh, 12° trunk) so the stand-or-sit
+# setup variability per instructions.ts doesn't false-fire.
+_KNEE_THIGH_MOVEMENT_THRESHOLD_DEG = 15.0
+_KNEE_TRUNK_LEAN_THRESHOLD_DEG = 12.0
+_KNEE_COMP_BASELINE_FRAME_COUNT = 10
+
+
+def _track_knee_compensations(
+    side: str,
+    lhx, lhy, lhv,    # left hip
+    rhx, rhy, rhv,    # right hip
+    lsx, lsy, lsv,    # left shoulder
+    rsx, rsy, rsv,    # right shoulder
+    side_hx, side_hy, side_hv,    # test-side hip
+    side_kx, side_ky, side_kv,    # test-side knee
+    n: int,
+) -> list[dict]:
+    _ = side  # carried for parity / future per-side tweaks
+    thigh_samples: list[float] = []
+    trunk_samples: list[float] = []
+    baseline_thigh: Optional[float] = None
+    baseline_trunk: Optional[float] = None
+    thigh_peak_dev = 0.0
+    trunk_peak_dev = 0.0
+    thigh_flagged = False
+    trunk_flagged = False
+
+    for i in range(n):
+        # Thigh angle: atan2(dx, dy) of (hip → knee) — same math as
+        # the JS computeKneeThighAngleDeg.
+        thigh_deg: Optional[float] = None
+        if (side_hv[i] >= _KNEE_VIS_THRESHOLD
+                and side_kv[i] >= _KNEE_VIS_THRESHOLD):
+            dx = float(side_kx[i]) - float(side_hx[i])
+            dy = float(side_ky[i]) - float(side_hy[i])
+            if math.hypot(dx, dy) >= 1e-4:
+                thigh_deg = math.degrees(math.atan2(dx, dy))
+
+        # Trunk angle: atan2(dx, -dy) of (hip-mid → shoulder-mid).
+        trunk_deg: Optional[float] = None
+        if (lhv[i] >= _KNEE_VIS_THRESHOLD
+                and rhv[i] >= _KNEE_VIS_THRESHOLD
+                and lsv[i] >= _KNEE_VIS_THRESHOLD
+                and rsv[i] >= _KNEE_VIS_THRESHOLD):
+            sh_mid_x = (float(lsx[i]) + float(rsx[i])) / 2.0
+            sh_mid_y = (float(lsy[i]) + float(rsy[i])) / 2.0
+            hp_mid_x = (float(lhx[i]) + float(rhx[i])) / 2.0
+            hp_mid_y = (float(lhy[i]) + float(rhy[i])) / 2.0
+            dx = sh_mid_x - hp_mid_x
+            dy = -(sh_mid_y - hp_mid_y)
+            if math.hypot(dx, dy) >= 1e-4:
+                trunk_deg = math.degrees(math.atan2(dx, dy))
+
+        # Baseline accumulation
+        if (thigh_deg is not None
+                and len(thigh_samples) < _KNEE_COMP_BASELINE_FRAME_COUNT):
+            thigh_samples.append(thigh_deg)
+            if len(thigh_samples) == _KNEE_COMP_BASELINE_FRAME_COUNT:
+                baseline_thigh = sum(thigh_samples) / _KNEE_COMP_BASELINE_FRAME_COUNT
+        if (trunk_deg is not None
+                and len(trunk_samples) < _KNEE_COMP_BASELINE_FRAME_COUNT):
+            trunk_samples.append(trunk_deg)
+            if len(trunk_samples) == _KNEE_COMP_BASELINE_FRAME_COUNT:
+                baseline_trunk = sum(trunk_samples) / _KNEE_COMP_BASELINE_FRAME_COUNT
+
+        # Threshold checks
+        if thigh_deg is not None and baseline_thigh is not None:
+            dev = abs(thigh_deg - baseline_thigh)
+            if dev > thigh_peak_dev:
+                thigh_peak_dev = dev
+            if dev > _KNEE_THIGH_MOVEMENT_THRESHOLD_DEG:
+                thigh_flagged = True
+        if trunk_deg is not None and baseline_trunk is not None:
+            dev = abs(trunk_deg - baseline_trunk)
+            if dev > trunk_peak_dev:
+                trunk_peak_dev = dev
+            if dev > _KNEE_TRUNK_LEAN_THRESHOLD_DEG:
+                trunk_flagged = True
+
+    return [
+        {
+            "type": "thigh_movement",
+            "label": "Thigh Movement",
+            "severity": "high",
+            "flagged": thigh_flagged,
+            "details": (
+                f"Peak thigh-angle deviation {thigh_peak_dev:.1f}° "
+                f"from baseline "
+                f"(threshold {_KNEE_THIGH_MOVEMENT_THRESHOLD_DEG:.0f}°)"
+            ),
+        },
+        {
+            "type": "knee_trunk_lean",
+            "label": "Trunk Lean",
+            "severity": "medium",
+            "flagged": trunk_flagged,
+            "details": (
+                f"Peak trunk-angle deviation {trunk_peak_dev:.1f}° "
+                f"from baseline "
+                f"(threshold {_KNEE_TRUNK_LEAN_THRESHOLD_DEG:.0f}°)"
+            ),
+        },
+    ]
+
+
 # ─── Main entry point ───────────────────────────────────────────
 def analyze_knee(
     video_path: str,
@@ -297,6 +410,14 @@ def analyze_knee(
     hx = ts[hip_key]["x_px"];   hy = ts[hip_key]["y_px"];   vh = ts[hip_key]["vis"]
     kx = ts[knee_key]["x_px"];  ky = ts[knee_key]["y_px"];  vk = ts[knee_key]["vis"]
     ax = ts[ankle_key]["x_px"]; ay = ts[ankle_key]["y_px"]; va = ts[ankle_key]["vis"]
+
+    # Pull both shoulders + both hips for the compensation tracker's
+    # trunk-angle math. Additive — not consumed by the existing knee
+    # angle pipeline.
+    lhx = ts["left_hip"]["x_px"];      lhy = ts["left_hip"]["y_px"];      lhv = ts["left_hip"]["vis"]
+    rhx = ts["right_hip"]["x_px"];     rhy = ts["right_hip"]["y_px"];     rhv = ts["right_hip"]["vis"]
+    lsx = ts["left_shoulder"]["x_px"]; lsy = ts["left_shoulder"]["y_px"]; lsv = ts["left_shoulder"]["vis"]
+    rsx = ts["right_shoulder"]["x_px"]; rsy = ts["right_shoulder"]["y_px"]; rsv = ts["right_shoulder"]["vis"]
 
     n = int(min(len(hx), len(kx), len(ax)))
 
@@ -402,6 +523,17 @@ def analyze_knee(
         if kf:
             key_frames.append(kf)
 
+    compensations = _track_knee_compensations(
+        side,
+        lhx, lhy, lhv,
+        rhx, rhy, rhv,
+        lsx, lsy, lsv,
+        rsx, rsy, rsv,
+        hx, hy, vh,
+        kx, ky, vk,
+        n,
+    )
+
     return {
         "body_part": "knee",
         "movement": "flexion_extension",
@@ -424,4 +556,5 @@ def analyze_knee(
         "secondary_reference_range": [float(s_lo), float(s_hi)],
         "primary_label": "Flexion",
         "secondary_label": "Extension",
+        "compensations": compensations,
     }
