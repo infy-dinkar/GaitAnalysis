@@ -286,6 +286,28 @@ const PRODUCTS: ProductCard[] = [
     icon: MoveRight,
     iconTone: "text-red-500",
   },
+  {
+    targetRoute: "/orthopedic/single-leg-hop",
+    eyebrow: "Functional hop test",
+    title: "Single-Leg Hop.",
+    body:
+      "Forward hop for distance — patient stands on the test leg, hops forward, lands on the same leg. Three trials per leg, both sides. Scale calibrated from the patient's standing height; the Limb Symmetry Index (≥ 90 % = cleared, standard ACL convention) flags side-to-side asymmetry.",
+    gradient:
+      "linear-gradient(135deg, rgba(249,115,22,0.20) 0%, rgba(251,146,60,0.10) 50%, rgba(28,28,33,0.0) 100%)",
+    icon: MoveRight,
+    iconTone: "text-orange-500",
+  },
+  {
+    targetRoute: "/orthopedic/counter-movement-jump",
+    eyebrow: "Vertical jump · power",
+    title: "Counter-Movement Jump.",
+    body:
+      "Lateral-view vertical jump for power. Patient dips into a brief squat then jumps straight up as high as possible — up to 3 jumps per recording. Primary outcome is jump height (cm) from the hip-midpoint apex; secondary is flight time plus a gravity-based physics cross-check (h = g · t² / 8) that stays valid even when calibration fails.",
+    gradient:
+      "linear-gradient(135deg, rgba(139,92,246,0.20) 0%, rgba(167,139,250,0.10) 50%, rgba(28,28,33,0.0) 100%)",
+    icon: MoveRight,
+    iconTone: "text-violet-500",
+  },
 ];
 
 export function ProductShowcase() {

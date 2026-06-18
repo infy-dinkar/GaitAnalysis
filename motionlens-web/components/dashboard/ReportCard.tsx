@@ -130,6 +130,16 @@ const MODULE_META: Record<
     icon: MoveRight,
     tone: "bg-red-500/10 text-red-700 dark:text-red-400",
   },
+  single_leg_hop: {
+    label: "Single-Leg Hop",
+    icon: MoveRight,
+    tone: "bg-orange-500/10 text-orange-700 dark:text-orange-400",
+  },
+  counter_movement_jump: {
+    label: "Counter-Movement Jump",
+    icon: MoveRight,
+    tone: "bg-violet-500/10 text-violet-700 dark:text-violet-400",
+  },
 };
 
 export function ReportCard({

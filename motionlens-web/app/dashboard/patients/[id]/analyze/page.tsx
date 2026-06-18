@@ -200,6 +200,24 @@ const MODULES = [
     tone: "from-red-500/15 to-red-500/5",
     iconTone: "text-red-600",
   },
+  {
+    href: "orthopedic/single-leg-hop",
+    eyebrow: "Functional hop test",
+    title: "Single-Leg Hop",
+    body: "Forward hop for distance. Patient stands on the test leg, hops forward, and lands on the same leg — three trials per leg. Scale is calibrated from the patient's standing height; the Limb Symmetry Index (≥ 90 % = cleared, standard ACL convention) flags side-to-side asymmetry.",
+    icon: MoveRight,
+    tone: "from-orange-500/15 to-orange-500/5",
+    iconTone: "text-orange-600",
+  },
+  {
+    href: "orthopedic/counter-movement-jump",
+    eyebrow: "Vertical jump · power",
+    title: "Counter-Movement Jump",
+    body: "Vertical jump for power. Patient dips into a brief squat then jumps straight up as high as possible — up to 3 trials per recording. Primary outcome is jump height (cm) from the hip-midpoint apex; secondary is flight time plus a gravity-based physics cross-check.",
+    icon: MoveRight,
+    tone: "from-violet-500/15 to-violet-500/5",
+    iconTone: "text-violet-600",
+  },
 ];
 
 export default function AnalyzePage({
