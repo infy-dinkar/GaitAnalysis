@@ -26,6 +26,8 @@ import { SavedSTSQualityReport } from "@/components/orthopedic/SavedSTSQualityRe
 import { SavedTandemWalkReport } from "@/components/orthopedic/SavedTandemWalkReport";
 import { SavedPronatorDriftReport } from "@/components/orthopedic/SavedPronatorDriftReport";
 import { SavedFunctionalReachReport } from "@/components/orthopedic/SavedFunctionalReachReport";
+import { SavedSingleLegHopReport } from "@/components/orthopedic/SavedSingleLegHopReport";
+import { SavedCMJReport } from "@/components/orthopedic/SavedCMJReport";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { formatIST } from "@/lib/format/datetime";
 import type { ReportDTO } from "@/lib/reports";
@@ -458,6 +460,28 @@ function ReportBody({
     );
   }
 
+  if (report.module === "single_leg_hop") {
+    return (
+      <SavedSingleLegHopReport
+        patientName={patient.name}
+        patient={patient}
+        metrics={report.metrics as Record<string, unknown>}
+        observations={report.observations as Record<string, unknown>}
+      />
+    );
+  }
+
+  if (report.module === "counter_movement_jump") {
+    return (
+      <SavedCMJReport
+        patientName={patient.name}
+        patient={patient}
+        metrics={report.metrics as Record<string, unknown>}
+        observations={report.observations as Record<string, unknown>}
+      />
+    );
+  }
+
   return <Notice>Unsupported module: {report.module}</Notice>;
 }
 
@@ -501,7 +525,116 @@ function buildDeltaRows(left: ReportDTO, right: ReportDTO): DeltaRow[] {
   if (left.module === "tandem_walk") return tandemWalkDeltas(left, right);
   if (left.module === "pronator_drift") return pronatorDriftDeltas(left, right);
   if (left.module === "functional_reach") return functionalReachDeltas(left, right);
+  if (left.module === "single_leg_hop") return singleLegHopDeltas(left, right);
+  if (left.module === "counter_movement_jump") return cmjDeltas(left, right);
   return [];
+}
+
+function cmjDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
+  const get = (m: Record<string, unknown>, key: string): number | null => {
+    const result = (m.result ?? null) as Record<string, unknown> | null;
+    if (!result) return null;
+    const v = result[key];
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+  };
+  const ml = left.metrics as Record<string, unknown>;
+  const mr = right.metrics as Record<string, unknown>;
+  const row = (
+    label: string,
+    b: number | null,
+    a: number | null,
+    unit: string,
+    higherBetter: boolean,
+  ): DeltaRow => {
+    let dir: Direction = "flat";
+    let text = "—";
+    if (b !== null && a !== null) {
+      const diff = a - b;
+      if (Math.abs(diff) < 0.05) {
+        dir = "flat";
+        text = `±0 ${unit}`;
+      } else if ((diff > 0) === higherBetter) {
+        dir = "improved";
+        text = `${diff > 0 ? "+" : ""}${diff.toFixed(2)} ${unit}`;
+      } else {
+        dir = "worsened";
+        text = `${diff.toFixed(2)} ${unit}`;
+      }
+    }
+    return { label, before: b, after: a, unit, deltaText: text, direction: dir };
+  };
+  return [
+    row(
+      "Best jump height",
+      get(ml, "best_valid_jump_cm"),
+      get(mr, "best_valid_jump_cm"),
+      "cm",
+      true,
+    ),
+    row(
+      "Best flight time",
+      get(ml, "best_valid_flight_sec"),
+      get(mr, "best_valid_flight_sec"),
+      "s",
+      true,
+    ),
+  ];
+}
+
+function singleLegHopDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
+  const ml = left.metrics as Record<string, unknown>;
+  const mr = right.metrics as Record<string, unknown>;
+  const getCm = (m: Record<string, unknown>, side: "left" | "right"): number | null => {
+    const leg = m[side] as Record<string, unknown> | null | undefined;
+    if (!leg) return null;
+    const v = leg.best_valid_hop_cm;
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+  };
+  const lsi = (m: Record<string, unknown>): number | null => {
+    const v = m.lsi_pct;
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+  };
+  const rows: DeltaRow[] = [];
+  const before = (label: string, b: number | null, a: number | null, unit: string): DeltaRow => {
+    let dir: Direction = "flat";
+    let text = "—";
+    if (b !== null && a !== null) {
+      const diff = a - b;
+      if (Math.abs(diff) < 0.05) {
+        dir = "flat";
+        text = `±0 ${unit}`;
+      } else if (diff > 0) {
+        dir = "improved";
+        text = `+${diff.toFixed(1)} ${unit}`;
+      } else {
+        dir = "worsened";
+        text = `${diff.toFixed(1)} ${unit}`;
+      }
+    }
+    return { label, before: b, after: a, unit, deltaText: text, direction: dir };
+  };
+  rows.push(before("Left best hop", getCm(ml, "left"), getCm(mr, "left"), "cm"));
+  rows.push(before("Right best hop", getCm(ml, "right"), getCm(mr, "right"), "cm"));
+  // LSI — closer to 100 = better; treat as improved when moving toward 100.
+  const lb = lsi(ml);
+  const la = lsi(mr);
+  let lsiText = "—";
+  let lsiDir: Direction = "flat";
+  if (lb !== null && la !== null) {
+    const diff = la - lb;
+    if (Math.abs(diff) < 0.5) {
+      lsiDir = "flat";
+      lsiText = `±0 %`;
+    } else if (diff > 0) {
+      lsiDir = "improved";
+      lsiText = `+${diff.toFixed(1)} %`;
+    } else {
+      lsiDir = "worsened";
+      lsiText = `${diff.toFixed(1)} %`;
+    }
+  }
+  rows.push({ label: "LSI", before: lb, after: la, unit: "%", deltaText: lsiText, direction: lsiDir });
+  return rows;
 }
 
 function functionalReachDeltas(left: ReportDTO, right: ReportDTO): DeltaRow[] {
@@ -1231,6 +1364,8 @@ function moduleHeading(r: ReportDTO): string {
   if (r.module === "tandem_walk") return "Tandem Walk";
   if (r.module === "pronator_drift") return "Pronator Drift";
   if (r.module === "functional_reach") return "Functional Reach";
+  if (r.module === "single_leg_hop") return "Single-Leg Hop";
+  if (r.module === "counter_movement_jump") return "Counter-Movement Jump";
   const bp = r.body_part ? `${r.body_part.charAt(0).toUpperCase()}${r.body_part.slice(1)}` : "";
   const mv = r.movement ? `${r.movement.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}` : "";
   return [bp, mv].filter(Boolean).join(" · ") || "Biomechanics";

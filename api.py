@@ -95,6 +95,8 @@ from engines.orthopedic.sts_quality_engine import analyze_sts_quality
 from engines.orthopedic.tandem_walk_engine import analyze_tandem_walk
 from engines.orthopedic.pronator_drift_engine import analyze_pronator_drift
 from engines.orthopedic.functional_reach_engine import analyze_functional_reach
+from engines.orthopedic.single_leg_hop_engine import analyze_single_leg_hop
+from engines.orthopedic.counter_movement_jump_engine import analyze_counter_movement_jump
 
 # ─── 5x Sit-to-Stand — Test C2 upload mode ───────────────────────
 # SINGLE trial (no L/R split). Engine math mirrors
@@ -2699,6 +2701,400 @@ async def analyze_functional_reach_endpoint(
     except Exception as e:
         log.exception("functional_reach analysis failed")
         return FunctionalReachResponse(
+            success=False, data=None, error=f"Analysis failed: {e}",
+        )
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# D3 Single-Leg Hop — forward hop for distance (per-leg)
+# ══════════════════════════════════════════════════════════════════════
+# Per-leg endpoint — caller invokes once per side. LSI (left vs
+# right) is computed CLIENT-side after both calls return. Mirrors
+# the Functional Reach endpoint architecturally: multipart form
+# with `side` + optional `calibration` JSON + optional
+# `patient_height_cm`; provider-agnostic CalibrationResult pass-
+# through; reuses the engines.calibration module without
+# duplication.
+class SLHTrialDTO(BaseModel):
+    trial_index: int
+    takeoff_frame_index: int
+    landing_frame_index: int
+    takeoff_t_ms: float
+    landing_t_ms: float
+    hop_distance_px: float
+    hop_distance_cm: Optional[float] = None
+    valid: bool
+    invalidation_reason: Optional[str] = None
+
+
+class SingleLegHopResultDTO(BaseModel):
+    side_tested: str
+    patient_height_cm: Optional[float] = None
+    calibration: Optional[Dict[str, Any]] = None
+    baseline_ankle_y_px: float
+    leg_length_px: float
+    trials: List[SLHTrialDTO]
+    best_valid_trial_index: Optional[int] = None
+    best_valid_hop_px: Optional[float] = None
+    best_valid_hop_cm: Optional[float] = None
+    peak_screenshot_data_url: Optional[str] = None
+    duration_seconds: float
+    termination: str
+    fps: Optional[float] = None
+    total_frames: Optional[int] = None
+    valid_frames: Optional[int] = None
+    interpretation: Optional[str] = None
+
+
+class SingleLegHopResponse(BaseModel):
+    success: bool
+    data: Optional[SingleLegHopResultDTO] = None
+    error: Optional[str] = None
+    fps_warning: Optional[str] = None
+    duration_warning: Optional[str] = None
+
+
+@app.post("/api/analyze-single-leg-hop", response_model=SingleLegHopResponse)
+async def analyze_single_leg_hop_endpoint(
+    video: UploadFile = File(...),
+    side: str = Form(...),
+    calibration: Optional[str] = Form(None),
+    patient_height_cm: Optional[float] = Form(None),
+) -> SingleLegHopResponse:
+    """Run the D3 Single-Leg Hop pipeline on an uploaded clip.
+
+    `side` is the test (hopping) leg. The endpoint is per-leg —
+    the caller invokes it once per side, then computes the Limb
+    Symmetry Index client-side from the two best-valid distances.
+
+    Calibration is supplied in one of two ways:
+      1. `calibration` — a JSON-encoded CalibrationResult that
+         the live-mode HeightCalibrationStep already locked in.
+      2. `patient_height_cm` — the patient's standing height;
+         the engine measures body pixel height from the standing
+         window of the clip itself and derives pixels_per_cm.
+    With neither, the test runs in relative-units mode (pixel
+    distances only — no cm value and no LSI classification).
+    """
+    if side not in ("left", "right"):
+        raise HTTPException(
+            status_code=400,
+            detail="Side must be 'left' or 'right'.",
+        )
+
+    parsed_calibration: Optional[Dict[str, Any]] = None
+    if calibration:
+        import json as _json
+        try:
+            parsed_calibration = _json.loads(calibration)
+            if not isinstance(parsed_calibration, dict):
+                parsed_calibration = None
+            else:
+                ppc = parsed_calibration.get("pixels_per_cm")
+                if not isinstance(ppc, (int, float)) or ppc <= 0:
+                    parsed_calibration = None
+        except (ValueError, TypeError):
+            parsed_calibration = None
+
+    tmp_path: Optional[str] = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(
+            contents, video.filename or "single_leg_hop.mp4",
+        )
+        log.info(
+            "single_leg_hop: file=%s side=%s size=%.2f MB calibration=%s",
+            video.filename, side, size_mb,
+            "client" if parsed_calibration else "server-auto",
+        )
+
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not determine video frame rate. "
+                    "Please upload a different file."
+                ),
+            )
+
+        fps_warning: Optional[str] = None
+        duration_warning: Optional[str] = None
+
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video frame rate too low ({probe_fps:.1f} FPS). "
+                    f"Minimum {MIN_REQUIRED_FPS} FPS required. "
+                    f"Recommended: {RECOMMENDED_FPS}+ FPS."
+                ),
+            )
+        if probe_fps < RECOMMENDED_FPS:
+            fps_warning = (
+                f"Note: Video is {probe_fps:.1f} FPS, below recommended "
+                f"{RECOMMENDED_FPS} FPS — hop event timing may be coarse."
+            )
+        if probe_total_frames <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not determine video length. Please upload a different file.",
+            )
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video too long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed."
+                ),
+            )
+        if duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = (
+                f"Video is short ({duration_seconds:.1f}s) — at least "
+                f"{MIN_GAIT_DURATION_SEC} seconds recommended so the engine "
+                f"can capture a stance + up to 3 hops."
+            )
+
+        pose_options = _build_gait_pose_options()
+        result: Dict[str, Any] = analyze_single_leg_hop(
+            video_path=tmp_path,
+            pose_options=pose_options,
+            side=side,
+            calibration=parsed_calibration,
+            patient_height_cm=patient_height_cm,
+        )
+
+        return SingleLegHopResponse(
+            success=True,
+            data=SingleLegHopResultDTO(**result),
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("single_leg_hop validation: %s", e)
+        return SingleLegHopResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("single_leg_hop analysis failed")
+        return SingleLegHopResponse(
+            success=False, data=None, error=f"Analysis failed: {e}",
+        )
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# D4 Counter-Movement Jump — vertical jump for power (both legs)
+# ══════════════════════════════════════════════════════════════════════
+# Both legs together — NO side parameter, NO LSI. Single recording
+# captures up to 3 jumps. Primary outcome is jump height (cm via
+# height calibration); secondary is flight time (s) plus a physics
+# cross-check on the height (h = g·t²/8). Mirrors the D3 endpoint
+# architecture (multipart form, optional calibration + height,
+# provider-agnostic CalibrationResult pass-through) minus the
+# per-leg structure.
+class CMJTrialDTO(BaseModel):
+    trial_index: int
+    takeoff_frame_index: int
+    apex_frame_index: int
+    landing_frame_index: int
+    takeoff_t_ms: float
+    landing_t_ms: float
+    flight_time_sec: float
+    jump_height_px: float
+    jump_height_cm: Optional[float] = None
+    physics_height_cm: float
+    valid: bool
+    invalidation_reason: Optional[str] = None
+
+
+class CMJResultDTO(BaseModel):
+    patient_height_cm: Optional[float] = None
+    calibration: Optional[Dict[str, Any]] = None
+    baseline_hip_y_px: float
+    baseline_left_ankle_y_px: float
+    baseline_right_ankle_y_px: float
+    leg_length_px: float
+    trials: List[CMJTrialDTO]
+    best_valid_trial_index: Optional[int] = None
+    best_valid_jump_px: Optional[float] = None
+    best_valid_jump_cm: Optional[float] = None
+    best_valid_flight_sec: Optional[float] = None
+    mean_valid_jump_cm: Optional[float] = None
+    mean_valid_flight_sec: Optional[float] = None
+    peak_screenshot_data_url: Optional[str] = None
+    duration_seconds: float
+    termination: str
+    fps: Optional[float] = None
+    total_frames: Optional[int] = None
+    valid_frames: Optional[int] = None
+    interpretation: Optional[str] = None
+
+
+class CMJResponse(BaseModel):
+    success: bool
+    data: Optional[CMJResultDTO] = None
+    error: Optional[str] = None
+    fps_warning: Optional[str] = None
+    duration_warning: Optional[str] = None
+
+
+@app.post(
+    "/api/analyze-counter-movement-jump",
+    response_model=CMJResponse,
+)
+async def analyze_counter_movement_jump_endpoint(
+    video: UploadFile = File(...),
+    calibration: Optional[str] = Form(None),
+    patient_height_cm: Optional[float] = Form(None),
+) -> CMJResponse:
+    """Run the D4 CMJ pipeline on an uploaded clip. Both legs
+    together — single recording, no side parameter.
+    """
+    parsed_calibration: Optional[Dict[str, Any]] = None
+    if calibration:
+        import json as _json
+        try:
+            parsed_calibration = _json.loads(calibration)
+            if not isinstance(parsed_calibration, dict):
+                parsed_calibration = None
+            else:
+                ppc = parsed_calibration.get("pixels_per_cm")
+                if not isinstance(ppc, (int, float)) or ppc <= 0:
+                    parsed_calibration = None
+        except (ValueError, TypeError):
+            parsed_calibration = None
+
+    tmp_path: Optional[str] = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(
+            contents, video.filename or "counter_movement_jump.mp4",
+        )
+        log.info(
+            "cmj: file=%s size=%.2f MB calibration=%s",
+            video.filename, size_mb,
+            "client" if parsed_calibration else "server-auto",
+        )
+
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not determine video frame rate. "
+                    "Please upload a different file."
+                ),
+            )
+
+        fps_warning: Optional[str] = None
+        duration_warning: Optional[str] = None
+
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video frame rate too low ({probe_fps:.1f} FPS). "
+                    f"Minimum {MIN_REQUIRED_FPS} FPS required. "
+                    f"Recommended: {RECOMMENDED_FPS}+ FPS."
+                ),
+            )
+        if probe_fps < RECOMMENDED_FPS:
+            fps_warning = (
+                f"Note: Video is {probe_fps:.1f} FPS, below recommended "
+                f"{RECOMMENDED_FPS} FPS — jump event timing may be coarse."
+            )
+        if probe_total_frames <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not determine video length.",
+            )
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video too long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed."
+                ),
+            )
+        if duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = (
+                f"Video is short ({duration_seconds:.1f}s) — at least "
+                f"{MIN_GAIT_DURATION_SEC} seconds recommended so the engine "
+                f"can capture a stance + up to 3 jumps."
+            )
+
+        pose_options = _build_gait_pose_options()
+        result: Dict[str, Any] = analyze_counter_movement_jump(
+            video_path=tmp_path,
+            pose_options=pose_options,
+            calibration=parsed_calibration,
+            patient_height_cm=patient_height_cm,
+        )
+
+        return CMJResponse(
+            success=True,
+            data=CMJResultDTO(**result),
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("cmj validation: %s", e)
+        return CMJResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("cmj analysis failed")
+        return CMJResponse(
             success=False, data=None, error=f"Analysis failed: {e}",
         )
     finally:
