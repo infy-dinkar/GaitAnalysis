@@ -34,6 +34,80 @@ const COLOR_AMBER = "#EA580C";
 const COLOR_REF = "#94A3B8";
 const COLOR_ACCENT = "#EA580C";
 
+// ─── Side filter — local to OverviewTab + AnkleTab ──────────────
+// Display-only — the underlying DTO always contains both sides;
+// the toggle just hides/shows series on the Plotly chart. Default
+// "both" preserves the prior behaviour exactly.
+type SideFilter = "both" | "left" | "right";
+
+function SideToggle({
+  value,
+  onChange,
+}: {
+  value: SideFilter;
+  onChange: (next: SideFilter) => void;
+}) {
+  const opts: Array<{
+    id: SideFilter;
+    label: string;
+    activeBg: string;
+    activeRing: string;
+    inactiveText: string;
+    inactiveHover: string;
+  }> = [
+    {
+      id: "both",
+      label: "Both",
+      activeBg: "bg-orange-500",
+      activeRing: "ring-orange-400",
+      inactiveText: "text-orange-400",
+      inactiveHover: "hover:bg-orange-500/15 hover:text-orange-300",
+    },
+    {
+      id: "left",
+      label: "Left",
+      activeBg: "bg-red-500",
+      activeRing: "ring-red-400",
+      inactiveText: "text-red-400",
+      inactiveHover: "hover:bg-red-500/15 hover:text-red-300",
+    },
+    {
+      id: "right",
+      label: "Right",
+      activeBg: "bg-yellow-500",
+      activeRing: "ring-yellow-400",
+      inactiveText: "text-yellow-300",
+      inactiveHover: "hover:bg-yellow-500/15 hover:text-yellow-200",
+    },
+  ];
+  return (
+    <div
+      role="group"
+      aria-label="Filter chart by side"
+      className="inline-flex gap-1 rounded-lg border border-zinc-600 bg-zinc-900 p-1 shadow-lg"
+    >
+      {opts.map((o) => {
+        const isActive = value === o.id;
+        return (
+          <button
+            key={o.id}
+            type="button"
+            onClick={() => onChange(o.id)}
+            aria-pressed={isActive}
+            className={`rounded-md px-4 py-1.5 text-sm font-semibold transition ${
+              isActive
+                ? `${o.activeBg} text-white shadow-md ring-1 ${o.activeRing}`
+                : `${o.inactiveText} ${o.inactiveHover}`
+            }`}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 type TabId =
   | "overview"
   | "knee"
@@ -301,20 +375,93 @@ export default function GaitResultsPage() {
 // TAB CONTENTS
 // ══════════════════════════════════════════════════════════════════════
 
+interface OverviewRow {
+  title: string;
+  yLabel: string;
+  left: (number | null)[];
+  right: (number | null)[];
+  leftLabel: string;
+  rightLabel: string;
+  leftColor: string;
+  rightColor: string;
+}
+
+function OverviewChartRow({
+  row,
+  timeAxis,
+  passes,
+}: {
+  row: OverviewRow;
+  timeAxis: number[];
+  passes: PassSegmentDTO[];
+}) {
+  // Each chart owns its own toggle — operators can isolate one
+  // side on one joint while keeping the others showing both.
+  const [sideFilter, setSideFilter] = useState<SideFilter>("both");
+  const showLeft = sideFilter !== "right";
+  const showRight = sideFilter !== "left";
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h4 className="text-base font-semibold tracking-tight text-foreground">
+          {row.title}
+        </h4>
+        <SideToggle value={sideFilter} onChange={setSideFilter} />
+      </div>
+      <PlotlyChart
+        height={280}
+        data={[
+          ...(showLeft
+            ? [
+                {
+                  type: "scatter",
+                  mode: "lines+markers",
+                  name: row.leftLabel,
+                  x: timeAxis,
+                  y: row.left,
+                  line: { color: row.leftColor, width: 1.2 },
+                  marker: { color: row.leftColor, size: 3 },
+                },
+              ]
+            : []),
+          ...(showRight
+            ? [
+                {
+                  type: "scatter",
+                  mode: "lines+markers",
+                  name: row.rightLabel,
+                  x: timeAxis,
+                  y: row.right,
+                  line: { color: row.rightColor, width: 1.2 },
+                  marker: { color: row.rightColor, size: 3 },
+                },
+              ]
+            : []),
+        ]}
+        layout={{
+          xaxis: { title: { text: "Time (seconds)" } },
+          yaxis: { title: { text: row.yLabel } },
+          shapes: passShapes(passes),
+          legend: {
+            orientation: "h",
+            y: 1.08,
+            x: 0.5,
+            xanchor: "center",
+            font: { color: "#475569", size: 11 },
+          },
+          margin: { l: 64, r: 24, t: 36, b: 48 },
+        }}
+      />
+    </div>
+  );
+}
+
 function OverviewTab({ data }: { data: GaitDataDTO }) {
   const o = data.normalized_overview;
   const passes = data.tabs_data.pass_segments;
 
-  const rows: {
-    title: string;
-    yLabel: string;
-    left: (number | null)[];
-    right: (number | null)[];
-    leftLabel: string;
-    rightLabel: string;
-    leftColor: string;
-    rightColor: string;
-  }[] = [
+  const rows: OverviewRow[] = [
     {
       title: "Leg Angle Analysis (Normalized)",
       yLabel: "Leg Angle (degrees)",
@@ -370,47 +517,12 @@ function OverviewTab({ data }: { data: GaitDataDTO }) {
       </div>
 
       {rows.map((row) => (
-        <div key={row.title} className="space-y-2">
-          <h4 className="text-base font-semibold tracking-tight text-foreground">
-            {row.title}
-          </h4>
-          <PlotlyChart
-            height={280}
-            data={[
-              {
-                type: "scatter",
-                mode: "lines+markers",
-                name: row.leftLabel,
-                x: o.time_axis,
-                y: row.left,
-                line: { color: row.leftColor, width: 1.2 },
-                marker: { color: row.leftColor, size: 3 },
-              },
-              {
-                type: "scatter",
-                mode: "lines+markers",
-                name: row.rightLabel,
-                x: o.time_axis,
-                y: row.right,
-                line: { color: row.rightColor, width: 1.2 },
-                marker: { color: row.rightColor, size: 3 },
-              },
-            ]}
-            layout={{
-              xaxis: { title: { text: "Time (seconds)" } },
-              yaxis: { title: { text: row.yLabel } },
-              shapes: passShapes(passes),
-              legend: {
-                orientation: "h",
-                y: 1.08,
-                x: 0.5,
-                xanchor: "center",
-                font: { color: "#475569", size: 11 },
-              },
-              margin: { l: 64, r: 24, t: 36, b: 48 },
-            }}
-          />
-        </div>
+        <OverviewChartRow
+          key={row.title}
+          row={row}
+          timeAxis={o.time_axis}
+          passes={passes}
+        />
       ))}
     </div>
   );
@@ -683,23 +795,41 @@ function TorsoTab({ data }: { data: GaitDataDTO }) {
 function AnkleTab({ data }: { data: GaitDataDTO }) {
   const a = data.tabs_data.ankle_trajectory;
   const passes = data.tabs_data.pass_segments;
+  // Independent of the Overview toggles — Ankle Trajectory owns
+  // its own state. Default "both" preserves prior behaviour.
+  const [sideFilter, setSideFilter] = useState<SideFilter>("both");
+  const showLeft = sideFilter !== "right";
+  const showRight = sideFilter !== "left";
 
   return (
     <div className="space-y-6">
-      <h3 className="text-xl font-semibold tracking-tight">Ankle X-Trajectory Over Time</h3>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h3 className="text-xl font-semibold tracking-tight">
+          Ankle X-Trajectory Over Time
+        </h3>
+        <SideToggle value={sideFilter} onChange={setSideFilter} />
+      </div>
       <PlotlyChart
         height={320}
         data={[
-          {
-            type: "scatter", mode: "lines", name: "Left ankle",
-            x: a.time_axis, y: a.left_x,
-            line: { color: COLOR_LEFT, width: 1.4 },
-          },
-          {
-            type: "scatter", mode: "lines", name: "Right ankle",
-            x: a.time_axis, y: a.right_x,
-            line: { color: COLOR_RIGHT, width: 1.4 },
-          },
+          ...(showLeft
+            ? [
+                {
+                  type: "scatter", mode: "lines", name: "Left ankle",
+                  x: a.time_axis, y: a.left_x,
+                  line: { color: COLOR_LEFT, width: 1.4 },
+                },
+              ]
+            : []),
+          ...(showRight
+            ? [
+                {
+                  type: "scatter", mode: "lines", name: "Right ankle",
+                  x: a.time_axis, y: a.right_x,
+                  line: { color: COLOR_RIGHT, width: 1.4 },
+                },
+              ]
+            : []),
         ]}
         layout={{
           xaxis: { title: { text: "Time (s)" } },
@@ -708,7 +838,7 @@ function AnkleTab({ data }: { data: GaitDataDTO }) {
         }}
       />
       <InfoBox>
-        Both ankles' horizontal positions over time. Symmetric, mirrored sweeps between Left and
+        Both ankles&apos; horizontal positions over time. Symmetric, mirrored sweeps between Left and
         Right indicate balanced gait. The validated walking passes are highlighted in lime —
         anything outside is excluded from the metrics.
       </InfoBox>
