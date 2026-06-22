@@ -19,7 +19,7 @@
 //   • repCountStep engine   — driven indirectly by RepCountShell
 //   • usePatientContext     — optional ?patientId attaches doctor flow
 
-import { useCallback, useState } from "react";
+import { Suspense, useCallback, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -45,6 +45,18 @@ const SQUAT_CONFIG = {
 const TARGET_REPS = 10;
 
 export default function SquatExercisePage() {
+  // Next.js 16 requires routes that use useSearchParams (via
+  // usePatientContext below) to be wrapped in Suspense for static
+  // prerender. Mirrors the same pattern the orthopedic test pages
+  // use — without this the route prerender bails out at build time.
+  return (
+    <Suspense fallback={null}>
+      <Inner />
+    </Suspense>
+  );
+}
+
+function Inner() {
   const [side, setSide] = useState<Side | null>(null);
   // Default 180 = standing position, so the engine starts in the
   // "above_top" phase ready for a descent.
