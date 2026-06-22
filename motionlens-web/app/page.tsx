@@ -3,6 +3,7 @@ import { Footer } from "@/components/layout/Footer";
 import { Hero } from "@/components/landing/Hero";
 import { Features } from "@/components/landing/Features";
 import { ProductShowcase } from "@/components/landing/ProductShowcase";
+import { RehabShowcase } from "@/components/rehab/RehabShowcase";
 import { UseCases } from "@/components/landing/UseCases";
 import { FadeIn } from "@/components/ui/FadeIn";
 
@@ -17,6 +18,9 @@ export default function Home() {
         </FadeIn>
         <FadeIn>
           <ProductShowcase />
+        </FadeIn>
+        <FadeIn>
+          <RehabShowcase />
         </FadeIn>
         <FadeIn>
           <UseCases />

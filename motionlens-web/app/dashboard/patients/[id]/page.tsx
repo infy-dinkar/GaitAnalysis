@@ -8,6 +8,7 @@ import {
   Activity,
   ArrowRight,
   Calendar,
+  Dumbbell,
   FileText,
   GitCompare,
   Loader2,
@@ -131,6 +132,15 @@ function PatientDetail({ id }: { id: string }) {
               <Activity className="h-4 w-4" />
               New assessment
               <ArrowRight className="h-4 w-4" />
+            </Button>
+          </Link>
+          <Link href={`/dashboard/patients/${id}/rehab`}>
+            <Button
+              variant="secondary"
+              className="text-teal-600 hover:bg-teal-500/10"
+            >
+              <Dumbbell className="h-4 w-4" />
+              Start Rehab
             </Button>
           </Link>
           {reports.length >= 2 && (
