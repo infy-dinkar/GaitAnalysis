@@ -46,26 +46,50 @@ export function TargetReachShell({
   const idCounterRef = useRef(0);
   const [, setTick] = useState(0);
 
-  // Step the engine whenever the cursor moves OR ~10 fps to retire
-  // expired targets. We piggyback the engine call on a rAF loop.
+  // Mirror live props in a ref so the rAF loop reads the latest
+  // values without re-creating itself on each prop change. Cursor
+  // changes ~60 Hz; including it in useEffect deps causes the
+  // loop to be torn down + recreated every frame.
+  const propsRef = useRef({
+    cursor,
+    config,
+    spawnIntervalMs,
+    defaultTtlMs,
+    defaultRadius,
+  });
+  useEffect(() => {
+    propsRef.current = {
+      cursor,
+      config,
+      spawnIntervalMs,
+      defaultTtlMs,
+      defaultRadius,
+    };
+  }, [cursor, config, spawnIntervalMs, defaultTtlMs, defaultRadius]);
+
+  // Single rAF loop — set up ONCE on mount, never restarted. Reads
+  // latest cursor + config from propsRef each frame so per-frame
+  // prop changes don't recreate the loop. Drives auto-spawn + engine
+  // step + UI re-render.
   useEffect(() => {
     let cancelled = false;
     let raf: number | null = null;
     const tick = () => {
       if (cancelled) return;
       const now = performance.now();
+      const p = propsRef.current;
       // Auto-spawn
       if (
-        spawnIntervalMs > 0
-        && (now - lastSpawnRef.current) >= spawnIntervalMs
+        p.spawnIntervalMs > 0
+        && (now - lastSpawnRef.current) >= p.spawnIntervalMs
       ) {
         const id = `t${++idCounterRef.current}`;
         const t: ReachTarget = {
           id,
           x: 0.15 + Math.random() * 0.7,
           y: 0.15 + Math.random() * 0.7,
-          radius: defaultRadius,
-          ttlMs: defaultTtlMs,
+          radius: p.defaultRadius,
+          ttlMs: p.defaultTtlMs,
           spawnedAt: now,
         };
         stateRef.current = spawnReachTarget(stateRef.current, t);
@@ -75,13 +99,13 @@ export function TargetReachShell({
       const r = targetReachStep(
         stateRef.current,
         scoreRef.current,
-        cursor,
-        config,
+        p.cursor,
+        p.config,
         now,
       );
       stateRef.current = r.state;
       scoreRef.current = r.score;
-      setTick((x) => x + 1);
+      setTick((x) => (x + 1) % 1_000_000);
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -89,7 +113,7 @@ export function TargetReachShell({
       cancelled = true;
       if (raf !== null) cancelAnimationFrame(raf);
     };
-  }, [cursor, config, spawnIntervalMs, defaultTtlMs, defaultRadius]);
+  }, []);
 
   const s = stateRef.current;
   const score = scoreRef.current;

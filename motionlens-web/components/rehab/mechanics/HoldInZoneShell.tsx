@@ -43,13 +43,44 @@ export function HoldInZoneShell({
   const scoreRef = useRef<Score>(emptyScore());
   const [, setTick] = useState(0);
 
+  // Mirror live props in a ref so the rAF loop always reads the
+  // latest values without re-creating itself on each prop change.
+  // This effect does NOT setState — it only mutates the ref, so
+  // running it on every signal update (~60 Hz) is safe.
+  const propsRef = useRef({ signal, config });
   useEffect(() => {
-    const now = performance.now();
-    const r = holdInZoneStep(stateRef.current, scoreRef.current, signal, config, now);
-    stateRef.current = r.state;
-    scoreRef.current = r.score;
-    setTick((t) => t + 1);
+    propsRef.current = { signal, config };
   }, [signal, config]);
+
+  // Single rAF loop, started once on mount. The engine ticks every
+  // frame regardless of signal stability so dtMs keeps accumulating
+  // when the patient holds perfectly still in the band.
+  //
+  // The prior pattern — useEffect([signal, config]) calling
+  // setTick inside — caused two bugs:
+  //   1. Max-update-depth: 60 Hz setState-from-effect chain trips
+  //      React 19's heuristic.
+  //   2. Timer froze when signal stopped changing: useEffect
+  //      didn't re-run, so dtMs never accumulated.
+  useEffect(() => {
+    let cancelled = false;
+    let raf = 0;
+    const loop = () => {
+      if (cancelled) return;
+      const now = performance.now();
+      const { signal: s, config: c } = propsRef.current;
+      const r = holdInZoneStep(stateRef.current, scoreRef.current, s, c, now);
+      stateRef.current = r.state;
+      scoreRef.current = r.score;
+      setTick((t) => (t + 1) % 1_000_000);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => {
+      cancelled = true;
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, []);
 
   const s = stateRef.current;
   const score = scoreRef.current;

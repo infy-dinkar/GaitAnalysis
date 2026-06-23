@@ -51,19 +51,31 @@ export function TraceShell({
   const trailRef = useRef<TracePathPoint[]>([]);
   const [tick, setTick] = useState(0);
 
+  // Mirror live props in a ref so the rAF loop reads the latest
+  // values without re-creating itself on each prop change. Cursor
+  // changes ~60 Hz; including it in deps tears down + recreates
+  // the rAF loop every frame.
+  const propsRef = useRef({ cursor, config, pathFn, loopDurationMs, trailLength });
+  useEffect(() => {
+    propsRef.current = { cursor, config, pathFn, loopDurationMs, trailLength };
+  }, [cursor, config, pathFn, loopDurationMs, trailLength]);
+
+  // Single rAF loop — set up ONCE on mount, never restarted. Reads
+  // latest props from propsRef each frame.
   useEffect(() => {
     let cancelled = false;
     let raf: number | null = null;
     const loop = () => {
       if (cancelled) return;
       const now = performance.now();
-      const t = ((now - startedAtRef.current) % loopDurationMs) / loopDurationMs;
-      const target = pathFn(t);
-      const r = traceStep(stateRef.current, scoreRef.current, cursor, target, config, now);
+      const p = propsRef.current;
+      const t = ((now - startedAtRef.current) % p.loopDurationMs) / p.loopDurationMs;
+      const target = p.pathFn(t);
+      const r = traceStep(stateRef.current, scoreRef.current, p.cursor, target, p.config, now);
       stateRef.current = r.state;
       scoreRef.current = r.score;
-      trailRef.current = [...trailRef.current.slice(-trailLength), cursor];
-      setTick((x) => x + 1);
+      trailRef.current = [...trailRef.current.slice(-p.trailLength), p.cursor];
+      setTick((x) => (x + 1) % 1_000_000);
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -71,7 +83,7 @@ export function TraceShell({
       cancelled = true;
       if (raf !== null) cancelAnimationFrame(raf);
     };
-  }, [cursor, config, pathFn, loopDurationMs, trailLength]);
+  }, []);
 
   const s = stateRef.current;
   const score = scoreRef.current;

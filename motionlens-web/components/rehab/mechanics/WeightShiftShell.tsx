@@ -41,30 +41,44 @@ export function WeightShiftShell({
     useState<"good" | "bad" | "neutral">("neutral");
   const [, setTick] = useState(0);
 
+  // Mirror live props in a ref so the rAF loop reads the latest
+  // values. No setState here — safe at 60 Hz prop updates.
+  const propsRef = useRef({ shift, stepDetected, config });
   useEffect(() => {
-    const now = performance.now();
-    const r = weightShiftStep(
-      stateRef.current,
-      scoreRef.current,
-      shift,
-      stepDetected,
-      config,
-      now,
-    );
-    stateRef.current = r.state;
-    scoreRef.current = r.score;
-    if (r.event?.kind === "zone_captured") {
-      setFeedback("Zone captured");
-      setFeedbackTone("good");
-    } else if (r.event?.kind === "step_paused") {
-      setFeedback("Step detected — pausing");
-      setFeedbackTone("bad");
-    } else if (r.event?.kind === "exited_zone") {
-      setFeedback("Out of zone");
-      setFeedbackTone("neutral");
-    }
-    setTick((t) => t + 1);
+    propsRef.current = { shift, stepDetected, config };
   }, [shift, stepDetected, config]);
+
+  // Single rAF loop, started once on mount. See HoldInZoneShell
+  // for the rationale.
+  useEffect(() => {
+    let cancelled = false;
+    let raf = 0;
+    const loop = () => {
+      if (cancelled) return;
+      const now = performance.now();
+      const { shift: sh, stepDetected: sd, config: c } = propsRef.current;
+      const r = weightShiftStep(stateRef.current, scoreRef.current, sh, sd, c, now);
+      stateRef.current = r.state;
+      scoreRef.current = r.score;
+      if (r.event?.kind === "zone_captured") {
+        setFeedback("Zone captured");
+        setFeedbackTone("good");
+      } else if (r.event?.kind === "step_paused") {
+        setFeedback("Step detected — pausing");
+        setFeedbackTone("bad");
+      } else if (r.event?.kind === "exited_zone") {
+        setFeedback("Out of zone");
+        setFeedbackTone("neutral");
+      }
+      setTick((t) => (t + 1) % 1_000_000);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => {
+      cancelled = true;
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, []);
 
   const s = stateRef.current;
   const score = scoreRef.current;
