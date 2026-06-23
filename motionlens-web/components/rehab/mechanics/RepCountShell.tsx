@@ -41,26 +41,48 @@ export function RepCountShell({
   );
   const [, setTick] = useState(0);
 
+  // Mirror live props in a ref so the rAF loop reads the latest
+  // values. No setState here — safe at 60 Hz prop updates.
+  const propsRef = useRef({ signal, config });
   useEffect(() => {
-    const now = performance.now();
-    const r = repCountStep(stateRef.current, scoreRef.current, signal, config, now);
-    stateRef.current = r.state;
-    scoreRef.current = r.score;
-    if (r.event?.kind === "rep_counted") {
-      const downgrade = r.event.payload?.downgrade as string | null;
-      if (downgrade === "shallow") {
-        setFeedback("Go deeper");
-        setFeedbackTone("bad");
-      } else if (downgrade === "jerky") {
-        setFeedback("Smooth it out");
-        setFeedbackTone("bad");
-      } else {
-        setFeedback("Good rep");
-        setFeedbackTone("good");
-      }
-    }
-    setTick((t) => t + 1);
+    propsRef.current = { signal, config };
   }, [signal, config]);
+
+  // Single rAF loop, started once on mount. See HoldInZoneShell
+  // for the rationale — fixes both max-update-depth at 60 Hz and
+  // engine-stalling when the signal stops changing.
+  useEffect(() => {
+    let cancelled = false;
+    let raf = 0;
+    const loop = () => {
+      if (cancelled) return;
+      const now = performance.now();
+      const { signal: s, config: c } = propsRef.current;
+      const r = repCountStep(stateRef.current, scoreRef.current, s, c, now);
+      stateRef.current = r.state;
+      scoreRef.current = r.score;
+      if (r.event?.kind === "rep_counted") {
+        const downgrade = r.event.payload?.downgrade as string | null;
+        if (downgrade === "shallow") {
+          setFeedback("Go deeper");
+          setFeedbackTone("bad");
+        } else if (downgrade === "jerky") {
+          setFeedback("Smooth it out");
+          setFeedbackTone("bad");
+        } else {
+          setFeedback("Good rep");
+          setFeedbackTone("good");
+        }
+      }
+      setTick((t) => (t + 1) % 1_000_000);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => {
+      cancelled = true;
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, []);
 
   const s = stateRef.current;
   const score = scoreRef.current;

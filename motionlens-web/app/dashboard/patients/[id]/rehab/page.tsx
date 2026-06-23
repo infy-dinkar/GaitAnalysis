@@ -53,12 +53,25 @@ const MODULES: RehabModule[] = [
     iconTone: "text-indigo-600",
   },
   {
-    id: "hold_in_zone",
-    href: null,
-    eyebrow: "Hold-in-Zone",
-    title: "Hold & control",
+    id: "wall_sit",
+    // Dashboard page builds the URL as `/${m.href}?patientId=…` —
+    // NO leading slash here, so the result is /rehab/wall-sit?patientId=…
+    href: "rehab/wall-sit",
+    eyebrow: "K5 · Wall Sit",
+    title: "Wall Sit",
     body:
-      "Isometric holds turned into a game — patient drives a marker into a target band and keeps it there.",
+      "Isometric hold at 80°–100° knee flexion. Timer accumulates inside the band, pauses outside. 30 s target. Powered by the Hold-in-Zone mechanic.",
+    icon: Timer,
+    tone: "from-teal-500/15 to-teal-500/5",
+    iconTone: "text-teal-600",
+  },
+  {
+    id: "pelvic_hold",
+    href: "rehab/pelvic-hold",
+    eyebrow: "H1 · Pelvic-Level Hold",
+    title: "Pelvic-Level Hold",
+    body:
+      "Trendelenburg retraining — single-leg stance with pelvis level (±5° band). Hip drop pauses the timer. 25 s cumulative target. Hold-in-Zone mechanic.",
     icon: Timer,
     tone: "from-teal-500/15 to-teal-500/5",
     iconTone: "text-teal-600",
@@ -75,37 +88,83 @@ const MODULES: RehabModule[] = [
     iconTone: "text-indigo-600",
   },
   {
-    id: "target_reach",
-    href: null,
-    eyebrow: "Target-Reach",
-    title: "Reach further",
+    id: "shoulder_raise",
+    // Dashboard page builds the URL as `/${m.href}?patientId=…` —
+    // NO leading slash here, so the result is /rehab/shoulder-raise?patientId=…
+    href: "rehab/shoulder-raise",
+    eyebrow: "S1 · Shoulder Raise",
+    title: "Shoulder Raise",
     body:
-      "Targets spawn around the play area; the patient drives a body-anchored cursor onto them. Tracks max excursion.",
+      "Active shoulder abduction to target. Cursor.y is the shared shoulder-elevation angle — patient raises arm to hit higher targets. Target-Reach mechanic.",
     icon: Target,
     tone: "from-cyan-500/15 to-cyan-500/5",
     iconTone: "text-cyan-600",
   },
   {
-    id: "trace",
-    href: null,
-    eyebrow: "Trace",
-    title: "Smooth trace",
+    id: "knee-extension",
+    href: "rehab/knee-extension",
+    eyebrow: "K3 · Terminal Knee Extension",
+    title: "Terminal Knee Extension",
     body:
-      "Lead target glides along a path; cursor stays glued to it. Per-sample accuracy AND smoothness scoring.",
+      "Active terminal-extension drill — cursor.y is the shared knee extension angle. Top targets target the last 0–27° (post-op terminal band). Target-Reach mechanic.",
+    icon: Target,
+    tone: "from-cyan-500/15 to-cyan-500/5",
+    iconTone: "text-cyan-600",
+  },
+  {
+    id: "pendulum",
+    href: "rehab/pendulum",
+    eyebrow: "S3 · Pendulum / Circle Trace",
+    title: "Pendulum / Circle Trace",
+    body:
+      "Gentle shoulder mobility — wrist follows a slow circle. Per-sample accuracy + smoothness scoring. Trace mechanic.",
     icon: Spline,
     tone: "from-purple-500/15 to-purple-500/5",
     iconTone: "text-purple-600",
   },
   {
     id: "weight_shift",
-    href: null,
-    eyebrow: "Weight-Shift",
-    title: "Honest weight shift",
+    href: "rehab/weight-shift",
+    eyebrow: "H3 · Weight-Shift Balance",
+    title: "Weight-Shift Balance",
     body:
-      "Lateral weight-shift with anti-cheat — step detected → dwell auto-pauses. Real medio-lateral COM control.",
+      "Limits-of-stability training — feet fixed, shift the hip-mid to capture four lateral zones at ±0.4 and ±0.8. Step detection auto-pauses dwell. Weight-Shift mechanic.",
     icon: Footprints,
     tone: "from-teal-500/15 to-teal-500/5",
     iconTone: "text-teal-600",
+  },
+  {
+    id: "bridge",
+    href: "rehab/bridge",
+    eyebrow: "H4 · Bridge",
+    title: "Bridge",
+    body:
+      "Supine glute bridge — hip interior angle drives the Rep-Count engine. Lateral view, depth + amplitude gates. Rep-Count mechanic.",
+    icon: Dumbbell,
+    tone: "from-indigo-500/15 to-indigo-500/5",
+    iconTone: "text-indigo-600",
+  },
+  {
+    id: "step-up",
+    href: "rehab/step-up",
+    eyebrow: "K4 · Step-Up Control",
+    title: "Step-Up Control",
+    body:
+      "Stepping-leg knee interior drives the Rep-Count engine. Patient steps up to full extension, lowers under control. Depth + amplitude gates. Rep-Count mechanic.",
+    icon: Dumbbell,
+    tone: "from-indigo-500/15 to-indigo-500/5",
+    iconTone: "text-indigo-600",
+  },
+  {
+    id: "lateral-step",
+    href: "rehab/lateral-step",
+    eyebrow: "H6 · Lateral Step",
+    title: "Lateral Step",
+    body:
+      "Side-stepping drill in a quarter-squat. Working knee interior drives the Rep-Count engine. Tighter amplitude gate (30°) for the shallower ROM. Rep-Count mechanic.",
+    icon: Dumbbell,
+    tone: "from-indigo-500/15 to-indigo-500/5",
+    iconTone: "text-indigo-600",
   },
   {
     id: "match_pose",

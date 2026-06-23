@@ -28,19 +28,37 @@ export function MatchPoseShell({ currentAngles, config }: Props) {
   const scoreRef = useRef<Score>(emptyScore());
   const [, setTick] = useState(0);
 
+  // Mirror live props in a ref so the rAF loop reads the latest
+  // values without re-creating itself on each prop change. No
+  // setState here — safe at 60 Hz prop updates.
+  const propsRef = useRef({ currentAngles, config });
   useEffect(() => {
-    const now = performance.now();
-    const r = matchPoseStep(
-      stateRef.current,
-      scoreRef.current,
-      currentAngles,
-      config,
-      now,
-    );
-    stateRef.current = r.state;
-    scoreRef.current = r.score;
-    setTick((t) => t + 1);
+    propsRef.current = { currentAngles, config };
   }, [currentAngles, config]);
+
+  // Single rAF loop, started once on mount. Engine ticks every
+  // frame regardless of currentAngles stability so dtMs keeps
+  // accumulating when the patient holds the achieved pose perfectly
+  // still.
+  useEffect(() => {
+    let cancelled = false;
+    let raf = 0;
+    const loop = () => {
+      if (cancelled) return;
+      const now = performance.now();
+      const { currentAngles: ca, config: c } = propsRef.current;
+      const r = matchPoseStep(stateRef.current, scoreRef.current, ca, c, now);
+      stateRef.current = r.state;
+      scoreRef.current = r.score;
+      setTick((t) => (t + 1) % 1_000_000);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => {
+      cancelled = true;
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, []);
 
   const s = stateRef.current;
   const score = scoreRef.current;
