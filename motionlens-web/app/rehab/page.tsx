@@ -79,6 +79,17 @@ const MODULES: RehabModule[] = [
     href: "/rehab/pelvic-hold",
   },
   {
+    id: "wall-slide",
+    eyebrow: "S4 · Wall Slide",
+    title: "Wall Slide",
+    body:
+      "Overhead-reach hold against a wall. Patient stands back-to-wall and slides the working arm up the wall, holding at the 140°–160° shoulder flexion band. 20 s cumulative target. Hold-in-Zone mechanic.",
+    icon: Timer,
+    iconTone: "text-teal-500",
+    tone: "from-teal-500/15 to-teal-500/5",
+    href: "/rehab/wall-slide",
+  },
+  {
     id: "rep_count",
     eyebrow: "Rep-Count Gate mechanic",
     title: "Quality reps",
@@ -111,6 +122,28 @@ const MODULES: RehabModule[] = [
     iconTone: "text-cyan-500",
     tone: "from-cyan-500/15 to-cyan-500/5",
     href: "/rehab/knee-extension",
+  },
+  {
+    id: "hip-abduction",
+    eyebrow: "H2 · Hip Abduction",
+    title: "Hip Abduction",
+    body:
+      "Standing hip abduction to target — patient stands with light support, lifts the working leg sideways. Cursor.y is the shared hip abduction angle; top targets at ~38° abduction sit at the upper end of typical active ROM. Frontal view. Powered by the Target-Reach mechanic.",
+    icon: Target,
+    iconTone: "text-cyan-500",
+    tone: "from-cyan-500/15 to-cyan-500/5",
+    href: "/rehab/hip-abduction",
+  },
+  {
+    id: "wall-clock",
+    eyebrow: "S2 · Wall-Clock Reach",
+    title: "Wall-Clock Reach",
+    body:
+      "Multidirectional shoulder reach — patient stands frontal and the hand IS the cursor. Targets spawn around the play area (12, 3, 6, 9 o’clock + diagonals), training full-hemisphere shoulder ROM + reach coordination. Powered by the Target-Reach mechanic.",
+    icon: Target,
+    iconTone: "text-cyan-500",
+    tone: "from-cyan-500/15 to-cyan-500/5",
+    href: "/rehab/wall-clock",
   },
   {
     id: "pendulum",
@@ -166,6 +199,28 @@ const MODULES: RehabModule[] = [
     iconTone: "text-indigo-500",
     tone: "from-indigo-500/15 to-indigo-500/5",
     href: "/rehab/lateral-step",
+  },
+  {
+    id: "single-leg-squat",
+    eyebrow: "K6 · Single-Leg Squat",
+    title: "Single-Leg Squat",
+    body:
+      "Unipedal squat — patient stands on the working leg, descends in a controlled single-leg squat, returns. Same Rep-Count engine as K1; tightened amplitude gate (35°) and rep target (8) reflect the reduced ROM and higher demand. Lateral view. Powered by the Rep-Count mechanic.",
+    icon: Dumbbell,
+    iconTone: "text-indigo-500",
+    tone: "from-indigo-500/15 to-indigo-500/5",
+    href: "/rehab/single-leg-squat",
+  },
+  {
+    id: "external-rotation",
+    eyebrow: "S5 · External Rotation (trend)",
+    title: "External Rotation",
+    body:
+      "Elbow-at-side external rotation rep counter — patient tucks the upper arm and rotates the forearm outward. Uses the same Rep-Count engine as K1. Note: 2-D forearm proxy, NOT absolute ER measurement — report as within-patient trend only. Powered by the Rep-Count mechanic.",
+    icon: Dumbbell,
+    iconTone: "text-indigo-500",
+    tone: "from-indigo-500/15 to-indigo-500/5",
+    href: "/rehab/external-rotation",
   },
   {
     id: "match_pose",
