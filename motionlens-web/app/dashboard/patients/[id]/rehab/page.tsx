@@ -77,6 +77,17 @@ const MODULES: RehabModule[] = [
     iconTone: "text-teal-600",
   },
   {
+    id: "wall-slide",
+    href: "rehab/wall-slide",
+    eyebrow: "S4 · Wall Slide",
+    title: "Wall Slide",
+    body:
+      "Overhead-reach hold — back-to-wall, slide working arm up to the 140°–160° shoulder flexion band. 20 s cumulative target. Hold-in-Zone mechanic.",
+    icon: Timer,
+    tone: "from-teal-500/15 to-teal-500/5",
+    iconTone: "text-teal-600",
+  },
+  {
     id: "rep_count",
     href: null,
     eyebrow: "Rep-Count Gate",
@@ -107,6 +118,28 @@ const MODULES: RehabModule[] = [
     title: "Terminal Knee Extension",
     body:
       "Active terminal-extension drill — cursor.y is the shared knee extension angle. Top targets target the last 0–27° (post-op terminal band). Target-Reach mechanic.",
+    icon: Target,
+    tone: "from-cyan-500/15 to-cyan-500/5",
+    iconTone: "text-cyan-600",
+  },
+  {
+    id: "hip-abduction",
+    href: "rehab/hip-abduction",
+    eyebrow: "H2 · Hip Abduction",
+    title: "Hip Abduction",
+    body:
+      "Standing hip abduction to target — cursor.y is the shared hip abduction angle. Top targets at ~38° (upper end of active ROM). Frontal view. Target-Reach mechanic.",
+    icon: Target,
+    tone: "from-cyan-500/15 to-cyan-500/5",
+    iconTone: "text-cyan-600",
+  },
+  {
+    id: "wall-clock",
+    href: "rehab/wall-clock",
+    eyebrow: "S2 · Wall-Clock Reach",
+    title: "Wall-Clock Reach",
+    body:
+      "Multidirectional shoulder reach — hand is the cursor. Targets spawn at clock-like positions, forcing reach in every direction. Frontal view. Target-Reach mechanic.",
     icon: Target,
     tone: "from-cyan-500/15 to-cyan-500/5",
     iconTone: "text-cyan-600",
@@ -162,6 +195,28 @@ const MODULES: RehabModule[] = [
     title: "Lateral Step",
     body:
       "Side-stepping drill in a quarter-squat. Working knee interior drives the Rep-Count engine. Tighter amplitude gate (30°) for the shallower ROM. Rep-Count mechanic.",
+    icon: Dumbbell,
+    tone: "from-indigo-500/15 to-indigo-500/5",
+    iconTone: "text-indigo-600",
+  },
+  {
+    id: "single-leg-squat",
+    href: "rehab/single-leg-squat",
+    eyebrow: "K6 · Single-Leg Squat",
+    title: "Single-Leg Squat",
+    body:
+      "Unipedal squat — same Rep-Count engine as K1, tighter amplitude (35°) and 8-rep target reflect the reduced ROM and higher balance load. Lateral view. Rep-Count mechanic.",
+    icon: Dumbbell,
+    tone: "from-indigo-500/15 to-indigo-500/5",
+    iconTone: "text-indigo-600",
+  },
+  {
+    id: "external-rotation",
+    href: "rehab/external-rotation",
+    eyebrow: "S5 · External Rotation (trend)",
+    title: "External Rotation",
+    body:
+      "Elbow-at-side ER rep counter using a 2-D forearm-position proxy. Trend only — not absolute ER. Frontal view. Rep-Count mechanic.",
     icon: Dumbbell,
     tone: "from-indigo-500/15 to-indigo-500/5",
     iconTone: "text-indigo-600",
