@@ -222,6 +222,17 @@ const MODULES: RehabModule[] = [
     iconTone: "text-indigo-600",
   },
   {
+    id: "scapular-set",
+    href: "rehab/scapular-set",
+    eyebrow: "S6 · Scapular Set (coarse)",
+    title: "Scapular Set",
+    body:
+      "Scapular retraction rep counter — proxy from shoulder-width narrowing. Coarse coaching cue only — not a precise scapular measurement. Frontal view, auto-calibrated baseline. Rep-Count mechanic.",
+    icon: Dumbbell,
+    tone: "from-indigo-500/15 to-indigo-500/5",
+    iconTone: "text-indigo-600",
+  },
+  {
     id: "match_pose",
     href: null,
     eyebrow: "Match-Pose",

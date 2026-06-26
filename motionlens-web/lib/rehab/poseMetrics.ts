@@ -69,6 +69,43 @@ export function computeShoulderWidth(keypoints: Keypoint[]): number | null {
   return Math.abs(rSh.x - lSh.x);
 }
 
+/** COARSE proxy for scapular retraction, derived from the
+ *  narrowing of shoulder-to-shoulder pixel width relative to a
+ *  calibrated baseline. This is a coaching-cue signal, NOT a
+ *  scapular position measurement.
+ *
+ *  Why a proxy is the best we can do here — the scapula has no
+ *  BlazePose landmark. True retraction is mostly posterior
+ *  translation (invisible in 2-D frontal view) plus a small
+ *  medial component (the shoulder landmarks pulling slightly
+ *  toward midline). Only the medial component is detectable here,
+ *  and only as a small (~3-10 %) reduction in shoulder pixel
+ *  width vs the relaxed baseline. The PRD explicitly flags S6 as
+ *  a coarse cue; callers MUST surface this in the UI.
+ *
+ *  Returns a number in [0, ~15] under typical clinic geometry:
+ *    • 0 at baseline (relaxed shoulders, blades neutral)
+ *    • Positive as the patient retracts; magnitude ≈ percentage
+ *      of width narrowing
+ *
+ *  Caller responsibility — track the baseline width separately
+ *  (e.g. average shoulder width over the first ~10 valid frames
+ *  while the patient stands neutral) and pass it in. The helper
+ *  stays pure: no module-level state.
+ */
+export function computeScapularRetractionProxy(
+  keypoints: Keypoint[],
+  baselineShoulderWidth: number,
+): number | null {
+  if (baselineShoulderWidth <= 0) return null;
+  const current = computeShoulderWidth(keypoints);
+  if (current === null) return null;
+  // Clamp to zero floor — width WIDER than baseline (patient
+  // protracted further or moved closer to the camera) is not
+  // retraction; treat as "neutral".
+  return Math.max(0, (1 - current / baselineShoulderWidth) * 100);
+}
+
 /** LOW-CONFIDENCE proxy for shoulder external rotation in degrees,
  *  derived from the lateral excursion of the wrist relative to the
  *  elbow in a 2-D frontal image. This is a TREND-ONLY signal, NOT

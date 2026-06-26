@@ -223,6 +223,17 @@ const MODULES: RehabModule[] = [
     href: "/rehab/external-rotation",
   },
   {
+    id: "scapular-set",
+    eyebrow: "S6 · Scapular Set (coarse)",
+    title: "Scapular Set",
+    body:
+      "Scapular retraction / row-pattern rep counter — patient squeezes the shoulder blades together. Same Rep-Count engine as K1. Note: scapula is not landmarked; the cue is inferred from small medial shoulder displacement — a coarse coaching signal, not a precise scapular measurement. Powered by the Rep-Count mechanic.",
+    icon: Dumbbell,
+    iconTone: "text-indigo-500",
+    tone: "from-indigo-500/15 to-indigo-500/5",
+    href: "/rehab/scapular-set",
+  },
+  {
     id: "match_pose",
     eyebrow: "Match-Pose mechanic",
     title: "Hold the pose",
