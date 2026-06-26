@@ -27,6 +27,7 @@ import { Footer } from "@/components/layout/Footer";
 import { Section } from "@/components/ui/Section";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 interface RehabModule {
   /** Stable id for the URL slug. */
@@ -223,6 +224,17 @@ const MODULES: RehabModule[] = [
     href: "/rehab/external-rotation",
   },
   {
+    id: "scapular-set",
+    eyebrow: "S6 · Scapular Set (coarse)",
+    title: "Scapular Set",
+    body:
+      "Scapular retraction / row-pattern rep counter — patient squeezes the shoulder blades together. Same Rep-Count engine as K1. Note: scapula is not landmarked; the cue is inferred from small medial shoulder displacement — a coarse coaching signal, not a precise scapular measurement. Powered by the Rep-Count mechanic.",
+    icon: Dumbbell,
+    iconTone: "text-indigo-500",
+    tone: "from-indigo-500/15 to-indigo-500/5",
+    href: "/rehab/scapular-set",
+  },
+  {
     id: "match_pose",
     eyebrow: "Match-Pose mechanic",
     title: "Hold the pose",
@@ -296,6 +308,12 @@ function Inner() {
             {MODULES.map((m) => {
               const Icon = m.icon;
               const comingSoon = m.href === null;
+              // Card ids use mixed conventions (early entries use
+              // underscores e.g. "wall_sit"; newer ones use hyphens
+              // e.g. "wall-clock"). The image map keys on the
+              // hyphen-slug form, matching the route folder names.
+              const imageUrl =
+                REHAB_EXERCISE_IMAGES[m.id.replace(/_/g, "-")];
               const sharedClass = `group relative flex flex-col overflow-hidden rounded-hero border border-border bg-gradient-to-br ${m.tone} p-6 transition md:p-8`;
               const interactive = comingSoon
                 ? "cursor-default opacity-80"
@@ -303,6 +321,22 @@ function Inner() {
 
               const content = (
                 <>
+                  {/* Reference thumbnail — mirrors biomech's
+                      MovementGrid tile (h-28, white bg, rounded,
+                      object-contain, lazy, decorative). Conditional
+                      so placeholder cards stay text-only. */}
+                  {imageUrl && (
+                    <div className="mb-3 w-full overflow-hidden rounded-md bg-white">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={imageUrl}
+                        alt=""
+                        aria-hidden="true"
+                        loading="lazy"
+                        className="block h-28 w-full object-contain"
+                      />
+                    </div>
+                  )}
                   <div className="flex items-center justify-between">
                     <Icon className={`h-7 w-7 ${m.iconTone}`} />
                     {comingSoon ? (

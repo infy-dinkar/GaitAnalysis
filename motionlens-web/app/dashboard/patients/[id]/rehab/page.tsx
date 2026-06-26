@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { AuthGuard } from "@/components/auth/AuthGuard";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
+import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 interface RehabModule {
   id: string;
@@ -222,6 +223,17 @@ const MODULES: RehabModule[] = [
     iconTone: "text-indigo-600",
   },
   {
+    id: "scapular-set",
+    href: "rehab/scapular-set",
+    eyebrow: "S6 · Scapular Set (coarse)",
+    title: "Scapular Set",
+    body:
+      "Scapular retraction rep counter — proxy from shoulder-width narrowing. Coarse coaching cue only — not a precise scapular measurement. Frontal view, auto-calibrated baseline. Rep-Count mechanic.",
+    icon: Dumbbell,
+    tone: "from-indigo-500/15 to-indigo-500/5",
+    iconTone: "text-indigo-600",
+  },
+  {
     id: "match_pose",
     href: null,
     eyebrow: "Match-Pose",
@@ -296,6 +308,10 @@ function Content({ patientId }: { patientId: string }) {
           const href = comingSoon
             ? null
             : `/${m.href}?patientId=${patientId}`;
+          // Mixed-id naming (some entries underscore, others
+          // hyphen). The image map keys on the route slug form.
+          const imageUrl =
+            REHAB_EXERCISE_IMAGES[m.id.replace(/_/g, "-")];
           const sharedClass = `group relative flex flex-col overflow-hidden rounded-hero border border-border bg-gradient-to-br ${m.tone} p-6 transition md:p-8`;
           const interactive = comingSoon
             ? "cursor-default opacity-80"
@@ -303,6 +319,21 @@ function Content({ patientId }: { patientId: string }) {
 
           const content = (
             <>
+              {/* Reference thumbnail — mirrors biomech's
+                  MovementGrid tile. Conditional so placeholder
+                  cards stay text-only. */}
+              {imageUrl && (
+                <div className="mb-3 w-full overflow-hidden rounded-md bg-white">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={imageUrl}
+                    alt=""
+                    aria-hidden="true"
+                    loading="lazy"
+                    className="block h-28 w-full object-contain"
+                  />
+                </div>
+              )}
               <div className="flex items-center justify-between">
                 <Icon className={`h-7 w-7 ${m.iconTone}`} />
                 {comingSoon ? (
