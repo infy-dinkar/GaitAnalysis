@@ -33,6 +33,7 @@ import { computeKneeAngle } from "@/lib/biomech/knee-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
+import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 type Side = "left" | "right";
 
@@ -216,6 +217,19 @@ function Inner() {
 function SidePicker({ onPick }: { onPick: (s: Side) => void }) {
   return (
     <div className="mt-10 max-w-xl">
+      {REHAB_EXERCISE_IMAGES["single-leg-squat"] && (
+        <div className="mb-6 mx-auto max-w-md overflow-hidden rounded-md border border-border bg-white">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={REHAB_EXERCISE_IMAGES["single-leg-squat"]}
+            alt=""
+            aria-hidden="true"
+            loading="lazy"
+            className="block w-full object-contain"
+            style={{ maxHeight: 240 }}
+          />
+        </div>
+      )}
       <h2 className="text-2xl font-semibold tracking-tight">
         Choose the standing leg
       </h2>

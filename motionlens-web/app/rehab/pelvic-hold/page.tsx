@@ -36,6 +36,7 @@ import { computePelvicTiltDeg } from "@/lib/rehab/poseMetrics";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
+import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 type StanceLeg = "left" | "right";
 
@@ -225,6 +226,19 @@ function Inner() {
 function StancePicker({ onPick }: { onPick: (s: StanceLeg) => void }) {
   return (
     <div className="mt-10 max-w-xl">
+      {REHAB_EXERCISE_IMAGES["pelvic-hold"] && (
+        <div className="mb-6 mx-auto max-w-md overflow-hidden rounded-md border border-border bg-white">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={REHAB_EXERCISE_IMAGES["pelvic-hold"]}
+            alt=""
+            aria-hidden="true"
+            loading="lazy"
+            className="block w-full object-contain"
+            style={{ maxHeight: 240 }}
+          />
+        </div>
+      )}
       <h2 className="text-2xl font-semibold tracking-tight">
         Choose the stance leg
       </h2>

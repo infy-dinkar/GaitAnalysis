@@ -48,6 +48,7 @@ import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
+import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 const CALIB_FRAMES = 10;
 const ANKLE_VIS_THRESHOLD = 0.3;
@@ -272,6 +273,24 @@ function Inner() {
                 Recalibrate
               </Button>
             </div>
+
+            {/* Reference image — shown during calibration prep,
+                hides once the baseline locks (mirrors side-picker
+                pages where the image disappears when the camera
+                starts active capture). */}
+            {phase === "calibrating" && REHAB_EXERCISE_IMAGES["weight-shift"] && (
+              <div className="mx-auto max-w-md overflow-hidden rounded-md border border-border bg-white">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={REHAB_EXERCISE_IMAGES["weight-shift"]}
+                  alt=""
+                  aria-hidden="true"
+                  loading="lazy"
+                  className="block w-full object-contain"
+                  style={{ maxHeight: 240 }}
+                />
+              </div>
+            )}
 
             <div className="grid gap-6 lg:grid-cols-2">
               <div>
