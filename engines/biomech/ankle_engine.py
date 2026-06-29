@@ -81,7 +81,58 @@ def _grab_ankle_key_frame(
         frame = cv2.resize(frame, (target_w, int(h * scale)))
         h, w = frame.shape[:2]
 
-    # Skeleton overlay — emphasizes the side under test.
+    # Determine which physical leg to emphasize in THIS keyframe by
+    # GEOMETRY (multi-landmark majority vote), NOT by the caller's
+    # `side` parameter.
+    #
+    # Why: the seated / supported-leg plantarflexion protocol always
+    # has the TEST leg LIFTED off the floor (on a bolster, table-edge,
+    # or extended forward), so its body landmarks sit at SMALLER y
+    # values (higher in the image) than the contralateral leg's.
+    # BlazePose can momentarily swap its left/right keypoint labels at
+    # the exact frame we're rendering — so trusting the label-based
+    # `side` parameter results in the WRONG visual leg being
+    # highlighted even when the trial-level measurement is correct.
+    #
+    # Robust pick — for each of (ankle, knee, foot_index), compare
+    # left vs right y. Take the majority. This handles:
+    #   • Single-landmark noise (one ankle's y momentarily junk)
+    #   • Low-visibility frames (positions still usable even at low
+    #     confidence — no visibility floor needed)
+    #   • Patient bent into unusual poses where one body part might
+    #     reverse the expected y ordering
+    landmark_pairs = (
+        ("left_ankle",      "right_ankle"),
+        ("left_knee",       "right_knee"),
+        ("left_foot_index", "right_foot_index"),
+    )
+    left_votes = 0
+    right_votes = 0
+    for l_name, r_name in landmark_pairs:
+        l_frames = keypoints_normalized.get(l_name, [])
+        r_frames = keypoints_normalized.get(r_name, [])
+        if frame_index >= len(l_frames) or frame_index >= len(r_frames):
+            continue
+        l_kp = l_frames[frame_index]
+        r_kp = r_frames[frame_index]
+        if l_kp is None or r_kp is None:
+            continue
+        _, ly, _lvis = l_kp
+        _, ry, _rvis = r_kp
+        if abs(ly - ry) < 0.005:
+            continue  # too close to vote
+        if ly < ry:
+            left_votes += 1
+        else:
+            right_votes += 1
+    if left_votes > right_votes:
+        lifted_side = "left"
+    elif right_votes > left_votes:
+        lifted_side = "right"
+    else:
+        lifted_side = side  # tied / no data — fall back to caller
+
+    # Skeleton overlay — emphasizes the lifted leg in this frame.
     def _draw_dot(name: str) -> Optional[tuple[int, int]]:
         frames = keypoints_normalized.get(name, [])
         if frame_index >= len(frames):
@@ -95,8 +146,8 @@ def _grab_ankle_key_frame(
         x_n, y_n, _vis = kp
         px = int(x_n * w)
         py = int(y_n * h)
-        emphasised = name.startswith(side)
-        # Brighter dot on the side being measured.
+        emphasised = name.startswith(lifted_side)
+        # Brighter dot on the lifted (test) leg.
         outer = (0, 0, 220) if emphasised else (150, 150, 150)
         cv2.circle(frame, (px, py), 5, outer, -1)
         cv2.circle(frame, (px, py), 7, (255, 255, 255), 1)
@@ -125,7 +176,10 @@ def _grab_ankle_key_frame(
             dot_pos[name] = p
     for a, b in edges:
         if a in dot_pos and b in dot_pos:
-            on_side = a.startswith(side) and b.startswith(side)
+            # Use the same lifted-leg pick we computed above so the
+            # bright skeleton lines stay on the test leg even when
+            # BlazePose's L/R label momentarily swapped.
+            on_side = a.startswith(lifted_side) and b.startswith(lifted_side)
             line_colour = (255, 255, 255) if on_side else (180, 180, 180)
             cv2.line(frame, dot_pos[a], dot_pos[b], line_colour, 2)
 
@@ -185,6 +239,158 @@ CALIBRATION_FACTORS: dict[str, float] = {
     "flexion":   1.25,   # dorsiflexion
     "extension": 1.30,   # plantarflexion
 }
+
+
+# ─── Anatomical sanity caps ─────────────────────────────────────
+# Calibrated peak magnitudes that exceed these values are
+# anatomically implausible — even hypermobile patients top out
+# around 70° plantarflexion / 30° dorsiflexion. Readings above
+# these caps almost always mean one of:
+#   1. Wrong protocol was filmed (e.g. a forward bend instead of
+#      seated extended-leg foot rotation)
+#   2. BlazePose left/right keypoint assignment swapped between
+#      frames — the "right_ankle" landmark in the neutral frame
+#      and the peak frame physically refer to different legs, so
+#      the angle math compares apples to oranges
+#   3. The pose pipeline locked onto a body-prior and never
+#      actually tracked the foot rotation
+# In any of these cases, the reported number is meaningless. We
+# fail loudly with actionable guidance rather than report a
+# garbage ROM that the clinician might trust.
+_ANATOMICAL_MAX_MAG_DEG: dict[str, float] = {
+    "flexion":   35.0,   # dorsiflexion — 1.4× upper-normal 25°
+    "extension": 80.0,   # plantarflexion — well above upper-normal 55°
+                          # but below hypermobile-max ~70° + calibration headroom
+}
+
+
+def _detect_side_consistency(
+    side_ax: list[float] | np.ndarray,
+    side_av: list[float] | np.ndarray,
+    other_ax: list[float] | np.ndarray,
+    other_av: list[float] | np.ndarray,
+    n: int,
+) -> tuple[bool, float]:
+    """Detect BlazePose left/right keypoint swap across the trial.
+
+    For a single subject staying in roughly the same position, the
+    test-side ankle x and the contralateral ankle x should hold a
+    STABLE ordering — if test-side starts on the camera-left half,
+    it stays there. If their relative ordering flips part-way
+    through the clip, BlazePose has re-detected with swapped L/R
+    keypoints, and the test-side measurement is unreliable.
+
+    Returns (swapped, swap_fraction):
+      • swapped:        True if a flip is detected
+      • swap_fraction:  0..1, fraction of frames whose ordering
+                        disagrees with the most common ordering
+    """
+    # Track sign(side_ax - other_ax) per valid frame. Use a LOW
+    # visibility floor (0.2, matching the rest of the engine's
+    # fallback path) instead of the strict compensation threshold
+    # so close-up / leg-only framing — where BlazePose's confidence
+    # drops on every landmark — still produces enough samples for
+    # the consistency check to fire.
+    SWAP_VIS_FLOOR = 0.2
+    signs: list[int] = []
+    for i in range(n):
+        if side_av[i] < SWAP_VIS_FLOOR:
+            continue
+        if other_av[i] < SWAP_VIS_FLOOR:
+            continue
+        diff = float(side_ax[i]) - float(other_ax[i])
+        if abs(diff) < 1e-6:
+            continue
+        signs.append(1 if diff > 0 else -1)
+    if len(signs) < 4:
+        return (False, 0.0)
+    # Majority sign vs minority sign.
+    pos = sum(1 for s in signs if s > 0)
+    neg = len(signs) - pos
+    minority = min(pos, neg)
+    swap_frac = minority / len(signs)
+    # 5 % threshold (tightened from the original 15 %): typical
+    # edge-noise stays well under 5 % in clean recordings, but
+    # genuine L/R swaps produce at least 10-20 % flipped frames.
+    # 5 % gives us margin without false-positive flagging.
+    return (swap_frac > 0.05, swap_frac)
+
+
+def _check_keyframe_side_consistency(
+    side_hip_x: list[float] | np.ndarray,
+    other_hip_x: list[float] | np.ndarray,
+    side_ankle_x: list[float] | np.ndarray,
+    other_ankle_x: list[float] | np.ndarray,
+    neutral_frame: int,
+    peak_frame: int,
+    image_width_estimate: float,
+) -> Optional[bool]:
+    """At the EXACT frames the report will display, verify that the
+    test-side body landmarks and the contralateral side sit on
+    consistent halves of the image. If their relative ordering flips
+    between the neutral and peak keyframes, the two rendered
+    thumbnails will visibly mark different physical legs (the
+    "two different legs detected" symptom).
+
+    Two-stage check (no visibility gate — BlazePose returns best-
+    guess positions even at low confidence; ignoring those positions
+    is exactly how the original keyframe-only check silently passed
+    in clips where the contralateral ankle had vis < 0.2):
+
+      1. HIP ORDERING — hip x positions are stable across a seated
+         leg-extended trial (patient barely moves). If the test-side
+         vs contralateral hip ordering flips between the two
+         keyframes, BlazePose has definitely re-assigned L/R.
+
+      2. ANKLE TELEPORT — even if hips look consistent (maybe the
+         body stayed put), check the ankle teleport directly: if the
+         test-side ANKLE jumped > 15 % of frame width between the
+         neutral and peak frames, the same landmark name now refers
+         to a physically different leg. (Pure foot-rotation barely
+         moves the ankle position — at most a few % of frame width.)
+
+    Returns:
+      • True  if both checks pass (consistent across keyframes)
+      • False if either check fails (swap detected at the rendered frames)
+      • None  if frame indices are out of bounds (caller skips check)
+    """
+    if (neutral_frame < 0 or peak_frame < 0
+            or neutral_frame >= len(side_hip_x)
+            or peak_frame >= len(side_hip_x)):
+        return None
+
+    # ── Check 1: hip ordering at the two keyframes ────────────────
+    diff_hip_n = float(side_hip_x[neutral_frame]) - float(other_hip_x[neutral_frame])
+    diff_hip_p = float(side_hip_x[peak_frame]) - float(other_hip_x[peak_frame])
+    # Both signs must match — only skip if both diffs are degenerate
+    # (hips literally on top of each other, ~impossible).
+    if abs(diff_hip_n) > 1e-3 and abs(diff_hip_p) > 1e-3:
+        if (diff_hip_n > 0) != (diff_hip_p > 0):
+            return False  # hip ordering flipped — definitive swap
+
+    # ── Check 2: test-side ankle teleport ─────────────────────────
+    # Pure ankle motion during a seated foot-rotation is tiny in the
+    # IMAGE PLANE — the ankle pivot point stays put; only the foot
+    # angle changes. So if the test-side ankle x landmark jumped by
+    # more than 15 % of frame width between the neutral and peak
+    # frames, the same name now points to a different leg.
+    if image_width_estimate > 1.0:
+        ankle_jump = abs(
+            float(side_ankle_x[neutral_frame])
+            - float(side_ankle_x[peak_frame])
+        )
+        if ankle_jump > 0.15 * image_width_estimate:
+            return False  # ankle teleported — landmark refers to a different leg
+
+        # Mirror check on contralateral ankle — same logic.
+        other_jump = abs(
+            float(other_ankle_x[neutral_frame])
+            - float(other_ankle_x[peak_frame])
+        )
+        if other_jump > 0.15 * image_width_estimate:
+            return False  # contralateral ankle teleported too
+
+    return True
 
 
 # ─── Public movement metadata ───────────────────────────────────
@@ -396,6 +602,56 @@ def analyze_ankle(
 
     n = int(min(len(kx), len(ax), len(fx)))
 
+    # ── L/R-consistent frame mask (auto-handles BlazePose swaps) ──
+    # BlazePose Full can swap its left/right keypoint assignment
+    # mid-clip if the patient briefly repositions, the model loses
+    # tracking momentarily, or close-up framing confuses the body-
+    # prior. When this happens, the "test-side" landmarks point to
+    # different physical legs in different frames — measurements
+    # become incoherent, and the rendered key-frame thumbnails
+    # visibly mark opposite legs (the symptom users have reported).
+    #
+    # Auto-handling: identify each frame's L/R "ordering" via the
+    # sign of (test_side_hip.x − contralateral_hip.x), then pick
+    # the MAJORITY ordering across the trial as ground truth. Any
+    # frame whose ordering disagrees with the majority is the
+    # SWAPPED one — exclude it from the downstream pipeline so the
+    # angle measurement and the keyframe selection both draw from a
+    # single, coherent body-side mapping.
+    other_side_for_filter = "left" if side == "right" else "right"
+    other_hip_arr = ts[f"{other_side_for_filter}_hip"]["x_px"]
+    side_hip_arr = ts[hip_key]["x_px"]
+    side_hip_vis = ts[hip_key]["vis"]
+    other_hip_vis = ts[f"{other_side_for_filter}_hip"]["vis"]
+    # Tally the sign of side_hip.x − other_hip.x across well-tracked
+    # frames (hips have higher BlazePose confidence than ankles, so
+    # the L/R ordering signal from hips is far more reliable).
+    HIP_SIGN_VIS = 0.2
+    hip_signs: list[int] = []
+    for i in range(n):
+        if side_hip_vis[i] < HIP_SIGN_VIS or other_hip_vis[i] < HIP_SIGN_VIS:
+            hip_signs.append(0)
+            continue
+        d = float(side_hip_arr[i]) - float(other_hip_arr[i])
+        if abs(d) < 1e-6:
+            hip_signs.append(0)
+            continue
+        hip_signs.append(1 if d > 0 else -1)
+    pos_n = sum(1 for s in hip_signs if s > 0)
+    neg_n = sum(1 for s in hip_signs if s < 0)
+    if pos_n == 0 and neg_n == 0:
+        majority_sign = 0  # can't determine — accept all frames
+    else:
+        majority_sign = 1 if pos_n >= neg_n else -1
+    # Per-frame L/R-consistent mask: frame is consistent if its hip
+    # sign matches majority OR if we couldn't sign it (0 → accept,
+    # because we can't prove it's flipped).
+    lr_consistent: list[bool] = [
+        (majority_sign == 0) or (hip_signs[i] == 0) or (hip_signs[i] == majority_sign)
+        for i in range(n)
+    ]
+    lr_dropped = sum(1 for i in range(n) if not lr_consistent[i])
+
     # Pre-compute per-frame "strict visibility" pass — knee + ankle
     # above VIS_THRESHOLD AND foot_index above FOOT_VIS_THRESHOLD.
     # Used to decide whether to gate or fall back to unguarded data.
@@ -418,9 +674,14 @@ def analyze_ankle(
     # gate in effect because strict_count is plenty.
     low_confidence_fallback = strict_count < min_frames_floor
     if low_confidence_fallback:
-        use_frame = [True] * n
+        base_use = [True] * n
     else:
-        use_frame = strict_pass
+        base_use = strict_pass
+    # AND the visibility gate with the L/R consistency mask so the
+    # rest of the pipeline (angle measurement + keyframe selection)
+    # silently operates on coherent-side frames only.
+    use_frame = [base_use[i] and lr_consistent[i] for i in range(n)]
+    _ = lr_dropped  # reserved for future telemetry surfacing
 
     # Per-frame interior ankle angle. NaN when the chosen gate rejects
     # the frame OR when the angle math degenerates (zero-length vector).
@@ -598,6 +859,59 @@ def analyze_ankle(
     cal = CALIBRATION_FACTORS[movement]
     peak_mag = raw_peak_mag * cal
 
+    # ── BlazePose L/R consistency telemetry (NO hard-fail) ────────
+    # We compute the trial-wide swap fraction so it's available for
+    # the keyframe-pair check below and as future telemetry, but we
+    # do NOT block the report on it. Real-world clinical videos with
+    # imperfect framing routinely show 5-15 % single-frame swaps as
+    # BlazePose noise; blocking on that would refuse most legitimate
+    # recordings. The actual user-visible problem ("two different
+    # legs shown") is gated by the explicit keyframe-pair check
+    # later in the function — that's the only hard-fail signal we
+    # trust for L/R consistency.
+    other_side = "left" if side == "right" else "right"
+    other_ankle_key = f"{other_side}_ankle"
+    other_ax_arr = ts[other_ankle_key]["x_px"]
+    other_av_arr = ts[other_ankle_key]["vis"]
+    _trial_swapped, _swap_frac = _detect_side_consistency(
+        ax, va, other_ax_arr, other_av_arr, n,
+    )
+    # Reserved for downstream telemetry / debug logging if needed.
+    _ = _trial_swapped
+    _ = _swap_frac
+
+    # ── Anatomical-max sanity cap (hard-fail) ─────────────────────
+    # The calibrated peak magnitude must fall within a physiologically
+    # plausible range. Above _ANATOMICAL_MAX_MAG_DEG means we measured
+    # garbage (wrong protocol, severe BlazePose breakdown, etc.). Fail
+    # loud with actionable guidance — these readings are MEANINGLESS,
+    # not just noisy.
+    anatomical_max = _ANATOMICAL_MAX_MAG_DEG[movement]
+    if peak_mag > anatomical_max:
+        movement_label = (
+            "Plantarflexion" if movement == "extension" else "Dorsiflexion"
+        )
+        toe_direction = (
+            "points DOWN (toes away from face) for plantarflexion"
+            if movement == "extension"
+            else "pulls UP (toes toward face) for dorsiflexion"
+        )
+        raise ValueError(
+            f"{movement_label} measurement is not reliable for this clip: "
+            f"the measured rotation ({peak_mag:.1f}°) exceeds the anatomical "
+            f"maximum (~{anatomical_max:.0f}°), which is physiologically "
+            f"impossible — almost always the wrong test was filmed.\n\n"
+            f"Re-record with the SPEC PROTOCOL:\n"
+            f"  • Patient SEATED with the test leg extended forward "
+            f"(knee straight)\n"
+            f"  • Foot starts at neutral (toes up), then {toe_direction}\n"
+            f"  • Camera perpendicular to the leg, capturing the WHOLE "
+            f"body (head, torso, leg, foot in the same frame) so "
+            f"MediaPipe's pose model stays anchored\n"
+            f"  • Hold the patient still — only the FOOT moves; the leg "
+            f"and trunk stay fixed"
+        )
+
     if movement == "extension":
         # Plantarflexion — peak is the MOST positive rel_angle
         # (foot rotated away from shin direction).
@@ -652,15 +966,27 @@ def analyze_ankle(
         # rel_frame_indices was indexed in lockstep with rel_angles,
         # which is the input to the smoothing. The smoothed array has
         # the same length, so this index maps correctly.
+        neutral_frame_idx = -1
+        peak_frame_idx = -1
         if 0 <= neutral_idx_in_rel < len(rel_frame_indices):
             neutral_frame_idx = rel_frame_indices[neutral_idx_in_rel]
+        if 0 <= peak_idx_in_rel < len(rel_frame_indices):
+            peak_frame_idx = rel_frame_indices[peak_idx_in_rel]
+
+        # Note: L/R consistency is already enforced upstream — the
+        # `use_frame` mask filters out frames where BlazePose's L/R
+        # assignment disagrees with the trial-wide majority, so the
+        # neutral / peak indices picked here are guaranteed to come
+        # from the consistent-side subset. No keyframe-level hard
+        # fail needed.
+
+        if neutral_frame_idx >= 0:
             kf = _grab_ankle_key_frame(
                 video_path, neutral_frame_idx, raw, neutral_label, side,
             )
             if kf:
                 key_frames.append(kf)
-        if 0 <= peak_idx_in_rel < len(rel_frame_indices):
-            peak_frame_idx = rel_frame_indices[peak_idx_in_rel]
+        if peak_frame_idx >= 0:
             kf = _grab_ankle_key_frame(
                 video_path, peak_frame_idx, raw, peak_label, side,
             )

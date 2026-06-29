@@ -235,6 +235,50 @@ const MODULES: RehabModule[] = [
     href: "/rehab/scapular-set",
   },
   {
+    id: "mini-squat",
+    eyebrow: "K2 · Mini-Squat",
+    title: "Mini-Squat",
+    body:
+      "Shallow partial squat — lower intensity than K1. Looser depth gate (interior 140°) and smaller amplitude (25°) make it suitable for early-stage / deconditioned patients. Same Rep-Count engine, higher rep target (12). Lateral view. Powered by the Rep-Count mechanic.",
+    icon: Dumbbell,
+    iconTone: "text-indigo-500",
+    tone: "from-indigo-500/15 to-indigo-500/5",
+    href: "/rehab/mini-squat",
+  },
+  {
+    id: "back-extension",
+    eyebrow: "B2 · Back Extension",
+    title: "Back Extension",
+    body:
+      "Standing or prone back-extension rep counter. Patient arches the trunk gently backward through a small controlled range. Same Rep-Count engine as K1 with a new trunk-tilt proxy. Lateral view. PRD: small pain-free range only. Powered by the Rep-Count mechanic.",
+    icon: Dumbbell,
+    iconTone: "text-indigo-500",
+    tone: "from-indigo-500/15 to-indigo-500/5",
+    href: "/rehab/back-extension",
+  },
+  {
+    id: "posture-hold",
+    eyebrow: "B1 · Posture Hold",
+    title: "Posture Hold",
+    body:
+      "Forward-head reset — patient sits or stands lateral to the camera and holds the ear stacked above the shoulder. Forward-head offset drives an in-zone band timer. Drift > 12° → timer pauses; return to alignment → resumes. 20 s cumulative target. Powered by the Hold-in-Zone mechanic.",
+    icon: Timer,
+    iconTone: "text-teal-500",
+    tone: "from-teal-500/15 to-teal-500/5",
+    href: "/rehab/posture-hold",
+  },
+  {
+    id: "side-bend",
+    eyebrow: "B3 · Side Bend",
+    title: "Side Bend",
+    body:
+      "Lateral trunk-flexion drill — patient stands frontal and bends sideways to drive a cursor. Cursor.x is the signed lateral-flexion angle (left bends ⇒ left, right ⇒ right); cursor.y rises with magnitude, so top targets demand near-max ROM. Frontal view. Powered by the Target-Reach mechanic.",
+    icon: Target,
+    iconTone: "text-cyan-500",
+    tone: "from-cyan-500/15 to-cyan-500/5",
+    href: "/rehab/side-bend",
+  },
+  {
     id: "match_pose",
     eyebrow: "Match-Pose mechanic",
     title: "Hold the pose",

@@ -69,6 +69,144 @@ export function computeShoulderWidth(keypoints: Keypoint[]): number | null {
   return Math.abs(rSh.x - lSh.x);
 }
 
+/** Unsigned trunk-tilt angle in degrees — angle between the
+ *  trunk segment (hip-mid → shoulder-mid) and vertical-up,
+ *  measured in image space (lateral-view assumption).
+ *
+ *  Reference cases:
+ *    • 0°    = upright neutral posture
+ *    • 10°   = mild lean from vertical
+ *    • 20-25° = clinically meaningful back-extension range
+ *
+ *  Returns MAGNITUDE only — both forward flexion and backward
+ *  extension produce positive values. The B2 Back Extension
+ *  exercise instructs the patient to extend BACKWARD only, so the
+ *  signal cleanly tracks the extension arc; forward-bending during
+ *  the drill would inflate the reading and is documented in setup
+ *  guidance.
+ *
+ *  NOTE — no equivalent in biomech. The hip-live helper measures
+ *  thigh-vs-trunk (sagittal hip flexion/extension); back extension
+ *  is a SPINE motion that biomech doesn't surface. Added here so
+ *  the rehab module can drive Rep-Count without modifying biomech.
+ */
+export function computeTrunkExtensionAngleDeg(
+  keypoints: Keypoint[],
+): number | null {
+  const lSh = keypoints[LM.LEFT_SHOULDER];
+  const rSh = keypoints[LM.RIGHT_SHOULDER];
+  const lHip = keypoints[LM.LEFT_HIP];
+  const rHip = keypoints[LM.RIGHT_HIP];
+  if (!lSh || !rSh || !lHip || !rHip) return null;
+  if ((lSh.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rSh.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((lHip.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rHip.score ?? 0) < VIS_THRESHOLD) return null;
+  const shMidX = (lSh.x + rSh.x) / 2;
+  const shMidY = (lSh.y + rSh.y) / 2;
+  const hipMidX = (lHip.x + rHip.x) / 2;
+  const hipMidY = (lHip.y + rHip.y) / 2;
+  // Trunk vector from hip-mid UP to shoulder-mid.
+  // Image y is down-positive, so shoulder above hip means dy < 0.
+  const dx = shMidX - hipMidX;
+  const dy = shMidY - hipMidY;
+  if (Math.hypot(dx, dy) < 1e-4) return null;
+  // Angle from vertical-up (= (0, -1) in image coords).
+  // atan2(|dx|, -dy) — both args positive for any upright torso.
+  return (Math.atan2(Math.abs(dx), -dy) * 180) / Math.PI;
+}
+
+/** Unsigned forward-head offset in degrees — angle between the
+ *  (shoulder → ear) vector and vertical-up, in image space.
+ *  Captures the head-jutted-forward postural fault commonly seen
+ *  in screen workers / cervical pain patients.
+ *
+ *  Reference cases (typical clinic camera, lateral or near-lateral):
+ *    • 0-5°    = good posture (ear roughly above shoulder)
+ *    • 10-15°  = mild forward head
+ *    • 20-30°  = pronounced forward-head posture
+ *
+ *  Unsigned — left/right side of the body is selectable via the
+ *  `side` parameter. Forward vs backward is conflated (both produce
+ *  positive); for the B1 Posture Hold exercise this is fine because
+ *  the in-zone target is LOW angle (good posture), not directional.
+ *
+ *  NOTE — no equivalent in biomech. The neck-live helper measures
+ *  cervical flexion/extension (head pitch); forward-head is the
+ *  HORIZONTAL translation of the head over the shoulder which the
+ *  neck-live model doesn't isolate.
+ */
+export function computeForwardHeadOffsetDeg(
+  keypoints: Keypoint[],
+  side: "left" | "right" = "right",
+): number | null {
+  const earIdx = side === "left" ? LM.LEFT_EAR : LM.RIGHT_EAR;
+  const shoulderIdx =
+    side === "left" ? LM.LEFT_SHOULDER : LM.RIGHT_SHOULDER;
+  const ear = keypoints[earIdx];
+  const shoulder = keypoints[shoulderIdx];
+  if (!ear || !shoulder) return null;
+  if ((ear.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((shoulder.score ?? 0) < VIS_THRESHOLD) return null;
+  const dx = ear.x - shoulder.x;
+  const dy = ear.y - shoulder.y;
+  if (Math.hypot(dx, dy) < 1e-4) return null;
+  // Ear sits ABOVE shoulder (dy < 0). Angle of (shoulder → ear)
+  // from vertical-up, unsigned.
+  return (Math.atan2(Math.abs(dx), -dy) * 180) / Math.PI;
+}
+
+/** Signed lateral trunk flexion angle in degrees — angle of the
+ *  trunk segment from vertical, measured in the frontal plane.
+ *  Sign convention: POSITIVE when the trunk leans to the patient's
+ *  RIGHT side (anatomical right). Negative when leaning to the
+ *  patient's left.
+ *
+ *  Reference cases:
+ *    • 0°       = upright neutral, no lateral lean
+ *    • +15°     = mid-range bend to patient's right
+ *    • +25-30°  = upper end of clinical active ROM (right bend)
+ *    • Negative = mirrored for left bends
+ *
+ *  Derivation — at neutral, hip-mid sits directly below shoulder-mid
+ *  (raw image: hipMid.y > shMid.y, hipMid.x ≈ shMid.x). When the
+ *  patient bends to their RIGHT anatomically, BOTH shoulders' avg x
+ *  shifts to their right side, which is LOWER x in the raw image
+ *  (because BlazePose returns un-mirrored pixel coords; the patient's
+ *  right is on the image's left). So (hipMid.x − shMid.x) increases
+ *  ⇒ atan2(positive, positive) > 0 ⇒ positive angle for right bend. ✓
+ *
+ *  NOTE — no biomech equivalent. Hip-live + neck-live model sagittal
+ *  motion; lateral trunk flexion is a coronal-plane spine motion.
+ */
+export function computeLateralTrunkFlexionDeg(
+  keypoints: Keypoint[],
+): number | null {
+  const lSh = keypoints[LM.LEFT_SHOULDER];
+  const rSh = keypoints[LM.RIGHT_SHOULDER];
+  const lHip = keypoints[LM.LEFT_HIP];
+  const rHip = keypoints[LM.RIGHT_HIP];
+  if (!lSh || !rSh || !lHip || !rHip) return null;
+  if ((lSh.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rSh.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((lHip.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rHip.score ?? 0) < VIS_THRESHOLD) return null;
+  const shMidX = (lSh.x + rSh.x) / 2;
+  const shMidY = (lSh.y + rSh.y) / 2;
+  const hipMidX = (lHip.x + rHip.x) / 2;
+  const hipMidY = (lHip.y + rHip.y) / 2;
+  // Vector pointing FROM shoulder-mid DOWN to hip-mid (the trunk
+  // axis as seen "from above"). At neutral upright: dx ≈ 0, dy > 0.
+  const dx = hipMidX - shMidX;
+  const dy = hipMidY - shMidY;
+  if (Math.hypot(dx, dy) < 1e-4) return null;
+  // Signed angle from vertical-down (= +y axis). atan2(dx, dy)
+  // returns 0 at neutral, positive when shoulder-mid is to the
+  // RIGHT of hip-mid in raw image (= patient bending RIGHT, since
+  // BlazePose raw coords are un-mirrored).
+  return (Math.atan2(dx, dy) * 180) / Math.PI;
+}
+
 /** COARSE proxy for scapular retraction, derived from the
  *  narrowing of shoulder-to-shoulder pixel width relative to a
  *  calibrated baseline. This is a coaching-cue signal, NOT a
