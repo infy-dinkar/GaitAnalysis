@@ -29,4 +29,8 @@ export const REHAB_EXERCISE_IMAGES: Record<string, string> = {
   "wall-clock": "/images/rehab/wall-clock.png",
   "external-rotation": "/images/rehab/external-rotation.png",
   "scapular-set": "/images/rehab/scapular-set.png",
+  "mini-squat": "/images/rehab/mini-squat.png",
+  "back-extension": "/images/rehab/back-extension.png",
+  "posture-hold": "/images/rehab/posture-hold.png",
+  "side-bend": "/images/rehab/side-bend.png",
 };

@@ -234,6 +234,50 @@ const MODULES: RehabModule[] = [
     iconTone: "text-indigo-600",
   },
   {
+    id: "mini-squat",
+    href: "rehab/mini-squat",
+    eyebrow: "K2 · Mini-Squat",
+    title: "Mini-Squat",
+    body:
+      "Shallow partial squat — looser depth (140°) and smaller amplitude (25°) than K1. Suitable for early-stage / deconditioned patients. 12-rep target. Lateral view. Rep-Count mechanic.",
+    icon: Dumbbell,
+    tone: "from-indigo-500/15 to-indigo-500/5",
+    iconTone: "text-indigo-600",
+  },
+  {
+    id: "back-extension",
+    href: "rehab/back-extension",
+    eyebrow: "B2 · Back Extension",
+    title: "Back Extension",
+    body:
+      "Bilateral back-extension rep counter using a new trunk-tilt proxy. Small pain-free range only. Lateral view. Rep-Count mechanic.",
+    icon: Dumbbell,
+    tone: "from-indigo-500/15 to-indigo-500/5",
+    iconTone: "text-indigo-600",
+  },
+  {
+    id: "posture-hold",
+    href: "rehab/posture-hold",
+    eyebrow: "B1 · Posture Hold",
+    title: "Posture Hold",
+    body:
+      "Forward-head reset — ear stacked above the shoulder. Offset > 12° pauses the band timer. 20 s cumulative target. Lateral view. Hold-in-Zone mechanic.",
+    icon: Timer,
+    tone: "from-teal-500/15 to-teal-500/5",
+    iconTone: "text-teal-600",
+  },
+  {
+    id: "side-bend",
+    href: "rehab/side-bend",
+    eyebrow: "B3 · Side Bend",
+    title: "Side Bend",
+    body:
+      "Lateral trunk-flexion drill — bend to either side to drive a cursor onto spawning targets. Cursor x is signed lateral flexion, cursor y rises with magnitude. Frontal view. Target-Reach mechanic.",
+    icon: Target,
+    tone: "from-cyan-500/15 to-cyan-500/5",
+    iconTone: "text-cyan-600",
+  },
+  {
     id: "match_pose",
     href: null,
     eyebrow: "Match-Pose",
