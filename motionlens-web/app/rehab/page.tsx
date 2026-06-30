@@ -1,12 +1,8 @@
 "use client";
-// Public rehab catalogue — lists every game-mechanic the rehab
-// module exposes. Mirrors the dashboard /analyze grid pattern so
-// the visual language matches the assessment catalogue.
-//
-// Routes for fully wired exercises link straight through; mechanics
-// that don't have a specific exercise plugged in yet show a graceful
-// "Coming soon" badge instead of a broken link — clicking them is a
-// no-op (the card stays disabled). No 404s, no dead routes.
+// Public rehab catalogue — lists every wired rehab exercise.
+// Mirrors the dashboard /analyze grid pattern so the visual
+// language matches the assessment catalogue. Every card links to
+// a real exercise route — no placeholders, no dead links.
 
 import Link from "next/link";
 import { Suspense } from "react";
@@ -14,7 +10,6 @@ import {
   ArrowUpRight,
   Dumbbell,
   Footprints,
-  Heart,
   Music,
   Spline,
   Sparkles,
@@ -38,9 +33,9 @@ interface RehabModule {
   icon: LucideIcon;
   iconTone: string;
   tone: string;
-  /** When null → "Coming soon" — the card renders disabled.
-   *  When set → Link target. */
-  href: string | null;
+  /** Route target — leading slash required (catalogue links
+   *  directly without a base-path join). */
+  href: string;
 }
 
 const MODULES: RehabModule[] = [
@@ -89,17 +84,6 @@ const MODULES: RehabModule[] = [
     iconTone: "text-teal-500",
     tone: "from-teal-500/15 to-teal-500/5",
     href: "/rehab/wall-slide",
-  },
-  {
-    id: "rep_count",
-    eyebrow: "Rep-Count Gate mechanic",
-    title: "Quality reps",
-    body:
-      "Counts reps with built-in depth + amplitude + jerk gates. Catches shallow / rushed reps and reports them to clinician + patient.",
-    icon: Dumbbell,
-    iconTone: "text-indigo-500",
-    tone: "from-indigo-500/15 to-indigo-500/5",
-    href: null,
   },
   {
     id: "shoulder_raise",
@@ -279,37 +263,48 @@ const MODULES: RehabModule[] = [
     href: "/rehab/side-bend",
   },
   {
-    id: "match_pose",
-    eyebrow: "Match-Pose mechanic",
-    title: "Hold the pose",
+    id: "hip-hinge",
+    eyebrow: "B5 · Hip Hinge",
+    title: "Hip Hinge",
     body:
-      "Per-joint angle targets with weighted aggregate match %. Linear tolerance fall-off gives partial credit; required hold-time gate captures the static portion.",
+      "Posterior-chain pattern training — patient hinges forward at the hips with a flat back, returns to upright. Same Rep-Count engine as B2 Back Extension; trunk-tilt magnitude drives reps. Lateral view. Powered by the Rep-Count mechanic.",
+    icon: Dumbbell,
+    iconTone: "text-indigo-500",
+    tone: "from-indigo-500/15 to-indigo-500/5",
+    href: "/rehab/hip-hinge",
+  },
+  {
+    id: "cat-cow",
+    eyebrow: "B6 · Cat-Cow",
+    title: "Cat-Cow",
+    body:
+      "Gentle spinal-mobility drill from quadruped — alternate CAT (chin tucked, back rounded) and COW (head lifted, back arched) following a slow vertical pacer. Trend only — head-position proxy, not a spinal ROM measurement. Powered by the Trace mechanic.",
+    icon: Spline,
+    iconTone: "text-purple-500",
+    tone: "from-purple-500/15 to-purple-500/5",
+    href: "/rehab/cat-cow",
+  },
+  {
+    id: "bird-dog",
+    eyebrow: "B4 · Bird-Dog",
+    title: "Bird-Dog",
+    body:
+      "Core-stability + posterior-chain coordination — quadruped position, extend one arm forward + opposite leg backward, hold a straight line. Three joint angles (arm, leg, trunk) tracked together; pose-match ≥ 70 % for ≥ 4 s clears the round. Powered by the Match-Pose mechanic.",
     icon: Sparkles,
     iconTone: "text-pink-500",
     tone: "from-pink-500/15 to-pink-500/5",
-    href: null,
+    href: "/rehab/bird-dog",
   },
   {
-    id: "metronome",
-    eyebrow: "Metronome mechanic",
-    title: "Move to the beat",
+    id: "marching",
+    eyebrow: "H5 · Marching",
+    title: "Marching",
     body:
-      "Cadence training with audio + visual beat. Patient events are graded perfect / good / miss with a deviation histogram. Ideal for Parkinson's cueing + gait retraining.",
+      "Cadence-paced marching in place — each knee lift on the tracked side is graded against a steady visual beat (perfect / good / miss). Patient internalises a steady, symmetric gait cadence. Audio off in v1 — music layer coming later. Powered by the Metronome mechanic.",
     icon: Music,
     iconTone: "text-fuchsia-500",
     tone: "from-fuchsia-500/15 to-fuchsia-500/5",
-    href: null,
-  },
-  {
-    id: "cardio",
-    eyebrow: "Cardio rehab",
-    title: "Submax cadence",
-    body:
-      "Stationary cardio drills with rep-counted intervals + on-tempo rhythm cues. Built for cardiac rehab phase II / III progression.",
-    icon: Heart,
-    iconTone: "text-rose-500",
-    tone: "from-rose-500/15 to-rose-500/5",
-    href: null,
+    href: "/rehab/marching",
   },
 ];
 
@@ -334,13 +329,13 @@ function Inner() {
                 Game-based therapy<span className="text-accent">.</span>
               </h1>
               <p className="mt-5 text-lg text-muted">
-                Seven reusable mechanics built on the same BlazePose
-                pipeline that powers the assessments. Each game wraps a
-                pure scoring engine — hold-in-zone, rep-count gate,
-                target-reach, trace, weight-shift, match-pose, metronome
-                — and plugs into any joint / movement the clinician
-                chooses. Specific exercise wirings ship in subsequent
-                releases.
+                Twenty-four wired exercises across the knee, hip,
+                back, and shoulder families — every one powered by
+                the same BlazePose pipeline that drives the
+                assessments. Each game wraps a pure scoring engine
+                (hold-in-zone, rep-count gate, target-reach, trace,
+                weight-shift, match-pose, metronome) plugged into
+                the joint movement clinicians actually prescribe.
               </p>
             </div>
             <Link href="/">
@@ -351,24 +346,23 @@ function Inner() {
           <div className="mt-16 grid gap-5 md:grid-cols-3">
             {MODULES.map((m) => {
               const Icon = m.icon;
-              const comingSoon = m.href === null;
               // Card ids use mixed conventions (early entries use
               // underscores e.g. "wall_sit"; newer ones use hyphens
               // e.g. "wall-clock"). The image map keys on the
               // hyphen-slug form, matching the route folder names.
               const imageUrl =
                 REHAB_EXERCISE_IMAGES[m.id.replace(/_/g, "-")];
-              const sharedClass = `group relative flex flex-col overflow-hidden rounded-hero border border-border bg-gradient-to-br ${m.tone} p-6 transition md:p-8`;
-              const interactive = comingSoon
-                ? "cursor-default opacity-80"
-                : "hover:border-accent hover:shadow-glow-sm";
+              const sharedClass = `group relative flex flex-col overflow-hidden rounded-hero border border-border bg-gradient-to-br ${m.tone} p-6 transition md:p-8 hover:border-accent hover:shadow-glow-sm`;
 
-              const content = (
-                <>
+              return (
+                <Link
+                  key={m.id}
+                  href={m.href}
+                  className={sharedClass}
+                >
                   {/* Reference thumbnail — mirrors biomech's
                       MovementGrid tile (h-28, white bg, rounded,
-                      object-contain, lazy, decorative). Conditional
-                      so placeholder cards stay text-only. */}
+                      object-contain, lazy, decorative). */}
                   {imageUrl && (
                     <div className="mb-3 w-full overflow-hidden rounded-md bg-white">
                       {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -383,13 +377,7 @@ function Inner() {
                   )}
                   <div className="flex items-center justify-between">
                     <Icon className={`h-7 w-7 ${m.iconTone}`} />
-                    {comingSoon ? (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-zinc-800/80 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.12em] text-zinc-300 ring-1 ring-zinc-600">
-                        Coming soon
-                      </span>
-                    ) : (
-                      <ArrowUpRight className="h-5 w-5 text-muted transition group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-accent" />
-                    )}
+                    <ArrowUpRight className="h-5 w-5 text-muted transition group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-accent" />
                   </div>
                   <div className="mt-8">
                     <p className="eyebrow">{m.eyebrow}</p>
@@ -400,27 +388,6 @@ function Inner() {
                       {m.body}
                     </p>
                   </div>
-                </>
-              );
-
-              if (comingSoon) {
-                return (
-                  <div
-                    key={m.id}
-                    aria-disabled
-                    className={`${sharedClass} ${interactive}`}
-                  >
-                    {content}
-                  </div>
-                );
-              }
-              return (
-                <Link
-                  key={m.id}
-                  href={m.href!}
-                  className={`${sharedClass} ${interactive}`}
-                >
-                  {content}
                 </Link>
               );
             })}
