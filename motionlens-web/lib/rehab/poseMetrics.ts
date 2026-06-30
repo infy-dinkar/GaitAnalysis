@@ -69,6 +69,117 @@ export function computeShoulderWidth(keypoints: Keypoint[]): number | null {
   return Math.abs(rSh.x - lSh.x);
 }
 
+/** Trunk angle from HORIZONTAL in degrees — angle between the
+ *  trunk segment (shoulder-mid → hip-mid) and the horizontal x-axis.
+ *  Used by B4 Bird-Dog where the target is a HORIZONTAL trunk
+ *  (quadruped position, neutral spine):
+ *    • 0°    = trunk horizontal (good bird-dog form)
+ *    • 30°   = trunk drifted off horizontal (lumbar sag / pike up)
+ *    • 90°   = trunk vertical (standing — not relevant here)
+ *
+ *  Unsigned magnitude — sagging back and piked-up back BOTH read
+ *  as positive deviations from horizontal. Pure helper, mirrors
+ *  the style of the other trunk-angle functions in this file.
+ *
+ *  NOTE — distinct from computeTrunkExtensionAngleDeg which uses
+ *  vertical-up as its reference (designed for standing back-
+ *  extension where the trunk's neutral is vertical). Bird-dog
+ *  needs the horizontal reference because the patient is in
+ *  quadruped position.
+ */
+export function computeTrunkAngleFromHorizontal(
+  keypoints: Keypoint[],
+): number | null {
+  const lSh = keypoints[LM.LEFT_SHOULDER];
+  const rSh = keypoints[LM.RIGHT_SHOULDER];
+  const lHip = keypoints[LM.LEFT_HIP];
+  const rHip = keypoints[LM.RIGHT_HIP];
+  if (!lSh || !rSh || !lHip || !rHip) return null;
+  if ((lSh.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rSh.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((lHip.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rHip.score ?? 0) < VIS_THRESHOLD) return null;
+  const shMidX = (lSh.x + rSh.x) / 2;
+  const shMidY = (lSh.y + rSh.y) / 2;
+  const hipMidX = (lHip.x + rHip.x) / 2;
+  const hipMidY = (lHip.y + rHip.y) / 2;
+  const dx = hipMidX - shMidX;
+  const dy = hipMidY - shMidY;
+  if (Math.hypot(dx, dy) < 1e-4) return null;
+  // Unsigned angle from horizontal-x axis. atan2(|dy|, |dx|):
+  // dy small (trunk horizontal) ⇒ angle ~0; dy large (trunk
+  // vertical) ⇒ angle ~90°.
+  return (Math.atan2(Math.abs(dy), Math.abs(dx)) * 180) / Math.PI;
+}
+
+/** LOW-CONFIDENCE proxy for spinal flexion / extension at the
+ *  thoracolumbar region, derived from head position relative to
+ *  shoulder line. Used by B6 Cat-Cow.
+ *
+ *  Why a proxy is the best we can do here — BlazePose has no
+ *  mid-spine landmark, so direct curvature isn't measurable. In
+ *  cat-cow specifically, the HEAD tucks down (chin to chest) at
+ *  spinal flexion ("cat") and lifts up (look forward / up) at
+ *  spinal extension ("cow"). Head position is a reliable PROXY
+ *  for the spinal cycle even though it's not a direct curvature
+ *  measurement. The B6 UI must surface a "trend only — gentle
+ *  spinal mobility" caveat.
+ *
+ *  Signed:
+ *    • POSITIVE  = head dropped below shoulder line (CAT, flexion)
+ *    • ZERO      = head at shoulder height (neutral quadruped)
+ *    • NEGATIVE  = head lifted above shoulder line (COW, extension)
+ *
+ *  Normalised by shoulder-width so the magnitude is roughly
+ *  comparable across patient sizes and clinic-camera distances.
+ */
+export function computeSpineFlexionProxyDeg(
+  keypoints: Keypoint[],
+): number | null {
+  const nose = keypoints[LM.NOSE];
+  const lSh = keypoints[LM.LEFT_SHOULDER];
+  const rSh = keypoints[LM.RIGHT_SHOULDER];
+  if (!nose || !lSh || !rSh) return null;
+  if ((nose.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((lSh.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rSh.score ?? 0) < VIS_THRESHOLD) return null;
+  const shMidY = (lSh.y + rSh.y) / 2;
+  const shoulderWidth = Math.abs(rSh.x - lSh.x);
+  if (shoulderWidth < 1e-3) return null;
+  // Vertical offset of nose from shoulder line, normalised by
+  // shoulder width, scaled to a degrees-like range so the Trace
+  // mechanic's accuracyTolerance feels familiar.
+  const normalisedOffset = (nose.y - shMidY) / shoulderWidth;
+  // Map ratio (~−2 to +2 in practice) to a degree-like scale by
+  // multiplying by 30. Cat (nose-below-shoulder ratio ~+1.5)
+  // produces +45-ish; cow (nose-above-shoulder ratio ~−1.0)
+  // produces −30-ish. Tunable downstream.
+  return normalisedOffset * 30;
+}
+
+/** Hip-hinge tilt angle in degrees — alias of
+ *  computeTrunkExtensionAngleDeg, exported under a hinge-specific
+ *  name so the B5 page reads cleanly. Math is identical: trunk-tilt
+ *  magnitude from vertical-up in image space.
+ *    • 0°    = upright neutral
+ *    • 20°   = mid-range hinge (trunk leaning forward)
+ *    • 45°+  = deep hinge (parallel-to-floor approached)
+ *
+ *  Unsigned: forward bend (the prescribed direction for hip hinge)
+ *  and backward bend both read positive. B5 setup help instructs
+ *  forward-only motion so this is clean for the intended drill.
+ *
+ *  The `side` parameter is accepted for future extension (signed
+ *  lateral-aware direction) but is currently unused — the math
+ *  uses the trunk midline only, which is symmetric.
+ */
+export function computeHipHingeAngleDeg(
+  keypoints: Keypoint[],
+  _side?: "left" | "right",
+): number | null {
+  return computeTrunkExtensionAngleDeg(keypoints);
+}
+
 /** Unsigned trunk-tilt angle in degrees — angle between the
  *  trunk segment (hip-mid → shoulder-mid) and vertical-up,
  *  measured in image space (lateral-view assumption).

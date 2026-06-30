@@ -33,4 +33,8 @@ export const REHAB_EXERCISE_IMAGES: Record<string, string> = {
   "back-extension": "/images/rehab/back-extension.png",
   "posture-hold": "/images/rehab/posture-hold.png",
   "side-bend": "/images/rehab/side-bend.png",
+  "hip-hinge": "/images/rehab/hip-hinge.png",
+  "cat-cow": "/images/rehab/cat-cow.png",
+  "bird-dog": "/images/rehab/bird-dog.png",
+  "marching": "/images/rehab/marching.png",
 };

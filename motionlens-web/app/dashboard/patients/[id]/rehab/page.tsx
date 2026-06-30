@@ -1,12 +1,12 @@
 "use client";
 // Dashboard rehab launcher — parallel to /analyze/page.tsx. Shows
-// the rehab mechanic catalogue with the patient context already
-// attached so any session played from here will save against the
-// patient's record once an exercise is wired into a mechanic.
+// the rehab exercise catalogue with the patient context already
+// attached, so any session played from here saves against the
+// patient's record.
 //
 // Identical visual structure to the analyze page (DashboardShell +
-// REHAB_MODULES grid). Cards link to /rehab/<game-id>?patientId=…
-// where available; otherwise they show a "Coming soon" pill.
+// MODULES grid). Cards link to /rehab/<slug>?patientId=… — every
+// card is a real route.
 
 import { use as usePromise } from "react";
 import Link from "next/link";
@@ -14,7 +14,6 @@ import {
   ArrowUpRight,
   Dumbbell,
   Footprints,
-  Heart,
   Music,
   Spline,
   Sparkles,
@@ -28,9 +27,10 @@ import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 interface RehabModule {
   id: string;
-  /** When null = coming soon. Otherwise the route slug, e.g.
-   *  "rehab/hold-in-zone" — patientId is appended at click time. */
-  href: string | null;
+  /** Route slug WITHOUT leading slash, e.g. "rehab/squat". The
+   *  click handler appends `?patientId=…` and prepends the leading
+   *  slash for the final URL. */
+  href: string;
   eyebrow: string;
   title: string;
   body: string;
@@ -87,17 +87,6 @@ const MODULES: RehabModule[] = [
     icon: Timer,
     tone: "from-teal-500/15 to-teal-500/5",
     iconTone: "text-teal-600",
-  },
-  {
-    id: "rep_count",
-    href: null,
-    eyebrow: "Rep-Count Gate",
-    title: "Quality reps",
-    body:
-      "Reps with built-in depth + amplitude + jerk gates. Shallow / rushed reps are flagged transparently.",
-    icon: Dumbbell,
-    tone: "from-indigo-500/15 to-indigo-500/5",
-    iconTone: "text-indigo-600",
   },
   {
     id: "shoulder_raise",
@@ -278,37 +267,48 @@ const MODULES: RehabModule[] = [
     iconTone: "text-cyan-600",
   },
   {
-    id: "match_pose",
-    href: null,
-    eyebrow: "Match-Pose",
-    title: "Hold the pose",
+    id: "hip-hinge",
+    href: "rehab/hip-hinge",
+    eyebrow: "B5 · Hip Hinge",
+    title: "Hip Hinge",
     body:
-      "Per-joint angle targets with weighted aggregate. Linear tolerance fall-off + required hold-time gate.",
+      "Posterior-chain pattern training — flat-back hinge forward, return upright. Trunk-tilt magnitude drives reps. Lateral view. Rep-Count mechanic.",
+    icon: Dumbbell,
+    tone: "from-indigo-500/15 to-indigo-500/5",
+    iconTone: "text-indigo-600",
+  },
+  {
+    id: "cat-cow",
+    href: "rehab/cat-cow",
+    eyebrow: "B6 · Cat-Cow",
+    title: "Cat-Cow",
+    body:
+      "Quadruped spinal mobility — alternate cat (chin tucked) and cow (head up) following a slow pacer. Coarse head-position proxy, trend only. Lateral view. Trace mechanic.",
+    icon: Spline,
+    tone: "from-purple-500/15 to-purple-500/5",
+    iconTone: "text-purple-600",
+  },
+  {
+    id: "bird-dog",
+    href: "rehab/bird-dog",
+    eyebrow: "B4 · Bird-Dog",
+    title: "Bird-Dog",
+    body:
+      "Core-stability + coordination — quadruped opposite-arm + opposite-leg hold. Match-Pose tracks arm, leg, trunk angles together. ≥ 70 % match for ≥ 4 s clears. Match-Pose mechanic.",
     icon: Sparkles,
     tone: "from-pink-500/15 to-pink-500/5",
     iconTone: "text-pink-600",
   },
   {
-    id: "metronome",
-    href: null,
-    eyebrow: "Metronome",
-    title: "Move to the beat",
+    id: "marching",
+    href: "rehab/marching",
+    eyebrow: "H5 · Marching",
+    title: "Marching",
     body:
-      "Cadence training with audio + visual beat. Perfect / good / miss grading. Ideal for Parkinson's cueing.",
+      "March-in-place cadence training — knee lifts graded against a visual metronome. Audio off in v1 (music layer later). Frontal view. Metronome mechanic.",
     icon: Music,
     tone: "from-fuchsia-500/15 to-fuchsia-500/5",
     iconTone: "text-fuchsia-600",
-  },
-  {
-    id: "cardio",
-    href: null,
-    eyebrow: "Cardio rehab",
-    title: "Submax cadence",
-    body:
-      "Stationary cardio drills with rep-counted intervals + on-tempo rhythm cues. Phase II / III progression.",
-    icon: Heart,
-    tone: "from-rose-500/15 to-rose-500/5",
-    iconTone: "text-rose-600",
   },
 ];
 
@@ -339,8 +339,7 @@ function Content({ patientId }: { patientId: string }) {
           Which mechanic are we playing today?
         </h1>
         <p className="mt-2 max-w-xl text-sm text-muted">
-          Pick a game. Once an exercise is plugged into the mechanic,
-          the session score saves automatically against this
+          Pick a game. Session scores save automatically against this
           patient&apos;s record.
         </p>
       </div>
@@ -348,24 +347,21 @@ function Content({ patientId }: { patientId: string }) {
       <div className="grid gap-5 md:grid-cols-3">
         {MODULES.map((m) => {
           const Icon = m.icon;
-          const comingSoon = m.href === null;
-          const href = comingSoon
-            ? null
-            : `/${m.href}?patientId=${patientId}`;
+          const href = `/${m.href}?patientId=${patientId}`;
           // Mixed-id naming (some entries underscore, others
           // hyphen). The image map keys on the route slug form.
           const imageUrl =
             REHAB_EXERCISE_IMAGES[m.id.replace(/_/g, "-")];
-          const sharedClass = `group relative flex flex-col overflow-hidden rounded-hero border border-border bg-gradient-to-br ${m.tone} p-6 transition md:p-8`;
-          const interactive = comingSoon
-            ? "cursor-default opacity-80"
-            : "hover:border-accent hover:shadow-glow-sm";
+          const sharedClass = `group relative flex flex-col overflow-hidden rounded-hero border border-border bg-gradient-to-br ${m.tone} p-6 transition md:p-8 hover:border-accent hover:shadow-glow-sm`;
 
-          const content = (
-            <>
+          return (
+            <Link
+              key={m.id}
+              href={href}
+              className={sharedClass}
+            >
               {/* Reference thumbnail — mirrors biomech's
-                  MovementGrid tile. Conditional so placeholder
-                  cards stay text-only. */}
+                  MovementGrid tile. */}
               {imageUrl && (
                 <div className="mb-3 w-full overflow-hidden rounded-md bg-white">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -380,13 +376,7 @@ function Content({ patientId }: { patientId: string }) {
               )}
               <div className="flex items-center justify-between">
                 <Icon className={`h-7 w-7 ${m.iconTone}`} />
-                {comingSoon ? (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-zinc-800/80 px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.12em] text-zinc-200 ring-1 ring-zinc-600">
-                    Coming soon
-                  </span>
-                ) : (
-                  <ArrowUpRight className="h-5 w-5 text-muted transition group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-accent" />
-                )}
+                <ArrowUpRight className="h-5 w-5 text-muted transition group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-accent" />
               </div>
 
               <div className="mt-8">
@@ -398,27 +388,6 @@ function Content({ patientId }: { patientId: string }) {
                   {m.body}
                 </p>
               </div>
-            </>
-          );
-
-          if (comingSoon || !href) {
-            return (
-              <div
-                key={m.id}
-                aria-disabled
-                className={`${sharedClass} ${interactive}`}
-              >
-                {content}
-              </div>
-            );
-          }
-          return (
-            <Link
-              key={m.id}
-              href={href}
-              className={`${sharedClass} ${interactive}`}
-            >
-              {content}
             </Link>
           );
         })}
