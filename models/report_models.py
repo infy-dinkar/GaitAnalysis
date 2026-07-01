@@ -41,6 +41,13 @@ class ReportCreate(BaseModel):
         "tandem_walk",
         "pronator_drift",
         "functional_reach",
+        # D-series functional jump tests. Both were shipped in the
+        # frontend (CMJCapture / SingleLegHopCapture) but never
+        # added to this allowlist — the resulting 422 was rendered
+        # as "[object Object]" by the client because the Pydantic
+        # error detail array can't stringify cleanly.
+        "counter_movement_jump",
+        "single_leg_hop",
     ]
 
     # Biomech-specific (optional for other modules)
