@@ -30,6 +30,7 @@ import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { RepCountShell } from "@/components/rehab/mechanics/RepCountShell";
 import { computeKneeAngle } from "@/lib/biomech/knee-live";
+import { LM_LIVE } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
@@ -134,7 +135,19 @@ function Inner() {
 
               <div className="grid gap-6 lg:grid-cols-2">
                 <div>
-                  <RehabCameraShell onFrame={handleFrame}>
+                  <RehabCameraShell
+                    onFrame={handleFrame}
+                    angleArc={{
+                      vertex: side === "left" ? LM_LIVE.LEFT_KNEE : LM_LIVE.RIGHT_KNEE,
+                      armA: side === "left" ? LM_LIVE.LEFT_HIP : LM_LIVE.RIGHT_HIP,
+                      armB: side === "left" ? LM_LIVE.LEFT_ANKLE : LM_LIVE.RIGHT_ANKLE,
+                      currentDeg: interior,
+                      band: {
+                        min: SINGLE_LEG_SQUAT_CONFIG.depthThreshold,
+                        max: SINGLE_LEG_SQUAT_CONFIG.topThreshold,
+                      },
+                    }}
+                  >
                     <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
                       <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">
                         {side === "left" ? "Left" : "Right"} knee

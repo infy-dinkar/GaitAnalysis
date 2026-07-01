@@ -32,6 +32,12 @@ import {
   LM_LIVE as LM,
   SKELETON_EDGES_LIVE as SKELETON_EDGES,
 } from "@/lib/pose/landmarks-live";
+import {
+  drawAngleArc,
+  drawCenterline,
+  drawSpineSegment,
+  type AngleArcConfig,
+} from "@/lib/pose/skeletonExtras";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 
 const OVERLAY_VIS_THRESHOLD = 0.35;
@@ -65,12 +71,21 @@ export interface RehabCameraShellProps {
    *  children. */
   children?: React.ReactNode;
   onError?: (msg: string) => void;
+  /** Optional angle-arc overlay drawn on the canvas at a joint
+   *  vertex. When present, an arc + labelled degree chip is
+   *  rendered AFTER the skeleton, centerline, and spine — reads
+   *  the vertex + arm indices from LM_LIVE, and the currentDeg
+   *  from the page's per-frame handler (the page still owns the
+   *  math; the shell just renders). Omit to keep the existing
+   *  overlay unchanged. */
+  angleArc?: AngleArcConfig;
 }
 
 export function RehabCameraShell({
   onFrame,
   onError,
   children,
+  angleArc,
 }: RehabCameraShellProps) {
   const { videoRef, active, error: camError, start, stop } = useCamera();
   const { ready: detectorReady, error: detectorError, detect } =
@@ -83,11 +98,16 @@ export function RehabCameraShell({
   const cancelledRef = useRef(false);
   const lastNormRef = useRef<Norm[] | null>(null);
   const onFrameRef = useRef(onFrame);
+  // Latest angleArc mirrored into a ref so the memoised
+  // drawSkeleton closure (with [] deps) picks up new values
+  // without needing to rebind on every prop change.
+  const angleArcRef = useRef<AngleArcConfig | undefined>(angleArc);
 
   const [busy, setBusy] = useState(false);
   const [showPip, setShowPip] = useState(true);
 
   useEffect(() => { onFrameRef.current = onFrame; }, [onFrame]);
+  useEffect(() => { angleArcRef.current = angleArc; }, [angleArc]);
   useEffect(() => {
     if (camError) onError?.(camError);
     if (detectorError) onError?.(detectorError);
@@ -145,6 +165,26 @@ export function RehabCameraShell({
       ctx.fill();
     }
     ctx.shadowBlur = 0;
+
+    // ── ViFive-style overlay extras (additive) ───────────────────
+    // Rendered AFTER the classic skeleton so guides sit on top as
+    // annotation rather than under the bones. Each helper is
+    // visibility-gated internally and no-ops on degenerate frames,
+    // so absence of any required landmark simply skips that guide.
+    drawCenterline(ctx, landmarks, w, h, {
+      visibilityThreshold: OVERLAY_VIS_THRESHOLD,
+    });
+    drawSpineSegment(ctx, landmarks, w, h, {
+      visibilityThreshold: OVERLAY_VIS_THRESHOLD,
+    });
+    const arc = angleArcRef.current;
+    if (arc) {
+      drawAngleArc(ctx, landmarks, w, h, {
+        ...arc,
+        visibilityThreshold:
+          arc.visibilityThreshold ?? OVERLAY_VIS_THRESHOLD,
+      });
+    }
   }, []);
 
   useEffect(() => {

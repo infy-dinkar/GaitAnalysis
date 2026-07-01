@@ -63,6 +63,7 @@ import { MatchPoseShell } from "@/components/rehab/mechanics/MatchPoseShell";
 import { computeShoulderAngle } from "@/lib/biomech/shoulder-live";
 import { computeHipAngle } from "@/lib/biomech/hip-live";
 import { computeTrunkAngleFromHorizontal } from "@/lib/rehab/poseMetrics";
+import { LM_LIVE } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
@@ -202,7 +203,16 @@ function Inner() {
 
               <div className="grid gap-6 lg:grid-cols-2">
                 <div>
-                  <RehabCameraShell onFrame={handleFrame}>
+                  <RehabCameraShell
+                    onFrame={handleFrame}
+                    angleArc={{
+                      vertex: combo.legSide === "left" ? LM_LIVE.LEFT_HIP : LM_LIVE.RIGHT_HIP,
+                      armA: combo.legSide === "left" ? LM_LIVE.LEFT_SHOULDER : LM_LIVE.RIGHT_SHOULDER,
+                      armB: combo.legSide === "left" ? LM_LIVE.LEFT_KNEE : LM_LIVE.RIGHT_KNEE,
+                      currentDeg: currentAngles.leg ?? 0,
+                      band: { min: 160, max: 200 },
+                    }}
+                  >
                     <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
                       <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">
                         Live joint angles

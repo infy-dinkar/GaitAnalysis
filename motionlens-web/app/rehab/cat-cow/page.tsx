@@ -42,6 +42,7 @@ import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { TraceShell } from "@/components/rehab/mechanics/TraceShell";
 import { computeSpineFlexionProxyDeg } from "@/lib/rehab/poseMetrics";
+import { LM_LIVE } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
@@ -170,7 +171,15 @@ function Inner() {
 
               <div className="grid gap-6 lg:grid-cols-2">
                 <div>
-                  <RehabCameraShell onFrame={handleFrame}>
+                  <RehabCameraShell
+                    onFrame={handleFrame}
+                    angleArc={{
+                      vertex: LM_LIVE.LEFT_HIP,
+                      armA: LM_LIVE.LEFT_SHOULDER,
+                      armB: LM_LIVE.LEFT_KNEE,
+                      currentDeg: liveProxy,
+                    }}
+                  >
                     <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
                       <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">
                         Spine proxy
