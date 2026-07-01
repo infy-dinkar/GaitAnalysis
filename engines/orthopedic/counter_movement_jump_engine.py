@@ -75,6 +75,18 @@ log = logging.getLogger(__name__)
 
 # ─── Spec constants (mirror lib/orthopedic/counterMovementJump.ts) ─
 _VIS_THRESHOLD = 0.15
+# Airborne-phase specific: at the jump apex, feet are typically
+# TUCKED close to the hips (patient pulls knees up mid-flight to
+# gain height) and MediaPipe BlazePose's ankle visibility scores
+# collapse — often to sub-0.10 — even though the POSITION estimate
+# stays usable (the model interpolates from kinematic context).
+# Using the standard 0.15 gate here would drop every airborne
+# frame and the state machine would never see a takeoff. This
+# lower floor keeps low-confidence positions in the sample stream;
+# the state machine's "both ankles above threshold + sustained
+# N frames" gate filters out random noise so this doesn't cause
+# false positives.
+_ANKLE_JUMP_VIS_FLOOR = 0.05
 _SAMPLE_HZ = 30.0
 _MAX_TRIALS = 3
 
@@ -215,6 +227,145 @@ def _grab_peak_frame(
     return f"data:image/jpeg;base64,{b64}"
 
 
+# ─── Hip-motion fallback detection ──────────────────────────────
+# Used when the ankle-based state machine fails to find any trials
+# (typically because BlazePose's ankle visibility collapsed during
+# the tucked-feet apex). The hip is BlazePose's most stable
+# landmark — it stays visible even when the feet don't — so hip
+# elevation above baseline is a very reliable proxy for the flight
+# phase. Reuses the same lift/land thresholds and validity gates
+# as the ankle-based path so cm heights and interpretation strings
+# stay directly comparable.
+def _detect_jumps_from_hip_motion(
+    *,
+    samples: list[dict],
+    baseline_hip_y: float,
+    leg_length_px: float,
+    min_airborne_samples: int,
+    min_gap_samples: int,
+    ppc: Optional[float],
+) -> list[dict]:
+    airborne_lift_thresh_px = _AIRBORNE_LIFT_FRAC_OF_LEG * leg_length_px
+    landed_band_px = _LANDED_BAND_FRAC_OF_LEG * leg_length_px
+
+    state: str = "grounded"
+    last_state_change_idx = 0
+    trials: list[dict] = []
+
+    cur_takeoff_idx: Optional[int] = None
+    cur_takeoff_frame: Optional[int] = None
+    cur_apex_hip_y: Optional[float] = None
+    cur_apex_frame: Optional[int] = None
+
+    for i in range(len(samples)):
+        s = samples[i]
+        hip_y = s["hip_y_px"]
+        if hip_y is None:
+            continue
+
+        # Image y decreases upward → "above baseline" = hip_y is
+        # SMALLER than baseline_hip_y.
+        hip_lift = baseline_hip_y - float(hip_y)
+        is_airborne = hip_lift > airborne_lift_thresh_px
+        is_landed = abs(float(hip_y) - baseline_hip_y) < landed_band_px
+
+        if state == "grounded":
+            if is_airborne:
+                if i - last_state_change_idx < min_gap_samples and trials:
+                    continue
+                state = "airborne"
+                cur_takeoff_idx = i
+                last_grounded = samples[i - 1] if i > 0 else s
+                cur_takeoff_frame = int(last_grounded["frame_index"])
+                cur_apex_hip_y = float(hip_y)
+                cur_apex_frame = int(s["frame_index"])
+                last_state_change_idx = i
+        else:  # airborne
+            # Track apex (smallest hip_y = highest).
+            if cur_apex_hip_y is None or float(hip_y) < cur_apex_hip_y:
+                cur_apex_hip_y = float(hip_y)
+                cur_apex_frame = int(s["frame_index"])
+
+            if (
+                is_landed
+                and (i - last_state_change_idx) >= min_airborne_samples
+            ):
+                takeoff_t_ms = (
+                    float(samples[cur_takeoff_idx]["t_ms"])
+                    if cur_takeoff_idx is not None
+                    else 0.0
+                )
+                landing_t_ms = float(s["t_ms"])
+                landing_frame = int(s["frame_index"])
+                flight_time_sec = max(
+                    0.0, (landing_t_ms - takeoff_t_ms) / 1000.0,
+                )
+                jump_height_px = 0.0
+                if cur_apex_hip_y is not None:
+                    jump_height_px = max(
+                        0.0, baseline_hip_y - float(cur_apex_hip_y),
+                    )
+                jump_height_cm = (
+                    jump_height_px / ppc if ppc is not None else None
+                )
+                physics_height_cm = _physics_jump_height_cm(flight_time_sec)
+
+                invalidation: Optional[str] = None
+                if ppc is not None:
+                    if jump_height_px < _MIN_JUMP_HEIGHT_FOR_VALID_CM * ppc:
+                        invalidation = (
+                            f"jump height {jump_height_cm:.1f} cm below "
+                            f"the {_MIN_JUMP_HEIGHT_FOR_VALID_CM:.0f} cm "
+                            f"minimum"
+                        )
+                else:
+                    min_px_fallback = (
+                        _MIN_JUMP_FALLBACK_FRACTION_OF_LEG * leg_length_px
+                    )
+                    if jump_height_px < min_px_fallback:
+                        invalidation = (
+                            f"jump height {jump_height_px:.0f} px below "
+                            f"minimum-jump validity threshold"
+                        )
+
+                trials.append({
+                    "trial_index": len(trials) + 1,
+                    "takeoff_frame_index": int(
+                        cur_takeoff_frame
+                        if cur_takeoff_frame is not None
+                        else -1
+                    ),
+                    "apex_frame_index": int(
+                        cur_apex_frame if cur_apex_frame is not None else -1
+                    ),
+                    "landing_frame_index": landing_frame,
+                    "takeoff_t_ms": takeoff_t_ms,
+                    "landing_t_ms": landing_t_ms,
+                    "flight_time_sec": float(flight_time_sec),
+                    "jump_height_px": float(jump_height_px),
+                    "jump_height_cm": (
+                        float(jump_height_cm)
+                        if jump_height_cm is not None
+                        else None
+                    ),
+                    "physics_height_cm": float(physics_height_cm),
+                    "valid": invalidation is None,
+                    "invalidation_reason": invalidation,
+                })
+
+                state = "grounded"
+                cur_takeoff_idx = None
+                cur_takeoff_frame = None
+                cur_apex_hip_y = None
+                cur_apex_frame = None
+                last_state_change_idx = i
+
+                if len(trials) >= _MAX_TRIALS:
+                    break
+
+    return trials
+
+
 # ─── Main entry point ───────────────────────────────────────────
 def analyze_counter_movement_jump(
     video_path: str,
@@ -298,14 +449,18 @@ def analyze_counter_movement_jump(
     for i in sampled_frames:
         t_ms = (i / fps) * 1000.0 if fps > 0 else 0.0
         hip_y = _hip_mid_y(ts, i)
+        # Use the airborne-tolerant visibility floor (0.05) instead
+        # of the strict 0.15 gate — see _ANKLE_JUMP_VIS_FLOOR notes.
+        # Missing this loosens the airborne-apex frames where
+        # BlazePose's ankle confidence collapses due to tucked feet.
         l_ankle_y = (
             float(ts["left_ankle"]["y_px"][i])
-            if _visible(ts, "left_ankle", i)
+            if float(ts["left_ankle"]["vis"][i]) >= _ANKLE_JUMP_VIS_FLOOR
             else None
         )
         r_ankle_y = (
             float(ts["right_ankle"]["y_px"][i])
-            if _visible(ts, "right_ankle", i)
+            if float(ts["right_ankle"]["vis"][i]) >= _ANKLE_JUMP_VIS_FLOOR
             else None
         )
         samples.append({
@@ -421,12 +576,22 @@ def analyze_counter_movement_jump(
     # be back inside the landed band to confirm landing. Image y
     # decreases upward, so "above baseline" = ankle_y < baseline -
     # threshold.
+    #
+    # Scan the FULL sample list (not just post-baseline-lock) so
+    # jumps that happen BEFORE the stable-standing window are
+    # caught. In many real recordings, the only stable standing
+    # period is AT THE END of the clip (patient jumped
+    # immediately, then stood still afterward) — locking the
+    # baseline there is correct, but only scanning forward from
+    # that lock would miss the jump entirely. The state machine's
+    # own thresholds keep pre-baseline standing frames classified
+    # as "grounded" so this doesn't produce false positives.
     state: str = "grounded"
     min_airborne_samples = max(
         2, int(round(_MIN_AIRBORNE_FRAMES_SEC * _SAMPLE_HZ))
     )
     min_gap_samples = max(1, int(round(_MIN_TRIAL_GAP_SEC * _SAMPLE_HZ)))
-    last_state_change_idx = baseline_lock_idx
+    last_state_change_idx = 0
 
     trials: list[dict] = []
     cur_takeoff_idx: Optional[int] = None
@@ -435,7 +600,7 @@ def analyze_counter_movement_jump(
     cur_apex_frame: Optional[int] = None
     cur_invalidation: Optional[str] = None
 
-    for i in range(baseline_lock_idx + 1, len(samples)):
+    for i in range(len(samples)):
         s = samples[i]
         lay = s["left_ankle_y_px"]
         ray = s["right_ankle_y_px"]
@@ -559,6 +724,29 @@ def analyze_counter_movement_jump(
 
                 if len(trials) >= _MAX_TRIALS:
                     break
+
+    # ── 5b) Fallback — hip-motion-based jump detection ────────
+    # If the ankle-based state machine found nothing, the patient
+    # likely tucked their feet at the apex (which crashes
+    # BlazePose's ankle visibility) or ankles are otherwise
+    # unreliable. Fall back to detecting the jump from HIP motion
+    # alone: the hip's rise above baseline is a rock-solid CMJ
+    # signature — hips are the largest, best-tracked landmarks in
+    # BlazePose and stay visible throughout the arc even when the
+    # feet don't.
+    if not trials:
+        log.info(
+            "cmj: ankle-based detection found no trials; running "
+            "hip-motion fallback."
+        )
+        trials = _detect_jumps_from_hip_motion(
+            samples=samples,
+            baseline_hip_y=baseline_hip_y,
+            leg_length_px=leg_length_px,
+            min_airborne_samples=min_airborne_samples,
+            min_gap_samples=min_gap_samples,
+            ppc=ppc,
+        )
 
     if not trials:
         raise ValueError(
