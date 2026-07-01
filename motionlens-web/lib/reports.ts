@@ -98,10 +98,53 @@ export interface ReportListResponse {
 }
 
 // ─── HTTP helpers ─────────────────────────────────────────────────
+
+/** Normalise FastAPI's error body into a human-readable string.
+ *
+ * FastAPI returns:
+ *   • string `detail` on hand-raised HTTPException → use as-is
+ *   • ARRAY of Pydantic error objects on 422 validation failure →
+ *     each element like { type, loc, msg, input }. Naively passing
+ *     the array into `new Error(...)` produced `Error.message` of
+ *     "[object Object]" (or comma-joined variant) which then leaked
+ *     into the UI as literal "[object Object]" text.
+ *   • object detail (rare) → fall back to JSON.stringify
+ */
+function normaliseErrorDetail(detail: unknown, status: number): string {
+  if (typeof detail === "string" && detail.length > 0) return detail;
+  if (Array.isArray(detail)) {
+    // Pydantic 422 — pick the human-readable `.msg` fields and
+    // annotate with the loc path so callers know which field failed.
+    const parts = detail
+      .map((item) => {
+        if (item && typeof item === "object") {
+          const rec = item as Record<string, unknown>;
+          const msg = typeof rec.msg === "string" ? rec.msg : null;
+          const loc = Array.isArray(rec.loc)
+            ? (rec.loc as unknown[]).filter((s) => typeof s === "string").join(".")
+            : null;
+          if (msg && loc) return `${loc}: ${msg}`;
+          if (msg) return msg;
+        }
+        return null;
+      })
+      .filter((s): s is string => Boolean(s));
+    if (parts.length > 0) return parts.join("; ");
+  }
+  if (detail && typeof detail === "object") {
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      // fall through
+    }
+  }
+  return `Request failed (${status})`;
+}
+
 async function asJSON<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-    throw new AuthError(body.detail || `Request failed (${res.status})`, res.status);
+    throw new AuthError(normaliseErrorDetail(body.detail, res.status), res.status);
   }
   return (await res.json()) as T;
 }
