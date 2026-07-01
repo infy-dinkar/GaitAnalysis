@@ -29,6 +29,7 @@ import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { RepCountShell } from "@/components/rehab/mechanics/RepCountShell";
 import { computeKneeAngle } from "@/lib/biomech/knee-live";
+import { LM_LIVE } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
@@ -142,7 +143,29 @@ function Inner() {
                   clinic laptop / desktop. */}
               <div className="grid gap-6 lg:grid-cols-2">
                 <div>
-                  <RehabCameraShell onFrame={handleFrame}>
+                  {/* Knee-angle arc — vertex at the working-side knee,
+                      arms to the hip and ankle on that side. Reuses
+                      the same `interior` value already computed by
+                      handleFrame; the shell just renders it as a
+                      partial arc with a colour band tied to the
+                      rep-count thresholds so the manager can see
+                      the ViFive-style joint indicator. */}
+                  <RehabCameraShell
+                    onFrame={handleFrame}
+                    angleArc={{
+                      vertex: side === "left" ? LM_LIVE.LEFT_KNEE : LM_LIVE.RIGHT_KNEE,
+                      armA: side === "left" ? LM_LIVE.LEFT_HIP : LM_LIVE.RIGHT_HIP,
+                      armB: side === "left" ? LM_LIVE.LEFT_ANKLE : LM_LIVE.RIGHT_ANKLE,
+                      currentDeg: interior,
+                      // Band tied to the healthy rep sweep — green
+                      // between the depth and top thresholds (active
+                      // rep zone), amber at the edges, red outside.
+                      band: {
+                        min: SQUAT_CONFIG.depthThreshold,
+                        max: SQUAT_CONFIG.topThreshold,
+                      },
+                    }}
+                  >
                     {/* Live knee-angle readout — corner overlay on
                         the camera tile. Updates every frame the
                         detector returns a valid signal. */}

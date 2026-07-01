@@ -41,6 +41,7 @@ import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell"
 import { MetronomeShell } from "@/components/rehab/mechanics/MetronomeShell";
 import { computeHipAngle } from "@/lib/biomech/hip-live";
 import { computePelvicTiltDeg } from "@/lib/rehab/poseMetrics";
+import { LM_LIVE } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
@@ -257,7 +258,16 @@ function Inner() {
 
               <div className="grid gap-6 lg:grid-cols-2">
                 <div>
-                  <RehabCameraShell onFrame={handleFrame}>
+                  <RehabCameraShell
+                    onFrame={handleFrame}
+                    angleArc={{
+                      vertex: side === "left" ? LM_LIVE.LEFT_HIP : LM_LIVE.RIGHT_HIP,
+                      armA: side === "left" ? LM_LIVE.LEFT_SHOULDER : LM_LIVE.RIGHT_SHOULDER,
+                      armB: side === "left" ? LM_LIVE.LEFT_KNEE : LM_LIVE.RIGHT_KNEE,
+                      currentDeg: liveFlexion,
+                      band: { min: 35, max: 90 },
+                    }}
+                  >
                     <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
                       <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">
                         Hip flexion ({side})
