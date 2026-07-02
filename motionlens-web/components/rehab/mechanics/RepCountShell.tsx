@@ -25,6 +25,12 @@ interface Props {
    *  to a "session complete" state. */
   targetReps?: number;
   config: RepCountConfig;
+  /** Optional session-state harvester. Called on each meaningful
+   *  transition (delta-gated: only when reps or score changes) so
+   *  the mounting page can build a save payload without peeking
+   *  into shell internals. Additive; backward-compatible when
+   *  omitted. */
+  onSnapshot?: (state: RepCountState, score: Score) => void;
 }
 
 export function RepCountShell({
@@ -32,6 +38,7 @@ export function RepCountShell({
   signalLabel = "Signal",
   targetReps,
   config,
+  onSnapshot,
 }: Props) {
   const stateRef = useRef<RepCountState>(emptyRepCountState());
   const scoreRef = useRef<Score>(emptyScore());
@@ -48,6 +55,20 @@ export function RepCountShell({
     propsRef.current = { signal, config };
   }, [signal, config]);
 
+  // Latest onSnapshot in a ref so the memoised rAF loop reads it
+  // without needing to rebind. Same pattern as RehabCameraShell's
+  // onFrame / angleArc refs.
+  const onSnapshotRef = useRef(onSnapshot);
+  useEffect(() => {
+    onSnapshotRef.current = onSnapshot;
+  }, [onSnapshot]);
+
+  // Delta-gate the snapshot emit: only fire when reps or points
+  // actually changed. Both are monotonically non-decreasing in
+  // normal play, so this covers every rep_counted event without
+  // spamming the consumer 60× per second.
+  const lastEmitRef = useRef<{ reps: number; points: number } | null>(null);
+
   // Single rAF loop, started once on mount. See HoldInZoneShell
   // for the rationale — fixes both max-update-depth at 60 Hz and
   // engine-stalling when the signal stops changing.
@@ -61,6 +82,19 @@ export function RepCountShell({
       const r = repCountStep(stateRef.current, scoreRef.current, s, c, now);
       stateRef.current = r.state;
       scoreRef.current = r.score;
+      // Delta-gated snapshot — fire on any rep-or-points change.
+      const last = lastEmitRef.current;
+      if (
+        !last
+        || last.reps !== r.state.reps
+        || last.points !== r.score.points
+      ) {
+        lastEmitRef.current = {
+          reps: r.state.reps,
+          points: r.score.points,
+        };
+        onSnapshotRef.current?.(r.state, r.score);
+      }
       if (r.event?.kind === "rep_counted") {
         const downgrade = r.event.payload?.downgrade as string | null;
         if (downgrade === "shallow") {

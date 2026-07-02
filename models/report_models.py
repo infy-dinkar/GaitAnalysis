@@ -48,6 +48,11 @@ class ReportCreate(BaseModel):
         # error detail array can't stringify cleanly.
         "counter_movement_jump",
         "single_leg_hop",
+        # Rehab game sessions — one report per exercise session
+        # (K1 Squat, K5 Wall Sit, ...). Payload shape lives in
+        # `metrics` (provider-agnostic dict) so all 24 exercises share
+        # this single literal.
+        "rehab",
     ]
 
     # Biomech-specific (optional for other modules)

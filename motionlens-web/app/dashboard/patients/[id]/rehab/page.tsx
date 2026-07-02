@@ -8,7 +8,7 @@
 // MODULES grid). Cards link to /rehab/<slug>?patientId=… — every
 // card is a real route.
 
-import { use as usePromise } from "react";
+import { useEffect, useMemo, useState, use as usePromise } from "react";
 import Link from "next/link";
 import {
   ArrowUpRight,
@@ -24,6 +24,9 @@ import {
 import { AuthGuard } from "@/components/auth/AuthGuard";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
+import { RehabStreakBadge } from "@/components/rehab/RehabStreakBadge";
+import { computeStreak, type StreakResult } from "@/lib/rehab/streak";
+import { listPatientReports, type ReportSummaryDTO } from "@/lib/reports";
 
 interface RehabModule {
   id: string;
@@ -331,17 +334,47 @@ export default function PatientRehabPage({
 }
 
 function Content({ patientId }: { patientId: string }) {
+  // Pull the patient's saved reports on mount so we can compute the
+  // rehab day-streak. Failures are non-fatal — the badge just stays
+  // in its "Start your streak!" empty state.
+  const [reports, setReports] = useState<ReportSummaryDTO[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    listPatientReports(patientId)
+      .then((res) => {
+        if (!cancelled) setReports(res.data);
+      })
+      .catch(() => {
+        if (!cancelled) setReports([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [patientId]);
+
+  const streak: StreakResult = useMemo(() => {
+    const dates = (reports ?? [])
+      .filter((r) => r.module === "rehab")
+      .map((r) => r.created_at);
+    return computeStreak(dates);
+  }, [reports]);
+
   return (
     <div className="space-y-8">
-      <div>
-        <p className="eyebrow">Choose rehab game</p>
-        <h1 className="mt-1 text-3xl font-semibold tracking-tight md:text-4xl">
-          Which mechanic are we playing today?
-        </h1>
-        <p className="mt-2 max-w-xl text-sm text-muted">
-          Pick a game. Session scores save automatically against this
-          patient&apos;s record.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <p className="eyebrow">Choose rehab game</p>
+          <h1 className="mt-1 text-3xl font-semibold tracking-tight md:text-4xl">
+            Which mechanic are we playing today?
+          </h1>
+          <p className="mt-2 max-w-xl text-sm text-muted">
+            Pick a game. Session scores save automatically against this
+            patient&apos;s record.
+          </p>
+        </div>
+        {/* Day-streak badge — Kemtai-style. Hidden while reports are
+            still loading to avoid a 0-streak flash before real data. */}
+        {reports !== null && <RehabStreakBadge streak={streak} />}
       </div>
 
       <div className="grid gap-5 md:grid-cols-3">
