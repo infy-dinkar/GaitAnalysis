@@ -855,8 +855,8 @@ export function buildInterpretation(result: FunctionalReachResult): string {
     const px = result.best_valid_reach_px ?? 0;
     return (
       `Best valid reach was ${px.toFixed(0)} px (relative units — no scale ` +
-      `calibration was applied). Fall-risk classification requires calibration ` +
-      `with an A4 sheet for absolute distance.`
+      `calibration was applied). Fall-risk classification requires ` +
+      `height-based calibration for absolute distance.`
     );
   }
 

@@ -5,7 +5,7 @@
 //   • Best valid reach summary — large number + fall-risk badge
 //     (cm if calibrated, "relative units" + "calibration not applied"
 //     hint if not).
-//   • Calibration banner — shows the pixels-per-cm + sheet orientation
+//   • Calibration banner — shows the pixels-per-cm source (height-based)
 //     when present, or an amber "uncalibrated — relative units only"
 //     warning otherwise.
 //   • Trial-by-trial validity log.
