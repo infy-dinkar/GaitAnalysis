@@ -25,6 +25,7 @@ import { AuthGuard } from "@/components/auth/AuthGuard";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 import { RehabStreakBadge } from "@/components/rehab/RehabStreakBadge";
+import { RehabProgressDashboard } from "@/components/rehab/RehabProgressDashboard";
 import { computeStreak, type StreakResult } from "@/lib/rehab/streak";
 import { listPatientReports, type ReportSummaryDTO } from "@/lib/reports";
 
@@ -424,6 +425,13 @@ function Content({ patientId }: { patientId: string }) {
             </Link>
           );
         })}
+      </div>
+
+      {/* ── Progress dashboard — Kemtai/ViFive-style. Fetches
+             its own data (rehab reports) client-side; renders empty
+             state cleanly when there are no sessions yet. */}
+      <div className="pt-4">
+        <RehabProgressDashboard patientId={patientId} />
       </div>
     </div>
   );
