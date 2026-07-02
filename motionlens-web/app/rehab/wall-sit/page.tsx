@@ -18,7 +18,7 @@
 //   • holdInZoneStep      — driven indirectly by HoldInZoneShell
 //   • usePatientContext   — ?patientId attaches doctor flow
 
-import { Suspense, useCallback, useState } from "react";
+import { Suspense, useCallback, useRef, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -27,11 +27,19 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { HoldInZoneShell } from "@/components/rehab/mechanics/HoldInZoneShell";
+import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
 import { computeKneeAngle } from "@/lib/biomech/knee-live";
 import { LM_LIVE } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
+import {
+  buildSkeletonPosePayload,
+  elapsedSecondsSince,
+  kpToPoseSnapshot,
+  type BestPoseSnapshot,
+  type PoseSnapshot,
+} from "@/lib/rehab/sessionHelpers";
 import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 type Side = "left" | "right";
@@ -68,22 +76,106 @@ function Inner() {
 
   const { patient, isDoctorFlow } = usePatientContext();
 
+  const sessionStartRef = useRef<number>(performance.now());
+  const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
+  const lastKpRef = useRef<PoseSnapshot | null>(null);
+  const bestSignalRef = useRef<number>(0);
+  // Page-side dwell tracking — HoldInZoneShell owns the truth but
+  // doesn't expose it. We approximate: total time signal was in
+  // band, plus the longest continuous in-band run.
+  const totalInZoneMsRef = useRef<number>(0);
+  const currentDwellMsRef = useRef<number>(0);
+  const bestDwellMsRef = useRef<number>(0);
+  const lastTickRef = useRef<number | null>(null);
+  const wasInZoneRef = useRef<boolean>(false);
+
   const handleFrame = useCallback(
-    (kp: Keypoint[], _v: HTMLVideoElement) => {
+    (kp: Keypoint[], video: HTMLVideoElement) => {
       if (!side) return;
+      const snap = kpToPoseSnapshot(kp, video.videoWidth, video.videoHeight);
+      if (snap) lastKpRef.current = snap;
       const flexion = computeKneeAngle(
         "flexion_extension",
         kp as unknown as LiveKeypoint[],
         side,
       );
       if (flexion !== null) {
-        // Feed flexion directly — no inversion. The band engine
-        // doesn't care about direction, only band membership.
         setKneeFlexion(flexion);
+        const inBand =
+          flexion >= WALL_SIT_CONFIG.min && flexion <= WALL_SIT_CONFIG.max;
+        const now = performance.now();
+        if (lastTickRef.current !== null) {
+          const dt = now - lastTickRef.current;
+          if (inBand && wasInZoneRef.current) {
+            totalInZoneMsRef.current += dt;
+            currentDwellMsRef.current += dt;
+            if (currentDwellMsRef.current > bestDwellMsRef.current) {
+              bestDwellMsRef.current = currentDwellMsRef.current;
+            }
+          } else if (!inBand) {
+            currentDwellMsRef.current = 0;
+          }
+        }
+        lastTickRef.current = now;
+        wasInZoneRef.current = inBand;
+        // Skeleton snapshot: prefer any in-band frame (latest wins).
+        if (inBand && lastKpRef.current) {
+          bestSignalRef.current = flexion;
+          bestPoseRef.current = {
+            landmarks: lastKpRef.current.landmarks,
+            source_frame: lastKpRef.current.source_frame,
+            angle: flexion,
+            capturedAtMs: now,
+          };
+        }
       }
     },
     [side],
   );
+
+  const buildRehabPayload = useCallback(() => {
+    if (!side) return null;
+    const totalSec = totalInZoneMsRef.current / 1000;
+    const bestDwellSec = bestDwellMsRef.current / 1000;
+    const interpretation = totalInZoneMsRef.current > 0
+      ? `Wall sit: ${totalSec.toFixed(1)}s cumulative in the ${WALL_SIT_CONFIG.min}–${WALL_SIT_CONFIG.max}° band `
+        + `(longest single hold ${bestDwellSec.toFixed(1)}s). Target ${(WALL_SIT_CONFIG.targetHoldMs / 1000).toFixed(0)}s.`
+      : "Session ended before the patient held the wall-sit band.";
+    const skeletonPose = buildSkeletonPosePayload(
+      bestPoseRef.current,
+      lastKpRef.current,
+      bestSignalRef.current,
+      side,
+      `Wall sit — ${bestSignalRef.current.toFixed(0)}° knee flexion`,
+    );
+    return {
+      module: "rehab" as const,
+      movement: "wall-sit",
+      side,
+      metrics: {
+        exercise_slug: "wall-sit",
+        mechanic_id: "hold_in_zone",
+        started_at_ms: sessionStartRef.current,
+        duration_sec: elapsedSecondsSince(sessionStartRef.current),
+        score: { points: 0, streak: 0, bestStreak: 0 },
+        mechanic_state: {
+          totalMsInZone: totalInZoneMsRef.current,
+          bestDwellMs: bestDwellMsRef.current,
+          currentDwellMs: currentDwellMsRef.current,
+        },
+        signal: {
+          name: "knee_flexion",
+          unit: "deg",
+          value_at_peak: bestSignalRef.current,
+          target_band: { min: WALL_SIT_CONFIG.min, max: WALL_SIT_CONFIG.max },
+        },
+        target_hold_ms: WALL_SIT_CONFIG.targetHoldMs,
+        config: WALL_SIT_CONFIG,
+        skeleton_pose: skeletonPose,
+      },
+      observations: { interpretation },
+    };
+  }, [side]);
 
   return (
     <>
@@ -171,6 +263,13 @@ function Inner() {
                     config={WALL_SIT_CONFIG}
                   />
                 </div>
+              </div>
+
+              <div className="no-pdf">
+                <SaveToPatientButton
+                  buildPayload={buildRehabPayload}
+                  label="Save rehab session"
+                />
               </div>
             </div>
           )}

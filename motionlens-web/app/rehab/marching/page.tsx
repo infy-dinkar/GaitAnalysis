@@ -39,6 +39,14 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { MetronomeShell } from "@/components/rehab/mechanics/MetronomeShell";
+import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import {
+  buildSkeletonPosePayload,
+  elapsedSecondsSince,
+  kpToPoseSnapshot,
+  type BestPoseSnapshot,
+  type PoseSnapshot,
+} from "@/lib/rehab/sessionHelpers";
 import { computeHipAngle } from "@/lib/biomech/hip-live";
 import { computePelvicTiltDeg } from "@/lib/rehab/poseMetrics";
 import { LM_LIVE } from "@/lib/pose/landmarks-live";
@@ -90,18 +98,38 @@ function Inner() {
   // HTMLAudioElement instance reference.
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
+  const sessionStartRef = useRef<number>(performance.now());
+  const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
+  const lastKpRef = useRef<PoseSnapshot | null>(null);
+  const peakFlexionRef = useRef<number>(0);
+  const liftCountRef = useRef<number>(0);
+
   const { patient, isDoctorFlow } = usePatientContext();
 
   const handleFrame = useCallback(
-    (kp: Keypoint[], _v: HTMLVideoElement) => {
+    (kp: Keypoint[], video: HTMLVideoElement) => {
       if (!side) return;
+      const snap = kpToPoseSnapshot(kp, video.videoWidth, video.videoHeight);
+      if (snap) lastKpRef.current = snap;
       const liveKp = kp as unknown as LiveKeypoint[];
       const flexion = computeHipAngle("flexion", liveKp, side);
       if (flexion !== null) {
         setLiveFlexion(flexion);
+        if (flexion > peakFlexionRef.current) {
+          peakFlexionRef.current = flexion;
+          if (flexion >= LIFT_THRESHOLD_DEG && lastKpRef.current) {
+            bestPoseRef.current = {
+              landmarks: lastKpRef.current.landmarks,
+              source_frame: lastKpRef.current.source_frame,
+              angle: flexion,
+              capturedAtMs: performance.now(),
+            };
+          }
+        }
         // Rising-edge detection — fire one event per lift.
         if (!inLiftedRef.current && flexion >= LIFT_THRESHOLD_DEG) {
           inLiftedRef.current = true;
+          liftCountRef.current += 1;
           setEventTrigger((n) => n + 1);
         } else if (inLiftedRef.current && flexion <= RESET_THRESHOLD_DEG) {
           inLiftedRef.current = false;
@@ -172,6 +200,47 @@ function Inner() {
       }
     };
   }, []);
+
+  const buildRehabPayload = useCallback(() => {
+    if (!side) return null;
+    const lifts = liftCountRef.current;
+    const peak = peakFlexionRef.current;
+    const interpretation =
+      lifts > 0
+        ? `Marching: ${lifts} knee lift${lifts === 1 ? "" : "s"} above ${LIFT_THRESHOLD_DEG}°. Peak hip flexion ${peak.toFixed(0)}°.`
+        : "Session ended before the patient completed a lift above threshold.";
+    const skeletonPose = buildSkeletonPosePayload(
+      bestPoseRef.current,
+      lastKpRef.current,
+      peak,
+      side,
+      `Peak marching lift — ${peak.toFixed(0)}° hip flexion`,
+    );
+    return {
+      module: "rehab" as const,
+      movement: "marching",
+      side,
+      metrics: {
+        exercise_slug: "marching",
+        mechanic_id: "metronome",
+        started_at_ms: sessionStartRef.current,
+        duration_sec: elapsedSecondsSince(sessionStartRef.current),
+        score: { points: 0, streak: 0, bestStreak: 0 },
+        mechanic_state: {
+          liftCount: lifts,
+        },
+        signal: {
+          name: "hip_flexion",
+          unit: "deg",
+          value_at_peak: peak,
+          target_band: { min: LIFT_THRESHOLD_DEG, max: 90 },
+        },
+        config: MARCHING_CONFIG,
+        skeleton_pose: skeletonPose,
+      },
+      observations: { interpretation },
+    };
+  }, [side]);
 
   return (
     <>
@@ -289,6 +358,13 @@ function Inner() {
                     config={MARCHING_CONFIG}
                   />
                 </div>
+              </div>
+
+              <div className="no-pdf">
+                <SaveToPatientButton
+                  buildPayload={buildRehabPayload}
+                  label="Save rehab session"
+                />
               </div>
             </div>
           )}

@@ -34,10 +34,18 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { TraceShell } from "@/components/rehab/mechanics/TraceShell";
+import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { TracePathPoint } from "@/lib/rehab/gameState";
+import {
+  buildSkeletonPosePayload,
+  elapsedSecondsSince,
+  kpToPoseSnapshot,
+  type BestPoseSnapshot,
+  type PoseSnapshot,
+} from "@/lib/rehab/sessionHelpers";
 import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 type Side = "left" | "right";
@@ -94,9 +102,15 @@ function Inner() {
 
   const { patient, isDoctorFlow } = usePatientContext();
 
+  const sessionStartRef = useRef<number>(performance.now());
+  const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
+  const lastKpRef = useRef<PoseSnapshot | null>(null);
+
   const handleFrame = useCallback(
     (kp: Keypoint[], video: HTMLVideoElement) => {
       if (!side) return;
+      const snap = kpToPoseSnapshot(kp, video.videoWidth, video.videoHeight);
+      if (snap) lastKpRef.current = snap;
       const wristIdx = side === "right" ? LM.RIGHT_WRIST : LM.LEFT_WRIST;
       const wrist = kp[wristIdx];
       const vw = video.videoWidth;
@@ -117,6 +131,17 @@ function Inner() {
       const cx = Math.max(0, Math.min(1, 1 - wrist.x / vw));
       const cy = Math.max(0, Math.min(1, wrist.y / vh));
       setCursor({ x: cx, y: cy });
+      // Continually promote lastKpRef to bestPoseRef so the report
+      // always has a live-tracking frame. Trace has no discrete
+      // "best" instant.
+      if (lastKpRef.current) {
+        bestPoseRef.current = {
+          landmarks: lastKpRef.current.landmarks,
+          source_frame: lastKpRef.current.source_frame,
+          angle: 0,
+          capturedAtMs: performance.now(),
+        };
+      }
       if (!wristSeenRef.current) {
         wristSeenRef.current = true;
         setTracking(true);
@@ -124,6 +149,41 @@ function Inner() {
     },
     [side],
   );
+
+  const buildRehabPayload = useCallback(() => {
+    if (!side) return null;
+    const durationSec = elapsedSecondsSince(sessionStartRef.current);
+    const interpretation =
+      `Pendulum trace — ${durationSec.toFixed(0)}s active on the ${side} wrist.`;
+    const skeletonPose = buildSkeletonPosePayload(
+      bestPoseRef.current,
+      lastKpRef.current,
+      0,
+      side,
+      "Pendulum session",
+    );
+    return {
+      module: "rehab" as const,
+      movement: "pendulum",
+      side,
+      metrics: {
+        exercise_slug: "pendulum",
+        mechanic_id: "trace",
+        started_at_ms: sessionStartRef.current,
+        duration_sec: durationSec,
+        score: { points: 0, streak: 0, bestStreak: 0 },
+        mechanic_state: null,
+        signal: {
+          name: "wrist_trace",
+          unit: "path",
+          value_at_peak: 0,
+        },
+        config: TRACE_CONFIG,
+        skeleton_pose: skeletonPose,
+      },
+      observations: { interpretation },
+    };
+  }, [side]);
 
   return (
     <>
@@ -208,6 +268,13 @@ function Inner() {
                     config={TRACE_CONFIG}
                   />
                 </div>
+              </div>
+
+              <div className="no-pdf">
+                <SaveToPatientButton
+                  buildPayload={buildRehabPayload}
+                  label="Save rehab session"
+                />
               </div>
             </div>
           )}

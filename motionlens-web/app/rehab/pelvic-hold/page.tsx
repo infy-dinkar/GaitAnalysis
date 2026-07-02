@@ -23,7 +23,7 @@
 //     (no existing biomech file was modified)
 //   • usePatientContext — ?patientId attaches doctor flow
 
-import { Suspense, useCallback, useState } from "react";
+import { Suspense, useCallback, useRef, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -32,10 +32,18 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { HoldInZoneShell } from "@/components/rehab/mechanics/HoldInZoneShell";
+import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
 import { computePelvicTiltDeg } from "@/lib/rehab/poseMetrics";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
+import {
+  buildSkeletonPosePayload,
+  elapsedSecondsSince,
+  kpToPoseSnapshot,
+  type BestPoseSnapshot,
+  type PoseSnapshot,
+} from "@/lib/rehab/sessionHelpers";
 import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 type StanceLeg = "left" | "right";
@@ -76,17 +84,109 @@ function Inner() {
 
   const { patient, isDoctorFlow } = usePatientContext();
 
+  const sessionStartRef = useRef<number>(performance.now());
+  const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
+  const lastKpRef = useRef<PoseSnapshot | null>(null);
+  const bestSignalRef = useRef<number>(0);
+  const totalInZoneMsRef = useRef<number>(0);
+  const currentDwellMsRef = useRef<number>(0);
+  const bestDwellMsRef = useRef<number>(0);
+  const lastTickRef = useRef<number | null>(null);
+  const wasInZoneRef = useRef<boolean>(false);
+
   const handleFrame = useCallback(
-    (kp: Keypoint[], _v: HTMLVideoElement) => {
+    (kp: Keypoint[], video: HTMLVideoElement) => {
+      const snap = kpToPoseSnapshot(kp, video.videoWidth, video.videoHeight);
+      if (snap) lastKpRef.current = snap;
       const tilt = computePelvicTiltDeg(
         kp as unknown as LiveKeypoint[],
       );
       if (tilt !== null) {
         setPelvicTilt(tilt);
+        const inBand =
+          tilt >= PELVIC_HOLD_CONFIG.min && tilt <= PELVIC_HOLD_CONFIG.max;
+        const now = performance.now();
+        if (lastTickRef.current !== null) {
+          const dt = now - lastTickRef.current;
+          if (inBand && wasInZoneRef.current) {
+            totalInZoneMsRef.current += dt;
+            currentDwellMsRef.current += dt;
+            if (currentDwellMsRef.current > bestDwellMsRef.current) {
+              bestDwellMsRef.current = currentDwellMsRef.current;
+            }
+          } else if (!inBand) {
+            currentDwellMsRef.current = 0;
+          }
+        }
+        lastTickRef.current = now;
+        wasInZoneRef.current = inBand;
+        if (inBand && lastKpRef.current) {
+          // Prefer the closest-to-level frame for the skeleton.
+          if (
+            Math.abs(tilt) <= Math.abs(bestSignalRef.current)
+            || bestPoseRef.current === null
+          ) {
+            bestSignalRef.current = tilt;
+            bestPoseRef.current = {
+              landmarks: lastKpRef.current.landmarks,
+              source_frame: lastKpRef.current.source_frame,
+              angle: tilt,
+              capturedAtMs: now,
+            };
+          }
+        }
       }
     },
     [],
   );
+
+  const buildRehabPayload = useCallback(() => {
+    if (!stance) return null;
+    const totalSec = totalInZoneMsRef.current / 1000;
+    const bestDwellSec = bestDwellMsRef.current / 1000;
+    const interpretation = totalInZoneMsRef.current > 0
+      ? `Pelvic-level hold: ${totalSec.toFixed(1)}s cumulative inside ±${PELVIC_HOLD_CONFIG.max}° band `
+        + `(longest single hold ${bestDwellSec.toFixed(1)}s). Target ${(PELVIC_HOLD_CONFIG.targetHoldMs / 1000).toFixed(0)}s.`
+      : "Session ended before the patient held the pelvic-level band.";
+    const skeletonPose = buildSkeletonPosePayload(
+      bestPoseRef.current,
+      lastKpRef.current,
+      bestSignalRef.current,
+      stance,
+      `Pelvic-level hold — ${bestSignalRef.current.toFixed(1)}° tilt`,
+    );
+    return {
+      module: "rehab" as const,
+      movement: "pelvic-hold",
+      side: stance,
+      metrics: {
+        exercise_slug: "pelvic-hold",
+        mechanic_id: "hold_in_zone",
+        started_at_ms: sessionStartRef.current,
+        duration_sec: elapsedSecondsSince(sessionStartRef.current),
+        score: { points: 0, streak: 0, bestStreak: 0 },
+        mechanic_state: {
+          totalMsInZone: totalInZoneMsRef.current,
+          bestDwellMs: bestDwellMsRef.current,
+          currentDwellMs: currentDwellMsRef.current,
+        },
+        signal: {
+          name: "pelvic_tilt",
+          unit: "deg",
+          value_at_peak: bestSignalRef.current,
+          target_band: {
+            min: PELVIC_HOLD_CONFIG.min,
+            max: PELVIC_HOLD_CONFIG.max,
+          },
+        },
+        stance,
+        target_hold_ms: PELVIC_HOLD_CONFIG.targetHoldMs,
+        config: PELVIC_HOLD_CONFIG,
+        skeleton_pose: skeletonPose,
+      },
+      observations: { interpretation },
+    };
+  }, [stance]);
 
   // Direction hint shown next to the live readout — helps the
   // patient understand which side is dropping when they drift out
@@ -179,6 +279,13 @@ function Inner() {
                     config={PELVIC_HOLD_CONFIG}
                   />
                 </div>
+              </div>
+
+              <div className="no-pdf">
+                <SaveToPatientButton
+                  buildPayload={buildRehabPayload}
+                  label="Save rehab session"
+                />
               </div>
             </div>
           )}

@@ -38,7 +38,7 @@
 //   • computeLateralTrunkFlexionDeg — NEW pure fn in poseMetrics
 //   • usePatientContext
 
-import { Suspense, useCallback, useState } from "react";
+import { Suspense, useCallback, useRef, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -47,10 +47,18 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { TargetReachShell } from "@/components/rehab/mechanics/TargetReachShell";
+import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
 import { computeLateralTrunkFlexionDeg } from "@/lib/rehab/poseMetrics";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
+import {
+  buildSkeletonPosePayload,
+  elapsedSecondsSince,
+  kpToPoseSnapshot,
+  type BestPoseSnapshot,
+  type PoseSnapshot,
+} from "@/lib/rehab/sessionHelpers";
 import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 // 25° = upper end of typical clinical active lateral-flexion ROM.
@@ -83,13 +91,32 @@ function Inner() {
 
   const { patient, isDoctorFlow } = usePatientContext();
 
+  const sessionStartRef = useRef<number>(performance.now());
+  const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
+  const lastKpRef = useRef<PoseSnapshot | null>(null);
+  const peakBendRef = useRef<number>(0);
+
   const handleFrame = useCallback(
-    (kp: Keypoint[], _video: HTMLVideoElement) => {
+    (kp: Keypoint[], video: HTMLVideoElement) => {
+      const snap = kpToPoseSnapshot(kp, video.videoWidth, video.videoHeight);
+      if (snap) lastKpRef.current = snap;
       const angle = computeLateralTrunkFlexionDeg(
         kp as unknown as LiveKeypoint[],
       );
       if (angle === null) return;
       setLiveAngle(angle);
+      const absAngle = Math.abs(angle);
+      if (absAngle > peakBendRef.current) {
+        peakBendRef.current = absAngle;
+        if (absAngle >= 5 && lastKpRef.current) {
+          bestPoseRef.current = {
+            landmarks: lastKpRef.current.landmarks,
+            source_frame: lastKpRef.current.source_frame,
+            angle: absAngle,
+            capturedAtMs: performance.now(),
+          };
+        }
+      }
       // Signed lateral shift, clamped so the cursor stays just
       // inside the target spawn band edges (0.05–0.95 visually,
       // 0.15-0.85 reachable).
@@ -105,6 +132,40 @@ function Inner() {
     },
     [],
   );
+
+  const buildRehabPayload = useCallback(() => {
+    const peak = peakBendRef.current;
+    const interpretation =
+      `Peak lateral trunk flexion: ${peak.toFixed(0)}° (target up to ${MAX_BEND_DEG}°).`;
+    const skeletonPose = buildSkeletonPosePayload(
+      bestPoseRef.current,
+      lastKpRef.current,
+      peak,
+      null,
+      `Peak side bend — ${peak.toFixed(0)}° lateral trunk flexion`,
+    );
+    return {
+      module: "rehab" as const,
+      movement: "side-bend",
+      metrics: {
+        exercise_slug: "side-bend",
+        mechanic_id: "target_reach",
+        started_at_ms: sessionStartRef.current,
+        duration_sec: elapsedSecondsSince(sessionStartRef.current),
+        score: { points: 0, streak: 0, bestStreak: 0 },
+        mechanic_state: null,
+        signal: {
+          name: "lateral_trunk_flexion",
+          unit: "deg",
+          value_at_peak: peak,
+          target_band: { min: 0, max: MAX_BEND_DEG },
+        },
+        config: REACH_CONFIG,
+        skeleton_pose: skeletonPose,
+      },
+      observations: { interpretation },
+    };
+  }, []);
 
   // Direction hint for the live readout.
   const bendSide =
@@ -188,6 +249,13 @@ function Inner() {
                 <div>
                   <TargetReachShell cursor={cursor} config={REACH_CONFIG} />
                 </div>
+              </div>
+
+              <div className="no-pdf">
+                <SaveToPatientButton
+                  buildPayload={buildRehabPayload}
+                  label="Save rehab session"
+                />
               </div>
             </div>
           )}

@@ -32,7 +32,7 @@
 //   • usePatientContext
 // NO biomech file modified.
 
-import { Suspense, useCallback, useState } from "react";
+import { Suspense, useCallback, useRef, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -41,12 +41,20 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { TraceShell } from "@/components/rehab/mechanics/TraceShell";
+import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
 import { computeSpineFlexionProxyDeg } from "@/lib/rehab/poseMetrics";
 import { LM_LIVE } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
 import type { TracePathPoint } from "@/lib/rehab/gameState";
+import {
+  buildSkeletonPosePayload,
+  elapsedSecondsSince,
+  kpToPoseSnapshot,
+  type BestPoseSnapshot,
+  type PoseSnapshot,
+} from "@/lib/rehab/sessionHelpers";
 import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 const PROXY_SCALE = 60;       // ±30 proxy → ±0.5 cursor.y swing
@@ -87,18 +95,70 @@ function Inner() {
 
   const { patient, isDoctorFlow } = usePatientContext();
 
+  const sessionStartRef = useRef<number>(performance.now());
+  const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
+  const lastKpRef = useRef<PoseSnapshot | null>(null);
+  const peakProxyRef = useRef<number>(0);
+
   const handleFrame = useCallback(
-    (kp: Keypoint[], _v: HTMLVideoElement) => {
+    (kp: Keypoint[], video: HTMLVideoElement) => {
+      const snap = kpToPoseSnapshot(kp, video.videoWidth, video.videoHeight);
+      if (snap) lastKpRef.current = snap;
       const proxy = computeSpineFlexionProxyDeg(
         kp as unknown as LiveKeypoint[],
       );
       if (proxy === null) return;
       setLiveProxy(proxy);
+      const absProxy = Math.abs(proxy);
+      if (absProxy > peakProxyRef.current) {
+        peakProxyRef.current = absProxy;
+        if (absProxy >= 5 && lastKpRef.current) {
+          bestPoseRef.current = {
+            landmarks: lastKpRef.current.landmarks,
+            source_frame: lastKpRef.current.source_frame,
+            angle: absProxy,
+            capturedAtMs: performance.now(),
+          };
+        }
+      }
       const yOffset = Math.max(-0.45, Math.min(0.45, proxy / PROXY_SCALE));
       setCursor({ x: 0.5, y: 0.5 + yOffset });
     },
     [],
   );
+
+  const buildRehabPayload = useCallback(() => {
+    const peak = peakProxyRef.current;
+    const interpretation =
+      `Cat-Cow trace — peak spine flexion proxy ${peak.toFixed(0)}° across the session.`;
+    const skeletonPose = buildSkeletonPosePayload(
+      bestPoseRef.current,
+      lastKpRef.current,
+      peak,
+      null,
+      `Cat-Cow — peak proxy ${peak.toFixed(0)}°`,
+    );
+    return {
+      module: "rehab" as const,
+      movement: "cat-cow",
+      metrics: {
+        exercise_slug: "cat-cow",
+        mechanic_id: "trace",
+        started_at_ms: sessionStartRef.current,
+        duration_sec: elapsedSecondsSince(sessionStartRef.current),
+        score: { points: 0, streak: 0, bestStreak: 0 },
+        mechanic_state: null,
+        signal: {
+          name: "spine_flex_proxy",
+          unit: "deg",
+          value_at_peak: peak,
+        },
+        config: TRACE_CONFIG,
+        skeleton_pose: skeletonPose,
+      },
+      observations: { interpretation },
+    };
+  }, []);
 
   const phaseHint =
     Math.abs(liveProxy) < 4
@@ -206,6 +266,13 @@ function Inner() {
                     config={TRACE_CONFIG}
                   />
                 </div>
+              </div>
+
+              <div className="no-pdf">
+                <SaveToPatientButton
+                  buildPayload={buildRehabPayload}
+                  label="Save rehab session"
+                />
               </div>
             </div>
           )}

@@ -253,10 +253,18 @@ function MechanicSummary({
   switch (mechanicId) {
     case "rep_count":
       return <RepCountSummary state={state} targetReps={targetReps} />;
-    // The other 6 mechanic summaries land here as they get wired in
-    // subsequent turns (hold_in_zone → dwell time, target_reach →
-    // hits/misses, etc.). Falling through to a generic block keeps
-    // older / unknown mechanic payloads viewable.
+    case "hold_in_zone":
+      return <HoldInZoneSummary state={state} />;
+    case "target_reach":
+      return <TargetReachSummary state={state} />;
+    case "trace":
+      return <TraceSummary state={state} />;
+    case "weight_shift":
+      return <WeightShiftSummary state={state} />;
+    case "match_pose":
+      return <MatchPoseSummary state={state} />;
+    case "metronome":
+      return <MetronomeSummary state={state} />;
     default:
       return (
         <div className="rounded-card border border-border bg-surface p-5 text-sm text-muted">
@@ -264,6 +272,171 @@ function MechanicSummary({
         </div>
       );
   }
+}
+
+function formatDurationSec(sec: number): string {
+  if (!Number.isFinite(sec) || sec <= 0) return "—";
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec - m * 60;
+  return `${m}m ${s.toFixed(0)}s`;
+}
+
+function HoldInZoneSummary({ state }: { state: Record<string, unknown> | null }) {
+  const totalMs = pickNumber(state, "totalMsInZone") ?? 0;
+  const bestMs = pickNumber(state, "bestDwellMs") ?? 0;
+  return (
+    <section>
+      <h3 className="text-base font-semibold tracking-tight">Hold summary</h3>
+      <div className="mt-3 grid gap-4 sm:grid-cols-2">
+        <div className="rounded-card border border-border bg-surface p-5">
+          <p className="text-[10px] uppercase tracking-[0.14em] text-subtle">
+            Cumulative in zone
+          </p>
+          <p className="mt-2 tabular text-3xl font-semibold text-foreground">
+            {formatDurationSec(totalMs / 1000)}
+          </p>
+        </div>
+        <div className="rounded-card border border-border bg-surface p-5">
+          <p className="text-[10px] uppercase tracking-[0.14em] text-subtle">
+            Longest single hold
+          </p>
+          <p className="mt-2 tabular text-3xl font-semibold text-emerald-600 dark:text-emerald-400">
+            {formatDurationSec(bestMs / 1000)}
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function TargetReachSummary({ state }: { state: Record<string, unknown> | null }) {
+  const hits = pickNumber(state, "hits") ?? 0;
+  const misses = pickNumber(state, "misses") ?? 0;
+  const total = hits + misses;
+  const rate = total > 0 ? (hits / total) * 100 : 0;
+  return (
+    <section>
+      <h3 className="text-base font-semibold tracking-tight">Target reach summary</h3>
+      <div className="mt-3 grid gap-4 sm:grid-cols-3">
+        <div className="rounded-card border border-border bg-surface p-5">
+          <p className="text-[10px] uppercase tracking-[0.14em] text-subtle">Hits</p>
+          <p className="mt-2 tabular text-3xl font-semibold text-emerald-600 dark:text-emerald-400">
+            {hits}
+          </p>
+        </div>
+        <div className="rounded-card border border-border bg-surface p-5">
+          <p className="text-[10px] uppercase tracking-[0.14em] text-subtle">Misses</p>
+          <p className="mt-2 tabular text-3xl font-semibold text-rose-600 dark:text-rose-400">
+            {misses}
+          </p>
+        </div>
+        <div className="rounded-card border border-border bg-surface p-5">
+          <p className="text-[10px] uppercase tracking-[0.14em] text-subtle">Hit rate</p>
+          <p className="mt-2 tabular text-3xl font-semibold text-foreground">
+            {total > 0 ? `${rate.toFixed(0)}%` : "—"}
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function TraceSummary({ state }: { state: Record<string, unknown> | null }) {
+  const samples = pickNumber(state, "samples") ?? 0;
+  const accurate = pickNumber(state, "accurateSamples") ?? 0;
+  const smooth = pickNumber(state, "smoothSamples") ?? 0;
+  const accuracyPct = samples > 0 ? (accurate / samples) * 100 : 0;
+  const smoothnessPct = samples > 0 ? (smooth / samples) * 100 : 0;
+  return (
+    <section>
+      <h3 className="text-base font-semibold tracking-tight">Trace quality</h3>
+      <div className="mt-3 grid gap-4 sm:grid-cols-3">
+        <div className="rounded-card border border-border bg-surface p-5">
+          <p className="text-[10px] uppercase tracking-[0.14em] text-subtle">Samples</p>
+          <p className="mt-2 tabular text-3xl font-semibold text-foreground">
+            {samples}
+          </p>
+        </div>
+        <div className="rounded-card border border-border bg-surface p-5">
+          <p className="text-[10px] uppercase tracking-[0.14em] text-subtle">Accuracy</p>
+          <p className="mt-2 tabular text-3xl font-semibold text-emerald-600 dark:text-emerald-400">
+            {samples > 0 ? `${accuracyPct.toFixed(0)}%` : "—"}
+          </p>
+        </div>
+        <div className="rounded-card border border-border bg-surface p-5">
+          <p className="text-[10px] uppercase tracking-[0.14em] text-subtle">Smoothness</p>
+          <p className="mt-2 tabular text-3xl font-semibold text-sky-600 dark:text-sky-400">
+            {samples > 0 ? `${smoothnessPct.toFixed(0)}%` : "—"}
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function WeightShiftSummary({ state }: { state: Record<string, unknown> | null }) {
+  return (
+    <section>
+      <h3 className="text-base font-semibold tracking-tight">Weight-shift summary</h3>
+      <div className="mt-3 rounded-card border border-border bg-surface p-5 text-sm text-muted">
+        {state
+          ? "Full zone-capture breakdown recorded in the session payload."
+          : "Weight-shift session data not available for this record."}
+      </div>
+    </section>
+  );
+}
+
+function MatchPoseSummary({ state }: { state: Record<string, unknown> | null }) {
+  const bestMatchPct = pickNumber(state, "bestMatchPct") ?? 0;
+  return (
+    <section>
+      <h3 className="text-base font-semibold tracking-tight">Match-pose summary</h3>
+      <div className="mt-3 grid gap-4 sm:grid-cols-2">
+        <div className="rounded-card border border-border bg-surface p-5">
+          <p className="text-[10px] uppercase tracking-[0.14em] text-subtle">
+            Best pose match
+          </p>
+          <p className="mt-2 tabular text-3xl font-semibold text-emerald-600 dark:text-emerald-400">
+            {bestMatchPct.toFixed(0)}%
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function MetronomeSummary({ state }: { state: Record<string, unknown> | null }) {
+  const lifts = pickNumber(state, "liftCount") ?? 0;
+  const perfect = pickNumber(state, "perfectCount") ?? 0;
+  const good = pickNumber(state, "goodCount") ?? 0;
+  const miss = pickNumber(state, "missCount") ?? 0;
+  return (
+    <section>
+      <h3 className="text-base font-semibold tracking-tight">Metronome summary</h3>
+      <div className="mt-3 grid gap-4 sm:grid-cols-2">
+        <div className="rounded-card border border-border bg-surface p-5">
+          <p className="text-[10px] uppercase tracking-[0.14em] text-subtle">
+            Total lifts
+          </p>
+          <p className="mt-2 tabular text-3xl font-semibold text-foreground">
+            {lifts}
+          </p>
+        </div>
+        <div className="rounded-card border border-border bg-surface p-5">
+          <p className="text-[10px] uppercase tracking-[0.14em] text-subtle">
+            Timing breakdown
+          </p>
+          <p className="mt-2 text-xs text-muted">
+            {perfect + good + miss > 0
+              ? `${perfect} perfect · ${good} good · ${miss} missed`
+              : "No shell-side beat data recorded."}
+          </p>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function RepCountSummary({

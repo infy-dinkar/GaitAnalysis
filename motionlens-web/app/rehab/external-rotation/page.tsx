@@ -37,7 +37,7 @@
 //   • usePoseDetectionLive, useCamera, usePatientContext
 // NO biomech file touched.
 
-import { Suspense, useCallback, useState } from "react";
+import { Suspense, useCallback, useRef, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -46,6 +46,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { RepCountShell } from "@/components/rehab/mechanics/RepCountShell";
+import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
 import {
   computeForearmRotationProxyDeg,
   computeShoulderWidth,
@@ -54,6 +55,14 @@ import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
+import type { RepCountState, Score } from "@/lib/rehab/gameState";
+import {
+  buildSkeletonPosePayload,
+  elapsedSecondsSince,
+  kpToPoseSnapshot,
+  type BestPoseSnapshot,
+  type PoseSnapshot,
+} from "@/lib/rehab/sessionHelpers";
 import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 type Side = "left" | "right";
@@ -99,9 +108,19 @@ function Inner() {
 
   const { patient, isDoctorFlow } = usePatientContext();
 
+  const sessionStartRef = useRef<number>(performance.now());
+  const snapshotRef = useRef<{ state: RepCountState; score: Score } | null>(
+    null,
+  );
+  const peakProxyRef = useRef<number>(0);
+  const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
+  const lastKpRef = useRef<PoseSnapshot | null>(null);
+
   const handleFrame = useCallback(
-    (kp: Keypoint[], _v: HTMLVideoElement) => {
+    (kp: Keypoint[], video: HTMLVideoElement) => {
       if (!side) return;
+      const snap = kpToPoseSnapshot(kp, video.videoWidth, video.videoHeight);
+      if (snap) lastKpRef.current = snap;
       const liveKp = kp as unknown as LiveKeypoint[];
       const proxy = computeForearmRotationProxyDeg(liveKp, side);
       if (proxy !== null) {
@@ -109,6 +128,19 @@ function Inner() {
         // Flip so signal is HIGH at neutral (rep "top") — matches
         // K1's rest-is-top convention.
         setSignal(90 - proxy);
+        if (proxy > peakProxyRef.current) {
+          peakProxyRef.current = proxy;
+          // Guard: patient has actually rotated outward (clinical
+          // rep-engagement zone) before we snapshot the pose.
+          if (proxy >= 25 && lastKpRef.current) {
+            bestPoseRef.current = {
+              landmarks: lastKpRef.current.landmarks,
+              source_frame: lastKpRef.current.source_frame,
+              angle: proxy,
+              capturedAtMs: performance.now(),
+            };
+          }
+        }
       }
       // Elbow drift coaching — only if both landmarks visible.
       const shoulder =
@@ -123,6 +155,60 @@ function Inner() {
     },
     [side],
   );
+
+  const handleSnapshot = useCallback(
+    (state: RepCountState, score: Score) => {
+      snapshotRef.current = { state, score };
+    },
+    [],
+  );
+
+  const buildRehabPayload = useCallback(() => {
+    if (!side) return null;
+    const snap = snapshotRef.current;
+    const state = snap?.state ?? null;
+    const score = snap?.score ?? { points: 0, streak: 0, bestStreak: 0 };
+    const reps = state?.reps ?? 0;
+    const goodReps = state?.goodReps ?? 0;
+    const interpretation = reps > 0
+      ? `${reps} ER rep${reps === 1 ? "" : "s"} completed`
+        + (goodReps !== reps ? `, ${goodReps} clean` : ", all clean")
+        + `. Peak external-rotation proxy: ${peakProxyRef.current.toFixed(0)}°.`
+      : "Session ended before any reps were counted.";
+    const skeletonPose = buildSkeletonPosePayload(
+      bestPoseRef.current,
+      lastKpRef.current,
+      peakProxyRef.current,
+      side,
+      `Peak external rotation — ${peakProxyRef.current.toFixed(0)}° proxy`,
+    );
+    return {
+      module: "rehab" as const,
+      movement: "external-rotation",
+      side,
+      metrics: {
+        exercise_slug: "external-rotation",
+        mechanic_id: "rep_count",
+        started_at_ms: sessionStartRef.current,
+        duration_sec: elapsedSecondsSince(sessionStartRef.current),
+        score,
+        mechanic_state: state,
+        signal: {
+          name: "forearm_rotation_proxy",
+          unit: "deg",
+          value_at_peak: peakProxyRef.current,
+          target_band: {
+            min: ER_CONFIG.depthThreshold,
+            max: ER_CONFIG.topThreshold,
+          },
+        },
+        target_reps: TARGET_REPS,
+        config: ER_CONFIG,
+        skeleton_pose: skeletonPose,
+      },
+      observations: { interpretation },
+    };
+  }, [side]);
 
   return (
     <>
@@ -223,8 +309,16 @@ function Inner() {
                     signalLabel={`${side === "left" ? "Left" : "Right"} ER (proxy °) — trend only`}
                     targetReps={TARGET_REPS}
                     config={ER_CONFIG}
+                    onSnapshot={handleSnapshot}
                   />
                 </div>
+              </div>
+
+              <div className="no-pdf">
+                <SaveToPatientButton
+                  buildPayload={buildRehabPayload}
+                  label="Save rehab session"
+                />
               </div>
             </div>
           )}

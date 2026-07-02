@@ -51,7 +51,7 @@
 //   • computeTrunkAngleFromHorizontal — NEW in poseMetrics
 //   • usePatientContext
 
-import { Suspense, useCallback, useState } from "react";
+import { Suspense, useCallback, useRef, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -60,6 +60,14 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { MatchPoseShell } from "@/components/rehab/mechanics/MatchPoseShell";
+import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import {
+  buildSkeletonPosePayload,
+  elapsedSecondsSince,
+  kpToPoseSnapshot,
+  type BestPoseSnapshot,
+  type PoseSnapshot,
+} from "@/lib/rehab/sessionHelpers";
 import { computeShoulderAngle } from "@/lib/biomech/shoulder-live";
 import { computeHipAngle } from "@/lib/biomech/hip-live";
 import { computeTrunkAngleFromHorizontal } from "@/lib/rehab/poseMetrics";
@@ -110,9 +118,16 @@ function Inner() {
 
   const { patient, isDoctorFlow } = usePatientContext();
 
+  const sessionStartRef = useRef<number>(performance.now());
+  const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
+  const lastKpRef = useRef<PoseSnapshot | null>(null);
+  const bestMatchRef = useRef<number>(0);
+
   const handleFrame = useCallback(
-    (kp: Keypoint[], _v: HTMLVideoElement) => {
+    (kp: Keypoint[], video: HTMLVideoElement) => {
       if (!combo) return;
+      const snap = kpToPoseSnapshot(kp, video.videoWidth, video.videoHeight);
+      if (snap) lastKpRef.current = snap;
       const liveKp = kp as unknown as LiveKeypoint[];
       const arm = computeShoulderAngle("flexion", liveKp, combo.armSide);
       const hipFlex = computeHipAngle("flexion", liveKp, combo.legSide);
@@ -127,11 +142,71 @@ function Inner() {
         if (arm !== null) next.arm = arm;
         if (hipFlex !== null) next.leg = 180 - hipFlex;
         if (trunk !== null) next.trunk = trunk;
+        // Approximate match % from proximity to targets (180 arm/leg, 0 trunk).
+        // Higher score = closer to pose.
+        const legVal = next.leg ?? 0;
+        const armVal = next.arm ?? 0;
+        const trunkVal = Math.abs(next.trunk ?? 90);
+        const armScore = Math.max(0, 100 - Math.abs(180 - armVal) * 2);
+        const legScore = Math.max(0, 100 - Math.abs(180 - legVal) * 2);
+        const trunkScore = Math.max(0, 100 - trunkVal * 2);
+        const matchPct = (armScore + legScore + trunkScore * 1.5) / 3.5;
+        if (matchPct > bestMatchRef.current && lastKpRef.current) {
+          bestMatchRef.current = matchPct;
+          if (matchPct >= 60) {
+            bestPoseRef.current = {
+              landmarks: lastKpRef.current.landmarks,
+              source_frame: lastKpRef.current.source_frame,
+              angle: matchPct,
+              capturedAtMs: performance.now(),
+            };
+          }
+        }
         return next;
       });
     },
     [combo],
   );
+
+  const buildRehabPayload = useCallback(() => {
+    if (!combo) return null;
+    const bestMatch = bestMatchRef.current;
+    const interpretation =
+      `Bird-Dog session — best pose match ${bestMatch.toFixed(0)}% (arm ${combo.armSide}, leg ${combo.legSide}).`;
+    const skeletonPose = buildSkeletonPosePayload(
+      bestPoseRef.current,
+      lastKpRef.current,
+      bestMatch,
+      combo.legSide,
+      `Best bird-dog match — ${bestMatch.toFixed(0)}%`,
+    );
+    return {
+      module: "rehab" as const,
+      movement: "bird-dog",
+      side: combo.legSide,
+      metrics: {
+        exercise_slug: "bird-dog",
+        mechanic_id: "match_pose",
+        started_at_ms: sessionStartRef.current,
+        duration_sec: elapsedSecondsSince(sessionStartRef.current),
+        score: { points: 0, streak: 0, bestStreak: 0 },
+        mechanic_state: {
+          bestMatchPct: bestMatch,
+          finalAngles: currentAngles,
+        },
+        signal: {
+          name: "match_pct",
+          unit: "%",
+          value_at_peak: bestMatch,
+          target_band: { min: 70, max: 100 },
+        },
+        combo: { armSide: combo.armSide, legSide: combo.legSide },
+        config: BIRD_DOG_CONFIG,
+        skeleton_pose: skeletonPose,
+      },
+      observations: { interpretation },
+    };
+  }, [combo, currentAngles]);
 
   return (
     <>
@@ -250,6 +325,13 @@ function Inner() {
                     config={BIRD_DOG_CONFIG}
                   />
                 </div>
+              </div>
+
+              <div className="no-pdf">
+                <SaveToPatientButton
+                  buildPayload={buildRehabPayload}
+                  label="Save rehab session"
+                />
               </div>
             </div>
           )}
