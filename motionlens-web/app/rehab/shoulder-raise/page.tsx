@@ -27,7 +27,7 @@
 //   • usePoseDetectionLive, useCamera (via RehabCameraShell)
 //   • usePatientContext for ?patientId doctor flow
 
-import { Suspense, useCallback, useState } from "react";
+import { Suspense, useCallback, useRef, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -36,11 +36,19 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { TargetReachShell } from "@/components/rehab/mechanics/TargetReachShell";
+import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
 import { computeShoulderAngle } from "@/lib/biomech/shoulder-live";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
+import {
+  buildSkeletonPosePayload,
+  elapsedSecondsSince,
+  kpToPoseSnapshot,
+  type BestPoseSnapshot,
+  type PoseSnapshot,
+} from "@/lib/rehab/sessionHelpers";
 import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 type Side = "left" | "right";
@@ -79,9 +87,16 @@ function Inner() {
 
   const { patient, isDoctorFlow } = usePatientContext();
 
+  const sessionStartRef = useRef<number>(performance.now());
+  const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
+  const lastKpRef = useRef<PoseSnapshot | null>(null);
+  const peakAngleRef = useRef<number>(0);
+
   const handleFrame = useCallback(
     (kp: Keypoint[], video: HTMLVideoElement) => {
       if (!side) return;
+      const snap = kpToPoseSnapshot(kp, video.videoWidth, video.videoHeight);
+      if (snap) lastKpRef.current = snap;
       // v1 movement: abduction (frontal view). The compute helper
       // is movement-keyed but pose-agnostic — same kp shape works.
       const liveKp = kp as unknown as LiveKeypoint[];
@@ -91,6 +106,17 @@ function Inner() {
       if (angle === null) return;
 
       setLiveAngle(angle);
+      if (angle > peakAngleRef.current) {
+        peakAngleRef.current = angle;
+        if (angle >= 60 && lastKpRef.current) {
+          bestPoseRef.current = {
+            landmarks: lastKpRef.current.landmarks,
+            source_frame: lastKpRef.current.source_frame,
+            angle,
+            capturedAtMs: performance.now(),
+          };
+        }
+      }
       // cursor.y from angle: arm up (high angle) → cursor.y near 0
       const yPct = Math.max(0, Math.min(1, angle / MAX_RAISE_ANGLE_DEG));
       const cursorY = 1 - yPct;
@@ -105,6 +131,42 @@ function Inner() {
     },
     [side],
   );
+
+  const buildRehabPayload = useCallback(() => {
+    if (!side) return null;
+    const peak = peakAngleRef.current;
+    const interpretation =
+      `Peak shoulder abduction: ${peak.toFixed(0)}° (target band 90–160°).`;
+    const skeletonPose = buildSkeletonPosePayload(
+      bestPoseRef.current,
+      lastKpRef.current,
+      peak,
+      side,
+      `Peak shoulder raise — ${peak.toFixed(0)}° abduction`,
+    );
+    return {
+      module: "rehab" as const,
+      movement: "shoulder-raise",
+      side,
+      metrics: {
+        exercise_slug: "shoulder-raise",
+        mechanic_id: "target_reach",
+        started_at_ms: sessionStartRef.current,
+        duration_sec: elapsedSecondsSince(sessionStartRef.current),
+        score: { points: 0, streak: 0, bestStreak: 0 },
+        mechanic_state: null,
+        signal: {
+          name: "shoulder_abduction",
+          unit: "deg",
+          value_at_peak: peak,
+          target_band: { min: 90, max: MAX_RAISE_ANGLE_DEG },
+        },
+        config: REACH_CONFIG,
+        skeleton_pose: skeletonPose,
+      },
+      observations: { interpretation },
+    };
+  }, [side]);
 
   return (
     <>
@@ -192,6 +254,13 @@ function Inner() {
                 <div>
                   <TargetReachShell cursor={cursor} config={REACH_CONFIG} />
                 </div>
+              </div>
+
+              <div className="no-pdf">
+                <SaveToPatientButton
+                  buildPayload={buildRehabPayload}
+                  label="Save rehab session"
+                />
               </div>
             </div>
           )}

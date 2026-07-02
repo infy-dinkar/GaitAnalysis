@@ -7,10 +7,9 @@ produces the same numbers in both modes.
 
 Pipeline:
   1. Calibration is provider-agnostic. The caller passes a
-     CalibrationResult-shaped dict (currently always None — Step 1
-     removed the A4 detector; Step 2 will pass a height-based
-     calibration through from the frontend). When None, the engine
-     runs in RELATIVE-UNITS-ONLY mode (no fall-risk classification).
+     CalibrationResult-shaped dict (height-based today, produced by
+     the frontend HeightCalibrationStep). When None, the engine runs
+     in RELATIVE-UNITS-ONLY mode (no fall-risk classification).
   2. Reuse gait_engine.extract_poses() + build_time_series() to get
      smoothed 33-kp landmarks per frame.
   3. Per-frame: wrist_x, ankle_x, heel_y, foot_index_y, shoulder_y,
@@ -343,11 +342,9 @@ def analyze_functional_reach(
         pose_options:  PoseLandmarkerOptions built by
                        api._build_gait_pose_options()
         side:          'left' or 'right' — the test-side arm
-        calibration:   optional pre-detected CalibrationResult dict
-                       passed in from the frontend. When None the
-                       engine runs in RELATIVE-UNITS-ONLY mode. Step 1
-                       removed the A4 auto-detector; Step 2 will wire
-                       in a height-based calibration provider.
+        calibration:   optional CalibrationResult dict passed in from
+                       the frontend HeightCalibrationStep. When None
+                       the engine runs in RELATIVE-UNITS-ONLY mode.
 
     Returns:
         Dict matching the frontend FunctionalReachResult shape, plus
@@ -908,7 +905,7 @@ def _build_interpretation(
         return (
             f"Best valid reach was {px:.0f} px (relative units — no scale "
             f"calibration was applied). Fall-risk classification requires "
-            f"calibration with an A4 sheet for absolute distance."
+            f"height-based calibration for absolute distance."
         )
 
     if classification == "low":

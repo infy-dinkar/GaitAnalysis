@@ -9,6 +9,7 @@ import {
   Award,
   Clock,
   Download,
+  Dumbbell,
   Footprints,
   Layers,
   PersonStanding,
@@ -139,6 +140,11 @@ const MODULE_META: Record<
     label: "Counter-Movement Jump",
     icon: MoveRight,
     tone: "bg-violet-500/10 text-violet-700 dark:text-violet-400",
+  },
+  rehab: {
+    label: "Rehab session",
+    icon: Dumbbell,
+    tone: "bg-orange-500/10 text-orange-700 dark:text-orange-400",
   },
 };
 

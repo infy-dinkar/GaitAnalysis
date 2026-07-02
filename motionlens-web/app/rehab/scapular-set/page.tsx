@@ -43,6 +43,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { RepCountShell } from "@/components/rehab/mechanics/RepCountShell";
+import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
 import {
   computeScapularRetractionProxy,
   computeShoulderWidth,
@@ -51,6 +52,14 @@ import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
+import type { RepCountState, Score } from "@/lib/rehab/gameState";
+import {
+  buildSkeletonPosePayload,
+  elapsedSecondsSince,
+  kpToPoseSnapshot,
+  type BestPoseSnapshot,
+  type PoseSnapshot,
+} from "@/lib/rehab/sessionHelpers";
 import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 const CALIB_FRAMES = 10;
@@ -99,6 +108,14 @@ function Inner() {
   const calibSamplesRef = useRef<Baseline[]>([]);
   const baselineRef = useRef<Baseline | null>(null);
 
+  const sessionStartRef = useRef<number>(performance.now());
+  const snapshotRef = useRef<{ state: RepCountState; score: Score } | null>(
+    null,
+  );
+  const peakRetractionRef = useRef<number>(0);
+  const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
+  const lastKpRef = useRef<PoseSnapshot | null>(null);
+
   const { patient, isDoctorFlow } = usePatientContext();
 
   const resetSession = useCallback(() => {
@@ -111,7 +128,9 @@ function Inner() {
   }, []);
 
   const handleFrame = useCallback(
-    (kp: Keypoint[], _v: HTMLVideoElement) => {
+    (kp: Keypoint[], video: HTMLVideoElement) => {
+      const snap = kpToPoseSnapshot(kp, video.videoWidth, video.videoHeight);
+      if (snap) lastKpRef.current = snap;
       const liveKp = kp as unknown as LiveKeypoint[];
       const lSh = liveKp[LM.LEFT_SHOULDER];
       const rSh = liveKp[LM.RIGHT_SHOULDER];
@@ -150,7 +169,23 @@ function Inner() {
         liveKp,
         baseline.shoulderWidth,
       );
-      if (proxy !== null) setRetractionProxy(proxy);
+      if (proxy !== null) {
+        setRetractionProxy(proxy);
+        if (proxy > peakRetractionRef.current) {
+          peakRetractionRef.current = proxy;
+          if (
+            proxy >= SCAPULAR_CONFIG.depthThreshold
+            && lastKpRef.current
+          ) {
+            bestPoseRef.current = {
+              landmarks: lastKpRef.current.landmarks,
+              source_frame: lastKpRef.current.source_frame,
+              angle: proxy,
+              capturedAtMs: performance.now(),
+            };
+          }
+        }
+      }
 
       // Shrug = shoulders rise (Y decreases in image) beyond
       // 7 % × baseline shoulder-width.
@@ -160,6 +195,58 @@ function Inner() {
     },
     [phase],
   );
+
+  const handleSnapshot = useCallback(
+    (state: RepCountState, score: Score) => {
+      snapshotRef.current = { state, score };
+    },
+    [],
+  );
+
+  const buildRehabPayload = useCallback(() => {
+    const snap = snapshotRef.current;
+    const state = snap?.state ?? null;
+    const score = snap?.score ?? { points: 0, streak: 0, bestStreak: 0 };
+    const reps = state?.reps ?? 0;
+    const goodReps = state?.goodReps ?? 0;
+    const interpretation = reps > 0
+      ? `${reps} scapular set${reps === 1 ? "" : "s"} completed`
+        + (goodReps !== reps ? `, ${goodReps} clean` : ", all clean")
+        + `. Peak retraction proxy: ${peakRetractionRef.current.toFixed(1)}%.`
+      : "Session ended before any reps were counted.";
+    const skeletonPose = buildSkeletonPosePayload(
+      bestPoseRef.current,
+      lastKpRef.current,
+      peakRetractionRef.current,
+      null,
+      `Peak scapular retraction — ${peakRetractionRef.current.toFixed(1)}% narrowing`,
+    );
+    return {
+      module: "rehab" as const,
+      movement: "scapular-set",
+      metrics: {
+        exercise_slug: "scapular-set",
+        mechanic_id: "rep_count",
+        started_at_ms: sessionStartRef.current,
+        duration_sec: elapsedSecondsSince(sessionStartRef.current),
+        score,
+        mechanic_state: state,
+        signal: {
+          name: "scapular_retraction_proxy",
+          unit: "%",
+          value_at_peak: peakRetractionRef.current,
+          target_band: {
+            min: SCAPULAR_CONFIG.depthThreshold,
+            max: SCAPULAR_CONFIG.topThreshold,
+          },
+        },
+        target_reps: TARGET_REPS,
+        config: SCAPULAR_CONFIG,
+        skeleton_pose: skeletonPose,
+      },
+      observations: { interpretation },
+    };
+  }, []);
 
   const calibratingPct = Math.round(calibProgress * 100);
 
@@ -281,6 +368,13 @@ function Inner() {
                   signalLabel="Scapular retraction (proxy) — coarse cue"
                   targetReps={TARGET_REPS}
                   config={SCAPULAR_CONFIG}
+                  onSnapshot={handleSnapshot}
+                />
+              </div>
+              <div className="no-pdf mt-4">
+                <SaveToPatientButton
+                  buildPayload={buildRehabPayload}
+                  label="Save rehab session"
                 />
               </div>
             </div>

@@ -19,7 +19,7 @@
 //   • repCountStep engine   — driven indirectly by RepCountShell
 //   • usePatientContext     — optional ?patientId attaches doctor flow
 
-import { Suspense, useCallback, useState } from "react";
+import { Suspense, useCallback, useRef, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -28,11 +28,13 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { RepCountShell } from "@/components/rehab/mechanics/RepCountShell";
+import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
 import { computeKneeAngle } from "@/lib/biomech/knee-live";
 import { LM_LIVE } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
+import type { RepCountState, Score } from "@/lib/rehab/gameState";
 import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 type Side = "left" | "right";
@@ -66,9 +68,53 @@ function Inner() {
 
   const { patient, isDoctorFlow } = usePatientContext();
 
+  // Session harvest refs — used to build the save payload without
+  // peeking into RepCountShell's internals. sessionStartRef anchors
+  // duration, snapshotRef holds the shell's latest {state, score},
+  // peakInteriorRef tracks the deepest squat (min interior angle)
+  // across the whole session. bestPoseRef holds a coordinate
+  // snapshot of the landmarks at the deepest-so-far frame; lastKpRef
+  // is the last-known-good pose used as a fallback if no deep rep
+  // ever landed. Skeleton is redrawn from coords in the report —
+  // NOT saved as a screenshot — so framing is controllable and the
+  // payload is tiny (~1.5 KB vs ~30-70 KB JPEG).
+  const sessionStartRef = useRef<number>(performance.now());
+  const snapshotRef = useRef<{ state: RepCountState; score: Score } | null>(
+    null,
+  );
+  const peakInteriorRef = useRef<number>(180);
+
+  interface PoseSnapshot {
+    landmarks: Array<{ x: number; y: number; score: number; name?: string }>;
+    source_frame: { width: number; height: number };
+  }
+  const bestPoseRef = useRef<
+    (PoseSnapshot & { angle: number; capturedAtMs: number }) | null
+  >(null);
+  const lastKpRef = useRef<PoseSnapshot | null>(null);
+
   const handleFrame = useCallback(
-    (kp: Keypoint[], _v: HTMLVideoElement) => {
+    (kp: Keypoint[], video: HTMLVideoElement) => {
       if (!side) return;
+      const sw = video.videoWidth;
+      const sh = video.videoHeight;
+
+      // Snapshot the current pose into lastKpRef every frame so
+      // buildRehabPayload always has SOMETHING to save even if the
+      // patient never crosses topThreshold. Rounded to 2 decimals
+      // to keep the payload lean (~1.5 KB for 33 landmarks).
+      if (sw > 0 && sh > 0 && kp.length > 0) {
+        lastKpRef.current = {
+          landmarks: kp.map((p) => ({
+            x: Math.round(p.x * 100) / 100,
+            y: Math.round(p.y * 100) / 100,
+            score: Math.round((p.score ?? 0) * 1000) / 1000,
+            ...(p.name ? { name: p.name } : {}),
+          })),
+          source_frame: { width: sw, height: sh },
+        };
+      }
+
       // Reuse the BlazePose-live biomech math without modification.
       // The Keypoint shape from @tensorflow-models/pose-detection
       // is structurally compatible with LiveKeypoint at runtime
@@ -80,11 +126,117 @@ function Inner() {
         side,
       );
       if (flexion !== null) {
-        setInterior(180 - flexion);
+        const interiorAngle = 180 - flexion;
+        setInterior(interiorAngle);
+        // Track session-wide deepest squat = smallest interior seen.
+        // On a new deepest frame that is actually squatting (below
+        // topThreshold — filters out standing-still noise), snapshot
+        // the landmark coords. The report redraws from these coords
+        // rather than saving pixels.
+        if (interiorAngle < peakInteriorRef.current) {
+          peakInteriorRef.current = interiorAngle;
+          if (
+            interiorAngle <= SQUAT_CONFIG.topThreshold
+            && lastKpRef.current
+          ) {
+            bestPoseRef.current = {
+              landmarks: lastKpRef.current.landmarks,
+              source_frame: lastKpRef.current.source_frame,
+              angle: interiorAngle,
+              capturedAtMs: performance.now(),
+            };
+          }
+        }
       }
     },
     [side],
   );
+
+  const handleSnapshot = useCallback(
+    (state: RepCountState, score: Score) => {
+      snapshotRef.current = { state, score };
+    },
+    [],
+  );
+
+  const buildRehabPayload = useCallback(() => {
+    if (!side) return null;
+    const snap = snapshotRef.current;
+    const state = snap?.state ?? null;
+    const score = snap?.score ?? { points: 0, streak: 0, bestStreak: 0 };
+    const reps = state?.reps ?? 0;
+    const goodReps = state?.goodReps ?? 0;
+    const durationSec = Math.max(
+      0,
+      (performance.now() - sessionStartRef.current) / 1000,
+    );
+    const interpretation = reps > 0
+      ? `${reps} rep${reps === 1 ? "" : "s"} completed`
+        + (goodReps !== reps ? `, ${goodReps} clean` : ", all clean")
+        + `. Deepest knee interior: ${peakInteriorRef.current.toFixed(0)}°.`
+      : "Session ended before any reps were counted.";
+
+    // Skeleton pose: prefer the deepest-rep pose we captured during
+    // play. If none was captured (patient stood still, or never
+    // dipped below topThreshold), fall back to the last-known-good
+    // frame so the report always shows a skeleton.
+    const best = bestPoseRef.current;
+    const fallback = lastKpRef.current;
+    const pose = best
+      ? {
+          landmarks: best.landmarks,
+          source_frame: best.source_frame,
+          angle: best.angle,
+          captured_at_ms: best.capturedAtMs,
+        }
+      : fallback
+        ? {
+            landmarks: fallback.landmarks,
+            source_frame: fallback.source_frame,
+            angle: peakInteriorRef.current,
+            captured_at_ms: performance.now(),
+          }
+        : null;
+    const skeletonPose = pose
+      ? {
+          landmarks: pose.landmarks,
+          source_frame: pose.source_frame,
+          angle: pose.angle,
+          captured_at_ms: pose.captured_at_ms,
+          side,
+          label: `Deepest squat — ${pose.angle.toFixed(0)}° knee interior`,
+        }
+      : null;
+    return {
+      module: "rehab" as const,
+      // Reuse the existing `movement` slot for the exercise slug —
+      // matches the audit's decision. `side` maps 1:1 to the shared
+      // report column.
+      movement: "squat",
+      side,
+      metrics: {
+        exercise_slug: "squat",
+        mechanic_id: "rep_count",
+        started_at_ms: sessionStartRef.current,
+        duration_sec: durationSec,
+        score,
+        mechanic_state: state,
+        signal: {
+          name: "knee_interior",
+          unit: "deg",
+          value_at_peak: peakInteriorRef.current,
+          target_band: {
+            min: SQUAT_CONFIG.depthThreshold,
+            max: SQUAT_CONFIG.topThreshold,
+          },
+        },
+        target_reps: TARGET_REPS,
+        config: SQUAT_CONFIG,
+        skeleton_pose: skeletonPose,
+      },
+      observations: { interpretation },
+    };
+  }, [side]);
 
   return (
     <>
@@ -186,8 +338,20 @@ function Inner() {
                     signalLabel={`${side === "left" ? "Left" : "Right"} knee angle (°)`}
                     targetReps={TARGET_REPS}
                     config={SQUAT_CONFIG}
+                    onSnapshot={handleSnapshot}
                   />
                 </div>
+              </div>
+
+              {/* Save button — visible only when opened from the
+                  doctor flow (?patientId=…). Mirrors the biomech save
+                  pattern. Marked no-pdf so it never appears in a
+                  saved-report PDF export. */}
+              <div className="no-pdf">
+                <SaveToPatientButton
+                  buildPayload={buildRehabPayload}
+                  label="Save rehab session"
+                />
               </div>
             </div>
           )}

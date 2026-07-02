@@ -37,7 +37,7 @@
 // NO biomech file imported or touched — wrist + shoulder landmarks
 // are read directly.
 
-import { Suspense, useCallback, useState } from "react";
+import { Suspense, useCallback, useRef, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -46,11 +46,19 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { TargetReachShell } from "@/components/rehab/mechanics/TargetReachShell";
+import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
 import { computeShoulderWidth } from "@/lib/rehab/poseMetrics";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
+import {
+  buildSkeletonPosePayload,
+  elapsedSecondsSince,
+  kpToPoseSnapshot,
+  type BestPoseSnapshot,
+  type PoseSnapshot,
+} from "@/lib/rehab/sessionHelpers";
 import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 type Side = "left" | "right";
@@ -91,9 +99,16 @@ function Inner() {
 
   const { patient, isDoctorFlow } = usePatientContext();
 
+  const sessionStartRef = useRef<number>(performance.now());
+  const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
+  const lastKpRef = useRef<PoseSnapshot | null>(null);
+  const peakReachRef = useRef<number>(0);
+
   const handleFrame = useCallback(
-    (kp: Keypoint[], _video: HTMLVideoElement) => {
+    (kp: Keypoint[], video: HTMLVideoElement) => {
       if (!side) return;
+      const snap = kpToPoseSnapshot(kp, video.videoWidth, video.videoHeight);
+      if (snap) lastKpRef.current = snap;
       const liveKp = kp as unknown as LiveKeypoint[];
       const wrist =
         liveKp[side === "right" ? LM.RIGHT_WRIST : LM.LEFT_WRIST];
@@ -120,12 +135,57 @@ function Inner() {
       const cursorY = Math.max(0, Math.min(1, 0.5 + reachY / scale));
       setCursor({ x: cursorX, y: cursorY });
       // Reach magnitude normalised — quick readout for the patient.
-      setReachMagnitude(
-        Math.hypot(reachXMirrored, reachY) / scale,
-      );
+      const magnitude = Math.hypot(reachXMirrored, reachY) / scale;
+      setReachMagnitude(magnitude);
+      if (magnitude > peakReachRef.current) {
+        peakReachRef.current = magnitude;
+        if (magnitude >= 0.2 && lastKpRef.current) {
+          bestPoseRef.current = {
+            landmarks: lastKpRef.current.landmarks,
+            source_frame: lastKpRef.current.source_frame,
+            angle: magnitude,
+            capturedAtMs: performance.now(),
+          };
+        }
+      }
     },
     [side],
   );
+
+  const buildRehabPayload = useCallback(() => {
+    if (!side) return null;
+    const peak = peakReachRef.current;
+    const interpretation =
+      `Peak reach magnitude: ${peak.toFixed(2)} (of shoulder-width baseline).`;
+    const skeletonPose = buildSkeletonPosePayload(
+      bestPoseRef.current,
+      lastKpRef.current,
+      peak,
+      side,
+      `Peak wall-clock reach — ${peak.toFixed(2)}× baseline`,
+    );
+    return {
+      module: "rehab" as const,
+      movement: "wall-clock",
+      side,
+      metrics: {
+        exercise_slug: "wall-clock",
+        mechanic_id: "target_reach",
+        started_at_ms: sessionStartRef.current,
+        duration_sec: elapsedSecondsSince(sessionStartRef.current),
+        score: { points: 0, streak: 0, bestStreak: 0 },
+        mechanic_state: null,
+        signal: {
+          name: "reach_magnitude",
+          unit: "shoulder-widths",
+          value_at_peak: peak,
+        },
+        config: REACH_CONFIG,
+        skeleton_pose: skeletonPose,
+      },
+      observations: { interpretation },
+    };
+  }, [side]);
 
   // Direction hint for the overlay — helps when the patient first
   // starts moving and isn't sure if the cursor mapping feels right.
@@ -221,6 +281,13 @@ function Inner() {
                 <div>
                   <TargetReachShell cursor={cursor} config={REACH_CONFIG} />
                 </div>
+              </div>
+
+              <div className="no-pdf">
+                <SaveToPatientButton
+                  buildPayload={buildRehabPayload}
+                  label="Save rehab session"
+                />
               </div>
             </div>
           )}

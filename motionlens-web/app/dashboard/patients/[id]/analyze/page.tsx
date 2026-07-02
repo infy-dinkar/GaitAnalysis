@@ -195,7 +195,7 @@ const MODULES = [
     href: "orthopedic/functional-reach",
     eyebrow: "Balance / fall-risk screen",
     title: "Functional Reach",
-    body: "Lateral-view bedside fall-risk screen. Patient holds an A4 sheet to calibrate scale (centimetres), then reaches forward three times; we auto-detect the peak, void trials with heel-rise or stepping, and classify fall risk on the best valid reach.",
+    body: "Lateral-view bedside fall-risk screen. Patient's height calibrates scale (centimetres), then reaches forward three times; we auto-detect the peak, void trials with heel-rise or stepping, and classify fall risk on the best valid reach.",
     icon: MoveRight,
     tone: "from-red-500/15 to-red-500/5",
     iconTone: "text-red-600",

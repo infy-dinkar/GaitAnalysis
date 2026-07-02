@@ -37,9 +37,10 @@ function Inner() {
                 fall risk, &lt; 15 cm flags high, &lt; 10 cm flags very high.
               </p>
               <p className="mt-3 text-xs text-muted">
-                <strong>Scale calibration:</strong> a height-based calibration
-                is on its way (Step 2). Until then the report shows reach in
-                relative pixel units only and fall-risk cutoffs do not apply.
+                <strong>Scale calibration:</strong> patient height is used to
+                compute pixels-per-cm so reach is reported in centimetres.
+                Skipping calibration falls back to relative pixel units —
+                fall-risk cutoffs then don&apos;t apply.
               </p>
             </div>
             <Link href="/dashboard">

@@ -28,7 +28,8 @@ export interface ReportSummaryDTO {
     | "pronator_drift"
     | "functional_reach"
     | "single_leg_hop"
-    | "counter_movement_jump";
+    | "counter_movement_jump"
+    | "rehab";
   body_part: string | null;
   movement: string | null;
   side: string | null;
@@ -79,7 +80,8 @@ export interface ReportCreatePayload {
     | "pronator_drift"
     | "functional_reach"
     | "single_leg_hop"
-    | "counter_movement_jump";
+    | "counter_movement_jump"
+    | "rehab";
   body_part?: "shoulder" | "neck" | "knee" | "hip" | "ankle";
   movement?: string;
   side?: "left" | "right";

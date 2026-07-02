@@ -280,7 +280,7 @@ const PRODUCTS: ProductCard[] = [
     eyebrow: "Balance / fall-risk screen",
     title: "Functional Reach.",
     body:
-      "Lateral-view fall-risk screen with on-board A4-sheet scale calibration. Three forward reaches per recording, automatic peak detection, heel-rise + step voiding, fall-risk classification in centimetres on the best valid trial.",
+      "Lateral-view fall-risk screen with on-board height-based scale calibration. Three forward reaches per recording, automatic peak detection, heel-rise + step voiding, fall-risk classification in centimetres on the best valid trial.",
     gradient:
       "linear-gradient(135deg, rgba(239,68,68,0.20) 0%, rgba(248,113,113,0.10) 50%, rgba(28,28,33,0.0) 100%)",
     icon: MoveRight,

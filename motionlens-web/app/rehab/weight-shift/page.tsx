@@ -40,6 +40,14 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { WeightShiftShell } from "@/components/rehab/mechanics/WeightShiftShell";
+import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import {
+  buildSkeletonPosePayload,
+  elapsedSecondsSince,
+  kpToPoseSnapshot,
+  type BestPoseSnapshot,
+  type PoseSnapshot,
+} from "@/lib/rehab/sessionHelpers";
 import {
   computeHipMidX,
   computeShoulderWidth,
@@ -119,6 +127,11 @@ function Inner() {
   const calibSamplesRef = useRef<CalibSample[]>([]);
   const baselineRef = useRef<Baseline | null>(null);
 
+  const sessionStartRef = useRef<number>(performance.now());
+  const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
+  const lastKpRef = useRef<PoseSnapshot | null>(null);
+  const peakShiftRef = useRef<number>(0);
+
   const { patient, isDoctorFlow } = usePatientContext();
 
   const resetSession = useCallback(() => {
@@ -130,11 +143,47 @@ function Inner() {
     setPhase("calibrating");
   }, []);
 
+  const buildRehabPayload = useCallback(() => {
+    const peak = peakShiftRef.current;
+    const interpretation =
+      `Weight-shift session — peak medio-lateral shift ${peak.toFixed(2)} (of ±1 scale).`;
+    const skeletonPose = buildSkeletonPosePayload(
+      bestPoseRef.current,
+      lastKpRef.current,
+      peak,
+      null,
+      `Peak weight shift — ${peak.toFixed(2)}× baseline`,
+    );
+    return {
+      module: "rehab" as const,
+      movement: "weight-shift",
+      metrics: {
+        exercise_slug: "weight-shift",
+        mechanic_id: "weight_shift",
+        started_at_ms: sessionStartRef.current,
+        duration_sec: elapsedSecondsSince(sessionStartRef.current),
+        score: { points: 0, streak: 0, bestStreak: 0 },
+        mechanic_state: null,
+        signal: {
+          name: "ml_shift",
+          unit: "normalised",
+          value_at_peak: peak,
+        },
+        config: WEIGHT_SHIFT_CONFIG,
+        skeleton_pose: skeletonPose,
+      },
+      observations: { interpretation },
+    };
+  }, []);
+
   const handleFrame = useCallback(
     (kp: Keypoint[], video: HTMLVideoElement) => {
       const vw = video.videoWidth;
       const vh = video.videoHeight;
       if (vw <= 0 || vh <= 0) return;
+
+      const snap = kpToPoseSnapshot(kp, vw, vh);
+      if (snap) lastKpRef.current = snap;
 
       const liveKp = kp as unknown as LiveKeypoint[];
       const hipMidPx = computeHipMidX(liveKp);
@@ -200,6 +249,18 @@ function Inner() {
       // its zone-membership test internally.
       const clampedShift = Math.max(-1.2, Math.min(1.2, rawShift));
       setShift(clampedShift);
+      const absShift = Math.abs(clampedShift);
+      if (absShift > peakShiftRef.current) {
+        peakShiftRef.current = absShift;
+        if (absShift >= 0.3 && lastKpRef.current) {
+          bestPoseRef.current = {
+            landmarks: lastKpRef.current.landmarks,
+            source_frame: lastKpRef.current.source_frame,
+            angle: absShift,
+            capturedAtMs: performance.now(),
+          };
+        }
+      }
 
       // Step detection — either foot lifting OR drifting laterally.
       // y-rise is positive when the ankle goes UP in image (lower
@@ -319,6 +380,12 @@ function Inner() {
                   config={WEIGHT_SHIFT_CONFIG}
                 />
               </div>
+            </div>
+            <div className="no-pdf mt-6">
+              <SaveToPatientButton
+                buildPayload={buildRehabPayload}
+                label="Save rehab session"
+              />
             </div>
           </div>
 

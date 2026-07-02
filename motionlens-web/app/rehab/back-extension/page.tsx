@@ -24,7 +24,7 @@
 //   • computeTrunkExtensionAngleDeg — NEW pure fn in poseMetrics
 //   • usePatientContext
 
-import { Suspense, useCallback, useState } from "react";
+import { Suspense, useCallback, useRef, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -33,10 +33,19 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { RepCountShell } from "@/components/rehab/mechanics/RepCountShell";
+import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
 import { computeTrunkExtensionAngleDeg } from "@/lib/rehab/poseMetrics";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
+import type { RepCountState, Score } from "@/lib/rehab/gameState";
+import {
+  buildSkeletonPosePayload,
+  elapsedSecondsSince,
+  kpToPoseSnapshot,
+  type BestPoseSnapshot,
+  type PoseSnapshot,
+} from "@/lib/rehab/sessionHelpers";
 import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 const BACK_EXT_CONFIG = {
@@ -70,15 +79,93 @@ function Inner() {
 
   const { patient, isDoctorFlow } = usePatientContext();
 
+  const sessionStartRef = useRef<number>(performance.now());
+  const snapshotRef = useRef<{ state: RepCountState; score: Score } | null>(
+    null,
+  );
+  const peakExtensionRef = useRef<number>(0);
+  const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
+  const lastKpRef = useRef<PoseSnapshot | null>(null);
+
   const handleFrame = useCallback(
-    (kp: Keypoint[], _v: HTMLVideoElement) => {
+    (kp: Keypoint[], video: HTMLVideoElement) => {
+      const snap = kpToPoseSnapshot(kp, video.videoWidth, video.videoHeight);
+      if (snap) lastKpRef.current = snap;
       const angle = computeTrunkExtensionAngleDeg(
         kp as unknown as LiveKeypoint[],
       );
-      if (angle !== null) setTrunkAngle(angle);
+      if (angle !== null) {
+        setTrunkAngle(angle);
+        if (angle > peakExtensionRef.current) {
+          peakExtensionRef.current = angle;
+          if (
+            angle >= BACK_EXT_CONFIG.depthThreshold
+            && lastKpRef.current
+          ) {
+            bestPoseRef.current = {
+              landmarks: lastKpRef.current.landmarks,
+              source_frame: lastKpRef.current.source_frame,
+              angle,
+              capturedAtMs: performance.now(),
+            };
+          }
+        }
+      }
     },
     [],
   );
+
+  const handleSnapshot = useCallback(
+    (state: RepCountState, score: Score) => {
+      snapshotRef.current = { state, score };
+    },
+    [],
+  );
+
+  const buildRehabPayload = useCallback(() => {
+    const snap = snapshotRef.current;
+    const state = snap?.state ?? null;
+    const score = snap?.score ?? { points: 0, streak: 0, bestStreak: 0 };
+    const reps = state?.reps ?? 0;
+    const goodReps = state?.goodReps ?? 0;
+    const interpretation = reps > 0
+      ? `${reps} back-extension${reps === 1 ? "" : "s"} completed`
+        + (goodReps !== reps ? `, ${goodReps} clean` : ", all clean")
+        + `. Peak trunk extension: ${peakExtensionRef.current.toFixed(0)}°.`
+      : "Session ended before any reps were counted.";
+    const skeletonPose = buildSkeletonPosePayload(
+      bestPoseRef.current,
+      lastKpRef.current,
+      peakExtensionRef.current,
+      null,
+      `Peak back-extension — ${peakExtensionRef.current.toFixed(0)}° trunk arch`,
+    );
+    return {
+      module: "rehab" as const,
+      movement: "back-extension",
+      metrics: {
+        exercise_slug: "back-extension",
+        mechanic_id: "rep_count",
+        started_at_ms: sessionStartRef.current,
+        duration_sec: elapsedSecondsSince(sessionStartRef.current),
+        score,
+        mechanic_state: state,
+        signal: {
+          name: "trunk_extension",
+          unit: "deg",
+          value_at_peak: peakExtensionRef.current,
+          target_band: {
+            min: BACK_EXT_CONFIG.depthThreshold,
+            max: BACK_EXT_CONFIG.topThreshold,
+          },
+        },
+        target_reps: TARGET_REPS,
+        config: BACK_EXT_CONFIG,
+        skeleton_pose: skeletonPose,
+      },
+      observations: { interpretation },
+    };
+  }, []);
 
   return (
     <>
@@ -169,8 +256,16 @@ function Inner() {
                     signalLabel="Trunk extension (°)"
                     targetReps={TARGET_REPS}
                     config={BACK_EXT_CONFIG}
+                    onSnapshot={handleSnapshot}
                   />
                 </div>
+              </div>
+
+              <div className="no-pdf">
+                <SaveToPatientButton
+                  buildPayload={buildRehabPayload}
+                  label="Save rehab session"
+                />
               </div>
             </div>
           )}

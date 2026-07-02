@@ -2467,19 +2467,16 @@ async def analyze_pronator_drift_endpoint(
 # ══════════════════════════════════════════════════════════════════════
 # Functional Reach (C6) — single-trial upload analysis
 # ══════════════════════════════════════════════════════════════════════
-# Lateral view, ~30 s clip. The patient holds an A4 sheet against
-# their chest briefly at the start (backend auto-detects it for
-# scale), then reaches forward 3 times. Math mirrors
+# Lateral view, ~30 s clip. Patient stands side-on, raises the near
+# arm to shoulder height, and reaches forward 3 times. Math mirrors
 # lib/orthopedic/functionalReach.ts so live + upload produce
 # identical reports.
 #
-# `calibration` is an optional JSON string the frontend can send if
-# it already detected an A4 sheet client-side (live mode). When
-# omitted, the engine runs its own A4 detection on the early frames
-# of the clip. If neither path finds an A4, the engine reports
-# distances in relative pixel units only — no fall-risk
-# classification (the explicit graceful-degradation path the spec
-# calls for).
+# `calibration` is an optional JSON string carrying the frontend's
+# height-based CalibrationResult (produced by HeightCalibrationStep).
+# When omitted, the engine reports distances in relative pixel units
+# only — no fall-risk classification (the explicit graceful-
+# degradation path the spec calls for).
 class FRFrameSampleDTO(BaseModel):
     t_ms: float
     wrist_x_px: Optional[float] = None
@@ -2528,9 +2525,9 @@ class FunctionalReachResultDTO(BaseModel):
     best_valid_reach_px: Optional[float] = None
     best_valid_reach_cm: Optional[float] = None
     classification: Optional[str] = None
-    # Step 1 removed the A4-specific calibration DTO. The field is a
-    # provider-agnostic dict so Step 2 can plug in a height-based
-    # calibration without an api.py round-trip.
+    # Provider-agnostic calibration dict — populated with the
+    # frontend's height-based CalibrationResult when present, else
+    # null (relative-units mode).
     calibration: Optional[Dict[str, Any]] = None
     duration_seconds: float
     termination: str
