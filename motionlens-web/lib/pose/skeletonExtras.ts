@@ -82,50 +82,52 @@ export function drawCenterline(
   const nose = landmarks[LM_LIVE.NOSE];
   const lSh = landmarks[LM_LIVE.LEFT_SHOULDER];
   const rSh = landmarks[LM_LIVE.RIGHT_SHOULDER];
-  const lHip = landmarks[LM_LIVE.LEFT_HIP];
-  const rHip = landmarks[LM_LIVE.RIGHT_HIP];
 
-  const hasShoulders = visible(lSh, threshold) && visible(rSh, threshold);
-  const hasHips = visible(lHip, threshold) && visible(rHip, threshold);
-  if (!hasShoulders || !hasHips) return; // spine mid required for any centerline
-
+  // Neck line only — nose → shoulder-mid. The shoulder-mid → hip-mid
+  // trunk is now rendered as a vertebra chain by drawSpineSegment,
+  // so we no longer duplicate a straight segment through the torso.
+  if (!visible(nose, threshold)) return;
+  if (!visible(lSh, threshold) || !visible(rSh, threshold)) return;
   const shMid = midpointPx(lSh!, rSh!, w, h);
-  const hipMid = midpointPx(lHip!, rHip!, w, h);
-  if (Math.hypot(shMid.x - hipMid.x, shMid.y - hipMid.y) < 1) return;
+  const nosePx = toPx(nose!, w, h);
+  if (Math.hypot(nosePx.x - shMid.x, nosePx.y - shMid.y) < 1) return;
 
   ctx.save();
-  ctx.strokeStyle = opts?.strokeStyle ?? "rgba(148, 233, 255, 0.65)"; // soft cyan
-  ctx.lineWidth = opts?.lineWidth ?? Math.max(1.5, w * 0.002);
-  ctx.setLineDash(opts?.dash ?? [6, 4]);
-  ctx.shadowBlur = 0;
-
-  // Segment 1: NOSE → shoulder-mid (only when nose is visible)
-  if (visible(nose, threshold)) {
-    const nosePx = toPx(nose!, w, h);
-    ctx.beginPath();
-    ctx.moveTo(nosePx.x, nosePx.y);
-    ctx.lineTo(shMid.x, shMid.y);
-    ctx.stroke();
-  }
-  // Segment 2: shoulder-mid → hip-mid  (this is the trunk axis)
+  ctx.strokeStyle = opts?.strokeStyle ?? "rgba(249, 115, 22, 0.9)"; // orange
+  ctx.lineWidth = opts?.lineWidth ?? Math.max(2, w * 0.003);
+  ctx.lineCap = "round";
+  ctx.setLineDash([]);
+  ctx.shadowColor = "rgba(249, 115, 22, 0.55)";
+  ctx.shadowBlur = 8;
   ctx.beginPath();
-  ctx.moveTo(shMid.x, shMid.y);
-  ctx.lineTo(hipMid.x, hipMid.y);
+  ctx.moveTo(nosePx.x, nosePx.y);
+  ctx.lineTo(shMid.x, shMid.y);
   ctx.stroke();
-
   ctx.restore();
 }
 
-// ─── 2. Spine segment (back joint) ──────────────────────────────
-// Solid line shoulder-mid → hip-mid, drawn slightly thicker than
-// a regular bone and tinted teal so it reads as "trunk axis" not
-// just another bone. Independent of centerline so a caller can pick
-// one, both, or neither.
+// ─── 2. Spine — flexible vertebra chain ─────────────────────────
+// Renders the trunk axis as N short segments with a small dot at
+// each interior vertebra. Because both endpoints (shoulder-mid,
+// hip-mid) are recomputed each frame from live landmarks, the
+// whole chain automatically tilts + translates with the trunk
+// — no interpolation of pose-invisible "spine" landmarks needed.
+//
+// Replaces the previous single-segment straight line so the trunk
+// reads as a Kemtai-style flexible spine rather than a rigid rod.
 
 export interface SpineSegmentOptions {
   visibilityThreshold?: number;
   strokeStyle?: string;
   lineWidth?: number;
+  /** Number of segments in the chain. 4 → 3 interior vertebra dots
+   *  + 2 shoulder/hip-mid endpoints (which are already skeleton
+   *  joint dots elsewhere — so no double-dot). Default 4. */
+  segments?: number;
+  /** Dot fill colour for the interior vertebrae. */
+  dotColor?: string;
+  /** Interior vertebra dot radius. Auto-scales to canvas by default. */
+  dotRadius?: number;
 }
 
 export function drawSpineSegment(
@@ -150,22 +152,101 @@ export function drawSpineSegment(
 
   const shMid = midpointPx(lSh!, rSh!, w, h);
   const hipMid = midpointPx(lHip!, rHip!, w, h);
-  if (Math.hypot(shMid.x - hipMid.x, shMid.y - hipMid.y) < 1) return;
+  const axisX = hipMid.x - shMid.x;
+  const axisY = hipMid.y - shMid.y;
+  const axisLen = Math.hypot(axisX, axisY);
+  if (axisLen < 1) return;
 
-  // Baseline bone thickness in RehabCameraShell = max(2, w * 0.0035).
-  // Spine sits 1.5× that so it clearly reads as trunk axis.
-  const baseLineWidth = Math.max(2, w * 0.0035);
+  // ── Bow the spine to a curve driven by the body's lean ────────
+  //
+  // Linear interpolation between shMid and hipMid would put every
+  // "vertebra" on the straight line between them — the chain would
+  // rotate as a rigid rod but never actually curve. To match the
+  // body's real bend we push the middle of the chain sideways,
+  // perpendicular to the trunk axis, by an amount proportional to
+  // how far the shoulder-mid has drifted off the vertical stack
+  // over the hip-mid.
+  //
+  // Signal: bowSignal = hipMid.x - shMid.x
+  //   • upright body → shMid.x ≈ hipMid.x → bowSignal ≈ 0 → straight
+  //   • lateral lean → shoulders shift sideways → bowSignal grows
+  //   • forward hinge (profile view) → shoulders shift forward → same
+  //
+  // Direction: perp to the trunk axis, chosen so a positive
+  // bowSignal pushes points toward the lean side.
+  // Scale: 0.6 × the raw offset produces a visible but not
+  // exaggerated bow; clamp to 40 % of trunk length as a safety.
+  //
+  // Sign note: an earlier version used `shMid.x - hipMid.x` here,
+  // which combined with the perpendicular (axisY, -axisX) and the
+  // canvas y-down coordinate system produced a bow OPPOSITE to
+  // the actual body lean (the spine curved away from where the
+  // patient was actually bending). Flipping the subtraction order
+  // to `hipMid.x - shMid.x` inverts the sign so the curve now
+  // bows TOWARD the lean, verified for both left and right leans.
+
+  const perpX =  axisY / axisLen;
+  const perpY = -axisX / axisLen;
+  const rawBow = (hipMid.x - shMid.x) * 0.6;
+  const maxBow = axisLen * 0.4;
+  const bow = Math.max(-maxBow, Math.min(maxBow, rawBow));
+
+  // Straight midpoint (linear lerp) that we bow away from.
+  const straightMidX = (shMid.x + hipMid.x) / 2;
+  const straightMidY = (shMid.y + hipMid.y) / 2;
+
+  // Quadratic Bezier control point placed so the curve's peak
+  // lands at (straightMid + perp × bow). For a quadratic
+  // curve at t=0.5 the point is P0/4 + C/2 + P2/4 — so to hit
+  // (straightMid + offset) we set C = straightMid + 2 × offset.
+  const bowOffsetX = perpX * bow;
+  const bowOffsetY = perpY * bow;
+  const controlX = straightMidX + 2 * bowOffsetX;
+  const controlY = straightMidY + 2 * bowOffsetY;
+
+  // Sample vertebra dots along the ACTUAL bowed curve so they lie
+  // on the visible spine, not on the underlying straight axis.
+  const nSegments = Math.max(2, opts?.segments ?? 4);
+  const bezierAt = (t: number) => {
+    const u = 1 - t;
+    return {
+      x: u * u * shMid.x + 2 * u * t * controlX + t * t * hipMid.x,
+      y: u * u * shMid.y + 2 * u * t * controlY + t * t * hipMid.y,
+    };
+  };
+
+  const baseLineWidth = Math.max(3, w * 0.005);
   ctx.save();
-  ctx.strokeStyle = opts?.strokeStyle ?? "rgba(45, 212, 191, 0.9)"; // teal
-  ctx.lineWidth = opts?.lineWidth ?? baseLineWidth * 1.5;
+  ctx.strokeStyle = opts?.strokeStyle ?? "rgba(249, 115, 22, 0.9)"; // orange
+  ctx.lineWidth = opts?.lineWidth ?? baseLineWidth * 1.2;
   ctx.lineCap = "round";
+  ctx.lineJoin = "round";
   ctx.setLineDash([]);
-  ctx.shadowColor = "rgba(45, 212, 191, 0.55)";
-  ctx.shadowBlur = 6;
+  ctx.shadowColor = "rgba(249, 115, 22, 0.55)";
+  ctx.shadowBlur = 12;
+
+  // Smooth quadratic curve from shoulder-mid to hip-mid, bulging
+  // toward the lean direction. This is the "spine" the eye reads.
   ctx.beginPath();
   ctx.moveTo(shMid.x, shMid.y);
-  ctx.lineTo(hipMid.x, hipMid.y);
+  ctx.quadraticCurveTo(controlX, controlY, hipMid.x, hipMid.y);
   ctx.stroke();
+
+  // Interior vertebra dots — orange fills with orange glow so
+  // they match the centre column of the side-coded skeleton.
+  // Sampled directly ON the bowed curve so they visually snap
+  // onto the visible spine.
+  ctx.fillStyle = opts?.dotColor ?? "#F97316";
+  ctx.shadowColor = "rgba(249, 115, 22, 0.6)";
+  ctx.shadowBlur = 10;
+  const r = opts?.dotRadius ?? Math.max(5, w * 0.008);
+  for (let i = 1; i < nSegments; i++) {
+    const t = i / nSegments;
+    const p = bezierAt(t);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
   ctx.restore();
 }
 
