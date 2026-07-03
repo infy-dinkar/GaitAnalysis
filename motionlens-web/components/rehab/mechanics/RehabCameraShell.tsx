@@ -21,8 +21,6 @@ import {
   AlertCircle,
   Camera,
   CameraOff,
-  Eye,
-  EyeOff,
   Loader2,
 } from "lucide-react";
 import { useCamera } from "@/hooks/useCamera";
@@ -53,6 +51,64 @@ const FULL_BODY_DOTS: number[] = [
   LM.LEFT_HEEL,     LM.RIGHT_HEEL,
   LM.LEFT_FOOT_INDEX, LM.RIGHT_FOOT_INDEX,
 ];
+
+// Face landmarks — rendered smaller than the body joints so the
+// nose + eyes + ears cluster reads as a light head anchor rather
+// than a busy blob of big dots. Kept the same colour + glow as the
+// body joints so the palette stays consistent.
+const FACE_DOTS = new Set<number>([
+  LM.NOSE, LM.LEFT_EYE, LM.RIGHT_EYE, LM.LEFT_EAR, LM.RIGHT_EAR,
+]);
+
+// Torso side edges (shoulder→hip verticals) — skipped in the bone
+// loop so the shoulders + hips no longer close into a rectangle.
+// The horizontal shoulder-shoulder and hip-hip bars stay; the
+// vertebra chain drawn by drawSpineSegment fills the middle.
+const TORSO_SIDE_EDGES = new Set<string>([
+  `${LM.LEFT_SHOULDER}-${LM.LEFT_HIP}`,
+  `${LM.RIGHT_SHOULDER}-${LM.RIGHT_HIP}`,
+]);
+
+// Side-coded palette matching the clinician's reference:
+//   • patient's LEFT limb  → cyan   (on-screen left in mirror view)
+//   • patient's RIGHT limb → pink   (on-screen right)
+//   • centre column        → orange (shoulder + hip crossbars, spine)
+// Face landmarks are handled separately below — kept small + orange
+// per the "face ko chod ke" instruction so the head cluster stays
+// unchanged from the prior turn.
+const LEFT_COLOR = "#38BDF8";              // sky-400
+const LEFT_GLOW = "rgba(56, 189, 248, 0.55)";
+const RIGHT_COLOR = "#F87171";             // red-400
+const RIGHT_GLOW = "rgba(248, 113, 113, 0.55)";
+const CENTER_COLOR = "#F97316";            // orange-500
+const CENTER_GLOW = "rgba(249, 115, 22, 0.55)";
+// Face palette (unchanged from prior turn — small orange dots).
+const FACE_COLOR = "#F97316";
+const FACE_GLOW = "rgba(249, 115, 22, 0.55)";
+
+// Side classifier from a landmark index.
+const LEFT_BODY_LMS = new Set<number>([
+  LM.LEFT_SHOULDER, LM.LEFT_ELBOW, LM.LEFT_WRIST,
+  LM.LEFT_HIP, LM.LEFT_KNEE, LM.LEFT_ANKLE,
+  LM.LEFT_HEEL, LM.LEFT_FOOT_INDEX,
+]);
+const RIGHT_BODY_LMS = new Set<number>([
+  LM.RIGHT_SHOULDER, LM.RIGHT_ELBOW, LM.RIGHT_WRIST,
+  LM.RIGHT_HIP, LM.RIGHT_KNEE, LM.RIGHT_ANKLE,
+  LM.RIGHT_HEEL, LM.RIGHT_FOOT_INDEX,
+]);
+function sideOf(idx: number): "left" | "right" | "face" | "center" {
+  if (LEFT_BODY_LMS.has(idx)) return "left";
+  if (RIGHT_BODY_LMS.has(idx)) return "right";
+  return "center"; // face is handled through its own dot set
+}
+function boneStyle(a: number, b: number): { stroke: string; glow: string } {
+  const sa = sideOf(a);
+  const sb = sideOf(b);
+  if (sa === "left" && sb === "left") return { stroke: LEFT_COLOR, glow: LEFT_GLOW };
+  if (sa === "right" && sb === "right") return { stroke: RIGHT_COLOR, glow: RIGHT_GLOW };
+  return { stroke: CENTER_COLOR, glow: CENTER_GLOW };
+}
 
 interface Norm {
   x: number;
@@ -104,7 +160,6 @@ export function RehabCameraShell({
   const angleArcRef = useRef<AngleArcConfig | undefined>(angleArc);
 
   const [busy, setBusy] = useState(false);
-  const [showPip, setShowPip] = useState(true);
 
   useEffect(() => { onFrameRef.current = onFrame; }, [onFrame]);
   useEffect(() => { angleArcRef.current = angleArc; }, [angleArc]);
@@ -135,11 +190,16 @@ export function RehabCameraShell({
 
     const px = (n: Norm) => ({ x: n.x * w, y: n.y * h });
 
-    ctx.strokeStyle = "#FFFFFF";
-    ctx.lineWidth = Math.max(2, w * 0.0035);
-    ctx.shadowColor = "rgba(0,0,0,0.6)";
-    ctx.shadowBlur = 3;
+    // ── Bones — side-coded strokes with matching glow. Torso sides
+    //    still skipped so the shoulders + hips don't close into a
+    //    rectangle across the trunk.
+    ctx.lineWidth = Math.max(3, w * 0.005);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.shadowBlur = 12;
     for (const [a, b] of SKELETON_EDGES) {
+      const key = a < b ? `${a}-${b}` : `${b}-${a}`;
+      if (TORSO_SIDE_EDGES.has(key)) continue;
       const p = landmarks[a];
       const q = landmarks[b];
       if (
@@ -147,21 +207,46 @@ export function RehabCameraShell({
         || p.visibility < OVERLAY_VIS_THRESHOLD
         || q.visibility < OVERLAY_VIS_THRESHOLD
       ) continue;
+      const style = boneStyle(a, b);
+      ctx.strokeStyle = style.stroke;
+      ctx.shadowColor = style.glow;
       const A = px(p); const B = px(q);
       ctx.beginPath();
       ctx.moveTo(A.x, A.y);
       ctx.lineTo(B.x, B.y);
       ctx.stroke();
     }
-    ctx.fillStyle = "#22D3EE";
-    ctx.lineWidth = 2;
+    // ── Joint dots — side-coded fills with matching glow. Face
+    //    landmarks (nose/eyes/ears) stay small orange per the
+    //    "face ko chod ke" instruction.
+    ctx.shadowBlur = 10;
+    const bodyDotR = Math.max(6, w * 0.009);
+    const faceDotR = Math.max(3, w * 0.004);
     for (const i of FULL_BODY_DOTS) {
       const p = landmarks[i];
       if (!p || p.visibility < OVERLAY_VIS_THRESHOLD) continue;
-      const r = Math.max(4, w * 0.005);
       const A = px(p);
+      if (FACE_DOTS.has(i)) {
+        ctx.fillStyle = FACE_COLOR;
+        ctx.shadowColor = FACE_GLOW;
+        ctx.beginPath();
+        ctx.arc(A.x, A.y, faceDotR, 0, Math.PI * 2);
+        ctx.fill();
+        continue;
+      }
+      const s = sideOf(i);
+      if (s === "left") {
+        ctx.fillStyle = LEFT_COLOR;
+        ctx.shadowColor = LEFT_GLOW;
+      } else if (s === "right") {
+        ctx.fillStyle = RIGHT_COLOR;
+        ctx.shadowColor = RIGHT_GLOW;
+      } else {
+        ctx.fillStyle = CENTER_COLOR;
+        ctx.shadowColor = CENTER_GLOW;
+      }
       ctx.beginPath();
-      ctx.arc(A.x, A.y, r, 0, Math.PI * 2);
+      ctx.arc(A.x, A.y, bodyDotR, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.shadowBlur = 0;
@@ -246,27 +331,25 @@ export function RehabCameraShell({
     <div>
       <div
         ref={containerRef}
-        className="relative aspect-video overflow-hidden rounded-card border border-border bg-gradient-to-br from-[#0A0A0B] via-[#0d0d10] to-[#15151a]"
+        className="relative aspect-video overflow-hidden rounded-card border border-border bg-black"
       >
+        {/* Live camera fills the tile. Mirrored horizontally so the
+            selfie orientation matches the mirrored landmark space
+            (`1 - p.x / sw`). object-cover keeps aspect + fills. */}
+        <video
+          ref={videoRef}
+          playsInline
+          muted
+          className={`absolute inset-0 h-full w-full -scale-x-100 object-cover transition-opacity duration-200 ${
+            active ? "opacity-100" : "opacity-0"
+          }`}
+        />
+        {/* Skeleton canvas overlays the video. Transparent — the
+            body shows through everywhere the skeleton isn't drawn. */}
         <canvas ref={overlayRef} className="pointer-events-none absolute inset-0" />
         {/* Game overlay slot — exercises render their target zones,
             cursors, paths, etc. on top of the skeleton via children. */}
         <div className="pointer-events-none absolute inset-0">{children}</div>
-        <div
-          className={`absolute bottom-3 right-3 z-10 overflow-hidden rounded-lg border border-white/15 bg-black/80 shadow-2xl transition-opacity duration-200 ${
-            active && showPip ? "opacity-100" : "pointer-events-none opacity-0"
-          }`}
-        >
-          <video
-            ref={videoRef}
-            playsInline
-            muted
-            className="block h-12 -scale-x-100 object-cover md:h-14 lg:h-16"
-          />
-          <span className="absolute left-1.5 top-1 rounded-full bg-black/55 px-1.5 py-[1px] text-[8px] uppercase tracking-[0.14em] text-white/70 backdrop-blur">
-            Live
-          </span>
-        </div>
         {!active && (
           <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
             {!detectorReady ? (
@@ -302,18 +385,6 @@ export function RehabCameraShell({
           <Button variant="secondary" onClick={stop}>
             <CameraOff className="h-4 w-4" />
             Stop
-          </Button>
-        )}
-        {active && (
-          <Button
-            variant="secondary"
-            onClick={() => setShowPip((v) => !v)}
-            aria-pressed={showPip}
-          >
-            {showPip
-              ? <EyeOff className="h-4 w-4" />
-              : <Eye className="h-4 w-4" />}
-            {showPip ? "Hide preview" : "Show preview"}
           </Button>
         )}
       </div>
