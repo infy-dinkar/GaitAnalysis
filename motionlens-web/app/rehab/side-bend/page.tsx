@@ -40,6 +40,7 @@
 
 import { Suspense, useCallback, useRef, useState } from "react";
 import Link from "next/link";
+import { DEFAULT_LEVEL_INDEX } from "@/lib/rehab/progressionLadders";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
 import { Section } from "@/components/ui/Section";
@@ -47,7 +48,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { TargetReachShell } from "@/components/rehab/mechanics/TargetReachShell";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
 import { computeLateralTrunkFlexionDeg } from "@/lib/rehab/poseMetrics";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
@@ -133,7 +134,7 @@ function Inner() {
     [],
   );
 
-  const buildRehabPayload = useCallback(() => {
+  const buildRehabPayload = useCallback((supervised: boolean) => {
     const peak = peakBendRef.current;
     const interpretation =
       `Peak lateral trunk flexion: ${peak.toFixed(0)}° (target up to ${MAX_BEND_DEG}°).`;
@@ -161,6 +162,8 @@ function Inner() {
           target_band: { min: 0, max: MAX_BEND_DEG },
         },
         config: REACH_CONFIG,
+        level_index: DEFAULT_LEVEL_INDEX,
+        supervised,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },
@@ -252,7 +255,7 @@ function Inner() {
               </div>
 
               <div className="no-pdf">
-                <SaveToPatientButton
+                <RehabSessionFooter
                   buildPayload={buildRehabPayload}
                   label="Save rehab session"
                 />

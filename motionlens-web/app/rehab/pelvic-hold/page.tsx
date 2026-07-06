@@ -25,6 +25,7 @@
 
 import { Suspense, useCallback, useRef, useState } from "react";
 import Link from "next/link";
+import { DEFAULT_LEVEL_INDEX } from "@/lib/rehab/progressionLadders";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
 import { Section } from "@/components/ui/Section";
@@ -32,7 +33,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { HoldInZoneShell } from "@/components/rehab/mechanics/HoldInZoneShell";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
 import { computePelvicTiltDeg } from "@/lib/rehab/poseMetrics";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
@@ -140,7 +141,7 @@ function Inner() {
     [],
   );
 
-  const buildRehabPayload = useCallback(() => {
+  const buildRehabPayload = useCallback((supervised: boolean) => {
     if (!stance) return null;
     const totalSec = totalInZoneMsRef.current / 1000;
     const bestDwellSec = bestDwellMsRef.current / 1000;
@@ -182,6 +183,8 @@ function Inner() {
         stance,
         target_hold_ms: PELVIC_HOLD_CONFIG.targetHoldMs,
         config: PELVIC_HOLD_CONFIG,
+        level_index: DEFAULT_LEVEL_INDEX,
+        supervised,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },
@@ -282,7 +285,7 @@ function Inner() {
               </div>
 
               <div className="no-pdf">
-                <SaveToPatientButton
+                <RehabSessionFooter
                   buildPayload={buildRehabPayload}
                   label="Save rehab session"
                 />

@@ -25,15 +25,23 @@ import {
   BarChart3,
   CalendarDays,
   ChartLine,
+  Dumbbell,
   Loader2,
   Percent,
   Timer,
+  Trash2,
   Trophy,
 } from "lucide-react";
+import Link from "next/link";
 import { PlotlyChart } from "@/components/gait/PlotlyChart";
 import { RehabStreakBadge } from "@/components/rehab/RehabStreakBadge";
 import { computeStreak, type StreakResult } from "@/lib/rehab/streak";
 import {
+  completedInLastDays,
+  computeCompletionByWeek,
+} from "@/lib/rehab/adherence";
+import {
+  deleteReport,
   getReport,
   listPatientReports,
   type ReportDTO,
@@ -349,7 +357,15 @@ export function RehabProgressDashboard({
     );
   }
 
-  return <Ready sessions={state.sessions} />;
+  const handleDeleted = (id: string) => {
+    setState((prev) =>
+      prev.status === "ready"
+        ? { ...prev, sessions: prev.sessions.filter((s) => s.id !== id) }
+        : prev,
+    );
+  };
+
+  return <Ready sessions={state.sessions} onDeleted={handleDeleted} />;
 }
 
 // ═════════════════════════════════════════════════════════════════
@@ -361,7 +377,13 @@ interface DailyBucket {
   sessions: EnrichedSession[];
 }
 
-function Ready({ sessions }: { sessions: EnrichedSession[] }) {
+function Ready({
+  sessions,
+  onDeleted,
+}: {
+  sessions: EnrichedSession[];
+  onDeleted: (id: string) => void;
+}) {
   const hasSessions = sessions.length > 0;
   const sessionsWithMetrics = useMemo<MetricSession[]>(
     () =>
@@ -550,6 +572,10 @@ function Ready({ sessions }: { sessions: EnrichedSession[] }) {
         </ChartCard>
       </div>
 
+      {/* ── Adherence — completed side only. Prescribed placeholder
+             stays "—" until a prescription record is built. */}
+      <AdherenceCard sessions={sessions} />
+
       {/* ── Top exercises (goal vs completed) ──────────────────── */}
       <ChartCard
         icon={Trophy}
@@ -562,8 +588,239 @@ function Ready({ sessions }: { sessions: EnrichedSession[] }) {
               ? "Session metrics still loading or unavailable."
               : "Complete a rehab session to populate this leaderboard."} />}
       </ChartCard>
+
+      {/* ── Recent sessions with per-row delete ────────────────── */}
+      {hasSessions && (
+        <RecentSessionsCard sessions={sessions} onDeleted={onDeleted} />
+      )}
     </div>
   );
+}
+
+// Adherence card — shows sessions completed this week + last 30d
+// alongside a "Prescribed" placeholder that goes live when the
+// prescription record lands.
+function AdherenceCard({ sessions }: { sessions: EnrichedSession[] }) {
+  // Filter out empty / aborted sessions — a session where the patient
+  // never actually did the movement (0 reps for RepCount, 0 ms in
+  // zone for HoldInZone, etc.) should NOT count toward adherence.
+  // Use per-mechanic activity signals; fall back to points > 0 when
+  // full metrics are missing.
+  const summaries = useMemo(
+    () =>
+      sessions
+        .filter((s) => sessionHadActivity(s))
+        .map((s) => ({
+          id: s.id,
+          module: "rehab",
+          movement: s.metrics?.exerciseSlug ?? s.fallbackExerciseSlug,
+          created_at: s.createdAtIso,
+        })),
+    [sessions],
+  );
+
+  const perWeek = useMemo(
+    () => computeCompletionByWeek(summaries),
+    [summaries],
+  );
+  const last30 = useMemo(
+    () => completedInLastDays(summaries, 30),
+    [summaries],
+  );
+  const last7 = useMemo(
+    () => completedInLastDays(summaries, 7),
+    [summaries],
+  );
+  const thisWeek = perWeek.length > 0 ? perWeek[perWeek.length - 1] : null;
+
+  return (
+    <ChartCard
+      icon={CalendarDays}
+      title="Adherence"
+      subtitle="Completed sessions vs prescription (prescribed side coming with the recommendation feature)"
+    >
+      <div className="grid gap-4 sm:grid-cols-3">
+        <div className="rounded-card border border-border bg-surface p-4">
+          <p className="text-[10px] uppercase tracking-[0.14em] text-subtle">
+            This week
+          </p>
+          <p className="mt-2 tabular text-3xl font-semibold text-foreground">
+            {thisWeek?.total ?? 0}
+            <span className="ml-1 text-xs font-normal text-muted">/ —</span>
+          </p>
+          <p className="mt-1 text-[11px] text-muted">
+            {thisWeek ? `${thisWeek.days} active day${thisWeek.days === 1 ? "" : "s"}` : "No sessions yet"}
+          </p>
+        </div>
+        <div className="rounded-card border border-border bg-surface p-4">
+          <p className="text-[10px] uppercase tracking-[0.14em] text-subtle">
+            Last 7 days
+          </p>
+          <p className="mt-2 tabular text-3xl font-semibold text-foreground">
+            {last7}
+          </p>
+        </div>
+        <div className="rounded-card border border-border bg-surface p-4">
+          <p className="text-[10px] uppercase tracking-[0.14em] text-subtle">
+            Last 30 days
+          </p>
+          <p className="mt-2 tabular text-3xl font-semibold text-foreground">
+            {last30}
+          </p>
+        </div>
+      </div>
+      <p className="mt-4 text-xs text-muted">
+        Prescribed: <span className="tabular text-foreground">—</span> · will populate
+        once a rehab prescription is assigned by the clinician.
+      </p>
+    </ChartCard>
+  );
+}
+
+// Recent sessions list — one row per saved session with a link to
+// the full report and a per-row delete button. Deletion goes through
+// the shared deleteReport() API; on success we call onDeleted so the
+// dashboard removes the row and every chart / adherence count above
+// re-computes without a page reload.
+function RecentSessionsCard({
+  sessions,
+  onDeleted,
+}: {
+  sessions: EnrichedSession[];
+  onDeleted: (id: string) => void;
+}) {
+  // Newest first — sessions came in oldest-first for chart plotting.
+  const rows = useMemo(
+    () =>
+      [...sessions].sort((a, b) =>
+        b.createdAtIso.localeCompare(a.createdAtIso),
+      ),
+    [sessions],
+  );
+  return (
+    <ChartCard
+      icon={Dumbbell}
+      title="Recent sessions"
+      subtitle="All saved rehab sessions. Delete removes a session from the record and every chart above."
+    >
+      <ul className="space-y-2">
+        {rows.map((s) => (
+          <RecentSessionRow
+            key={s.id}
+            session={s}
+            onDeleted={onDeleted}
+          />
+        ))}
+      </ul>
+    </ChartCard>
+  );
+}
+
+function RecentSessionRow({
+  session,
+  onDeleted,
+}: {
+  session: EnrichedSession;
+  onDeleted: (id: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const slug = session.metrics?.exerciseSlug ?? session.fallbackExerciseSlug;
+  const title = humanExerciseName(slug);
+  const dateStr = new Date(session.createdAtIso).toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+  const summary = summarizeMechanic(session.metrics);
+
+  async function handleDelete(e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (busy) return;
+    if (!confirm(`Delete this ${title} session? This cannot be undone.`)) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await deleteReport(session.id);
+      onDeleted(session.id);
+    } catch (e2) {
+      setErr(e2 instanceof Error ? e2.message : "Delete failed");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <li>
+      <div className="group flex items-center gap-3 rounded-card border border-border bg-surface p-3 transition hover:border-accent">
+        <Link
+          href={`/dashboard/reports/${session.id}`}
+          className="flex flex-1 items-center gap-3 min-w-0"
+        >
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-card bg-orange-500/10 text-orange-700 dark:text-orange-400">
+            <Dumbbell className="h-4 w-4" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium text-foreground">
+              {title}
+            </p>
+            <p className="truncate text-xs text-muted">
+              {summary}
+            </p>
+          </div>
+          <p className="shrink-0 text-xs tabular text-muted">{dateStr}</p>
+        </Link>
+        <button
+          type="button"
+          onClick={handleDelete}
+          disabled={busy}
+          className="shrink-0 rounded-md p-1.5 text-muted transition hover:bg-error/10 hover:text-error disabled:opacity-50"
+          aria-label={`Delete ${title} session`}
+        >
+          {busy
+            ? <Loader2 className="h-4 w-4 animate-spin" />
+            : <Trash2 className="h-4 w-4" />}
+        </button>
+      </div>
+      {err && <p className="mt-1 pl-3 text-xs text-error">{err}</p>}
+    </li>
+  );
+}
+
+function summarizeMechanic(m: RehabSessionMetrics | null): string {
+  if (!m) return "Session details unavailable";
+  switch (m.mechanicId) {
+    case "rep_count":
+      return `${m.reps} reps · ${m.goodReps} clean · ${m.points} pts`;
+    case "hold_in_zone": {
+      const s = (m.totalMsInZone / 1000).toFixed(1);
+      return `${s} s in zone · ${m.points} pts`;
+    }
+    case "target_reach":
+      return `${m.hits} hits · ${m.misses} misses · ${m.points} pts`;
+    case "match_pose":
+      return `Best match ${m.bestMatchPct.toFixed(0)}% · ${m.points} pts`;
+    case "metronome":
+      return `${m.liftCount} lifts · ${m.points} pts`;
+    default:
+      return `${m.points} pts · ${m.durationSec.toFixed(0)}s`;
+  }
+}
+
+// True when the session actually recorded work — filters out
+// aborted / camera-only sessions that would otherwise inflate the
+// adherence count. Uses whichever mechanic-appropriate signal fits;
+// falls back to points > 0 when full metrics didn't hydrate.
+function sessionHadActivity(s: EnrichedSession): boolean {
+  const m = s.metrics;
+  if (!m) return false;
+  if (m.reps > 0) return true;
+  if (m.totalMsInZone > 0) return true;
+  if (m.hits > 0 || m.misses > 0) return true;
+  if (m.bestMatchPct > 0) return true;
+  if (m.liftCount > 0) return true;
+  if (m.completionPct > 0) return true;
+  if (m.points > 0) return true;
+  return false;
 }
 
 // Compact placeholder rendered INSIDE a ChartCard when the

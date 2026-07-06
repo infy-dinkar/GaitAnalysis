@@ -46,8 +46,9 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { TargetReachShell } from "@/components/rehab/mechanics/TargetReachShell";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
 import { computeShoulderWidth } from "@/lib/rehab/poseMetrics";
+import { DEFAULT_LEVEL_INDEX } from "@/lib/rehab/progressionLadders";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
@@ -152,7 +153,7 @@ function Inner() {
     [side],
   );
 
-  const buildRehabPayload = useCallback(() => {
+  const buildRehabPayload = useCallback((supervised: boolean) => {
     if (!side) return null;
     const peak = peakReachRef.current;
     const interpretation =
@@ -181,6 +182,8 @@ function Inner() {
           value_at_peak: peak,
         },
         config: REACH_CONFIG,
+        level_index: DEFAULT_LEVEL_INDEX,
+        supervised,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },
@@ -284,7 +287,7 @@ function Inner() {
               </div>
 
               <div className="no-pdf">
-                <SaveToPatientButton
+                <RehabSessionFooter
                   buildPayload={buildRehabPayload}
                   label="Save rehab session"
                 />

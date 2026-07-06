@@ -40,7 +40,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { WeightShiftShell } from "@/components/rehab/mechanics/WeightShiftShell";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
 import {
   buildSkeletonPosePayload,
   elapsedSecondsSince,
@@ -52,6 +52,7 @@ import {
   computeHipMidX,
   computeShoulderWidth,
 } from "@/lib/rehab/poseMetrics";
+import { DEFAULT_LEVEL_INDEX } from "@/lib/rehab/progressionLadders";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
@@ -143,7 +144,7 @@ function Inner() {
     setPhase("calibrating");
   }, []);
 
-  const buildRehabPayload = useCallback(() => {
+  const buildRehabPayload = useCallback((supervised: boolean) => {
     const peak = peakShiftRef.current;
     const interpretation =
       `Weight-shift session — peak medio-lateral shift ${peak.toFixed(2)} (of ±1 scale).`;
@@ -170,6 +171,8 @@ function Inner() {
           value_at_peak: peak,
         },
         config: WEIGHT_SHIFT_CONFIG,
+        level_index: DEFAULT_LEVEL_INDEX,
+        supervised,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },
@@ -382,7 +385,7 @@ function Inner() {
               </div>
             </div>
             <div className="no-pdf mt-6">
-              <SaveToPatientButton
+              <RehabSessionFooter
                 buildPayload={buildRehabPayload}
                 label="Save rehab session"
               />
