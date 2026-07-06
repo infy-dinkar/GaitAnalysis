@@ -39,7 +39,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { MetronomeShell } from "@/components/rehab/mechanics/MetronomeShell";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
 import {
   buildSkeletonPosePayload,
   elapsedSecondsSince,
@@ -49,6 +49,7 @@ import {
 } from "@/lib/rehab/sessionHelpers";
 import { computeHipAngle } from "@/lib/biomech/hip-live";
 import { computePelvicTiltDeg } from "@/lib/rehab/poseMetrics";
+import { DEFAULT_LEVEL_INDEX } from "@/lib/rehab/progressionLadders";
 import { LM_LIVE } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
@@ -201,7 +202,7 @@ function Inner() {
     };
   }, []);
 
-  const buildRehabPayload = useCallback(() => {
+  const buildRehabPayload = useCallback((supervised: boolean) => {
     if (!side) return null;
     const lifts = liftCountRef.current;
     const peak = peakFlexionRef.current;
@@ -236,6 +237,8 @@ function Inner() {
           target_band: { min: LIFT_THRESHOLD_DEG, max: 90 },
         },
         config: MARCHING_CONFIG,
+        level_index: DEFAULT_LEVEL_INDEX,
+        supervised,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },
@@ -361,7 +364,7 @@ function Inner() {
               </div>
 
               <div className="no-pdf">
-                <SaveToPatientButton
+                <RehabSessionFooter
                   buildPayload={buildRehabPayload}
                   label="Save rehab session"
                 />

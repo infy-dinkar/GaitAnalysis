@@ -1,312 +1,26 @@
 "use client";
-// Public rehab catalogue — lists every wired rehab exercise.
-// Mirrors the dashboard /analyze grid pattern so the visual
-// language matches the assessment catalogue. Every card links to
-// a real exercise route — no placeholders, no dead links.
+// Public rehab catalogue — 24 exercises grouped by joint family
+// (Knee / Hip / Back / Shoulder). Card definitions live in the
+// shared lib/rehab/exerciseCatalog.js so both this page and the
+// doctor-flow launcher stay in sync.
+//
+// Logged-in clinicians can pick a patient at the top of the page —
+// picking one appends ?patientId=xxx to every exercise link so the
+// full doctor-flow (Save, Level chip, Compensation flags, Progress)
+// activates without having to go through /dashboard first.
 
 import Link from "next/link";
-import { Suspense } from "react";
-import {
-  ArrowUpRight,
-  Dumbbell,
-  Footprints,
-  Music,
-  Spline,
-  Sparkles,
-  Target,
-  Timer,
-  type LucideIcon,
-} from "lucide-react";
+import { Suspense, useEffect, useState } from "react";
+import { ArrowUpRight, UserRound, LineChart } from "lucide-react";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
 import { Section } from "@/components/ui/Section";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
-
-interface RehabModule {
-  /** Stable id for the URL slug. */
-  id: string;
-  eyebrow: string;
-  title: string;
-  body: string;
-  icon: LucideIcon;
-  iconTone: string;
-  tone: string;
-  /** Route target — leading slash required (catalogue links
-   *  directly without a base-path join). */
-  href: string;
-}
-
-const MODULES: RehabModule[] = [
-  {
-    id: "squat",
-    eyebrow: "K1 · Controlled Squat",
-    title: "Controlled Squat",
-    body:
-      "Quality-gated squat rep counter. Each rep checked against depth (110° interior knee), amplitude (50° excursion), and starting position. Shallow reps flagged transparently. Powered by the Rep-Count mechanic.",
-    icon: Dumbbell,
-    iconTone: "text-indigo-500",
-    tone: "from-indigo-500/15 to-indigo-500/5",
-    // Catalogue page uses href directly → LEADING slash required.
-    href: "/rehab/squat",
-  },
-  {
-    id: "wall_sit",
-    eyebrow: "K5 · Wall Sit",
-    title: "Wall Sit",
-    body:
-      "Isometric wall-sit hold at 80°–100° knee flexion. The in-zone timer accumulates as long as the knee stays inside the band; drift out and it pauses. Powered by the Hold-in-Zone mechanic. Target 30 s cumulative.",
-    icon: Timer,
-    iconTone: "text-teal-500",
-    tone: "from-teal-500/15 to-teal-500/5",
-    // Catalogue page uses href directly → LEADING slash required.
-    href: "/rehab/wall-sit",
-  },
-  {
-    id: "pelvic_hold",
-    eyebrow: "H1 · Pelvic-Level Hold",
-    title: "Pelvic-Level Hold",
-    body:
-      "Trendelenburg retraining — single-leg stance with the pelvis held level (tilt within ±5° of horizontal). Symmetric ±5° band drives the in-zone timer; a hip drop pauses it. 25 s cumulative target. Hold-in-Zone mechanic.",
-    icon: Timer,
-    iconTone: "text-teal-500",
-    tone: "from-teal-500/15 to-teal-500/5",
-    href: "/rehab/pelvic-hold",
-  },
-  {
-    id: "wall-slide",
-    eyebrow: "S4 · Wall Slide",
-    title: "Wall Slide",
-    body:
-      "Overhead-reach hold against a wall. Patient stands back-to-wall and slides the working arm up the wall, holding at the 140°–160° shoulder flexion band. 20 s cumulative target. Hold-in-Zone mechanic.",
-    icon: Timer,
-    iconTone: "text-teal-500",
-    tone: "from-teal-500/15 to-teal-500/5",
-    href: "/rehab/wall-slide",
-  },
-  {
-    id: "shoulder_raise",
-    eyebrow: "S1 · Shoulder Raise",
-    title: "Shoulder Raise",
-    body:
-      "Active shoulder abduction to target. Raises the test arm to drive a cursor onto spawning targets — cursor height is the shared shoulder elevation angle, so the game control IS the clinical metric. Powered by the Target-Reach mechanic.",
-    icon: Target,
-    iconTone: "text-cyan-500",
-    tone: "from-cyan-500/15 to-cyan-500/5",
-    // Catalogue page uses href directly → LEADING slash required.
-    href: "/rehab/shoulder-raise",
-  },
-  {
-    id: "knee-extension",
-    eyebrow: "K3 · Terminal Knee Extension",
-    title: "Terminal Knee Extension",
-    body:
-      "Active terminal-extension drill — patient sitting with thigh supported, actively straightens the knee to drive a cursor onto spawning targets. Cursor.y is the shared knee extension angle; top targets at ≥153° extension target the post-op terminal band. Powered by the Target-Reach mechanic.",
-    icon: Target,
-    iconTone: "text-cyan-500",
-    tone: "from-cyan-500/15 to-cyan-500/5",
-    href: "/rehab/knee-extension",
-  },
-  {
-    id: "hip-abduction",
-    eyebrow: "H2 · Hip Abduction",
-    title: "Hip Abduction",
-    body:
-      "Standing hip abduction to target — patient stands with light support, lifts the working leg sideways. Cursor.y is the shared hip abduction angle; top targets at ~38° abduction sit at the upper end of typical active ROM. Frontal view. Powered by the Target-Reach mechanic.",
-    icon: Target,
-    iconTone: "text-cyan-500",
-    tone: "from-cyan-500/15 to-cyan-500/5",
-    href: "/rehab/hip-abduction",
-  },
-  {
-    id: "wall-clock",
-    eyebrow: "S2 · Wall-Clock Reach",
-    title: "Wall-Clock Reach",
-    body:
-      "Multidirectional shoulder reach — patient stands frontal and the hand IS the cursor. Targets spawn around the play area (12, 3, 6, 9 o’clock + diagonals), training full-hemisphere shoulder ROM + reach coordination. Powered by the Target-Reach mechanic.",
-    icon: Target,
-    iconTone: "text-cyan-500",
-    tone: "from-cyan-500/15 to-cyan-500/5",
-    href: "/rehab/wall-clock",
-  },
-  {
-    id: "pendulum",
-    eyebrow: "S3 · Pendulum / Circle Trace",
-    title: "Pendulum / Circle Trace",
-    body:
-      "Gentle shoulder mobility — patient leans forward, lets the test arm hang, and traces a slow circle following a moving lead target. Cursor is the wrist position directly; score = accuracy + smoothness. Powered by the Trace mechanic.",
-    icon: Spline,
-    iconTone: "text-purple-500",
-    tone: "from-purple-500/15 to-purple-500/5",
-    href: "/rehab/pendulum",
-  },
-  {
-    id: "weight_shift",
-    eyebrow: "H3 · Weight-Shift Balance",
-    title: "Weight-Shift Balance",
-    body:
-      "Limits-of-stability training. Patient stands feet fixed, shifts weight medio-laterally to drive a cursor through four target zones at ±0.4 and ±0.8. Step detection auto-pauses dwell — only honest weight shifts count. Powered by the Weight-Shift mechanic.",
-    icon: Footprints,
-    iconTone: "text-teal-500",
-    tone: "from-teal-500/15 to-teal-500/5",
-    href: "/rehab/weight-shift",
-  },
-  {
-    id: "bridge",
-    eyebrow: "H4 · Bridge",
-    title: "Bridge",
-    body:
-      "Supine glute bridge with quality-gated rep counting. Patient lifts hips toward a straight shoulder-hip-knee line; the hip interior angle drives the same Rep-Count engine K1 Squat uses. Lateral view, depth + amplitude gates. Powered by the Rep-Count mechanic.",
-    icon: Dumbbell,
-    iconTone: "text-indigo-500",
-    tone: "from-indigo-500/15 to-indigo-500/5",
-    href: "/rehab/bridge",
-  },
-  {
-    id: "step-up",
-    eyebrow: "K4 · Step-Up Control",
-    title: "Step-Up Control",
-    body:
-      "Quality-gated step-up rep counter. Patient steps onto a low platform with the working leg, reaches full extension at the top, lowers under control. Stepping-leg knee interior drives the same Rep-Count engine K1 uses. Powered by the Rep-Count mechanic.",
-    icon: Dumbbell,
-    iconTone: "text-indigo-500",
-    tone: "from-indigo-500/15 to-indigo-500/5",
-    href: "/rehab/step-up",
-  },
-  {
-    id: "lateral-step",
-    eyebrow: "H6 · Lateral Step",
-    title: "Lateral Step",
-    body:
-      "Side-stepping drill in a maintained quarter-squat. Working-leg knee interior drives the Rep-Count engine — tighter amplitude gate (30°) reflects the shallower ROM. Frontal view, knee-tracking focus. Powered by the Rep-Count mechanic.",
-    icon: Dumbbell,
-    iconTone: "text-indigo-500",
-    tone: "from-indigo-500/15 to-indigo-500/5",
-    href: "/rehab/lateral-step",
-  },
-  {
-    id: "single-leg-squat",
-    eyebrow: "K6 · Single-Leg Squat",
-    title: "Single-Leg Squat",
-    body:
-      "Unipedal squat — patient stands on the working leg, descends in a controlled single-leg squat, returns. Same Rep-Count engine as K1; tightened amplitude gate (35°) and rep target (8) reflect the reduced ROM and higher demand. Lateral view. Powered by the Rep-Count mechanic.",
-    icon: Dumbbell,
-    iconTone: "text-indigo-500",
-    tone: "from-indigo-500/15 to-indigo-500/5",
-    href: "/rehab/single-leg-squat",
-  },
-  {
-    id: "external-rotation",
-    eyebrow: "S5 · External Rotation (trend)",
-    title: "External Rotation",
-    body:
-      "Elbow-at-side external rotation rep counter — patient tucks the upper arm and rotates the forearm outward. Uses the same Rep-Count engine as K1. Note: 2-D forearm proxy, NOT absolute ER measurement — report as within-patient trend only. Powered by the Rep-Count mechanic.",
-    icon: Dumbbell,
-    iconTone: "text-indigo-500",
-    tone: "from-indigo-500/15 to-indigo-500/5",
-    href: "/rehab/external-rotation",
-  },
-  {
-    id: "scapular-set",
-    eyebrow: "S6 · Scapular Set (coarse)",
-    title: "Scapular Set",
-    body:
-      "Scapular retraction / row-pattern rep counter — patient squeezes the shoulder blades together. Same Rep-Count engine as K1. Note: scapula is not landmarked; the cue is inferred from small medial shoulder displacement — a coarse coaching signal, not a precise scapular measurement. Powered by the Rep-Count mechanic.",
-    icon: Dumbbell,
-    iconTone: "text-indigo-500",
-    tone: "from-indigo-500/15 to-indigo-500/5",
-    href: "/rehab/scapular-set",
-  },
-  {
-    id: "mini-squat",
-    eyebrow: "K2 · Mini-Squat",
-    title: "Mini-Squat",
-    body:
-      "Shallow partial squat — lower intensity than K1. Looser depth gate (interior 140°) and smaller amplitude (25°) make it suitable for early-stage / deconditioned patients. Same Rep-Count engine, higher rep target (12). Lateral view. Powered by the Rep-Count mechanic.",
-    icon: Dumbbell,
-    iconTone: "text-indigo-500",
-    tone: "from-indigo-500/15 to-indigo-500/5",
-    href: "/rehab/mini-squat",
-  },
-  {
-    id: "back-extension",
-    eyebrow: "B2 · Back Extension",
-    title: "Back Extension",
-    body:
-      "Standing or prone back-extension rep counter. Patient arches the trunk gently backward through a small controlled range. Same Rep-Count engine as K1 with a new trunk-tilt proxy. Lateral view. PRD: small pain-free range only. Powered by the Rep-Count mechanic.",
-    icon: Dumbbell,
-    iconTone: "text-indigo-500",
-    tone: "from-indigo-500/15 to-indigo-500/5",
-    href: "/rehab/back-extension",
-  },
-  {
-    id: "posture-hold",
-    eyebrow: "B1 · Posture Hold",
-    title: "Posture Hold",
-    body:
-      "Forward-head reset — patient sits or stands lateral to the camera and holds the ear stacked above the shoulder. Forward-head offset drives an in-zone band timer. Drift > 12° → timer pauses; return to alignment → resumes. 20 s cumulative target. Powered by the Hold-in-Zone mechanic.",
-    icon: Timer,
-    iconTone: "text-teal-500",
-    tone: "from-teal-500/15 to-teal-500/5",
-    href: "/rehab/posture-hold",
-  },
-  {
-    id: "side-bend",
-    eyebrow: "B3 · Side Bend",
-    title: "Side Bend",
-    body:
-      "Lateral trunk-flexion drill — patient stands frontal and bends sideways to drive a cursor. Cursor.x is the signed lateral-flexion angle (left bends ⇒ left, right ⇒ right); cursor.y rises with magnitude, so top targets demand near-max ROM. Frontal view. Powered by the Target-Reach mechanic.",
-    icon: Target,
-    iconTone: "text-cyan-500",
-    tone: "from-cyan-500/15 to-cyan-500/5",
-    href: "/rehab/side-bend",
-  },
-  {
-    id: "hip-hinge",
-    eyebrow: "B5 · Hip Hinge",
-    title: "Hip Hinge",
-    body:
-      "Posterior-chain pattern training — patient hinges forward at the hips with a flat back, returns to upright. Same Rep-Count engine as B2 Back Extension; trunk-tilt magnitude drives reps. Lateral view. Powered by the Rep-Count mechanic.",
-    icon: Dumbbell,
-    iconTone: "text-indigo-500",
-    tone: "from-indigo-500/15 to-indigo-500/5",
-    href: "/rehab/hip-hinge",
-  },
-  {
-    id: "cat-cow",
-    eyebrow: "B6 · Cat-Cow",
-    title: "Cat-Cow",
-    body:
-      "Gentle spinal-mobility drill from quadruped — alternate CAT (chin tucked, back rounded) and COW (head lifted, back arched) following a slow vertical pacer. Trend only — head-position proxy, not a spinal ROM measurement. Powered by the Trace mechanic.",
-    icon: Spline,
-    iconTone: "text-purple-500",
-    tone: "from-purple-500/15 to-purple-500/5",
-    href: "/rehab/cat-cow",
-  },
-  {
-    id: "bird-dog",
-    eyebrow: "B4 · Bird-Dog",
-    title: "Bird-Dog",
-    body:
-      "Core-stability + posterior-chain coordination — quadruped position, extend one arm forward + opposite leg backward, hold a straight line. Three joint angles (arm, leg, trunk) tracked together; pose-match ≥ 70 % for ≥ 4 s clears the round. Powered by the Match-Pose mechanic.",
-    icon: Sparkles,
-    iconTone: "text-pink-500",
-    tone: "from-pink-500/15 to-pink-500/5",
-    href: "/rehab/bird-dog",
-  },
-  {
-    id: "marching",
-    eyebrow: "H5 · Marching",
-    title: "Marching",
-    body:
-      "Cadence-paced marching in place — each knee lift on the tracked side is graded against a steady visual beat (perfect / good / miss). Patient internalises a steady, symmetric gait cadence. Audio off in v1 — music layer coming later. Powered by the Metronome mechanic.",
-    icon: Music,
-    iconTone: "text-fuchsia-500",
-    tone: "from-fuchsia-500/15 to-fuchsia-500/5",
-    href: "/rehab/marching",
-  },
-];
+import { groupExercisesByJoint } from "@/lib/rehab/exerciseCatalog";
+import { useAuth } from "@/contexts/AuthContext";
+import { listPatients, type PatientDTO } from "@/lib/patients";
 
 export default function RehabCataloguePage() {
   return (
@@ -317,6 +31,36 @@ export default function RehabCataloguePage() {
 }
 
 function Inner() {
+  const groups = groupExercisesByJoint();
+  const { doctor } = useAuth();
+  const [patients, setPatients] = useState<PatientDTO[] | null>(null);
+  const [selectedPatientId, setSelectedPatientId] = useState<string>("");
+
+  useEffect(() => {
+    if (!doctor) {
+      setPatients(null);
+      setSelectedPatientId("");
+      return;
+    }
+    let cancelled = false;
+    listPatients()
+      .then((res) => {
+        if (!cancelled) setPatients(res.data);
+      })
+      .catch(() => {
+        if (!cancelled) setPatients([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [doctor]);
+
+  const selectedPatient =
+    patients?.find((p) => p.id === selectedPatientId) ?? null;
+  const patientQuery = selectedPatientId
+    ? `?patientId=${selectedPatientId}`
+    : "";
+
   return (
     <>
       <Nav />
@@ -343,61 +87,110 @@ function Inner() {
             </Link>
           </div>
 
-          <div className="mt-16 grid gap-5 md:grid-cols-3">
-            {MODULES.map((m) => {
-              const Icon = m.icon;
-              // Card ids use mixed conventions (early entries use
-              // underscores e.g. "wall_sit"; newer ones use hyphens
-              // e.g. "wall-clock"). The image map keys on the
-              // hyphen-slug form, matching the route folder names.
-              const imageUrl =
-                REHAB_EXERCISE_IMAGES[m.id.replace(/_/g, "-")];
-              const sharedClass = `group relative flex flex-col overflow-hidden rounded-hero border border-border bg-gradient-to-br ${m.tone} p-6 transition md:p-8 hover:border-accent hover:shadow-glow-sm`;
-
-              return (
-                <Link
-                  key={m.id}
-                  href={m.href}
-                  className={sharedClass}
+          {/* Clinician-only patient picker. Not shown to logged-out
+              visitors — the catalogue works fine without saving. */}
+          {doctor && (
+            <div className="mt-10 rounded-card border border-border bg-surface p-5">
+              <div className="flex flex-wrap items-center gap-4">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-card bg-accent/10 text-accent">
+                  <UserRound className="h-5 w-5" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-foreground">
+                    Playing on behalf of…
+                  </p>
+                  <p className="mt-0.5 text-xs text-muted">
+                    Pick a patient to unlock save, level progression,
+                    compensation flags, and the progress dashboard.
+                    Leave blank for a solo demo run.
+                  </p>
+                </div>
+                <select
+                  value={selectedPatientId}
+                  onChange={(e) => setSelectedPatientId(e.target.value)}
+                  className="min-w-[200px] rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
                 >
-                  {/* Reference thumbnail — mirrors biomech's
-                      MovementGrid tile (h-28, white bg, rounded,
-                      object-contain, lazy, decorative). */}
-                  {imageUrl && (
-                    <div className="mb-3 w-full overflow-hidden rounded-md bg-white">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={imageUrl}
-                        alt=""
-                        aria-hidden="true"
-                        loading="lazy"
-                        className="block h-28 w-full object-contain"
-                      />
-                    </div>
-                  )}
-                  <div className="flex items-center justify-between">
-                    <Icon className={`h-7 w-7 ${m.iconTone}`} />
-                    <ArrowUpRight className="h-5 w-5 text-muted transition group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-accent" />
-                  </div>
-                  <div className="mt-8">
-                    <p className="eyebrow">{m.eyebrow}</p>
-                    <h2 className="mt-1 text-xl font-semibold tracking-tight md:text-2xl">
-                      {m.title}
-                    </h2>
-                    <p className="mt-3 text-sm leading-relaxed text-muted">
-                      {m.body}
-                    </p>
-                  </div>
-                </Link>
-              );
-            })}
+                  <option value="">— Solo (no patient) —</option>
+                  {(patients ?? []).map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {selectedPatient && (
+                <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-border pt-4">
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-500/30 dark:text-emerald-300">
+                    Saving to {selectedPatient.name}
+                  </span>
+                  <Link
+                    href={`/dashboard/patients/${selectedPatient.id}/rehab`}
+                    className="inline-flex items-center gap-1.5 text-xs font-medium text-accent hover:underline"
+                  >
+                    <LineChart className="h-3.5 w-3.5" />
+                    View progress dashboard
+                  </Link>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="mt-16 space-y-16">
+            {groups.map(({ joint, meta, items }) => (
+              <section key={joint}>
+                <div className="flex items-baseline justify-between">
+                  <h2 className="text-2xl font-semibold tracking-tight md:text-3xl">
+                    {meta.label}
+                  </h2>
+                  <p className="text-sm text-muted">{meta.subtitle}</p>
+                </div>
+                <div className="mt-6 grid gap-5 md:grid-cols-3">
+                  {items.map((m) => {
+                    const Icon = m.icon;
+                    const imageUrl = REHAB_EXERCISE_IMAGES[m.slug];
+                    const href = `/rehab/${m.slug}${patientQuery}`;
+                    const eyebrow = `${m.code} · ${m.title}`;
+                    const sharedClass = `group relative flex flex-col overflow-hidden rounded-hero border border-border bg-gradient-to-br ${m.tone} p-6 transition md:p-8 hover:border-accent hover:shadow-glow-sm`;
+                    return (
+                      <Link key={m.slug} href={href} className={sharedClass}>
+                        {imageUrl && (
+                          <div className="mb-3 w-full overflow-hidden rounded-md bg-white">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={imageUrl}
+                              alt=""
+                              aria-hidden="true"
+                              loading="lazy"
+                              className="block h-28 w-full object-contain"
+                            />
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between">
+                          <Icon className={`h-7 w-7 ${m.iconTone}`} />
+                          <ArrowUpRight className="h-5 w-5 text-muted transition group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-accent" />
+                        </div>
+                        <div className="mt-8">
+                          <p className="eyebrow">{eyebrow}</p>
+                          <h3 className="mt-1 text-xl font-semibold tracking-tight md:text-2xl">
+                            {m.title}
+                          </h3>
+                          <p className="mt-3 text-sm leading-relaxed text-muted">
+                            {m.publicBody}
+                          </p>
+                        </div>
+                      </Link>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
           </div>
 
           <div className="mt-16 rounded-card border border-border bg-surface p-5 text-sm text-muted">
             <p className="font-semibold text-foreground">For clinicians</p>
             <p className="mt-2">
-              Rehab games are designed to share the patient context the
-              assessment modules already use — open this catalogue from a
+              Rehab games share the patient context the assessment
+              modules already use — open this catalogue from a
               patient&apos;s record and any session played here saves
               against that patient&apos;s history once an exercise is
               wired into a mechanic.

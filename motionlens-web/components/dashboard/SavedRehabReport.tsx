@@ -16,7 +16,7 @@
 // no schema change.
 
 import { useMemo } from "react";
-import { Award, Dumbbell, Flame, Target } from "lucide-react";
+import { AlertTriangle, Award, Dumbbell, Flame, Target } from "lucide-react";
 import {
   drawSkeletonFromLandmarks,
   type SavedLandmark,
@@ -101,6 +101,11 @@ export function SavedRehabReport({
   const exerciseSlug = pickString(metrics, "exercise_slug");
   const mechanicId = pickString(metrics, "mechanic_id");
   const durationSec = pickNumber(metrics, "duration_sec") ?? 0;
+  // Supervised flag lives at the top of metrics — defaults to false
+  // for legacy sessions saved before F1A landed.
+  const supervised = metrics && typeof metrics === "object"
+    ? Boolean((metrics as Record<string, unknown>).supervised)
+    : false;
   const targetReps = pickNumber(metrics, "target_reps");
 
   const scoreRaw = pickObject(metrics, "score");
@@ -127,6 +132,7 @@ export function SavedRehabReport({
 
   const mechanicState = pickObject(metrics, "mechanic_state");
   const interpretation = pickString(observations, "interpretation");
+  const compensationFlags = parseSavedCompensations(metrics);
 
   const exerciseName = humanExerciseName(exerciseSlug);
   const mechanicName = humanMechanicName(mechanicId);
@@ -148,6 +154,17 @@ export function SavedRehabReport({
               {patientName?.trim() || "Anonymous patient"} · session duration{" "}
               {formatDuration(durationSec)}
             </p>
+            <div className="mt-2">
+              <span
+                className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] ring-1 ${
+                  supervised
+                    ? "bg-accent/15 text-accent ring-accent/30"
+                    : "bg-surface text-muted ring-border"
+                }`}
+              >
+                {supervised ? "Supervised" : "Unsupervised"}
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -196,6 +213,12 @@ export function SavedRehabReport({
           screenshot of whatever framing the live camera happened to
           use. Not wrapped in .no-pdf so it survives the PDF export. */}
       <SkeletonPoseCard raw={pickObject(metrics, "skeleton_pose")} />
+
+      {/* Compensation flags — biomech-style flagged rows harvested
+          during the session and saved to metrics.compensation_flags. */}
+      {compensationFlags.length > 0 && (
+        <CompensationsCard flags={compensationFlags} />
+      )}
 
       {/* Interpretation */}
       {interpretation && (
@@ -648,6 +671,90 @@ function ClinicalMetricCard({
           )}
         </div>
       </div>
+    </section>
+  );
+}
+
+// ─── Compensation flags ─────────────────────────────────────────
+// Reads metrics.compensation_flags (added by rehab pages via
+// lib/rehab/compensationChecks helpers + reused biomech trackers).
+// Same shape as the biomech Compensation type: type/label/severity/
+// flagged/details. Only flagged=true entries are rendered.
+
+interface CompensationFlag {
+  type: string;
+  label: string;
+  severity: "low" | "medium" | "high";
+  flagged: boolean;
+  details?: string;
+}
+
+function parseSavedCompensations(
+  metrics: Record<string, unknown> | null | undefined,
+): CompensationFlag[] {
+  if (!metrics || typeof metrics !== "object") return [];
+  const raw = (metrics as Record<string, unknown>).compensation_flags;
+  if (!Array.isArray(raw)) return [];
+  const out: CompensationFlag[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const e = entry as Record<string, unknown>;
+    const flagged = Boolean(e.flagged);
+    if (!flagged) continue;
+    const type = typeof e.type === "string" ? e.type : "compensation";
+    const label = typeof e.label === "string" ? e.label : type;
+    const rawSeverity = typeof e.severity === "string" ? e.severity : "medium";
+    const severity: CompensationFlag["severity"] =
+      rawSeverity === "low" || rawSeverity === "high" ? rawSeverity : "medium";
+    const details = typeof e.details === "string" ? e.details : undefined;
+    out.push({ type, label, severity, flagged: true, details });
+  }
+  return out;
+}
+
+function CompensationsCard({ flags }: { flags: CompensationFlag[] }) {
+  return (
+    <section>
+      <h3 className="text-base font-semibold tracking-tight">
+        Compensation flags
+      </h3>
+      <p className="mt-1 text-sm text-muted">
+        Movement patterns detected during the session that suggest the
+        target muscle group wasn't doing all the work.
+      </p>
+      <ul className="mt-3 space-y-2">
+        {flags.map((f, i) => {
+          const tone =
+            f.severity === "high"
+              ? "bg-rose-500/10 text-rose-700 ring-rose-500/30 dark:text-rose-300"
+              : f.severity === "low"
+                ? "bg-amber-500/10 text-amber-700 ring-amber-500/30 dark:text-amber-300"
+                : "bg-orange-500/10 text-orange-700 ring-orange-500/30 dark:text-orange-300";
+          return (
+            <li
+              key={`${f.type}-${i}`}
+              className="flex items-start gap-3 rounded-card border border-border bg-surface p-4"
+            >
+              <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ring-1 ${tone}`}>
+                <AlertTriangle className="h-4 w-4" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-baseline gap-2">
+                  <p className="text-sm font-semibold text-foreground">
+                    {f.label}
+                  </p>
+                  <span className="text-[10px] uppercase tracking-[0.12em] text-subtle">
+                    {f.severity}
+                  </span>
+                </div>
+                {f.details && (
+                  <p className="mt-1 text-sm text-muted">{f.details}</p>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
     </section>
   );
 }

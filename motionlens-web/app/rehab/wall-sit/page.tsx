@@ -18,7 +18,7 @@
 //   • holdInZoneStep      — driven indirectly by HoldInZoneShell
 //   • usePatientContext   — ?patientId attaches doctor flow
 
-import { Suspense, useCallback, useRef, useState } from "react";
+import { Suspense, useCallback, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -27,8 +27,11 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { HoldInZoneShell } from "@/components/rehab/mechanics/HoldInZoneShell";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
 import { computeKneeAngle } from "@/lib/biomech/knee-live";
+import { DEFAULT_LEVEL_INDEX, WALL_SIT_LADDER } from "@/lib/rehab/progressionLadders";
+import { useProgressionLevel } from "@/lib/rehab/useProgressionLevel";
+import { createHandUseTracker } from "@/lib/rehab/compensationChecks";
 import { LM_LIVE } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
@@ -76,6 +79,17 @@ function Inner() {
 
   const { patient, isDoctorFlow } = usePatientContext();
 
+  const progression = useProgressionLevel(
+    patient?.id ?? null,
+    "wall-sit",
+    WALL_SIT_LADDER,
+  );
+  const activeConfig = useMemo(
+    () => (isDoctorFlow && progression.config ? progression.config : WALL_SIT_CONFIG),
+    [isDoctorFlow, progression.config],
+  );
+  const handUseRef = useRef(createHandUseTracker({ sustainedFrames: 12 }));
+
   const sessionStartRef = useRef<number>(performance.now());
   const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
   const lastKpRef = useRef<PoseSnapshot | null>(null);
@@ -94,6 +108,7 @@ function Inner() {
       if (!side) return;
       const snap = kpToPoseSnapshot(kp, video.videoWidth, video.videoHeight);
       if (snap) lastKpRef.current = snap;
+      handUseRef.current.update(kp);
       const flexion = computeKneeAngle(
         "flexion_extension",
         kp as unknown as LiveKeypoint[],
@@ -102,7 +117,7 @@ function Inner() {
       if (flexion !== null) {
         setKneeFlexion(flexion);
         const inBand =
-          flexion >= WALL_SIT_CONFIG.min && flexion <= WALL_SIT_CONFIG.max;
+          flexion >= activeConfig.min && flexion <= activeConfig.max;
         const now = performance.now();
         if (lastTickRef.current !== null) {
           const dt = now - lastTickRef.current;
@@ -130,16 +145,16 @@ function Inner() {
         }
       }
     },
-    [side],
+    [side, activeConfig.min, activeConfig.max],
   );
 
-  const buildRehabPayload = useCallback(() => {
+  const buildRehabPayload = useCallback((supervised: boolean) => {
     if (!side) return null;
     const totalSec = totalInZoneMsRef.current / 1000;
     const bestDwellSec = bestDwellMsRef.current / 1000;
     const interpretation = totalInZoneMsRef.current > 0
-      ? `Wall sit: ${totalSec.toFixed(1)}s cumulative in the ${WALL_SIT_CONFIG.min}–${WALL_SIT_CONFIG.max}° band `
-        + `(longest single hold ${bestDwellSec.toFixed(1)}s). Target ${(WALL_SIT_CONFIG.targetHoldMs / 1000).toFixed(0)}s.`
+      ? `Wall sit: ${totalSec.toFixed(1)}s cumulative in the ${activeConfig.min}–${activeConfig.max}° band `
+        + `(longest single hold ${bestDwellSec.toFixed(1)}s). Target ${(activeConfig.targetHoldMs / 1000).toFixed(0)}s.`
       : "Session ended before the patient held the wall-sit band.";
     const skeletonPose = buildSkeletonPosePayload(
       bestPoseRef.current,
@@ -167,15 +182,18 @@ function Inner() {
           name: "knee_flexion",
           unit: "deg",
           value_at_peak: bestSignalRef.current,
-          target_band: { min: WALL_SIT_CONFIG.min, max: WALL_SIT_CONFIG.max },
+          target_band: { min: activeConfig.min, max: activeConfig.max },
         },
-        target_hold_ms: WALL_SIT_CONFIG.targetHoldMs,
-        config: WALL_SIT_CONFIG,
+        target_hold_ms: activeConfig.targetHoldMs,
+        config: activeConfig,
+        level_index: isDoctorFlow ? progression.level : DEFAULT_LEVEL_INDEX,
+        supervised,
+        compensation_flags: [handUseRef.current.finalize()].filter(Boolean),
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },
     };
-  }, [side]);
+  }, [side, activeConfig, isDoctorFlow, progression.level]);
 
   return (
     <>
@@ -219,6 +237,11 @@ function Inner() {
                 <span className="inline-flex items-center gap-1.5 rounded-full bg-teal-500/15 px-3 py-1 text-xs font-semibold text-teal-200 ring-1 ring-teal-400/40">
                   Testing: {side === "left" ? "Left" : "Right"} leg
                 </span>
+                {isDoctorFlow && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-semibold text-emerald-200 ring-1 ring-emerald-400/40">
+                    Level {progression.level + 1} · {progression.hint}
+                  </span>
+                )}
                 <Button
                   variant="ghost"
                   size="sm"
@@ -238,8 +261,8 @@ function Inner() {
                       armB: side === "left" ? LM_LIVE.LEFT_ANKLE : LM_LIVE.RIGHT_ANKLE,
                       currentDeg: kneeFlexion,
                       band: {
-                        min: WALL_SIT_CONFIG.min,
-                        max: WALL_SIT_CONFIG.max,
+                        min: activeConfig.min,
+                        max: activeConfig.max,
                       },
                     }}
                   >
@@ -260,13 +283,13 @@ function Inner() {
                     signalLabel={`${side === "left" ? "Left" : "Right"} knee flexion (°)`}
                     axisMin={AXIS_MIN}
                     axisMax={AXIS_MAX}
-                    config={WALL_SIT_CONFIG}
+                    config={activeConfig}
                   />
                 </div>
               </div>
 
               <div className="no-pdf">
-                <SaveToPatientButton
+                <RehabSessionFooter
                   buildPayload={buildRehabPayload}
                   label="Save rehab session"
                 />

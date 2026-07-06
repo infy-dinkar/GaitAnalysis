@@ -29,7 +29,7 @@
 //   • RepCountShell, repCountStep, RehabCameraShell — rehab library
 //   • usePoseDetectionLive, useCamera, usePatientContext
 
-import { Suspense, useCallback, useRef, useState } from "react";
+import { Suspense, useCallback, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -38,8 +38,11 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { RepCountShell } from "@/components/rehab/mechanics/RepCountShell";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
 import { computeHipAngle } from "@/lib/biomech/hip-live";
+import { BRIDGE_LADDER, DEFAULT_LEVEL_INDEX } from "@/lib/rehab/progressionLadders";
+import { useProgressionLevel } from "@/lib/rehab/useProgressionLevel";
+import { createHandUseTracker } from "@/lib/rehab/compensationChecks";
 import { LM_LIVE } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
@@ -91,6 +94,17 @@ function Inner() {
 
   const { patient, isDoctorFlow } = usePatientContext();
 
+  const progression = useProgressionLevel(
+    patient?.id ?? null,
+    "bridge",
+    BRIDGE_LADDER,
+  );
+  const activeConfig = useMemo(
+    () => (isDoctorFlow && progression.config ? progression.config : BRIDGE_CONFIG),
+    [isDoctorFlow, progression.config],
+  );
+  const handUseRef = useRef(createHandUseTracker({ sustainedFrames: 10 }));
+
   const sessionStartRef = useRef<number>(performance.now());
   const snapshotRef = useRef<{ state: RepCountState; score: Score } | null>(
     null,
@@ -104,6 +118,7 @@ function Inner() {
       if (!side) return;
       const snap = kpToPoseSnapshot(kp, video.videoWidth, video.videoHeight);
       if (snap) lastKpRef.current = snap;
+      handUseRef.current.update(kp);
       // "flexion" and "extension" run the same internal formula in
       // hip-live.ts — both return (180 − interior). Passing
       // "flexion" is just a movement label; the unsigned magnitude
@@ -119,7 +134,7 @@ function Inner() {
         if (bridgeValue > peakBridgeRef.current) {
           peakBridgeRef.current = bridgeValue;
           if (
-            bridgeValue >= BRIDGE_CONFIG.depthThreshold
+            bridgeValue >= activeConfig.depthThreshold
             && lastKpRef.current
           ) {
             bestPoseRef.current = {
@@ -132,7 +147,7 @@ function Inner() {
         }
       }
     },
-    [side],
+    [side, activeConfig.depthThreshold],
   );
 
   const handleSnapshot = useCallback(
@@ -142,7 +157,7 @@ function Inner() {
     [],
   );
 
-  const buildRehabPayload = useCallback(() => {
+  const buildRehabPayload = useCallback((supervised: boolean) => {
     if (!side) return null;
     const snap = snapshotRef.current;
     const state = snap?.state ?? null;
@@ -177,17 +192,20 @@ function Inner() {
           unit: "deg",
           value_at_peak: peakBridgeRef.current,
           target_band: {
-            min: BRIDGE_CONFIG.depthThreshold,
-            max: BRIDGE_CONFIG.topThreshold,
+            min: activeConfig.depthThreshold,
+            max: activeConfig.topThreshold,
           },
         },
         target_reps: TARGET_REPS,
-        config: BRIDGE_CONFIG,
+        config: activeConfig,
+        level_index: isDoctorFlow ? progression.level : DEFAULT_LEVEL_INDEX,
+        supervised,
+        compensation_flags: [handUseRef.current.finalize()].filter(Boolean),
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },
     };
-  }, [side]);
+  }, [side, activeConfig, isDoctorFlow, progression.level]);
 
   return (
     <>
@@ -231,6 +249,11 @@ function Inner() {
                 <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-500/15 px-3 py-1 text-xs font-semibold text-indigo-200 ring-1 ring-indigo-400/40">
                   Testing: {side === "left" ? "Left" : "Right"} side
                 </span>
+                {isDoctorFlow && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-semibold text-emerald-200 ring-1 ring-emerald-400/40">
+                    Level {progression.level + 1} · {progression.hint}
+                  </span>
+                )}
                 <Button
                   variant="ghost"
                   size="sm"
@@ -250,8 +273,8 @@ function Inner() {
                       armB: side === "left" ? LM_LIVE.LEFT_KNEE : LM_LIVE.RIGHT_KNEE,
                       currentDeg: bridgeSignal,
                       band: {
-                        min: BRIDGE_CONFIG.depthThreshold,
-                        max: BRIDGE_CONFIG.topThreshold,
+                        min: activeConfig.depthThreshold,
+                        max: activeConfig.topThreshold,
                       },
                     }}
                   >
@@ -263,9 +286,9 @@ function Inner() {
                         {bridgeSignal.toFixed(0)}°
                       </p>
                       <p className="mt-1 text-[10px] text-zinc-300">
-                        {bridgeSignal >= BRIDGE_CONFIG.topThreshold
+                        {bridgeSignal >= activeConfig.topThreshold
                           ? "bridged"
-                          : bridgeSignal <= BRIDGE_CONFIG.depthThreshold
+                          : bridgeSignal <= activeConfig.depthThreshold
                           ? "resting"
                           : "transition"}
                       </p>
@@ -277,15 +300,15 @@ function Inner() {
                   <RepCountShell
                     signal={bridgeSignal}
                     signalLabel={`${side === "left" ? "Left" : "Right"} hip — interior angle (°)`}
-                    targetReps={TARGET_REPS}
-                    config={BRIDGE_CONFIG}
+                    targetReps={activeConfig.targetReps ?? TARGET_REPS}
+                    config={activeConfig}
                     onSnapshot={handleSnapshot}
                   />
                 </div>
               </div>
 
               <div className="no-pdf">
-                <SaveToPatientButton
+                <RehabSessionFooter
                   buildPayload={buildRehabPayload}
                   label="Save rehab session"
                 />

@@ -60,7 +60,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { MatchPoseShell } from "@/components/rehab/mechanics/MatchPoseShell";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
 import {
   buildSkeletonPosePayload,
   elapsedSecondsSince,
@@ -71,6 +71,7 @@ import {
 import { computeShoulderAngle } from "@/lib/biomech/shoulder-live";
 import { computeHipAngle } from "@/lib/biomech/hip-live";
 import { computeTrunkAngleFromHorizontal } from "@/lib/rehab/poseMetrics";
+import { DEFAULT_LEVEL_INDEX } from "@/lib/rehab/progressionLadders";
 import { LM_LIVE } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
@@ -168,7 +169,7 @@ function Inner() {
     [combo],
   );
 
-  const buildRehabPayload = useCallback(() => {
+  const buildRehabPayload = useCallback((supervised: boolean) => {
     if (!combo) return null;
     const bestMatch = bestMatchRef.current;
     const interpretation =
@@ -202,6 +203,8 @@ function Inner() {
         },
         combo: { armSide: combo.armSide, legSide: combo.legSide },
         config: BIRD_DOG_CONFIG,
+        level_index: DEFAULT_LEVEL_INDEX,
+        supervised,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },
@@ -328,7 +331,7 @@ function Inner() {
               </div>
 
               <div className="no-pdf">
-                <SaveToPatientButton
+                <RehabSessionFooter
                   buildPayload={buildRehabPayload}
                   label="Save rehab session"
                 />

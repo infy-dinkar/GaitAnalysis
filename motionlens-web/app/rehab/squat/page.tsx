@@ -19,7 +19,7 @@
 //   • repCountStep engine   — driven indirectly by RepCountShell
 //   • usePatientContext     — optional ?patientId attaches doctor flow
 
-import { Suspense, useCallback, useRef, useState } from "react";
+import { Suspense, useCallback, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -28,8 +28,11 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { RepCountShell } from "@/components/rehab/mechanics/RepCountShell";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
 import { computeKneeAngle } from "@/lib/biomech/knee-live";
+import { DEFAULT_LEVEL_INDEX, SQUAT_LADDER } from "@/lib/rehab/progressionLadders";
+import { useProgressionLevel } from "@/lib/rehab/useProgressionLevel";
+import { createRoundingTracker, createHandUseTracker } from "@/lib/rehab/compensationChecks";
 import { LM_LIVE } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
@@ -67,6 +70,25 @@ function Inner() {
   const [interior, setInterior] = useState<number>(180);
 
   const { patient, isDoctorFlow } = usePatientContext();
+
+  // Progression: derive the current level from the patient's history
+  // when the doctor flow supplied a patientId. Public flow falls back
+  // to the ladder's default level (matches the hardcoded SQUAT_CONFIG).
+  const progression = useProgressionLevel(
+    patient?.id ?? null,
+    "squat",
+    SQUAT_LADDER,
+  );
+  const activeConfig = useMemo(
+    () => (isDoctorFlow && progression.config ? progression.config : SQUAT_CONFIG),
+    [isDoctorFlow, progression.config],
+  );
+
+  // Compensation trackers — additive; nothing here modifies biomech
+  // engines. RoundingTracker catches trunk lean, HandUseTracker
+  // catches wrist-at-hip offloading.
+  const roundingRef = useRef(createRoundingTracker({ thresholdFraction: 0.18 }));
+  const handUseRef = useRef(createHandUseTracker({ sustainedFrames: 10 }));
 
   // Session harvest refs — used to build the save payload without
   // peeking into RepCountShell's internals. sessionStartRef anchors
@@ -115,6 +137,10 @@ function Inner() {
         };
       }
 
+      // Feed compensation trackers off the same keypoints.
+      roundingRef.current.update(kp);
+      handUseRef.current.update(kp);
+
       // Reuse the BlazePose-live biomech math without modification.
       // The Keypoint shape from @tensorflow-models/pose-detection
       // is structurally compatible with LiveKeypoint at runtime
@@ -136,7 +162,7 @@ function Inner() {
         if (interiorAngle < peakInteriorRef.current) {
           peakInteriorRef.current = interiorAngle;
           if (
-            interiorAngle <= SQUAT_CONFIG.topThreshold
+            interiorAngle <= activeConfig.topThreshold
             && lastKpRef.current
           ) {
             bestPoseRef.current = {
@@ -149,7 +175,7 @@ function Inner() {
         }
       }
     },
-    [side],
+    [side, activeConfig.topThreshold],
   );
 
   const handleSnapshot = useCallback(
@@ -159,7 +185,7 @@ function Inner() {
     [],
   );
 
-  const buildRehabPayload = useCallback(() => {
+  const buildRehabPayload = useCallback((supervised: boolean) => {
     if (!side) return null;
     const snap = snapshotRef.current;
     const state = snap?.state ?? null;
@@ -226,17 +252,23 @@ function Inner() {
           unit: "deg",
           value_at_peak: peakInteriorRef.current,
           target_band: {
-            min: SQUAT_CONFIG.depthThreshold,
-            max: SQUAT_CONFIG.topThreshold,
+            min: activeConfig.depthThreshold,
+            max: activeConfig.topThreshold,
           },
         },
         target_reps: TARGET_REPS,
-        config: SQUAT_CONFIG,
+        config: activeConfig,
+        level_index: isDoctorFlow ? progression.level : DEFAULT_LEVEL_INDEX,
+        supervised,
+        compensation_flags: [
+          roundingRef.current.finalize(),
+          handUseRef.current.finalize(),
+        ].filter(Boolean),
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },
     };
-  }, [side]);
+  }, [side, activeConfig, isDoctorFlow, progression.level]);
 
   return (
     <>
@@ -280,6 +312,11 @@ function Inner() {
                 <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-500/15 px-3 py-1 text-xs font-semibold text-indigo-200 ring-1 ring-indigo-400/40">
                   Testing: {side === "left" ? "Left" : "Right"} leg
                 </span>
+                {isDoctorFlow && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-semibold text-emerald-200 ring-1 ring-emerald-400/40">
+                    Level {progression.level + 1} · {progression.hint}
+                  </span>
+                )}
                 <Button
                   variant="ghost"
                   size="sm"
@@ -313,8 +350,8 @@ function Inner() {
                       // between the depth and top thresholds (active
                       // rep zone), amber at the edges, red outside.
                       band: {
-                        min: SQUAT_CONFIG.depthThreshold,
-                        max: SQUAT_CONFIG.topThreshold,
+                        min: activeConfig.depthThreshold,
+                        max: activeConfig.topThreshold,
                       },
                     }}
                   >
@@ -336,8 +373,8 @@ function Inner() {
                   <RepCountShell
                     signal={interior}
                     signalLabel={`${side === "left" ? "Left" : "Right"} knee angle (°)`}
-                    targetReps={TARGET_REPS}
-                    config={SQUAT_CONFIG}
+                    targetReps={activeConfig.targetReps ?? TARGET_REPS}
+                    config={activeConfig}
                     onSnapshot={handleSnapshot}
                   />
                 </div>
@@ -348,7 +385,7 @@ function Inner() {
                   pattern. Marked no-pdf so it never appears in a
                   saved-report PDF export. */}
               <div className="no-pdf">
-                <SaveToPatientButton
+                <RehabSessionFooter
                   buildPayload={buildRehabPayload}
                   label="Save rehab session"
                 />
