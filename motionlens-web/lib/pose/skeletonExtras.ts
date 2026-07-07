@@ -157,56 +157,34 @@ export function drawSpineSegment(
   const axisLen = Math.hypot(axisX, axisY);
   if (axisLen < 1) return;
 
-  // ── Bow the spine to a curve driven by the body's lean ────────
+  // ── Faceted polyline with mild lean-driven bend. ─────────────
   //
-  // Linear interpolation between shMid and hipMid would put every
-  // "vertebra" on the straight line between them — the chain would
-  // rotate as a rigid rod but never actually curve. To match the
-  // body's real bend we push the middle of the chain sideways,
-  // perpendicular to the trunk axis, by an amount proportional to
-  // how far the shoulder-mid has drifted off the vertical stack
-  // over the hip-mid.
+  // BlazePose 33-keypoint gives no mid-torso landmarks, so the
+  // interior "vertebra" positions are inferred. Prior versions
+  // drew one smooth quadratic bezier (too curvy — read as a rod
+  // bowing), then a fully straight polyline (read as too rigid
+  // when the patient was actively bending). Middle ground:
+  //   • Compute a subtle bezier control point from the observed
+  //     lean signal (how far the shoulder-mid has drifted off the
+  //     vertical stack over the hip-mid).
+  //   • Sample interior points along that bezier.
+  //   • Connect them with STRAIGHT segments — no curveTo. The eye
+  //     reads it as a jointed chain that hinges at every dot
+  //     while still tracking the actual body lean.
   //
-  // Signal: bowSignal = hipMid.x - shMid.x
-  //   • upright body → shMid.x ≈ hipMid.x → bowSignal ≈ 0 → straight
-  //   • lateral lean → shoulders shift sideways → bowSignal grows
-  //   • forward hinge (profile view) → shoulders shift forward → same
-  //
-  // Direction: perp to the trunk axis, chosen so a positive
-  // bowSignal pushes points toward the lean side.
-  // Scale: 0.6 × the raw offset produces a visible but not
-  // exaggerated bow; clamp to 40 % of trunk length as a safety.
-  //
-  // Sign note: an earlier version used `shMid.x - hipMid.x` here,
-  // which combined with the perpendicular (axisY, -axisX) and the
-  // canvas y-down coordinate system produced a bow OPPOSITE to
-  // the actual body lean (the spine curved away from where the
-  // patient was actually bending). Flipping the subtraction order
-  // to `hipMid.x - shMid.x` inverts the sign so the curve now
-  // bows TOWARD the lean, verified for both left and right leans.
-
+  // Bow strength kept low (0.35 × raw lean, capped at 20 % of
+  // trunk length) so a straight upper body gives an effectively
+  // straight polyline, and a real forward/lateral bend nudges
+  // the chain enough to be visible but not exaggerated.
   const perpX =  axisY / axisLen;
   const perpY = -axisX / axisLen;
-  const rawBow = (hipMid.x - shMid.x) * 0.6;
-  const maxBow = axisLen * 0.4;
+  const rawBow = (hipMid.x - shMid.x) * 0.35;
+  const maxBow = axisLen * 0.2;
   const bow = Math.max(-maxBow, Math.min(maxBow, rawBow));
-
-  // Straight midpoint (linear lerp) that we bow away from.
   const straightMidX = (shMid.x + hipMid.x) / 2;
   const straightMidY = (shMid.y + hipMid.y) / 2;
-
-  // Quadratic Bezier control point placed so the curve's peak
-  // lands at (straightMid + perp × bow). For a quadratic
-  // curve at t=0.5 the point is P0/4 + C/2 + P2/4 — so to hit
-  // (straightMid + offset) we set C = straightMid + 2 × offset.
-  const bowOffsetX = perpX * bow;
-  const bowOffsetY = perpY * bow;
-  const controlX = straightMidX + 2 * bowOffsetX;
-  const controlY = straightMidY + 2 * bowOffsetY;
-
-  // Sample vertebra dots along the ACTUAL bowed curve so they lie
-  // on the visible spine, not on the underlying straight axis.
-  const nSegments = Math.max(2, opts?.segments ?? 4);
+  const controlX = straightMidX + 2 * perpX * bow;
+  const controlY = straightMidY + 2 * perpY * bow;
   const bezierAt = (t: number) => {
     const u = 1 - t;
     return {
@@ -214,6 +192,14 @@ export function drawSpineSegment(
       y: u * u * shMid.y + 2 * u * t * controlY + t * t * hipMid.y,
     };
   };
+
+  const nSegments = Math.max(2, opts?.segments ?? 4);
+  const spinePoints: { x: number; y: number }[] = [];
+  spinePoints.push({ x: shMid.x, y: shMid.y });
+  for (let i = 1; i < nSegments; i++) {
+    spinePoints.push(bezierAt(i / nSegments));
+  }
+  spinePoints.push({ x: hipMid.x, y: hipMid.y });
 
   const baseLineWidth = Math.max(3, w * 0.005);
   ctx.save();
@@ -225,24 +211,24 @@ export function drawSpineSegment(
   ctx.shadowColor = "rgba(249, 115, 22, 0.55)";
   ctx.shadowBlur = 12;
 
-  // Smooth quadratic curve from shoulder-mid to hip-mid, bulging
-  // toward the lean direction. This is the "spine" the eye reads.
   ctx.beginPath();
-  ctx.moveTo(shMid.x, shMid.y);
-  ctx.quadraticCurveTo(controlX, controlY, hipMid.x, hipMid.y);
+  ctx.moveTo(spinePoints[0].x, spinePoints[0].y);
+  for (let i = 1; i < spinePoints.length; i++) {
+    ctx.lineTo(spinePoints[i].x, spinePoints[i].y);
+  }
   ctx.stroke();
 
-  // Interior vertebra dots — orange fills with orange glow so
-  // they match the centre column of the side-coded skeleton.
-  // Sampled directly ON the bowed curve so they visually snap
-  // onto the visible spine.
+  // Interior vertebra dots — orange fills with orange glow so they
+  // match the centre column of the side-coded skeleton. Positioned
+  // exactly on the straight polyline so each "turn" is a visible
+  // hinge; the line stays straight between hinges because the pose
+  // does not provide the data to justify anything else.
   ctx.fillStyle = opts?.dotColor ?? "#F97316";
   ctx.shadowColor = "rgba(249, 115, 22, 0.6)";
   ctx.shadowBlur = 10;
   const r = opts?.dotRadius ?? Math.max(5, w * 0.008);
-  for (let i = 1; i < nSegments; i++) {
-    const t = i / nSegments;
-    const p = bezierAt(t);
+  for (let i = 1; i < spinePoints.length - 1; i++) {
+    const p = spinePoints[i];
     ctx.beginPath();
     ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
     ctx.fill();

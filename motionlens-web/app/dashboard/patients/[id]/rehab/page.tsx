@@ -7,16 +7,12 @@
 // Exercise definitions live in the shared lib/rehab/exerciseCatalog
 // so this page and the public /rehab catalogue stay in sync.
 
-import { useEffect, useMemo, useState, use as usePromise } from "react";
+import { useMemo, use as usePromise } from "react";
 import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
 import { AuthGuard } from "@/components/auth/AuthGuard";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
-import { RehabStreakBadge } from "@/components/rehab/RehabStreakBadge";
-import { RehabProgressDashboard } from "@/components/rehab/RehabProgressDashboard";
-import { computeStreak, type StreakResult } from "@/lib/rehab/streak";
-import { listPatientReports, type ReportSummaryDTO } from "@/lib/reports";
 import { groupExercisesByJoint } from "@/lib/rehab/exerciseCatalog";
 
 export default function PatientRehabPage({
@@ -38,28 +34,6 @@ export default function PatientRehabPage({
 }
 
 function Content({ patientId }: { patientId: string }) {
-  const [reports, setReports] = useState<ReportSummaryDTO[] | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    listPatientReports(patientId)
-      .then((res) => {
-        if (!cancelled) setReports(res.data);
-      })
-      .catch(() => {
-        if (!cancelled) setReports([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [patientId]);
-
-  const streak: StreakResult = useMemo(() => {
-    const dates = (reports ?? [])
-      .filter((r) => r.module === "rehab")
-      .map((r) => r.created_at);
-    return computeStreak(dates);
-  }, [reports]);
-
   const groups = useMemo(() => groupExercisesByJoint(), []);
 
   return (
@@ -75,7 +49,6 @@ function Content({ patientId }: { patientId: string }) {
             patient&apos;s record.
           </p>
         </div>
-        {reports !== null && <RehabStreakBadge streak={streak} />}
       </div>
 
       <div className="space-y-12">
@@ -127,11 +100,6 @@ function Content({ patientId }: { patientId: string }) {
             </div>
           </section>
         ))}
-      </div>
-
-      {/* Progress dashboard — Kemtai/ViFive-style. */}
-      <div className="pt-4">
-        <RehabProgressDashboard patientId={patientId} />
       </div>
     </div>
   );

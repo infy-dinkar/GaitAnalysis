@@ -117,7 +117,7 @@ function Inner() {
     [],
   );
 
-  const buildRehabPayload = useCallback((supervised: boolean) => {
+  const buildRehabPayload = useCallback(() => {
     if (!side) return null;
     const snap = snapshotRef.current;
     const state = snap?.state ?? null;
@@ -159,7 +159,6 @@ function Inner() {
         target_reps: TARGET_REPS,
         config: MINI_SQUAT_CONFIG,
         level_index: DEFAULT_LEVEL_INDEX,
-        supervised,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },

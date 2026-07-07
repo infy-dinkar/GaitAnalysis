@@ -34,6 +34,7 @@ import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { HoldInZoneShell } from "@/components/rehab/mechanics/HoldInZoneShell";
 import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
+import { RehabStartCard } from "@/components/rehab/RehabStartCard";
 import { computePelvicTiltDeg } from "@/lib/rehab/poseMetrics";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
@@ -79,6 +80,7 @@ export default function PelvicHoldExercisePage() {
 
 function Inner() {
   const [stance, setStance] = useState<StanceLeg | null>(null);
+  const [started, setStarted] = useState(false);
   // Default 0 = perfectly level. Patient starts in zone before
   // they lift the contralateral foot.
   const [pelvicTilt, setPelvicTilt] = useState<number>(0);
@@ -141,7 +143,7 @@ function Inner() {
     [],
   );
 
-  const buildRehabPayload = useCallback((supervised: boolean) => {
+  const buildRehabPayload = useCallback(() => {
     if (!stance) return null;
     const totalSec = totalInZoneMsRef.current / 1000;
     const bestDwellSec = bestDwellMsRef.current / 1000;
@@ -184,7 +186,6 @@ function Inner() {
         target_hold_ms: PELVIC_HOLD_CONFIG.targetHoldMs,
         config: PELVIC_HOLD_CONFIG,
         level_index: DEFAULT_LEVEL_INDEX,
-        supervised,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },
@@ -249,7 +250,7 @@ function Inner() {
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => setStance(null)}
+                  onClick={() => { setStance(null); setStarted(false); }}
                 >
                   Change stance leg
                 </Button>
@@ -274,13 +275,17 @@ function Inner() {
                 </div>
 
                 <div>
-                  <HoldInZoneShell
-                    signal={pelvicTilt}
-                    signalLabel="Pelvic tilt (°) — level = 0"
-                    axisMin={AXIS_MIN}
-                    axisMax={AXIS_MAX}
-                    config={PELVIC_HOLD_CONFIG}
-                  />
+                  {started ? (
+                    <HoldInZoneShell
+                      signal={pelvicTilt}
+                      signalLabel="Pelvic tilt (°) — level = 0"
+                      axisMin={AXIS_MIN}
+                      axisMax={AXIS_MAX}
+                      config={PELVIC_HOLD_CONFIG}
+                    />
+                  ) : (
+                    <RehabStartCard onStart={() => setStarted(true)} />
+                  )}
                 </div>
               </div>
 

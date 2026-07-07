@@ -42,6 +42,7 @@ import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { TraceShell } from "@/components/rehab/mechanics/TraceShell";
 import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
+import { RehabStartCard } from "@/components/rehab/RehabStartCard";
 import { computeSpineFlexionProxyDeg } from "@/lib/rehab/poseMetrics";
 import { DEFAULT_LEVEL_INDEX } from "@/lib/rehab/progressionLadders";
 import { LM_LIVE } from "@/lib/pose/landmarks-live";
@@ -88,6 +89,7 @@ export default function CatCowExercisePage() {
 
 function Inner() {
   const [phase, setPhase] = useState<"ready" | "active">("ready");
+  const [started, setStarted] = useState(false);
   const [cursor, setCursor] = useState<{ x: number; y: number }>({
     x: 0.5,
     y: 0.5,
@@ -128,7 +130,7 @@ function Inner() {
     [],
   );
 
-  const buildRehabPayload = useCallback((supervised: boolean) => {
+  const buildRehabPayload = useCallback(() => {
     const peak = peakProxyRef.current;
     const interpretation =
       `Cat-Cow trace — peak spine flexion proxy ${peak.toFixed(0)}° across the session.`;
@@ -156,7 +158,6 @@ function Inner() {
         },
         config: TRACE_CONFIG,
         level_index: DEFAULT_LEVEL_INDEX,
-        supervised,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },
@@ -262,12 +263,16 @@ function Inner() {
                 </div>
 
                 <div>
-                  <TraceShell
-                    cursor={cursor}
-                    pathFn={catCowPath}
-                    loopDurationMs={LOOP_DURATION_MS}
-                    config={TRACE_CONFIG}
-                  />
+                  {started ? (
+                    <TraceShell
+                      cursor={cursor}
+                      pathFn={catCowPath}
+                      loopDurationMs={LOOP_DURATION_MS}
+                      config={TRACE_CONFIG}
+                    />
+                  ) : (
+                    <RehabStartCard onStart={() => setStarted(true)} />
+                  )}
                 </div>
               </div>
 

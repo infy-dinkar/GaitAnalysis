@@ -157,7 +157,7 @@ function Inner() {
     [],
   );
 
-  const buildRehabPayload = useCallback((supervised: boolean) => {
+  const buildRehabPayload = useCallback(() => {
     if (!side) return null;
     const snap = snapshotRef.current;
     const state = snap?.state ?? null;
@@ -199,7 +199,6 @@ function Inner() {
         target_reps: TARGET_REPS,
         config: activeConfig,
         level_index: isDoctorFlow ? progression.level : DEFAULT_LEVEL_INDEX,
-        supervised,
         compensation_flags: [handUseRef.current.finalize()].filter(Boolean),
         skeleton_pose: skeletonPose,
       },
