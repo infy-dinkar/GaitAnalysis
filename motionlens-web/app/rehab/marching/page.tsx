@@ -40,6 +40,7 @@ import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { MetronomeShell } from "@/components/rehab/mechanics/MetronomeShell";
 import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
+import { RehabStartCard } from "@/components/rehab/RehabStartCard";
 import {
   buildSkeletonPosePayload,
   elapsedSecondsSince,
@@ -87,6 +88,7 @@ export default function MarchingExercisePage() {
 
 function Inner() {
   const [side, setSide] = useState<Side | null>(null);
+  const [started, setStarted] = useState(false);
   const [eventTrigger, setEventTrigger] = useState<number>(0);
   const [liveFlexion, setLiveFlexion] = useState<number>(0);
   const [pelvisDrifted, setPelvisDrifted] = useState<boolean>(false);
@@ -148,19 +150,21 @@ function Inner() {
   // Side picker callback — wraps setSide with audio start. The
   // play() call must happen INSIDE the user-gesture handler
   // (button click) to satisfy browser autoplay policy.
-  const handleSidePick = useCallback(
-    (s: Side) => {
-      setSide(s);
-      if (musicOn && audioRef.current) {
-        audioRef.current.currentTime = 0;
-        // Autoplay safe here — invoked from the button's click
-        // event. Catch (and silently ignore) the promise rejection
-        // some browsers throw if playback fails anyway.
-        void audioRef.current.play().catch(() => {});
-      }
-    },
-    [musicOn],
-  );
+  //
+  // Music intentionally does NOT start on side pick — it waits until
+  // the patient explicitly clicks "Start exercise" (see handleStart)
+  // so the audio doesn't play against an empty camera preview.
+  const handleSidePick = useCallback((s: Side) => {
+    setSide(s);
+  }, []);
+
+  const handleStart = useCallback(() => {
+    setStarted(true);
+    if (musicOn && audioRef.current) {
+      audioRef.current.currentTime = 0;
+      void audioRef.current.play().catch(() => {});
+    }
+  }, [musicOn]);
 
   // "Change side" — pause music, reset position, clear session
   // state so the next pick starts fresh.
@@ -171,6 +175,7 @@ function Inner() {
     }
     inLiftedRef.current = false;
     setSide(null);
+    setStarted(false);
     setEventTrigger(0);
   }, []);
 
@@ -202,7 +207,7 @@ function Inner() {
     };
   }, []);
 
-  const buildRehabPayload = useCallback((supervised: boolean) => {
+  const buildRehabPayload = useCallback(() => {
     if (!side) return null;
     const lifts = liftCountRef.current;
     const peak = peakFlexionRef.current;
@@ -238,7 +243,6 @@ function Inner() {
         },
         config: MARCHING_CONFIG,
         level_index: DEFAULT_LEVEL_INDEX,
-        supervised,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },
@@ -355,11 +359,18 @@ function Inner() {
                 </div>
 
                 <div>
-                  <MetronomeShell
-                    eventTrigger={eventTrigger}
-                    audio={false}
-                    config={MARCHING_CONFIG}
-                  />
+                  {started ? (
+                    <MetronomeShell
+                      eventTrigger={eventTrigger}
+                      audio={false}
+                      config={MARCHING_CONFIG}
+                    />
+                  ) : (
+                    <RehabStartCard
+                      onStart={handleStart}
+                      hint="Position yourself in front of the camera, then press Start. The metronome and music will begin only after you press Start."
+                    />
+                  )}
                 </div>
               </div>
 

@@ -136,7 +136,7 @@ function Inner() {
     [side],
   );
 
-  const buildRehabPayload = useCallback((supervised: boolean) => {
+  const buildRehabPayload = useCallback(() => {
     if (!side) return null;
     const totalSec = totalInZoneMsRef.current / 1000;
     const bestDwellSec = bestDwellMsRef.current / 1000;
@@ -178,7 +178,6 @@ function Inner() {
         target_hold_ms: WALL_SLIDE_CONFIG.targetHoldMs,
         config: WALL_SLIDE_CONFIG,
         level_index: DEFAULT_LEVEL_INDEX,
-        supervised,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },

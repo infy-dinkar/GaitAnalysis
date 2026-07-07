@@ -134,7 +134,7 @@ function Inner() {
     [],
   );
 
-  const buildRehabPayload = useCallback((supervised: boolean) => {
+  const buildRehabPayload = useCallback(() => {
     const peak = peakBendRef.current;
     const interpretation =
       `Peak lateral trunk flexion: ${peak.toFixed(0)}° (target up to ${MAX_BEND_DEG}°).`;
@@ -163,7 +163,6 @@ function Inner() {
         },
         config: REACH_CONFIG,
         level_index: DEFAULT_LEVEL_INDEX,
-        supervised,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },

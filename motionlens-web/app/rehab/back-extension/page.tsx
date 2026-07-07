@@ -123,7 +123,7 @@ function Inner() {
     [],
   );
 
-  const buildRehabPayload = useCallback((supervised: boolean) => {
+  const buildRehabPayload = useCallback(() => {
     const snap = snapshotRef.current;
     const state = snap?.state ?? null;
     const score = snap?.score ?? { points: 0, streak: 0, bestStreak: 0 };
@@ -163,7 +163,6 @@ function Inner() {
         target_reps: TARGET_REPS,
         config: BACK_EXT_CONFIG,
         level_index: DEFAULT_LEVEL_INDEX,
-        supervised,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },

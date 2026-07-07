@@ -151,7 +151,7 @@ function Inner() {
     [side],
   );
 
-  const buildRehabPayload = useCallback((supervised: boolean) => {
+  const buildRehabPayload = useCallback(() => {
     if (!side) return null;
     const durationSec = elapsedSecondsSince(sessionStartRef.current);
     const interpretation =
@@ -181,7 +181,6 @@ function Inner() {
         },
         config: TRACE_CONFIG,
         level_index: DEFAULT_LEVEL_INDEX,
-        supervised,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },

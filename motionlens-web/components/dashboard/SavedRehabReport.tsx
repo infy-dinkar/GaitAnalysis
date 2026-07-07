@@ -101,11 +101,6 @@ export function SavedRehabReport({
   const exerciseSlug = pickString(metrics, "exercise_slug");
   const mechanicId = pickString(metrics, "mechanic_id");
   const durationSec = pickNumber(metrics, "duration_sec") ?? 0;
-  // Supervised flag lives at the top of metrics — defaults to false
-  // for legacy sessions saved before F1A landed.
-  const supervised = metrics && typeof metrics === "object"
-    ? Boolean((metrics as Record<string, unknown>).supervised)
-    : false;
   const targetReps = pickNumber(metrics, "target_reps");
 
   const scoreRaw = pickObject(metrics, "score");
@@ -154,17 +149,6 @@ export function SavedRehabReport({
               {patientName?.trim() || "Anonymous patient"} · session duration{" "}
               {formatDuration(durationSec)}
             </p>
-            <div className="mt-2">
-              <span
-                className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] ring-1 ${
-                  supervised
-                    ? "bg-accent/15 text-accent ring-accent/30"
-                    : "bg-surface text-muted ring-border"
-                }`}
-              >
-                {supervised ? "Supervised" : "Unsupervised"}
-              </span>
-            </div>
           </div>
         </div>
       </div>

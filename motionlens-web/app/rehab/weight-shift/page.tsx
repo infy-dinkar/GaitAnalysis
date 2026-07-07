@@ -144,7 +144,7 @@ function Inner() {
     setPhase("calibrating");
   }, []);
 
-  const buildRehabPayload = useCallback((supervised: boolean) => {
+  const buildRehabPayload = useCallback(() => {
     const peak = peakShiftRef.current;
     const interpretation =
       `Weight-shift session — peak medio-lateral shift ${peak.toFixed(2)} (of ±1 scale).`;
@@ -172,7 +172,6 @@ function Inner() {
         },
         config: WEIGHT_SHIFT_CONFIG,
         level_index: DEFAULT_LEVEL_INDEX,
-        supervised,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },

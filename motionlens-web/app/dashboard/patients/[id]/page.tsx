@@ -10,6 +10,7 @@ import {
   Calendar,
   Dumbbell,
   FileText,
+  Flame,
   GitCompare,
   Loader2,
   Phone,
@@ -141,6 +142,15 @@ function PatientDetail({ id }: { id: string }) {
             >
               <Dumbbell className="h-4 w-4" />
               Start Rehab
+            </Button>
+          </Link>
+          <Link href={`/dashboard/patients/${id}/rehab/progress`}>
+            <Button
+              variant="secondary"
+              className="text-orange-600 hover:bg-orange-500/10"
+            >
+              <Flame className="h-4 w-4" />
+              Rehab progress
             </Button>
           </Link>
           {reports.length >= 2 && (

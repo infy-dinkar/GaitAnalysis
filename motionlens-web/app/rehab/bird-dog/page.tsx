@@ -169,7 +169,7 @@ function Inner() {
     [combo],
   );
 
-  const buildRehabPayload = useCallback((supervised: boolean) => {
+  const buildRehabPayload = useCallback(() => {
     if (!combo) return null;
     const bestMatch = bestMatchRef.current;
     const interpretation =
@@ -204,7 +204,6 @@ function Inner() {
         combo: { armSide: combo.armSide, legSide: combo.legSide },
         config: BIRD_DOG_CONFIG,
         level_index: DEFAULT_LEVEL_INDEX,
-        supervised,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },

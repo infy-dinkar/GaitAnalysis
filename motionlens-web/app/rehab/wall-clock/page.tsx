@@ -47,6 +47,7 @@ import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { TargetReachShell } from "@/components/rehab/mechanics/TargetReachShell";
 import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
+import { RehabStartCard } from "@/components/rehab/RehabStartCard";
 import { computeShoulderWidth } from "@/lib/rehab/poseMetrics";
 import { DEFAULT_LEVEL_INDEX } from "@/lib/rehab/progressionLadders";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
@@ -89,6 +90,7 @@ export default function WallClockExercisePage() {
 
 function Inner() {
   const [side, setSide] = useState<Side | null>(null);
+  const [started, setStarted] = useState(false);
   // Default centre — patient starts at neutral stance, cursor sits
   // at the play-area centre.
   const [cursor, setCursor] = useState<{ x: number; y: number }>({
@@ -153,7 +155,7 @@ function Inner() {
     [side],
   );
 
-  const buildRehabPayload = useCallback((supervised: boolean) => {
+  const buildRehabPayload = useCallback(() => {
     if (!side) return null;
     const peak = peakReachRef.current;
     const interpretation =
@@ -183,7 +185,6 @@ function Inner() {
         },
         config: REACH_CONFIG,
         level_index: DEFAULT_LEVEL_INDEX,
-        supervised,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },
@@ -257,7 +258,7 @@ function Inner() {
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => setSide(null)}
+                  onClick={() => { setSide(null); setStarted(false); }}
                 >
                   Change side
                 </Button>
@@ -282,7 +283,11 @@ function Inner() {
                 </div>
 
                 <div>
-                  <TargetReachShell cursor={cursor} config={REACH_CONFIG} />
+                  {started ? (
+                    <TargetReachShell cursor={cursor} config={REACH_CONFIG} />
+                  ) : (
+                    <RehabStartCard onStart={() => setStarted(true)} />
+                  )}
                 </div>
               </div>
 

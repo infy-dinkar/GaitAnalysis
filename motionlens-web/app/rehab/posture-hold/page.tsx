@@ -131,7 +131,7 @@ function Inner() {
     [side],
   );
 
-  const buildRehabPayload = useCallback((supervised: boolean) => {
+  const buildRehabPayload = useCallback(() => {
     if (!side) return null;
     const finalBest = Number.isFinite(bestSignalRef.current)
       ? bestSignalRef.current
@@ -176,7 +176,6 @@ function Inner() {
         target_hold_ms: POSTURE_HOLD_CONFIG.targetHoldMs,
         config: POSTURE_HOLD_CONFIG,
         level_index: DEFAULT_LEVEL_INDEX,
-        supervised,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },

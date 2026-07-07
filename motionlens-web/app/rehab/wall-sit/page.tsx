@@ -148,7 +148,7 @@ function Inner() {
     [side, activeConfig.min, activeConfig.max],
   );
 
-  const buildRehabPayload = useCallback((supervised: boolean) => {
+  const buildRehabPayload = useCallback(() => {
     if (!side) return null;
     const totalSec = totalInZoneMsRef.current / 1000;
     const bestDwellSec = bestDwellMsRef.current / 1000;
@@ -187,7 +187,6 @@ function Inner() {
         target_hold_ms: activeConfig.targetHoldMs,
         config: activeConfig,
         level_index: isDoctorFlow ? progression.level : DEFAULT_LEVEL_INDEX,
-        supervised,
         compensation_flags: [handUseRef.current.finalize()].filter(Boolean),
         skeleton_pose: skeletonPose,
       },
