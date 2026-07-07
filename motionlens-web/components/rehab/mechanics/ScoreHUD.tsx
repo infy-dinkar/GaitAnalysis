@@ -19,6 +19,10 @@ interface Props {
    *  "Step paused", ...). Cleared automatically after ~1.6 s. */
   feedback?: string | null;
   feedbackTone?: "good" | "bad" | "neutral";
+  /** Compact single-row variant for space-constrained shells
+   *  (live-mode sidebar). Renders as a single chip strip instead of
+   *  the three-column card grid. */
+  compact?: boolean;
 }
 
 export function ScoreHUD({
@@ -26,6 +30,7 @@ export function ScoreHUD({
   timer = null,
   feedback = null,
   feedbackTone = "neutral",
+  compact = false,
 }: Props) {
   const [shownFeedback, setShownFeedback] = useState<string | null>(null);
 
@@ -42,6 +47,51 @@ export function ScoreHUD({
       : feedbackTone === "bad"
       ? "bg-rose-500/20 text-rose-200 ring-1 ring-rose-400/40"
       : "bg-zinc-700/70 text-zinc-100 ring-1 ring-white/20";
+
+  if (compact) {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900/80 px-3 py-2">
+        <div className="min-w-0 flex-1">
+          <p className="text-[9px] uppercase tracking-[0.14em] text-zinc-500">
+            Score
+          </p>
+          <p className="tabular text-lg font-semibold leading-none text-white">
+            {Math.round(score.points)}
+          </p>
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="flex items-center gap-1 text-[9px] uppercase tracking-[0.14em] text-zinc-500">
+            <Flame className="h-2.5 w-2.5 text-orange-400" /> Streak
+          </p>
+          <p className="tabular text-lg font-semibold leading-none text-white">
+            {score.streak}
+            {score.bestStreak > 0 && (
+              <span className="ml-1 text-[10px] font-normal text-zinc-400">
+                / {score.bestStreak}
+              </span>
+            )}
+          </p>
+        </div>
+        {timer && (
+          <div className="min-w-0 flex-1">
+            <p className="text-[9px] uppercase tracking-[0.14em] text-zinc-500">
+              Time
+            </p>
+            <p className="tabular text-lg font-semibold leading-none text-white">
+              {timer}
+            </p>
+          </div>
+        )}
+        {shownFeedback && (
+          <div
+            className={`pointer-events-none fixed left-1/2 top-24 z-50 -translate-x-1/2 rounded-full px-5 py-2 text-sm font-semibold shadow-lg ${toneClass}`}
+          >
+            {shownFeedback}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="grid gap-3 sm:grid-cols-3">

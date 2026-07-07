@@ -30,6 +30,8 @@ interface Props {
   axisMin: number;
   axisMax: number;
   config: HoldInZoneConfig;
+  /** Compact live-mode variant. */
+  compact?: boolean;
 }
 
 export function HoldInZoneShell({
@@ -38,6 +40,7 @@ export function HoldInZoneShell({
   axisMin,
   axisMax,
   config,
+  compact = false,
 }: Props) {
   const stateRef = useRef<HoldInZoneState>(emptyHoldInZoneState());
   const scoreRef = useRef<Score>(emptyScore());
@@ -97,6 +100,73 @@ export function HoldInZoneShell({
   const remainingMs = Math.max(0, config.targetHoldMs - s.totalMsInZone);
   const timer = `${(remainingMs / 1000).toFixed(1)}s left`;
   const feedback = s.inZone ? "In the zone" : null;
+
+  if (compact) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col gap-2">
+        <ScoreHUD
+          score={score}
+          timer={timer}
+          feedback={feedback}
+          feedbackTone={s.inZone ? "good" : "neutral"}
+          compact
+        />
+        <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-zinc-700 bg-zinc-900/80 p-3">
+          <p className="text-[9px] font-semibold uppercase tracking-[0.12em] text-zinc-400">
+            {signalLabel}
+          </p>
+          <div className="mt-2 flex min-h-0 flex-1 items-stretch gap-3">
+            <div className="relative w-10 overflow-hidden rounded-md border border-zinc-700 bg-zinc-950">
+              <div
+                className="absolute inset-x-0 bg-emerald-500/25 ring-1 ring-emerald-400/60"
+                style={{
+                  top: `${Math.max(0, bandTopPct)}%`,
+                  height: `${Math.max(0, bandHeightPct)}%`,
+                }}
+              />
+              <div
+                className={`absolute inset-x-[-4px] h-1 rounded-full ${
+                  s.inZone ? "bg-emerald-300" : "bg-rose-300"
+                }`}
+                style={{
+                  bottom: `calc(${Math.min(100, Math.max(0, markerPct))}% - 2px)`,
+                }}
+              />
+            </div>
+            <div className="flex flex-col justify-between py-1 text-[10px] text-zinc-400">
+              <span className="tabular">{axisMax.toFixed(0)}</span>
+              <span className="tabular text-zinc-100">
+                <span className="font-semibold">{signal.toFixed(0)}</span>
+              </span>
+              <span className="tabular">{axisMin.toFixed(0)}</span>
+            </div>
+            <div className="flex flex-1 flex-col justify-between text-[10px] text-zinc-300">
+              <div>
+                <p className="text-[9px] uppercase tracking-[0.14em] text-zinc-500">Band</p>
+                <p className="tabular">{config.min.toFixed(0)}–{config.max.toFixed(0)}</p>
+              </div>
+              <div>
+                <p className="text-[9px] uppercase tracking-[0.14em] text-zinc-500">Dwell</p>
+                <p className="tabular">{(s.currentDwellMs / 1000).toFixed(1)}s</p>
+              </div>
+              <div>
+                <p className="text-[9px] uppercase tracking-[0.14em] text-zinc-500">Total</p>
+                <p className="tabular">{(s.totalMsInZone / 1000).toFixed(1)}s</p>
+              </div>
+            </div>
+          </div>
+          <div className="mt-2">
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
+              <div
+                className="h-full bg-emerald-500 transition-all"
+                style={{ width: `${progressPct}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">

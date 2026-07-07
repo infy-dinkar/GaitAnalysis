@@ -29,6 +29,7 @@ import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { RepCountShell } from "@/components/rehab/mechanics/RepCountShell";
 import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import { computeKneeAngle } from "@/lib/biomech/knee-live";
 import { DEFAULT_LEVEL_INDEX, SQUAT_LADDER } from "@/lib/rehab/progressionLadders";
 import { useProgressionLevel } from "@/lib/rehab/useProgressionLevel";
@@ -305,91 +306,102 @@ function Inner() {
 
           {!side ? (
             <SidePicker onPick={setSide} />
-          ) : (
-            <div className="mt-10 space-y-6">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-500/15 px-3 py-1 text-xs font-semibold text-indigo-200 ring-1 ring-indigo-400/40">
-                  Testing: {side === "left" ? "Left" : "Right"} leg
-                </span>
-                {isDoctorFlow && (
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-semibold text-emerald-200 ring-1 ring-emerald-400/40">
-                    Level {progression.level + 1} · {progression.hint}
-                  </span>
-                )}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setSide(null)}
-                >
-                  Change side
-                </Button>
-              </div>
+          ) : null}
 
-              {/* Two-column layout on lg+: camera left, game stats
-                  right. Stacks on smaller screens. Keeps both
-                  panels visible without scrolling on a typical
-                  clinic laptop / desktop. */}
-              <div className="grid gap-6 lg:grid-cols-2">
-                <div>
-                  {/* Knee-angle arc — vertex at the working-side knee,
-                      arms to the hip and ankle on that side. Reuses
-                      the same `interior` value already computed by
-                      handleFrame; the shell just renders it as a
-                      partial arc with a colour band tied to the
-                      rep-count thresholds so the manager can see
-                      the ViFive-style joint indicator. */}
-                  <RehabCameraShell
-                    onFrame={handleFrame}
-                    angleArc={{
-                      vertex: side === "left" ? LM_LIVE.LEFT_KNEE : LM_LIVE.RIGHT_KNEE,
-                      armA: side === "left" ? LM_LIVE.LEFT_HIP : LM_LIVE.RIGHT_HIP,
-                      armB: side === "left" ? LM_LIVE.LEFT_ANKLE : LM_LIVE.RIGHT_ANKLE,
-                      currentDeg: interior,
-                      // Band tied to the healthy rep sweep — green
-                      // between the depth and top thresholds (active
-                      // rep zone), amber at the edges, red outside.
-                      band: {
-                        min: activeConfig.depthThreshold,
-                        max: activeConfig.topThreshold,
-                      },
-                    }}
-                  >
-                    {/* Live knee-angle readout — corner overlay on
-                        the camera tile. Updates every frame the
-                        detector returns a valid signal. */}
-                    <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
-                      <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">
-                        {side === "left" ? "Left" : "Right"} knee
-                      </p>
-                      <p className="tabular text-2xl font-semibold text-white">
-                        {interior.toFixed(0)}°
+          {side && (
+            <LiveModeLayout
+              title={`Controlled Squat · ${side === "left" ? "Left" : "Right"} leg`}
+              subtitle={
+                isDoctorFlow && patient
+                  ? `Connected to ${patient.name}'s record${
+                      isDoctorFlow
+                        ? ` · Level ${progression.level + 1}`
+                        : ""
+                    }`
+                  : `Depth ${activeConfig.depthThreshold}° · Top ${activeConfig.topThreshold}° · Goal ${activeConfig.targetReps ?? TARGET_REPS} reps`
+              }
+              onExit={() => setSide(null)}
+              camera={(
+                <RehabCameraShell
+                  onFrame={handleFrame}
+                  angleArc={{
+                    vertex: side === "left" ? LM_LIVE.LEFT_KNEE : LM_LIVE.RIGHT_KNEE,
+                    armA: side === "left" ? LM_LIVE.LEFT_HIP : LM_LIVE.RIGHT_HIP,
+                    armB: side === "left" ? LM_LIVE.LEFT_ANKLE : LM_LIVE.RIGHT_ANKLE,
+                    currentDeg: interior,
+                    band: {
+                      min: activeConfig.depthThreshold,
+                      max: activeConfig.topThreshold,
+                    },
+                  }}
+                >
+                  <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+                    <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">
+                      {side === "left" ? "Left" : "Right"} knee
+                    </p>
+                    <p className="tabular text-2xl font-semibold text-white">
+                      {interior.toFixed(0)}°
+                    </p>
+                  </div>
+                </RehabCameraShell>
+              )}
+              sidebar={(
+                <>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-500/15 px-3 py-1 text-xs font-semibold text-indigo-200 ring-1 ring-indigo-400/40">
+                      Testing: {side === "left" ? "Left" : "Right"} leg
+                    </span>
+                    {isDoctorFlow && (
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-semibold text-emerald-200 ring-1 ring-emerald-400/40">
+                        Level {progression.level + 1} · {progression.hint}
+                      </span>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setSide(null)}
+                    >
+                      Change side
+                    </Button>
+                  </div>
+
+                  {REHAB_EXERCISE_IMAGES["squat"] && (
+                    <div className="overflow-hidden rounded-md border border-border bg-white">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={REHAB_EXERCISE_IMAGES["squat"]}
+                        alt="Squat reference"
+                        loading="lazy"
+                        className="block w-full object-contain"
+                        style={{ maxHeight: 140 }}
+                      />
+                      <p className="border-t border-border bg-surface px-2 py-1 text-center text-[10px] uppercase tracking-[0.12em] text-muted">
+                        Reference form
                       </p>
                     </div>
-                  </RehabCameraShell>
-                </div>
+                  )}
 
-                <div>
-                  <RepCountShell
-                    signal={interior}
-                    signalLabel={`${side === "left" ? "Left" : "Right"} knee angle (°)`}
-                    targetReps={activeConfig.targetReps ?? TARGET_REPS}
-                    config={activeConfig}
-                    onSnapshot={handleSnapshot}
-                  />
-                </div>
-              </div>
+                  <div className="flex min-h-0 flex-1 flex-col">
+                    <RepCountShell
+                      signal={interior}
+                      signalLabel={`${side === "left" ? "L" : "R"} knee (°)`}
+                      targetReps={activeConfig.targetReps ?? TARGET_REPS}
+                      config={activeConfig}
+                      onSnapshot={handleSnapshot}
+                      compact
+                    />
+                  </div>
 
-              {/* Save button — visible only when opened from the
-                  doctor flow (?patientId=…). Mirrors the biomech save
-                  pattern. Marked no-pdf so it never appears in a
-                  saved-report PDF export. */}
-              <div className="no-pdf">
-                <RehabSessionFooter
-                  buildPayload={buildRehabPayload}
-                  label="Save rehab session"
-                />
-              </div>
-            </div>
+                  <div className="no-pdf">
+                    <RehabSessionFooter
+                      buildPayload={buildRehabPayload}
+                      label="Save session"
+                      compact
+                    />
+                  </div>
+                </>
+              )}
+            />
           )}
 
           {/* Setup help */}

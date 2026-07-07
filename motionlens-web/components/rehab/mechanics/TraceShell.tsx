@@ -31,6 +31,8 @@ interface Props {
   /** Length of the cursor's trail visualisation, in samples. */
   trailLength?: number;
   config: TraceConfig;
+  /** Compact live-mode variant. */
+  compact?: boolean;
 }
 
 const DEFAULT_PATH: (t: number) => TracePathPoint = (t) => ({
@@ -44,6 +46,7 @@ export function TraceShell({
   loopDurationMs = 6000,
   trailLength = 30,
   config,
+  compact = false,
 }: Props) {
   const stateRef = useRef<TraceState>(emptyTraceState());
   const scoreRef = useRef<Score>(emptyScore());
@@ -103,6 +106,57 @@ export function TraceShell({
   const lead = pathFn(tNow);
 
   void tick;
+  if (compact) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col gap-2">
+        <ScoreHUD
+          score={score}
+          timer={`${accuracyPct.toFixed(0)}%`}
+          compact
+        />
+        <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border border-zinc-700 bg-zinc-950">
+          {dots.map((p, i) => (
+            <div
+              key={i}
+              className="absolute h-1 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/20"
+              style={{ left: `${p.x * 100}%`, top: `${p.y * 100}%` }}
+            />
+          ))}
+          <div
+            className="absolute -translate-x-1/2 -translate-y-1/2"
+            style={{ left: `${lead.x * 100}%`, top: `${lead.y * 100}%` }}
+          >
+            <div className="h-4 w-4 rounded-full bg-amber-400 ring-2 ring-amber-200 shadow-[0_0_14px_rgba(252,211,77,0.7)]" />
+          </div>
+          {trailRef.current.map((p, i) => (
+            <div
+              key={`trail-${i}`}
+              className="absolute h-1 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-cyan-400/60"
+              style={{
+                left: `${p.x * 100}%`,
+                top: `${p.y * 100}%`,
+                opacity: i / trailRef.current.length,
+              }}
+            />
+          ))}
+          <div
+            className="absolute -translate-x-1/2 -translate-y-1/2"
+            style={{ left: `${cursor.x * 100}%`, top: `${cursor.y * 100}%` }}
+          >
+            <div className="h-3 w-3 rounded-full bg-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.9)]" />
+          </div>
+          <div className="absolute bottom-2 left-2 right-2 rounded-md bg-black/60 px-2 py-1 backdrop-blur">
+            <div className="h-1 w-full overflow-hidden rounded-full bg-zinc-800">
+              <div
+                className="h-full bg-emerald-500 transition-all"
+                style={{ width: `${accuracyPct}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="space-y-4">
       <ScoreHUD

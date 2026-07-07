@@ -21,9 +21,11 @@ interface Props {
   /** Current joint angles keyed identically to config.pose. */
   currentAngles: Record<string, number>;
   config: MatchPoseConfig;
+  /** Compact live-mode variant. */
+  compact?: boolean;
 }
 
-export function MatchPoseShell({ currentAngles, config }: Props) {
+export function MatchPoseShell({ currentAngles, config, compact = false }: Props) {
   const stateRef = useRef<MatchPoseState>(emptyMatchPoseState());
   const scoreRef = useRef<Score>(emptyScore());
   const [, setTick] = useState(0);
@@ -75,6 +77,72 @@ export function MatchPoseShell({ currentAngles, config }: Props) {
     : overallPct >= 60
     ? "Close — refine"
     : "Adjust pose";
+
+  if (compact) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col gap-2">
+        <ScoreHUD
+          score={score}
+          timer={`${(remainingMs / 1000).toFixed(1)}s`}
+          feedback={feedback}
+          feedbackTone={tone}
+          compact
+        />
+        <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-zinc-700 bg-zinc-900/80 p-3">
+          <div className="flex items-center gap-3">
+            <div
+              className={`flex h-16 w-16 shrink-0 items-center justify-center rounded-full border-2 ${
+                s.achieved
+                  ? "border-emerald-400 bg-emerald-500/20"
+                  : overallPct >= 60
+                    ? "border-amber-400 bg-amber-500/15"
+                    : "border-rose-400 bg-rose-500/15"
+              }`}
+            >
+              <p className="tabular text-lg font-bold text-white">
+                {overallPct.toFixed(0)}%
+              </p>
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-[9px] uppercase tracking-[0.14em] text-zinc-500">
+                Threshold {config.achievedThresholdPct.toFixed(0)}%
+              </p>
+              <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
+                <div
+                  className="h-full bg-cyan-400 transition-all"
+                  style={{ width: `${holdProgressPct}%` }}
+                />
+              </div>
+              <p className="mt-1 text-[9px] text-zinc-400">
+                {(s.achievedDwellMs / 1000).toFixed(1)}s / {(config.requiredHoldMs / 1000).toFixed(1)}s
+              </p>
+            </div>
+          </div>
+          <div className="mt-2 min-h-0 flex-1 space-y-1.5 overflow-hidden">
+            {Object.entries(config.pose).map(([joint, target]) => {
+              const pct = Math.max(0, Math.min(100, s.perJoint[joint] ?? 0));
+              return (
+                <div key={joint}>
+                  <div className="flex items-baseline justify-between text-[10px]">
+                    <span className="truncate font-semibold text-zinc-100">{joint}</span>
+                    <span className="tabular text-zinc-400">{pct.toFixed(0)}%</span>
+                  </div>
+                  <div className="mt-0.5 h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
+                    <div
+                      className={`h-full transition-all ${
+                        pct >= 90 ? "bg-emerald-500" : pct >= 60 ? "bg-amber-500" : "bg-rose-500"
+                      }`}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">

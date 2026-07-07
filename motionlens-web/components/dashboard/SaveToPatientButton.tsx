@@ -28,11 +28,18 @@ interface Props {
   buildPayload: () => ReportCreatePayload | null;
   /** Optional label override. */
   label?: string;
+  /**
+   * Compact mode — renders just the button (no explanatory heading /
+   * subtitle card). Used inside space-constrained shells like the
+   * live-mode sidebar where vertical space is tight.
+   */
+  compact?: boolean;
 }
 
 export function SaveToPatientButton({
   buildPayload,
   label = "Save to patient history",
+  compact = false,
 }: Props) {
   const { isDoctorFlow, patient, patientId, saveReport } = usePatientContext();
   const [busy, setBusy] = useState(false);
@@ -62,6 +69,22 @@ export function SaveToPatientButton({
   }
 
   if (saved) {
+    if (compact) {
+      return (
+        <div className="flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs">
+          <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+          <span className="font-medium text-foreground">Saved</span>
+          {patientId && (
+            <Link
+              href={`/dashboard/patients/${patientId}`}
+              className="ml-auto text-emerald-700 hover:underline"
+            >
+              View →
+            </Link>
+          )}
+        </div>
+      );
+    }
     return (
       <div className="flex items-center gap-3 rounded-card border border-emerald-500/30 bg-emerald-500/5 px-5 py-3 text-sm">
         <CheckCircle2 className="h-5 w-5 text-emerald-600" />
@@ -75,6 +98,37 @@ export function SaveToPatientButton({
           >
             View patient →
           </Link>
+        )}
+      </div>
+    );
+  }
+
+  if (compact) {
+    return (
+      <div className="space-y-1">
+        <Button
+          onClick={handle}
+          disabled={busy}
+          className="w-full"
+          size="sm"
+        >
+          {busy ? (
+            <>
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Saving…
+            </>
+          ) : (
+            <>
+              <Save className="h-4 w-4" />
+              {label}
+            </>
+          )}
+        </Button>
+        {error && (
+          <p className="flex items-start gap-1.5 px-1 text-[11px] text-error">
+            <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
+            {error}
+          </p>
         )}
       </div>
     );
