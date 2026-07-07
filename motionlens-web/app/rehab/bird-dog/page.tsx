@@ -61,6 +61,7 @@ import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { MatchPoseShell } from "@/components/rehab/mechanics/MatchPoseShell";
 import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import {
   buildSkeletonPosePayload,
   elapsedSecondsSince,
@@ -259,83 +260,54 @@ function Inner() {
             </Link>
           </div>
 
-          {!combo ? (
-            <ComboPicker onPick={setCombo} />
-          ) : (
-            <div className="mt-10 space-y-6">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-pink-500/15 px-3 py-1 text-xs font-semibold text-pink-200 ring-1 ring-pink-400/40">
-                  {combo.armSide === "right" ? "Right" : "Left"} arm
-                  {" + "}
-                  {combo.legSide === "right" ? "Right" : "Left"} leg
-                </span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setCombo(null)}
+          {!combo ? <ComboPicker onPick={setCombo} /> : null}
+
+          {combo && (
+            <LiveModeLayout
+              title={`Bird-Dog · ${combo.armSide === "right" ? "R" : "L"} arm + ${combo.legSide === "right" ? "R" : "L"} leg`}
+              subtitle={isDoctorFlow && patient ? `Connected to ${patient.name}'s record.` : "Hold the target pose"}
+              onExit={() => setCombo(null)}
+              camera={(
+                <RehabCameraShell
+                  onFrame={handleFrame}
+                  angleArc={{
+                    vertex: combo.legSide === "left" ? LM_LIVE.LEFT_HIP : LM_LIVE.RIGHT_HIP,
+                    armA: combo.legSide === "left" ? LM_LIVE.LEFT_SHOULDER : LM_LIVE.RIGHT_SHOULDER,
+                    armB: combo.legSide === "left" ? LM_LIVE.LEFT_KNEE : LM_LIVE.RIGHT_KNEE,
+                    currentDeg: currentAngles.leg ?? 0,
+                    band: { min: 160, max: 200 },
+                  }}
                 >
-                  Change combo
-                </Button>
-              </div>
-
-              <div className="grid gap-6 lg:grid-cols-2">
-                <div>
-                  <RehabCameraShell
-                    onFrame={handleFrame}
-                    angleArc={{
-                      vertex: combo.legSide === "left" ? LM_LIVE.LEFT_HIP : LM_LIVE.RIGHT_HIP,
-                      armA: combo.legSide === "left" ? LM_LIVE.LEFT_SHOULDER : LM_LIVE.RIGHT_SHOULDER,
-                      armB: combo.legSide === "left" ? LM_LIVE.LEFT_KNEE : LM_LIVE.RIGHT_KNEE,
-                      currentDeg: currentAngles.leg ?? 0,
-                      band: { min: 160, max: 200 },
-                    }}
-                  >
-                    <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
-                      <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">
-                        Live joint angles
-                      </p>
-                      <div className="tabular text-[11px] text-zinc-200 space-y-0.5">
-                        <p>
-                          arm{" "}
-                          <span className="font-semibold text-white">
-                            {(currentAngles.arm ?? 0).toFixed(0)}°
-                          </span>{" "}
-                          / 180
-                        </p>
-                        <p>
-                          leg{" "}
-                          <span className="font-semibold text-white">
-                            {(currentAngles.leg ?? 0).toFixed(0)}°
-                          </span>{" "}
-                          / 180
-                        </p>
-                        <p>
-                          trunk{" "}
-                          <span className="font-semibold text-white">
-                            {(currentAngles.trunk ?? 0).toFixed(0)}°
-                          </span>{" "}
-                          / 0
-                        </p>
-                      </div>
+                  <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+                    <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">Live angles</p>
+                    <div className="tabular text-[11px] text-zinc-200 space-y-0.5">
+                      <p>arm <span className="font-semibold text-white">{(currentAngles.arm ?? 0).toFixed(0)}°</span></p>
+                      <p>leg <span className="font-semibold text-white">{(currentAngles.leg ?? 0).toFixed(0)}°</span></p>
+                      <p>trunk <span className="font-semibold text-white">{(currentAngles.trunk ?? 0).toFixed(0)}°</span></p>
                     </div>
-                  </RehabCameraShell>
-                </div>
-
-                <div>
-                  <MatchPoseShell
-                    currentAngles={currentAngles}
-                    config={BIRD_DOG_CONFIG}
-                  />
-                </div>
-              </div>
-
-              <div className="no-pdf">
-                <RehabSessionFooter
-                  buildPayload={buildRehabPayload}
-                  label="Save rehab session"
-                />
-              </div>
-            </div>
+                  </div>
+                </RehabCameraShell>
+              )}
+              sidebar={(
+                <>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-pink-500/15 px-3 py-1 text-xs font-semibold text-pink-200 ring-1 ring-pink-400/40">{combo.armSide === "right" ? "R" : "L"} arm + {combo.legSide === "right" ? "R" : "L"} leg</span>
+                    <Button variant="ghost" size="sm" onClick={() => setCombo(null)}>Change combo</Button>
+                  </div>
+                  {REHAB_EXERCISE_IMAGES["bird-dog"] && (
+                    <div className="overflow-hidden rounded-md border border-border bg-white">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={REHAB_EXERCISE_IMAGES["bird-dog"]} alt="Bird-Dog reference" loading="lazy" className="block w-full object-contain" style={{ maxHeight: 140 }} />
+                      <p className="border-t border-border bg-surface px-2 py-1 text-center text-[10px] uppercase tracking-[0.12em] text-muted">Reference form</p>
+                    </div>
+                  )}
+                  <div className="flex min-h-0 flex-1 flex-col">
+                    <MatchPoseShell currentAngles={currentAngles} config={BIRD_DOG_CONFIG} compact />
+                  </div>
+                  <div className="no-pdf"><RehabSessionFooter buildPayload={buildRehabPayload} label="Save session" compact /></div>
+                </>
+              )}
+            />
           )}
 
           <div className="mt-16 rounded-card border border-border bg-surface p-5 text-sm text-muted">

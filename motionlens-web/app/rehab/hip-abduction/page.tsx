@@ -37,6 +37,7 @@ import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell"
 import { TargetReachShell } from "@/components/rehab/mechanics/TargetReachShell";
 import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
 import { RehabStartCard } from "@/components/rehab/RehabStartCard";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import { computeHipAbductionDeg } from "@/lib/rehab/poseMetrics";
 import { DEFAULT_LEVEL_INDEX } from "@/lib/rehab/progressionLadders";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
@@ -201,66 +202,54 @@ function Inner() {
             </Link>
           </div>
 
-          {!side ? (
-            <SidePicker onPick={setSide} />
-          ) : (
-            <div className="mt-10 space-y-6">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-cyan-500/15 px-3 py-1 text-xs font-semibold text-cyan-200 ring-1 ring-cyan-400/40">
-                  Working leg: {side === "left" ? "Left" : "Right"}
-                </span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => { setSide(null); setStarted(false); }}
+          {!side ? <SidePicker onPick={setSide} /> : null}
+
+          {side && (
+            <LiveModeLayout
+              title={`Hip Abduction · ${side === "left" ? "Left" : "Right"} leg`}
+              subtitle={isDoctorFlow && patient ? `Connected to ${patient.name}'s record.` : "Drive cursor onto targets"}
+              onExit={() => { setSide(null); setStarted(false); }}
+              camera={(
+                <RehabCameraShell
+                  onFrame={handleFrame}
+                  angleArc={{
+                    vertex: side === "left" ? LM.LEFT_HIP : LM.RIGHT_HIP,
+                    armA: side === "left" ? LM.LEFT_SHOULDER : LM.RIGHT_SHOULDER,
+                    armB: side === "left" ? LM.LEFT_KNEE : LM.RIGHT_KNEE,
+                    currentDeg: liveAngle,
+                    band: { min: 15, max: 40 },
+                  }}
                 >
-                  Change side
-                </Button>
-              </div>
-
-              <div className="grid gap-6 lg:grid-cols-2">
-                <div>
-                  <RehabCameraShell
-                    onFrame={handleFrame}
-                    angleArc={{
-                      vertex: side === "left" ? LM.LEFT_HIP : LM.RIGHT_HIP,
-                      armA: side === "left" ? LM.LEFT_SHOULDER : LM.RIGHT_SHOULDER,
-                      armB: side === "left" ? LM.LEFT_KNEE : LM.RIGHT_KNEE,
-                      currentDeg: liveAngle,
-                      band: { min: 15, max: 40 },
-                    }}
-                  >
-                    <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
-                      <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">
-                        {side === "left" ? "Left" : "Right"} hip · abduction
-                      </p>
-                      <p className="tabular text-2xl font-semibold text-white">
-                        {liveAngle.toFixed(0)}°
-                      </p>
-                      <p className="mt-1 text-[10px] text-zinc-300">
-                        cursor y {cursor.y.toFixed(2)} ·{" "}
-                        {liveAngle >= 30 ? "near target ROM" : "lift higher"}
-                      </p>
+                  <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+                    <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">{side === "left" ? "L" : "R"} hip · abd</p>
+                    <p className="tabular text-2xl font-semibold text-white">{liveAngle.toFixed(0)}°</p>
+                  </div>
+                </RehabCameraShell>
+              )}
+              sidebar={(
+                <>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-cyan-500/15 px-3 py-1 text-xs font-semibold text-cyan-200 ring-1 ring-cyan-400/40">{side === "left" ? "Left" : "Right"} leg</span>
+                    <Button variant="ghost" size="sm" onClick={() => { setSide(null); setStarted(false); }}>Change side</Button>
+                  </div>
+                  {REHAB_EXERCISE_IMAGES["hip-abduction"] && (
+                    <div className="overflow-hidden rounded-md border border-border bg-white">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={REHAB_EXERCISE_IMAGES["hip-abduction"]} alt="Hip Abduction reference" loading="lazy" className="block w-full object-contain" style={{ maxHeight: 140 }} />
+                      <p className="border-t border-border bg-surface px-2 py-1 text-center text-[10px] uppercase tracking-[0.12em] text-muted">Reference form</p>
                     </div>
-                  </RehabCameraShell>
-                </div>
-
-                <div>
-                  {started ? (
-                    <TargetReachShell cursor={cursor} config={REACH_CONFIG} />
-                  ) : (
-                    <RehabStartCard onStart={() => setStarted(true)} />
                   )}
-                </div>
-              </div>
-
-              <div className="no-pdf">
-                <RehabSessionFooter
-                  buildPayload={buildRehabPayload}
-                  label="Save rehab session"
-                />
-              </div>
-            </div>
+                  <div className="flex min-h-0 flex-1 flex-col">
+                    {started ? (
+                      <TargetReachShell cursor={cursor} config={REACH_CONFIG} compact />
+                    ) : (
+                      <RehabStartCard onStart={() => setStarted(true)} />
+                    )}
+                  </div>
+                  <div className="no-pdf"><RehabSessionFooter buildPayload={buildRehabPayload} label="Save session" compact /></div>
+                </>
+              )}
+            />
           )}
 
           {/* Setup help */}

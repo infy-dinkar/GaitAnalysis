@@ -49,6 +49,7 @@ import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { TargetReachShell } from "@/components/rehab/mechanics/TargetReachShell";
 import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import { computeLateralTrunkFlexionDeg } from "@/lib/rehab/poseMetrics";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
@@ -213,53 +214,42 @@ function Inner() {
             </Link>
           </div>
 
-          {phase === "ready" ? (
-            <ReadyGate onStart={() => setPhase("active")} />
-          ) : (
-            <div className="mt-10 space-y-6">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-cyan-500/15 px-3 py-1 text-xs font-semibold text-cyan-200 ring-1 ring-cyan-400/40">
-                  Side bend · bilateral
-                </span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setPhase("ready")}
-                >
-                  Show reference
-                </Button>
-              </div>
+          {phase === "ready" ? <ReadyGate onStart={() => setPhase("active")} /> : null}
 
-              <div className="grid gap-6 lg:grid-cols-2">
-                <div>
-                  <RehabCameraShell onFrame={handleFrame}>
-                    <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
-                      <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">
-                        Lateral flexion
-                      </p>
-                      <p className="tabular text-2xl font-semibold text-white">
-                        {liveAngle > 0 ? "+" : ""}
-                        {liveAngle.toFixed(0)}°
-                      </p>
-                      <p className="mt-1 text-[10px] text-zinc-300">
-                        {bendSide}
-                      </p>
+          {phase !== "ready" && (
+            <LiveModeLayout
+              title="Side Bend"
+              subtitle={isDoctorFlow && patient ? `Connected to ${patient.name}'s record.` : "Bilateral — bend both sides"}
+              onExit={() => setPhase("ready")}
+              camera={(
+                <RehabCameraShell onFrame={handleFrame}>
+                  <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+                    <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">Lateral flexion</p>
+                    <p className="tabular text-2xl font-semibold text-white">{liveAngle > 0 ? "+" : ""}{liveAngle.toFixed(0)}°</p>
+                    <p className="mt-1 text-[10px] text-zinc-300">{bendSide}</p>
+                  </div>
+                </RehabCameraShell>
+              )}
+              sidebar={(
+                <>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-cyan-500/15 px-3 py-1 text-xs font-semibold text-cyan-200 ring-1 ring-cyan-400/40">Bilateral</span>
+                    <Button variant="ghost" size="sm" onClick={() => setPhase("ready")}>Show reference</Button>
+                  </div>
+                  {REHAB_EXERCISE_IMAGES["side-bend"] && (
+                    <div className="overflow-hidden rounded-md border border-border bg-white">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={REHAB_EXERCISE_IMAGES["side-bend"]} alt="Side Bend reference" loading="lazy" className="block w-full object-contain" style={{ maxHeight: 140 }} />
+                      <p className="border-t border-border bg-surface px-2 py-1 text-center text-[10px] uppercase tracking-[0.12em] text-muted">Reference form</p>
                     </div>
-                  </RehabCameraShell>
-                </div>
-
-                <div>
-                  <TargetReachShell cursor={cursor} config={REACH_CONFIG} />
-                </div>
-              </div>
-
-              <div className="no-pdf">
-                <RehabSessionFooter
-                  buildPayload={buildRehabPayload}
-                  label="Save rehab session"
-                />
-              </div>
-            </div>
+                  )}
+                  <div className="flex min-h-0 flex-1 flex-col">
+                    <TargetReachShell cursor={cursor} config={REACH_CONFIG} compact />
+                  </div>
+                  <div className="no-pdf"><RehabSessionFooter buildPayload={buildRehabPayload} label="Save session" compact /></div>
+                </>
+              )}
+            />
           )}
 
           <div className="mt-16 rounded-card border border-border bg-surface p-5 text-sm text-muted">
