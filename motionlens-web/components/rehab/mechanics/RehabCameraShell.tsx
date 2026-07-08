@@ -135,6 +135,10 @@ export interface RehabCameraShellProps {
    *  math; the shell just renders). Omit to keep the existing
    *  overlay unchanged. */
   angleArc?: AngleArcConfig;
+  /** Fill the parent container instead of using a fixed 16:9 aspect.
+   *  Used inside LiveModeLayout where the shell must expand to the
+   *  entire left half of the viewport. */
+  fill?: boolean;
 }
 
 export function RehabCameraShell({
@@ -142,6 +146,7 @@ export function RehabCameraShell({
   onError,
   children,
   angleArc,
+  fill = false,
 }: RehabCameraShellProps) {
   const { videoRef, active, error: camError, start, stop } = useCamera();
   const { ready: detectorReady, error: detectorError, detect } =
@@ -328,10 +333,14 @@ export function RehabCameraShell({
   }
 
   return (
-    <div>
+    <div className={fill ? "flex h-full w-full flex-col" : undefined}>
       <div
         ref={containerRef}
-        className="relative aspect-video overflow-hidden rounded-card border border-border bg-black"
+        className={
+          fill
+            ? "relative min-h-0 w-full flex-1 overflow-hidden rounded-card border border-border bg-black"
+            : "relative aspect-video overflow-hidden rounded-card border border-border bg-black"
+        }
       >
         {/* Live camera fills the tile. Mirrored horizontally so the
             selfie orientation matches the mirrored landmark space
@@ -372,8 +381,8 @@ export function RehabCameraShell({
           </div>
         )}
       </div>
-      {camError && <p className="mt-3 text-xs text-error">{camError}</p>}
-      <div className="mt-4 flex flex-wrap gap-3">
+      {camError && <p className={fill ? "mt-1 text-xs text-error" : "mt-3 text-xs text-error"}>{camError}</p>}
+      <div className={fill ? "mt-2 flex shrink-0 flex-wrap gap-2" : "mt-4 flex flex-wrap gap-3"}>
         {!active ? (
           <Button onClick={handleStart} disabled={busy}>
             {busy

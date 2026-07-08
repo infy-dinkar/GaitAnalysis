@@ -23,10 +23,13 @@
 // requiring the browser's fullscreen permission.
 
 import {
+  cloneElement,
+  isValidElement,
   useCallback,
   useEffect,
   useRef,
   useState,
+  type ReactElement,
   type ReactNode,
 } from "react";
 import { Maximize2, Minimize2, X } from "lucide-react";
@@ -175,8 +178,15 @@ export function LiveModeLayout({
              vertical stack sized to fit the available height. */}
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
         <div className="relative flex min-h-0 flex-1 items-stretch overflow-hidden bg-black md:basis-[68%]">
-          <div className="flex min-h-0 w-full items-center justify-center">
-            {camera}
+          {/* Inject `fill` into the camera child so the RehabCameraShell
+              (and the LiveBiomechCamera on the biomech side, if wired)
+              drops its intrinsic aspect-video ratio and stretches to
+              fill the entire left half. Camera slots that don't accept
+              the prop simply ignore it. */}
+          <div className="flex min-h-0 w-full items-stretch justify-stretch p-2">
+            {isValidElement(camera)
+              ? cloneElement(camera as ReactElement<{ fill?: boolean }>, { fill: true })
+              : camera}
           </div>
         </div>
         <div className="flex min-h-0 shrink-0 flex-col overflow-hidden border-t border-border md:basis-[32%] md:border-l md:border-t-0">
