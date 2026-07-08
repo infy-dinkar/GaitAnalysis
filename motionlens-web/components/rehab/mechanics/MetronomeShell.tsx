@@ -34,12 +34,15 @@ interface Props {
   /** Enable the audio click on each scheduled beat. Default true. */
   audio?: boolean;
   config: MetronomeConfig;
+  /** Compact live-mode variant. */
+  compact?: boolean;
 }
 
 export function MetronomeShell({
   eventTrigger,
   audio = true,
   config,
+  compact = false,
 }: Props) {
   const stateRef = useRef<MetronomeState>(emptyMetronomeState());
   const scoreRef = useRef<Score>(emptyScore());
@@ -143,6 +146,87 @@ export function MetronomeShell({
     s.beats.length > 0
       ? ((s.perfectCount + s.goodCount) / s.beats.length) * 100
       : 0;
+
+  if (compact) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col gap-2">
+        <ScoreHUD
+          score={score}
+          timer={`${accuracyPct.toFixed(0)}%`}
+          feedback={feedback}
+          feedbackTone={feedbackTone}
+          compact
+        />
+        <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-zinc-700 bg-zinc-900/80 p-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-[9px] font-semibold uppercase tracking-[0.12em] text-zinc-400">
+                Tempo
+              </p>
+              <p className="tabular text-2xl font-semibold text-white">
+                {config.bpm} <span className="text-xs text-zinc-400">bpm</span>
+              </p>
+            </div>
+            <div
+              className={`flex h-14 w-14 items-center justify-center rounded-full transition-all ${
+                pulse
+                  ? "scale-110 bg-cyan-400 shadow-[0_0_20px_rgba(34,211,238,0.8)]"
+                  : "scale-100 bg-zinc-700"
+              }`}
+            >
+              <span className="text-lg font-bold text-zinc-50">♩</span>
+            </div>
+          </div>
+          <div className="mt-2 grid grid-cols-3 gap-2 text-[10px]">
+            <div className="rounded-md border border-zinc-700 bg-zinc-950 p-2">
+              <p className="text-[9px] uppercase tracking-[0.14em] text-zinc-500">Perfect</p>
+              <p className="tabular text-lg font-semibold text-emerald-300">{s.perfectCount}</p>
+            </div>
+            <div className="rounded-md border border-zinc-700 bg-zinc-950 p-2">
+              <p className="text-[9px] uppercase tracking-[0.14em] text-zinc-500">Good</p>
+              <p className="tabular text-lg font-semibold text-amber-300">{s.goodCount}</p>
+            </div>
+            <div className="rounded-md border border-zinc-700 bg-zinc-950 p-2">
+              <p className="text-[9px] uppercase tracking-[0.14em] text-zinc-500">Miss</p>
+              <p className="tabular text-lg font-semibold text-rose-300">{s.missCount}</p>
+            </div>
+          </div>
+          <div className="mt-2 min-h-0 flex-1">
+            <p className="text-[9px] uppercase tracking-[0.14em] text-zinc-500">
+              Last 8 · deviation (ms)
+            </p>
+            <div className="mt-1 flex h-full max-h-24 items-end gap-1">
+              {lastBeats.length === 0 && (
+                <span className="text-[10px] text-zinc-500">Waiting for events…</span>
+              )}
+              {lastBeats.map((b, i) => {
+                const dev = b.deviationMs ?? 0;
+                const maxAbs = Math.max(config.goodWindowMs, Math.abs(dev));
+                const h = (Math.abs(dev) / maxAbs) * 100;
+                const colour =
+                  b.grade === "perfect"
+                    ? "bg-emerald-500"
+                    : b.grade === "good"
+                      ? "bg-amber-500"
+                      : "bg-rose-500";
+                return (
+                  <div key={i} className="flex flex-1 flex-col items-center gap-0.5">
+                    <div
+                      className={`w-full rounded-sm ${colour}`}
+                      style={{ height: `${Math.max(6, h)}%` }}
+                    />
+                    <span className="text-[8px] tabular text-zinc-500">
+                      {dev > 0 ? "+" : ""}{dev.toFixed(0)}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">

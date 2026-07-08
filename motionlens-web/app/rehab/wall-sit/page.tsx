@@ -28,6 +28,7 @@ import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { HoldInZoneShell } from "@/components/rehab/mechanics/HoldInZoneShell";
 import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import { computeKneeAngle } from "@/lib/biomech/knee-live";
 import { DEFAULT_LEVEL_INDEX, WALL_SIT_LADDER } from "@/lib/rehab/progressionLadders";
 import { useProgressionLevel } from "@/lib/rehab/useProgressionLevel";
@@ -228,72 +229,89 @@ function Inner() {
             </Link>
           </div>
 
-          {!side ? (
-            <SidePicker onPick={setSide} />
-          ) : (
-            <div className="mt-10 space-y-6">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-teal-500/15 px-3 py-1 text-xs font-semibold text-teal-200 ring-1 ring-teal-400/40">
-                  Testing: {side === "left" ? "Left" : "Right"} leg
-                </span>
-                {isDoctorFlow && (
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-semibold text-emerald-200 ring-1 ring-emerald-400/40">
-                    Level {progression.level + 1} · {progression.hint}
-                  </span>
-                )}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setSide(null)}
-                >
-                  Change side
-                </Button>
-              </div>
+          {!side ? <SidePicker onPick={setSide} /> : null}
 
-              <div className="grid gap-6 lg:grid-cols-2">
-                <div>
-                  <RehabCameraShell
-                    onFrame={handleFrame}
-                    angleArc={{
-                      vertex: side === "left" ? LM_LIVE.LEFT_KNEE : LM_LIVE.RIGHT_KNEE,
-                      armA: side === "left" ? LM_LIVE.LEFT_HIP : LM_LIVE.RIGHT_HIP,
-                      armB: side === "left" ? LM_LIVE.LEFT_ANKLE : LM_LIVE.RIGHT_ANKLE,
-                      currentDeg: kneeFlexion,
-                      band: {
-                        min: activeConfig.min,
-                        max: activeConfig.max,
-                      },
-                    }}
-                  >
-                    <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
-                      <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">
-                        {side === "left" ? "Left" : "Right"} knee flexion
-                      </p>
-                      <p className="tabular text-2xl font-semibold text-white">
-                        {kneeFlexion.toFixed(0)}°
+          {side && (
+            <LiveModeLayout
+              title={`Wall Sit · ${side === "left" ? "Left" : "Right"} leg`}
+              subtitle={
+                isDoctorFlow && patient
+                  ? `Connected to ${patient.name}'s record · Level ${progression.level + 1}`
+                  : `Band ${activeConfig.min}–${activeConfig.max}° · ${(activeConfig.targetHoldMs / 1000).toFixed(0)}s hold`
+              }
+              onExit={() => setSide(null)}
+              camera={(
+                <RehabCameraShell
+                  onFrame={handleFrame}
+                  angleArc={{
+                    vertex: side === "left" ? LM_LIVE.LEFT_KNEE : LM_LIVE.RIGHT_KNEE,
+                    armA: side === "left" ? LM_LIVE.LEFT_HIP : LM_LIVE.RIGHT_HIP,
+                    armB: side === "left" ? LM_LIVE.LEFT_ANKLE : LM_LIVE.RIGHT_ANKLE,
+                    currentDeg: kneeFlexion,
+                    band: { min: activeConfig.min, max: activeConfig.max },
+                  }}
+                >
+                  <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+                    <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">
+                      {side === "left" ? "L" : "R"} knee flexion
+                    </p>
+                    <p className="tabular text-2xl font-semibold text-white">
+                      {kneeFlexion.toFixed(0)}°
+                    </p>
+                  </div>
+                </RehabCameraShell>
+              )}
+              sidebar={(
+                <>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-teal-500/15 px-3 py-1 text-xs font-semibold text-teal-200 ring-1 ring-teal-400/40">
+                      {side === "left" ? "Left" : "Right"} leg
+                    </span>
+                    {isDoctorFlow && (
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-semibold text-emerald-200 ring-1 ring-emerald-400/40">
+                        Level {progression.level + 1}
+                      </span>
+                    )}
+                    <Button variant="ghost" size="sm" onClick={() => setSide(null)}>
+                      Change side
+                    </Button>
+                  </div>
+
+                  {REHAB_EXERCISE_IMAGES["wall-sit"] && (
+                    <div className="overflow-hidden rounded-md border border-border bg-white">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={REHAB_EXERCISE_IMAGES["wall-sit"]}
+                        alt="Wall Sit reference"
+                        loading="lazy"
+                        className="block w-full object-contain"
+                        style={{ maxHeight: 140 }}
+                      />
+                      <p className="border-t border-border bg-surface px-2 py-1 text-center text-[10px] uppercase tracking-[0.12em] text-muted">
+                        Reference form
                       </p>
                     </div>
-                  </RehabCameraShell>
-                </div>
+                  )}
 
-                <div>
                   <HoldInZoneShell
                     signal={kneeFlexion}
-                    signalLabel={`${side === "left" ? "Left" : "Right"} knee flexion (°)`}
+                    signalLabel={`${side === "left" ? "L" : "R"} knee (°)`}
                     axisMin={AXIS_MIN}
                     axisMax={AXIS_MAX}
                     config={activeConfig}
+                    compact
                   />
-                </div>
-              </div>
 
-              <div className="no-pdf">
-                <RehabSessionFooter
-                  buildPayload={buildRehabPayload}
-                  label="Save rehab session"
-                />
-              </div>
-            </div>
+                  <div className="no-pdf">
+                    <RehabSessionFooter
+                      buildPayload={buildRehabPayload}
+                      label="Save session"
+                      compact
+                    />
+                  </div>
+                </>
+              )}
+            />
           )}
 
           {/* Setup help */}

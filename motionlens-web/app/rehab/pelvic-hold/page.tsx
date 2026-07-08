@@ -35,6 +35,7 @@ import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell"
 import { HoldInZoneShell } from "@/components/rehab/mechanics/HoldInZoneShell";
 import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
 import { RehabStartCard } from "@/components/rehab/RehabStartCard";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import { computePelvicTiltDeg } from "@/lib/rehab/poseMetrics";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
@@ -239,63 +240,46 @@ function Inner() {
             </Link>
           </div>
 
-          {!stance ? (
-            <StancePicker onPick={setStance} />
-          ) : (
-            <div className="mt-10 space-y-6">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-teal-500/15 px-3 py-1 text-xs font-semibold text-teal-200 ring-1 ring-teal-400/40">
-                  Standing on: {stance === "left" ? "Left" : "Right"} leg
-                </span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => { setStance(null); setStarted(false); }}
-                >
-                  Change stance leg
-                </Button>
-              </div>
+          {!stance ? <StancePicker onPick={setStance} /> : null}
 
-              <div className="grid gap-6 lg:grid-cols-2">
-                <div>
-                  <RehabCameraShell onFrame={handleFrame}>
-                    <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
-                      <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">
-                        Pelvic tilt
-                      </p>
-                      <p className="tabular text-2xl font-semibold text-white">
-                        {pelvicTilt > 0 ? "+" : ""}
-                        {pelvicTilt.toFixed(1)}°
-                      </p>
-                      <p className="mt-1 text-[10px] text-zinc-300">
-                        {tiltSide}
-                      </p>
+          {stance && (
+            <LiveModeLayout
+              title={`Pelvic Level Hold · ${stance === "left" ? "Left" : "Right"} stance`}
+              subtitle={isDoctorFlow && patient ? `Connected to ${patient.name}'s record.` : `Hold ${(PELVIC_HOLD_CONFIG.targetHoldMs / 1000).toFixed(0)}s`}
+              onExit={() => { setStance(null); setStarted(false); }}
+              camera={(
+                <RehabCameraShell onFrame={handleFrame}>
+                  <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+                    <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">Pelvic tilt</p>
+                    <p className="tabular text-2xl font-semibold text-white">{pelvicTilt > 0 ? "+" : ""}{pelvicTilt.toFixed(1)}°</p>
+                    <p className="mt-1 text-[10px] text-zinc-300">{tiltSide}</p>
+                  </div>
+                </RehabCameraShell>
+              )}
+              sidebar={(
+                <>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-teal-500/15 px-3 py-1 text-xs font-semibold text-teal-200 ring-1 ring-teal-400/40">{stance === "left" ? "Left" : "Right"} stance</span>
+                    <Button variant="ghost" size="sm" onClick={() => { setStance(null); setStarted(false); }}>Change stance</Button>
+                  </div>
+                  {REHAB_EXERCISE_IMAGES["pelvic-hold"] && (
+                    <div className="overflow-hidden rounded-md border border-border bg-white">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={REHAB_EXERCISE_IMAGES["pelvic-hold"]} alt="Pelvic Hold reference" loading="lazy" className="block w-full object-contain" style={{ maxHeight: 140 }} />
+                      <p className="border-t border-border bg-surface px-2 py-1 text-center text-[10px] uppercase tracking-[0.12em] text-muted">Reference form</p>
                     </div>
-                  </RehabCameraShell>
-                </div>
-
-                <div>
-                  {started ? (
-                    <HoldInZoneShell
-                      signal={pelvicTilt}
-                      signalLabel="Pelvic tilt (°) — level = 0"
-                      axisMin={AXIS_MIN}
-                      axisMax={AXIS_MAX}
-                      config={PELVIC_HOLD_CONFIG}
-                    />
-                  ) : (
-                    <RehabStartCard onStart={() => setStarted(true)} />
                   )}
-                </div>
-              </div>
-
-              <div className="no-pdf">
-                <RehabSessionFooter
-                  buildPayload={buildRehabPayload}
-                  label="Save rehab session"
-                />
-              </div>
-            </div>
+                  <div className="flex min-h-0 flex-1 flex-col">
+                    {started ? (
+                      <HoldInZoneShell signal={pelvicTilt} signalLabel="Pelvic tilt (°)" axisMin={AXIS_MIN} axisMax={AXIS_MAX} config={PELVIC_HOLD_CONFIG} compact />
+                    ) : (
+                      <RehabStartCard onStart={() => setStarted(true)} />
+                    )}
+                  </div>
+                  <div className="no-pdf"><RehabSessionFooter buildPayload={buildRehabPayload} label="Save session" compact /></div>
+                </>
+              )}
+            />
           )}
 
           {/* Setup help */}

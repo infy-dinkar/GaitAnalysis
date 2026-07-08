@@ -27,12 +27,15 @@ interface Props {
   /** True if the patient has lifted a foot — game pauses dwell. */
   stepDetected: boolean;
   config: WeightShiftConfig;
+  /** Compact live-mode variant. */
+  compact?: boolean;
 }
 
 export function WeightShiftShell({
   shift,
   stepDetected,
   config,
+  compact = false,
 }: Props) {
   const stateRef = useRef<WeightShiftState>(emptyWeightShiftState());
   const scoreRef = useRef<Score>(emptyScore());
@@ -89,6 +92,70 @@ export function WeightShiftShell({
   // Cursor position 0..100% across the track. shift -1 maps to 0%,
   // +1 maps to 100%.
   const cursorPct = ((s.cursor + 1) / 2) * 100;
+
+  if (compact) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col gap-2">
+        <ScoreHUD
+          score={score}
+          timer={timer}
+          feedback={feedback}
+          feedbackTone={feedbackTone}
+          compact
+        />
+        <div className="relative flex min-h-0 flex-1 flex-col rounded-lg border border-zinc-700 bg-zinc-900/80 p-3">
+          {stepDetected && (
+            <div className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-rose-500/20 px-2 py-0.5 text-[10px] font-semibold text-rose-200 ring-1 ring-rose-400/50">
+              <Footprints className="h-3 w-3" /> Step paused
+            </div>
+          )}
+          <p className="text-[9px] font-semibold uppercase tracking-[0.12em] text-zinc-400">
+            Lateral weight shift
+          </p>
+          <div className="relative mt-4 h-12 w-full rounded-full border border-zinc-700 bg-zinc-950">
+            <div className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-white/10" />
+            {config.zones.map((z) => {
+              const leftPct = ((z.centre - z.halfWidth + 1) / 2) * 100;
+              const widthPct = z.halfWidth * 2 * 50;
+              const isCaptured = s.capturedZoneIds.includes(z.id);
+              const isCurrent = s.currentZoneId === z.id;
+              return (
+                <div
+                  key={z.id}
+                  className={`absolute top-1 bottom-1 rounded-full ring-1 ${
+                    isCaptured
+                      ? "bg-emerald-500/30 ring-emerald-400"
+                      : isCurrent
+                        ? "bg-amber-500/30 ring-amber-400"
+                        : "bg-cyan-500/15 ring-cyan-500/40"
+                  }`}
+                  style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                />
+              );
+            })}
+            <div
+              className="absolute top-1/2 h-8 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-md bg-white shadow-[0_0_8px_rgba(255,255,255,0.5)]"
+              style={{ left: `${cursorPct}%` }}
+            />
+          </div>
+          <div className="mt-3 grid grid-cols-3 gap-2 text-[10px]">
+            <div>
+              <p className="text-[9px] uppercase tracking-[0.14em] text-zinc-500">Zone</p>
+              <p className="tabular text-zinc-100">{s.currentZoneId ?? "—"}</p>
+            </div>
+            <div>
+              <p className="text-[9px] uppercase tracking-[0.14em] text-zinc-500">Dwell</p>
+              <p className="tabular text-zinc-100">{(s.dwellMs / 1000).toFixed(1)}s</p>
+            </div>
+            <div>
+              <p className="text-[9px] uppercase tracking-[0.14em] text-zinc-500">Paused</p>
+              <p className="tabular text-zinc-100">{(s.stepPausedMs / 1000).toFixed(1)}s</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">

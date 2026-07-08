@@ -12,6 +12,8 @@ import { usePatientContext } from "@/hooks/usePatientContext";
  *   The page's buildRehabPayload — called on Save click to produce
  *   the report payload.
  * @property {string} [label]
+ * @property {boolean} [compact]  Slim variant for space-constrained
+ *   shells like the live-mode sidebar. Renders just the button.
  */
 
 /**
@@ -20,12 +22,17 @@ import { usePatientContext } from "@/hooks/usePatientContext";
 export function RehabSessionFooter({
   buildPayload,
   label = "Save rehab session",
+  compact = false,
 }) {
   const { isDoctorFlow } = usePatientContext();
   if (!isDoctorFlow) return null;
   return (
     <div className="no-pdf">
-      <SaveToPatientButton buildPayload={buildPayload} label={label} />
+      <SaveToPatientButton
+        buildPayload={buildPayload}
+        label={label}
+        compact={compact}
+      />
     </div>
   );
 }

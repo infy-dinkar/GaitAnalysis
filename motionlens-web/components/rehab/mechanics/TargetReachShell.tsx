@@ -31,6 +31,8 @@ interface Props {
   /** Default normalised radius. */
   defaultRadius?: number;
   config: TargetReachConfig;
+  /** Compact live-mode variant. */
+  compact?: boolean;
 }
 
 export function TargetReachShell({
@@ -39,6 +41,7 @@ export function TargetReachShell({
   defaultTtlMs = 3000,
   defaultRadius = 0.07,
   config,
+  compact = false,
 }: Props) {
   const stateRef = useRef<TargetReachState>(emptyTargetReachState());
   const scoreRef = useRef<Score>(emptyScore());
@@ -118,6 +121,47 @@ export function TargetReachShell({
   const s = stateRef.current;
   const score = scoreRef.current;
   const timer = `${s.hits} hits · ${s.misses} miss`;
+
+  if (compact) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col gap-2">
+        <ScoreHUD score={score} timer={timer} compact />
+        <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border border-zinc-700 bg-zinc-950">
+          <div className="pointer-events-none absolute inset-0">
+            <div className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-white/5" />
+            <div className="absolute left-0 top-1/2 h-px w-full -translate-y-1/2 bg-white/5" />
+          </div>
+          {s.targets.map((t) => {
+            const now = performance.now();
+            const lifeLeft =
+              t.ttlMs != null && t.ttlMs > 0
+                ? Math.max(0, 1 - (now - t.spawnedAt) / t.ttlMs)
+                : 1;
+            return (
+              <div
+                key={t.id}
+                className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full ring-2 ring-orange-400 transition-opacity"
+                style={{
+                  left: `${t.x * 100}%`,
+                  top: `${t.y * 100}%`,
+                  width: `${t.radius * 200}%`,
+                  aspectRatio: "1",
+                  background: `radial-gradient(circle, rgba(251,146,60,${0.35 * lifeLeft}) 0%, rgba(251,146,60,0) 70%)`,
+                  opacity: 0.4 + 0.6 * lifeLeft,
+                }}
+              />
+            );
+          })}
+          <div
+            className="absolute -translate-x-1/2 -translate-y-1/2"
+            style={{ left: `${cursor.x * 100}%`, top: `${cursor.y * 100}%` }}
+          >
+            <div className="h-3 w-3 rounded-full bg-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.8)]" />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">

@@ -41,6 +41,7 @@ import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell"
 import { MetronomeShell } from "@/components/rehab/mechanics/MetronomeShell";
 import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
 import { RehabStartCard } from "@/components/rehab/RehabStartCard";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import {
   buildSkeletonPosePayload,
   elapsedSecondsSince,
@@ -296,91 +297,108 @@ function Inner() {
             </Link>
           </div>
 
-          {!side ? (
-            <SidePicker onPick={handleSidePick} />
-          ) : (
-            <div className="mt-10 space-y-6">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-fuchsia-500/15 px-3 py-1 text-xs font-semibold text-fuchsia-200 ring-1 ring-fuchsia-400/40">
-                  Marching: {side === "left" ? "Left" : "Right"} knee tracked
-                </span>
-                {pelvisDrifted && (
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-500/20 px-3 py-1 text-xs font-semibold text-rose-200 ring-1 ring-rose-400/50">
-                    Keep pelvis level
-                  </span>
-                )}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={handleMusicToggle}
-                  aria-pressed={musicOn}
-                  aria-label={musicOn ? "Mute music" : "Unmute music"}
-                >
-                  {musicOn ? (
-                    <Volume2 className="h-4 w-4" />
-                  ) : (
-                    <VolumeX className="h-4 w-4" />
-                  )}
-                  {musicOn ? "Music on" : "Music off"}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={handleChangeSide}
-                >
-                  Change side
-                </Button>
-              </div>
+          {!side ? <SidePicker onPick={handleSidePick} /> : null}
 
-              <div className="grid gap-6 lg:grid-cols-2">
-                <div>
-                  <RehabCameraShell
-                    onFrame={handleFrame}
-                    angleArc={{
-                      vertex: side === "left" ? LM_LIVE.LEFT_HIP : LM_LIVE.RIGHT_HIP,
-                      armA: side === "left" ? LM_LIVE.LEFT_SHOULDER : LM_LIVE.RIGHT_SHOULDER,
-                      armB: side === "left" ? LM_LIVE.LEFT_KNEE : LM_LIVE.RIGHT_KNEE,
-                      currentDeg: liveFlexion,
-                      band: { min: 35, max: 90 },
-                    }}
-                  >
-                    <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
-                      <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">
-                        Hip flexion ({side})
-                      </p>
-                      <p className="tabular text-2xl font-semibold text-white">
-                        {liveFlexion.toFixed(0)}°
-                      </p>
-                      <p className="mt-1 text-[10px] text-zinc-300">
-                        {inLiftedRef.current ? "lifted" : "ready"}
+          {side && (
+            <LiveModeLayout
+              title={`Marching · ${side === "left" ? "Left" : "Right"} knee`}
+              subtitle={
+                isDoctorFlow && patient
+                  ? `Connected to ${patient.name}'s record.`
+                  : `${MARCHING_CONFIG.bpm} bpm cadence`
+              }
+              onExit={handleChangeSide}
+              camera={(
+                <RehabCameraShell
+                  onFrame={handleFrame}
+                  angleArc={{
+                    vertex: side === "left" ? LM_LIVE.LEFT_HIP : LM_LIVE.RIGHT_HIP,
+                    armA: side === "left" ? LM_LIVE.LEFT_SHOULDER : LM_LIVE.RIGHT_SHOULDER,
+                    armB: side === "left" ? LM_LIVE.LEFT_KNEE : LM_LIVE.RIGHT_KNEE,
+                    currentDeg: liveFlexion,
+                    band: { min: 35, max: 90 },
+                  }}
+                >
+                  <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+                    <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">
+                      Hip flexion ({side})
+                    </p>
+                    <p className="tabular text-2xl font-semibold text-white">
+                      {liveFlexion.toFixed(0)}°
+                    </p>
+                    <p className="mt-1 text-[10px] text-zinc-300">
+                      {inLiftedRef.current ? "lifted" : "ready"}
+                    </p>
+                  </div>
+                </RehabCameraShell>
+              )}
+              sidebar={(
+                <>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-fuchsia-500/15 px-3 py-1 text-xs font-semibold text-fuchsia-200 ring-1 ring-fuchsia-400/40">
+                      {side === "left" ? "Left" : "Right"} knee
+                    </span>
+                    {pelvisDrifted && (
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-500/20 px-3 py-1 text-xs font-semibold text-rose-200 ring-1 ring-rose-400/50">
+                        Pelvis
+                      </span>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleMusicToggle}
+                      aria-pressed={musicOn}
+                      aria-label={musicOn ? "Mute music" : "Unmute music"}
+                    >
+                      {musicOn ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={handleChangeSide}>
+                      Change side
+                    </Button>
+                  </div>
+
+                  {REHAB_EXERCISE_IMAGES["marching"] && (
+                    <div className="overflow-hidden rounded-md border border-border bg-white">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={REHAB_EXERCISE_IMAGES["marching"]}
+                        alt="Marching reference"
+                        loading="lazy"
+                        className="block w-full object-contain"
+                        style={{ maxHeight: 140 }}
+                      />
+                      <p className="border-t border-border bg-surface px-2 py-1 text-center text-[10px] uppercase tracking-[0.12em] text-muted">
+                        Reference form
                       </p>
                     </div>
-                  </RehabCameraShell>
-                </div>
-
-                <div>
-                  {started ? (
-                    <MetronomeShell
-                      eventTrigger={eventTrigger}
-                      audio={false}
-                      config={MARCHING_CONFIG}
-                    />
-                  ) : (
-                    <RehabStartCard
-                      onStart={handleStart}
-                      hint="Position yourself in front of the camera, then press Start. The metronome and music will begin only after you press Start."
-                    />
                   )}
-                </div>
-              </div>
 
-              <div className="no-pdf">
-                <RehabSessionFooter
-                  buildPayload={buildRehabPayload}
-                  label="Save rehab session"
-                />
-              </div>
-            </div>
+                  <div className="flex min-h-0 flex-1 flex-col">
+                    {started ? (
+                      <MetronomeShell
+                        eventTrigger={eventTrigger}
+                        audio={false}
+                        config={MARCHING_CONFIG}
+                        compact
+                      />
+                    ) : (
+                      <RehabStartCard
+                        onStart={handleStart}
+                        hint="Position yourself, then press Start. Music and metronome start only after Start."
+                      />
+                    )}
+                  </div>
+
+                  <div className="no-pdf">
+                    <RehabSessionFooter
+                      buildPayload={buildRehabPayload}
+                      label="Save session"
+                      compact
+                    />
+                  </div>
+                </>
+              )}
+            />
           )}
 
           <div className="mt-16 rounded-card border border-border bg-surface p-5 text-sm text-muted">

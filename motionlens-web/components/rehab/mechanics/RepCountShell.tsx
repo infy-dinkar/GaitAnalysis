@@ -31,6 +31,9 @@ interface Props {
    *  into shell internals. Additive; backward-compatible when
    *  omitted. */
   onSnapshot?: (state: RepCountState, score: Score) => void;
+  /** Compact mode — tighter card + shorter depth bar + no verbose
+   *  phase/currentMin/etc rows. Used inside the live-mode sidebar. */
+  compact?: boolean;
 }
 
 export function RepCountShell({
@@ -39,6 +42,7 @@ export function RepCountShell({
   targetReps,
   config,
   onSnapshot,
+  compact = false,
 }: Props) {
   const stateRef = useRef<RepCountState>(emptyRepCountState());
   const scoreRef = useRef<Score>(emptyScore());
@@ -136,6 +140,65 @@ export function RepCountShell({
     targetReps != null
       ? `${s.reps} / ${targetReps}`
       : `${s.reps} reps`;
+
+  if (compact) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col gap-2">
+        <ScoreHUD
+          score={score}
+          timer={timer}
+          feedback={feedback}
+          feedbackTone={feedbackTone}
+          compact
+        />
+        {/* Depth card grows to fill the remaining sidebar space; the
+            bar inside stretches with it so the operator always sees
+            a full-height depth visualisation, not a token stub. */}
+        <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-zinc-700 bg-zinc-900/80 p-3">
+          <div className="flex min-h-0 flex-1 items-stretch gap-3">
+            <div className="flex flex-col items-center justify-center">
+              <p className="text-[9px] uppercase tracking-[0.14em] text-zinc-500">
+                Reps
+              </p>
+              <p className="tabular text-4xl font-bold leading-none text-white">
+                {s.reps}
+              </p>
+              {complete && (
+                <span className="mt-1 rounded-full bg-emerald-500/20 px-2 py-0.5 text-[9px] font-semibold text-emerald-200">
+                  Complete
+                </span>
+              )}
+            </div>
+            <div className="flex min-h-0 flex-1 flex-col">
+              <p className="text-[9px] font-semibold uppercase tracking-[0.12em] text-zinc-400">
+                Depth · {signalLabel}
+              </p>
+              <div className="mt-1 flex min-h-0 flex-1 items-stretch gap-2">
+                <div className="relative w-10 overflow-hidden rounded-md border border-zinc-700 bg-zinc-950">
+                  <div
+                    className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-orange-500 to-amber-300 transition-all"
+                    style={{ height: `${depthPct}%` }}
+                  />
+                  <div className="absolute inset-x-0 top-0 h-[2px] bg-emerald-400/70" />
+                </div>
+                <div className="flex flex-1 flex-col justify-between py-1 text-[10px] text-zinc-400">
+                  <span className="tabular">
+                    top {config.topThreshold.toFixed(0)}
+                  </span>
+                  <span className="tabular text-zinc-100">
+                    now <span className="font-semibold">{signal.toFixed(0)}</span>
+                  </span>
+                  <span className="tabular">
+                    depth {config.depthThreshold.toFixed(0)}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
