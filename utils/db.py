@@ -126,4 +126,13 @@ async def _ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     # Compound for sorted recent reports per patient
     await db.reports.create_index([("patient_id", 1), ("created_at", -1)])
 
+    # ── prescriptions ─────────────────────────────────────────
+    # One prescription per (patient, doctor) pair — enforced with a
+    # unique compound index. Also the primary access pattern for the
+    # GET/PUT/DELETE endpoints.
+    await db.prescriptions.create_index(
+        [("patient_id", 1), ("doctor_id", 1)],
+        unique=True,
+    )
+
     log.info("MongoDB indexes ensured")
