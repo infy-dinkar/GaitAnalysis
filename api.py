@@ -157,6 +157,7 @@ from routes.report_routes import (
     patient_reports_router,
     reports_router,
 )
+from routes.prescription_routes import router as prescription_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -223,6 +224,7 @@ app.include_router(auth_router)
 app.include_router(patient_router)
 app.include_router(patient_reports_router)
 app.include_router(reports_router)
+app.include_router(prescription_router)
 
 
 # ══════════════════════════════════════════════════════════════════════

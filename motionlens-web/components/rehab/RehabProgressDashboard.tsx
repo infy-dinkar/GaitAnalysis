@@ -36,6 +36,7 @@ import Link from "next/link";
 import { PlotlyChart } from "@/components/gait/PlotlyChart";
 import { RehabStreakBadge } from "@/components/rehab/RehabStreakBadge";
 import { computeStreak, type StreakResult } from "@/lib/rehab/streak";
+import { useRecommendations } from "@/lib/rehab/useRecommendations";
 import {
   completedInLastDays,
   computeCompletionByWeek,
@@ -365,7 +366,13 @@ export function RehabProgressDashboard({
     );
   };
 
-  return <Ready sessions={state.sessions} onDeleted={handleDeleted} />;
+  return (
+    <Ready
+      sessions={state.sessions}
+      onDeleted={handleDeleted}
+      patientId={patientId}
+    />
+  );
 }
 
 // ═════════════════════════════════════════════════════════════════
@@ -380,9 +387,11 @@ interface DailyBucket {
 function Ready({
   sessions,
   onDeleted,
+  patientId,
 }: {
   sessions: EnrichedSession[];
   onDeleted: (id: string) => void;
+  patientId: string;
 }) {
   const hasSessions = sessions.length > 0;
   const sessionsWithMetrics = useMemo<MetricSession[]>(
@@ -572,9 +581,10 @@ function Ready({
         </ChartCard>
       </div>
 
-      {/* ── Adherence — completed side only. Prescribed placeholder
-             stays "—" until a prescription record is built. */}
-      <AdherenceCard sessions={sessions} />
+      {/* ── Adherence — completed side + prescribed side. Prescribed
+             is resolved via getPrescribedSet (today: auto-recommended;
+             later: doctor-saved prescription preferred). */}
+      <AdherenceCard sessions={sessions} patientId={patientId} />
 
       {/* ── Top exercises (goal vs completed) ──────────────────── */}
       <ChartCard
@@ -598,9 +608,19 @@ function Ready({
 }
 
 // Adherence card — shows sessions completed this week + last 30d
-// alongside a "Prescribed" placeholder that goes live when the
-// prescription record lands.
-function AdherenceCard({ sessions }: { sessions: EnrichedSession[] }) {
+// alongside the "prescribed" side, resolved from getPrescribedSet.
+// Today prescribed = auto-recommended; later a doctor-saved
+// prescription preempts the auto set (see lib/rehab/recommendation.js
+// -> getPrescribedSet). This card doesn't care which — it always
+// reads the same seam.
+function AdherenceCard({
+  sessions,
+  patientId,
+}: {
+  sessions: EnrichedSession[];
+  patientId: string;
+}) {
+  const recs = useRecommendations(patientId);
   // Filter out empty / aborted sessions — a session where the patient
   // never actually did the movement (0 reps for RepCount, 0 ms in
   // zone for HoldInZone, etc.) should NOT count toward adherence.
@@ -633,11 +653,35 @@ function AdherenceCard({ sessions }: { sessions: EnrichedSession[] }) {
   );
   const thisWeek = perWeek.length > 0 ? perWeek[perWeek.length - 1] : null;
 
+  const prescribedCount = recs.slugs.size;
+  // How many DISTINCT prescribed slugs the patient has actually done
+  // this week? That's the natural "prescribed adherence" numerator.
+  const distinctPrescribedThisWeekDone = useMemo(() => {
+    if (prescribedCount === 0) return 0;
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const seen = new Set<string>();
+    for (const s of summaries) {
+      const created = new Date(s.created_at).getTime();
+      if (!Number.isFinite(created) || created < cutoff) continue;
+      const slug = typeof s.movement === "string" ? s.movement : null;
+      if (slug && recs.slugs.has(slug)) seen.add(slug);
+    }
+    return seen.size;
+  }, [summaries, recs.slugs, prescribedCount]);
+
+  const prescribedDenominator = prescribedCount > 0 ? String(prescribedCount) : "—";
+  const sourceLabel =
+    recs.source === "doctor" ? "clinician-prescribed" : "auto-recommended";
+
   return (
     <ChartCard
       icon={CalendarDays}
       title="Adherence"
-      subtitle="Completed sessions vs prescription (prescribed side coming with the recommendation feature)"
+      subtitle={
+        prescribedCount > 0
+          ? `Completed sessions vs ${prescribedCount} ${sourceLabel} exercise${prescribedCount === 1 ? "" : "s"}`
+          : "Completed sessions — no prescription set yet"
+      }
     >
       <div className="grid gap-4 sm:grid-cols-3">
         <div className="rounded-card border border-border bg-surface p-4">
@@ -646,10 +690,17 @@ function AdherenceCard({ sessions }: { sessions: EnrichedSession[] }) {
           </p>
           <p className="mt-2 tabular text-3xl font-semibold text-foreground">
             {thisWeek?.total ?? 0}
-            <span className="ml-1 text-xs font-normal text-muted">/ —</span>
+            <span className="ml-1 text-xs font-normal text-muted">
+              / {prescribedDenominator}
+            </span>
           </p>
           <p className="mt-1 text-[11px] text-muted">
-            {thisWeek ? `${thisWeek.days} active day${thisWeek.days === 1 ? "" : "s"}` : "No sessions yet"}
+            {thisWeek
+              ? `${thisWeek.days} active day${thisWeek.days === 1 ? "" : "s"}`
+              : "No sessions yet"}
+            {prescribedCount > 0
+              ? ` · ${distinctPrescribedThisWeekDone}/${prescribedCount} prescribed touched`
+              : ""}
           </p>
         </div>
         <div className="rounded-card border border-border bg-surface p-4">
@@ -670,8 +721,13 @@ function AdherenceCard({ sessions }: { sessions: EnrichedSession[] }) {
         </div>
       </div>
       <p className="mt-4 text-xs text-muted">
-        Prescribed: <span className="tabular text-foreground">—</span> · will populate
-        once a rehab prescription is assigned by the clinician.
+        Prescribed:{" "}
+        <span className="tabular text-foreground">
+          {prescribedCount > 0 ? `${prescribedCount} exercise${prescribedCount === 1 ? "" : "s"}` : "—"}
+        </span>
+        {prescribedCount > 0
+          ? ` · ${sourceLabel} from ${recs.assessmentsUsed} recent assessment${recs.assessmentsUsed === 1 ? "" : "s"}.`
+          : " · will populate once a rehab prescription is assigned or the patient completes an assessment."}
       </p>
     </ChartCard>
   );
