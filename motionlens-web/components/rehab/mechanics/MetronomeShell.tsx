@@ -34,6 +34,10 @@ interface Props {
   /** Enable the audio click on each scheduled beat. Default true. */
   audio?: boolean;
   config: MetronomeConfig;
+  /** Optional session-state harvester — same additive pattern as
+   *  RepCountShell.onSnapshot. Fires whenever a beat is graded so
+   *  pages can persist perfect/good/miss counts + beat tail. */
+  onSnapshot?: (state: MetronomeState, score: Score) => void;
   /** Compact live-mode variant. */
   compact?: boolean;
 }
@@ -42,6 +46,7 @@ export function MetronomeShell({
   eventTrigger,
   audio = true,
   config,
+  onSnapshot,
   compact = false,
 }: Props) {
   const stateRef = useRef<MetronomeState>(emptyMetronomeState());
@@ -54,6 +59,10 @@ export function MetronomeShell({
     useState<"good" | "bad" | "neutral">("neutral");
   const [pulse, setPulse] = useState(false);
   const [, setTick] = useState(0);
+  const onSnapshotRef = useRef(onSnapshot);
+  useEffect(() => {
+    onSnapshotRef.current = onSnapshot;
+  }, [onSnapshot]);
 
   // Process patient event ticks.
   useEffect(() => {
@@ -62,6 +71,9 @@ export function MetronomeShell({
     const r = metronomeStep(stateRef.current, scoreRef.current, now, config, now);
     stateRef.current = r.state;
     scoreRef.current = r.score;
+    // Emit each graded beat so the page can capture the running
+    // perfect/good/miss counts + beat tail.
+    onSnapshotRef.current?.(r.state, r.score);
     const grade = r.event?.kind ?? "";
     if (grade === "beat_perfect") {
       setFeedback("Perfect!");

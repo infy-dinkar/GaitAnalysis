@@ -31,6 +31,11 @@ interface Props {
   /** Length of the cursor's trail visualisation, in samples. */
   trailLength?: number;
   config: TraceConfig;
+  /** Optional session-state harvester — same additive pattern as
+   *  RepCountShell.onSnapshot. Fires on delta-gated sample-count
+   *  changes so pages can capture accuracy/smoothness/mean-dev at
+   *  save time. */
+  onSnapshot?: (state: TraceState, score: Score) => void;
   /** Compact live-mode variant. */
   compact?: boolean;
 }
@@ -46,6 +51,7 @@ export function TraceShell({
   loopDurationMs = 6000,
   trailLength = 30,
   config,
+  onSnapshot,
   compact = false,
 }: Props) {
   const stateRef = useRef<TraceState>(emptyTraceState());
@@ -53,6 +59,13 @@ export function TraceShell({
   const startedAtRef = useRef<number>(performance.now());
   const trailRef = useRef<TracePathPoint[]>([]);
   const [tick, setTick] = useState(0);
+  const onSnapshotRef = useRef(onSnapshot);
+  useEffect(() => {
+    onSnapshotRef.current = onSnapshot;
+  }, [onSnapshot]);
+  // Delta-gate: only fire when samples change by >=1 (~60Hz naturally).
+  // Throttle to at most 5Hz to keep the consumer cheap.
+  const lastEmitRef = useRef<{ samples: number; at: number } | null>(null);
 
   // Mirror live props in a ref so the rAF loop reads the latest
   // values without re-creating itself on each prop change. Cursor
@@ -78,6 +91,14 @@ export function TraceShell({
       stateRef.current = r.state;
       scoreRef.current = r.score;
       trailRef.current = [...trailRef.current.slice(-p.trailLength), p.cursor];
+      const last = lastEmitRef.current;
+      if (
+        !last
+        || (r.state.samples !== last.samples && now - last.at >= 200)
+      ) {
+        lastEmitRef.current = { samples: r.state.samples, at: now };
+        onSnapshotRef.current?.(r.state, r.score);
+      }
       setTick((x) => (x + 1) % 1_000_000);
       raf = requestAnimationFrame(loop);
     };

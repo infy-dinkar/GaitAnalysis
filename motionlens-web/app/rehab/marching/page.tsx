@@ -39,6 +39,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { MetronomeShell } from "@/components/rehab/mechanics/MetronomeShell";
+import type { MetronomeState, Score as MechanicScore } from "@/lib/rehab/gameState";
 import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
 import { RehabStartCard } from "@/components/rehab/RehabStartCard";
 import { LiveModeLayout } from "@/components/live/LiveModeLayout";
@@ -107,6 +108,13 @@ function Inner() {
   const lastKpRef = useRef<PoseSnapshot | null>(null);
   const peakFlexionRef = useRef<number>(0);
   const liftCountRef = useRef<number>(0);
+  const metronomeStateRef = useRef<MetronomeState | null>(null);
+  const handleMetronomeSnapshot = useCallback(
+    (state: MetronomeState, _score: MechanicScore) => {
+      metronomeStateRef.current = state;
+    },
+    [],
+  );
 
   const { patient, isDoctorFlow } = usePatientContext();
 
@@ -233,9 +241,28 @@ function Inner() {
         started_at_ms: sessionStartRef.current,
         duration_sec: elapsedSecondsSince(sessionStartRef.current),
         score: { points: 0, streak: 0, bestStreak: 0 },
-        mechanic_state: {
-          liftCount: lifts,
-        },
+        mechanic_state: (() => {
+          const m = metronomeStateRef.current;
+          const perfect = m?.perfectCount ?? 0;
+          const good = m?.goodCount ?? 0;
+          const miss = m?.missCount ?? 0;
+          const total = perfect + good + miss;
+          return {
+            liftCount: lifts,
+            perfect,
+            good,
+            miss,
+            totalBeats: total,
+            onBeatPct: total > 0 ? ((perfect + good) / total) * 100 : 0,
+            meanAbsDeviationMs: m?.meanAbsDeviationMs ?? 0,
+            beatsTail: m
+              ? m.beats.slice(-20).map((b) => ({
+                  deviationMs: b.deviationMs,
+                  grade: b.grade,
+                }))
+              : [],
+          };
+        })(),
         signal: {
           name: "hip_flexion",
           unit: "deg",
@@ -380,6 +407,7 @@ function Inner() {
                         audio={false}
                         config={MARCHING_CONFIG}
                         compact
+                        onSnapshot={handleMetronomeSnapshot}
                       />
                     ) : (
                       <RehabStartCard

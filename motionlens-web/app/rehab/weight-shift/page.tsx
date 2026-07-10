@@ -40,6 +40,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { WeightShiftShell } from "@/components/rehab/mechanics/WeightShiftShell";
+import type { WeightShiftState, Score as MechanicScore } from "@/lib/rehab/gameState";
 import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
 import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import {
@@ -130,6 +131,15 @@ function Inner() {
   const baselineRef = useRef<Baseline | null>(null);
 
   const sessionStartRef = useRef<number>(performance.now());
+  const weightShiftStateRef = useRef<WeightShiftState | null>(null);
+  const maxAbsShiftRef = useRef<number>(0);
+  const stepCountRef = useRef<number>(0);
+  const prevStepDetectedRef = useRef<boolean>(false);
+  const handleWSShapshot = useCallback((state: WeightShiftState, _score: MechanicScore) => {
+    weightShiftStateRef.current = state;
+    const abs = Math.abs(state.cursor);
+    if (abs > maxAbsShiftRef.current) maxAbsShiftRef.current = abs;
+  }, []);
   const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
   const lastKpRef = useRef<PoseSnapshot | null>(null);
   const peakShiftRef = useRef<number>(0);
@@ -165,7 +175,16 @@ function Inner() {
         started_at_ms: sessionStartRef.current,
         duration_sec: elapsedSecondsSince(sessionStartRef.current),
         score: { points: 0, streak: 0, bestStreak: 0 },
-        mechanic_state: null,
+        mechanic_state: weightShiftStateRef.current
+          ? {
+              zonesCaptured: weightShiftStateRef.current.capturedZoneIds.length,
+              totalZones: WEIGHT_SHIFT_CONFIG.zones.length,
+              capturedZoneIds: weightShiftStateRef.current.capturedZoneIds,
+              maxExcursion: maxAbsShiftRef.current,
+              stepPausedMs: weightShiftStateRef.current.stepPausedMs,
+              stepCount: stepCountRef.current,
+            }
+          : null,
         signal: {
           name: "ml_shift",
           unit: "normalised",
@@ -278,6 +297,11 @@ function Inner() {
         || lAnkleXDrift > STEP_X_THRESH_NORM
         || rAnkleXDrift > STEP_X_THRESH_NORM;
       setStepDetected(stepped);
+      // Rising-edge count — increment once per new step, not every frame.
+      if (stepped && !prevStepDetectedRef.current) {
+        stepCountRef.current += 1;
+      }
+      prevStepDetectedRef.current = stepped;
     },
     [phase],
   );
@@ -357,7 +381,7 @@ function Inner() {
                   </div>
                 )}
                 <div className="flex min-h-0 flex-1 flex-col">
-                  <WeightShiftShell shift={shift} stepDetected={stepDetected} config={WEIGHT_SHIFT_CONFIG} compact />
+                  <WeightShiftShell shift={shift} stepDetected={stepDetected} config={WEIGHT_SHIFT_CONFIG} compact onSnapshot={handleWSShapshot} />
                 </div>
                 <div className="no-pdf"><RehabSessionFooter buildPayload={buildRehabPayload} label="Save session" compact /></div>
               </>

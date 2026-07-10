@@ -34,6 +34,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { TraceShell } from "@/components/rehab/mechanics/TraceShell";
+import type { TraceState, Score as MechanicScore } from "@/lib/rehab/gameState";
 import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
 import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import { DEFAULT_LEVEL_INDEX } from "@/lib/rehab/progressionLadders";
@@ -105,6 +106,10 @@ function Inner() {
   const { patient, isDoctorFlow } = usePatientContext();
 
   const sessionStartRef = useRef<number>(performance.now());
+  const traceStateRef = useRef<TraceState | null>(null);
+  const handleTraceSnapshot = useCallback((state: TraceState, _score: MechanicScore) => {
+    traceStateRef.current = state;
+  }, []);
   const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
   const lastKpRef = useRef<PoseSnapshot | null>(null);
 
@@ -174,7 +179,7 @@ function Inner() {
         started_at_ms: sessionStartRef.current,
         duration_sec: durationSec,
         score: { points: 0, streak: 0, bestStreak: 0 },
-        mechanic_state: null,
+        mechanic_state: traceStateRef.current,
         signal: {
           name: "wrist_trace",
           unit: "path",
@@ -252,7 +257,7 @@ function Inner() {
                     </div>
                   )}
                   <div className="flex min-h-0 flex-1 flex-col">
-                    <TraceShell cursor={cursor} pathFn={circlePath} loopDurationMs={LOOP_DURATION_MS} config={TRACE_CONFIG} compact />
+                    <TraceShell cursor={cursor} pathFn={circlePath} loopDurationMs={LOOP_DURATION_MS} config={TRACE_CONFIG} compact onSnapshot={handleTraceSnapshot} />
                   </div>
                   <div className="no-pdf"><RehabSessionFooter buildPayload={buildRehabPayload} label="Save session" compact /></div>
                 </>

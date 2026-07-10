@@ -14,7 +14,7 @@
 
 import { useEffect, useMemo, useState, use as usePromise } from "react";
 import Link from "next/link";
-import { ArrowUpRight, Pencil, Sparkles } from "lucide-react";
+import { ArrowUpRight, LineChart, Pencil, Sparkles } from "lucide-react";
 import { AuthGuard } from "@/components/auth/AuthGuard";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { Button } from "@/components/ui/Button";
@@ -75,6 +75,12 @@ function Content({ patientId }: { patientId: string }) {
             patient&apos;s record.
           </p>
         </div>
+        <Link href={`/dashboard/patients/${patientId}/rehab/progress`}>
+          <Button variant="secondary" size="sm">
+            <LineChart className="h-4 w-4" />
+            Progress
+          </Button>
+        </Link>
       </div>
 
       <RecommendedStrip

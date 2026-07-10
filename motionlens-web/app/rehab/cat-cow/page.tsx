@@ -41,6 +41,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { TraceShell } from "@/components/rehab/mechanics/TraceShell";
+import type { TraceState, Score as MechanicScore } from "@/lib/rehab/gameState";
 import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
 import { RehabStartCard } from "@/components/rehab/RehabStartCard";
 import { LiveModeLayout } from "@/components/live/LiveModeLayout";
@@ -100,6 +101,10 @@ function Inner() {
   const { patient, isDoctorFlow } = usePatientContext();
 
   const sessionStartRef = useRef<number>(performance.now());
+  const traceStateRef = useRef<TraceState | null>(null);
+  const handleTraceSnapshot = useCallback((state: TraceState, _score: MechanicScore) => {
+    traceStateRef.current = state;
+  }, []);
   const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
   const lastKpRef = useRef<PoseSnapshot | null>(null);
   const peakProxyRef = useRef<number>(0);
@@ -151,7 +156,7 @@ function Inner() {
         started_at_ms: sessionStartRef.current,
         duration_sec: elapsedSecondsSince(sessionStartRef.current),
         score: { points: 0, streak: 0, bestStreak: 0 },
-        mechanic_state: null,
+        mechanic_state: traceStateRef.current,
         signal: {
           name: "spine_flex_proxy",
           unit: "deg",
@@ -251,7 +256,7 @@ function Inner() {
                   )}
                   <div className="flex min-h-0 flex-1 flex-col">
                     {started ? (
-                      <TraceShell cursor={cursor} pathFn={catCowPath} loopDurationMs={LOOP_DURATION_MS} config={TRACE_CONFIG} compact />
+                      <TraceShell cursor={cursor} pathFn={catCowPath} loopDurationMs={LOOP_DURATION_MS} config={TRACE_CONFIG} compact onSnapshot={handleTraceSnapshot} />
                     ) : (
                       <RehabStartCard onStart={() => setStarted(true)} />
                     )}
