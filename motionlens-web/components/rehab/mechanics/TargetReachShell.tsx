@@ -31,6 +31,11 @@ interface Props {
   /** Default normalised radius. */
   defaultRadius?: number;
   config: TargetReachConfig;
+  /** Optional session-state harvester. Called on each meaningful
+   *  transition (delta-gated on hits/misses/points) so the mounting
+   *  page can persist mechanic_state without peeking into shell
+   *  internals. Same additive pattern as RepCountShell.onSnapshot. */
+  onSnapshot?: (state: TargetReachState, score: Score) => void;
   /** Compact live-mode variant. */
   compact?: boolean;
 }
@@ -41,6 +46,7 @@ export function TargetReachShell({
   defaultTtlMs = 3000,
   defaultRadius = 0.07,
   config,
+  onSnapshot,
   compact = false,
 }: Props) {
   const stateRef = useRef<TargetReachState>(emptyTargetReachState());
@@ -48,6 +54,13 @@ export function TargetReachShell({
   const lastSpawnRef = useRef<number>(0);
   const idCounterRef = useRef(0);
   const [, setTick] = useState(0);
+
+  // onSnapshot ref + delta-gate — mirrors RepCountShell.
+  const onSnapshotRef = useRef(onSnapshot);
+  useEffect(() => {
+    onSnapshotRef.current = onSnapshot;
+  }, [onSnapshot]);
+  const lastEmitRef = useRef<{ hits: number; misses: number; points: number } | null>(null);
 
   // Mirror live props in a ref so the rAF loop reads the latest
   // values without re-creating itself on each prop change. Cursor
@@ -108,6 +121,21 @@ export function TargetReachShell({
       );
       stateRef.current = r.state;
       scoreRef.current = r.score;
+      // Delta-gated snapshot — fire when hit/miss counts or points change.
+      const last = lastEmitRef.current;
+      if (
+        !last
+        || last.hits !== r.state.hits
+        || last.misses !== r.state.misses
+        || last.points !== r.score.points
+      ) {
+        lastEmitRef.current = {
+          hits: r.state.hits,
+          misses: r.state.misses,
+          points: r.score.points,
+        };
+        onSnapshotRef.current?.(r.state, r.score);
+      }
       setTick((x) => (x + 1) % 1_000_000);
       raf = requestAnimationFrame(tick);
     };

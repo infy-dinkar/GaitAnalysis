@@ -27,6 +27,10 @@ interface Props {
   /** True if the patient has lifted a foot — game pauses dwell. */
   stepDetected: boolean;
   config: WeightShiftConfig;
+  /** Optional session-state harvester — same additive pattern as
+   *  RepCountShell.onSnapshot. Fires when captured zones change so
+   *  pages can persist mechanic_state without peeking. */
+  onSnapshot?: (state: WeightShiftState, score: Score) => void;
   /** Compact live-mode variant. */
   compact?: boolean;
 }
@@ -35,6 +39,7 @@ export function WeightShiftShell({
   shift,
   stepDetected,
   config,
+  onSnapshot,
   compact = false,
 }: Props) {
   const stateRef = useRef<WeightShiftState>(emptyWeightShiftState());
@@ -43,6 +48,11 @@ export function WeightShiftShell({
   const [feedbackTone, setFeedbackTone] =
     useState<"good" | "bad" | "neutral">("neutral");
   const [, setTick] = useState(0);
+  const onSnapshotRef = useRef(onSnapshot);
+  useEffect(() => {
+    onSnapshotRef.current = onSnapshot;
+  }, [onSnapshot]);
+  const lastEmitRef = useRef<{ captured: number; points: number } | null>(null);
 
   // Mirror live props in a ref so the rAF loop reads the latest
   // values. No setState here — safe at 60 Hz prop updates.
@@ -63,6 +73,16 @@ export function WeightShiftShell({
       const r = weightShiftStep(stateRef.current, scoreRef.current, sh, sd, c, now);
       stateRef.current = r.state;
       scoreRef.current = r.score;
+      const capturedNow = r.state.capturedZoneIds.length;
+      const last = lastEmitRef.current;
+      if (
+        !last
+        || last.captured !== capturedNow
+        || last.points !== r.score.points
+      ) {
+        lastEmitRef.current = { captured: capturedNow, points: r.score.points };
+        onSnapshotRef.current?.(r.state, r.score);
+      }
       if (r.event?.kind === "zone_captured") {
         setFeedback("Zone captured");
         setFeedbackTone("good");

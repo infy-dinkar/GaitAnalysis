@@ -71,12 +71,42 @@
  *  @property {number=} weight
  */
 
+/** @typedef {object} SharedMetric
+ *  Optional per-exercise declaration that this exercise's rehab
+ *  signal + a specific assessment metric measure the same underlying
+ *  clinical construct in the same units — so the proof-of-progress
+ *  chart can plot BASELINE (earliest assessment) → REHAB TREND (daily
+ *  session peaks) → RE-ASSESSMENT (later assessment) on ONE axis.
+ *
+ *  Populated ONLY for exercises where the direct match is clean —
+ *  the engine in proofArtifact.js skips exercises without this field.
+ *
+ *  @property {AssessmentModule} assessmentModule
+ *  @property {string=} assessmentBodyPart   biomech-only filter
+ *  @property {string[]=} assessmentMovements biomech-only movement filter
+ *  @property {string=} gaitMetric           gait-only metric key
+ *  @property {"raw"|"deficit_from_180"} [rehabTransform] transformation
+ *    applied to the rehab signal.value_at_peak before plotting. For
+ *    knee-extension the rehab side saves knee extension angle (higher
+ *    better) while AKE tracks extension deficit (lower better). Setting
+ *    `deficit_from_180` computes `180 - rehab_value` so both series
+ *    live in the same "deficit-degrees" axis.
+ *  @property {string} unit                   axis unit label ("°", "bpm", "cm")
+ *  @property {"higher"|"lower"} betterDirection improvement direction
+ *  @property {string} label                  short axis / chart label
+ *  @property {string=} caveat                clinician-facing note when
+ *    the rehab signal and assessment metric are conceptually related
+ *    but not literally the same measurement (e.g. pelvic tilt vs
+ *    single-leg pelvic drop).
+ */
+
 /** @typedef {object} ExerciseIndication
  *  @property {string} slug
  *  @property {AssessmentModule[]} linkedAssessments
  *  @property {DeficitRule[]} deficitRules
  *  @property {1|2|3} priority
  *  @property {string=} note      Optional prose shown as fallback tooltip
+ *  @property {SharedMetric=} sharedMetric  Optional proof-of-progress link
  */
 
 /** All 24 rehab exercises' indications. Keyed by slug.
@@ -113,6 +143,14 @@ export const EXERCISE_INDICATIONS = {
       { module: "ake", when: "classification", equals: ["mild", "moderate", "severe"], weight: 1.4 },
     ],
     note: "Terminal knee extension for AKE deficit (post-op / quads inhibition).",
+    sharedMetric: {
+      assessmentModule: "ake",
+      unit: "°",
+      betterDirection: "lower",
+      label: "Knee extension deficit",
+      rehabTransform: "deficit_from_180",
+      caveat: "Rehab side computed as (180° − peak extension) so both series live in the same deficit-degree axis.",
+    },
   },
   "step-up": {
     slug: "step-up",
@@ -154,6 +192,13 @@ export const EXERCISE_INDICATIONS = {
       { module: "trendelenburg", when: "classification", equals: ["positive", "compensated"], weight: 1.4 },
     ],
     note: "Trendelenburg retraining — hip-drop control.",
+    sharedMetric: {
+      assessmentModule: "trendelenburg",
+      unit: "°",
+      betterDirection: "lower",
+      label: "Pelvic drop / tilt",
+      caveat: "Pelvic control proxy — rehab measures pelvic tilt during hold; assessment measures max pelvic drop in single-leg stance. Both in degrees.",
+    },
   },
   "hip-abduction": {
     slug: "hip-abduction",
@@ -197,6 +242,14 @@ export const EXERCISE_INDICATIONS = {
       { module: "tug", when: "classification", equals: ["mild_fall_risk", "elevated_fall_risk", "significant_fall_risk"] },
     ],
     note: "Cadence + symmetry retraining for gait deficit.",
+    sharedMetric: {
+      assessmentModule: "gait",
+      gaitMetric: "cadence",
+      unit: "bpm",
+      betterDirection: "higher",
+      label: "Gait cadence",
+      caveat: "Rehab-side cadence isn't currently persisted per session — chart shows baseline + re-assessment; trend populates once cadence is logged.",
+    },
   },
   "lateral-step": {
     slug: "lateral-step",
@@ -226,6 +279,15 @@ export const EXERCISE_INDICATIONS = {
       },
     ],
     note: "Forward-head / cervical posture reset.",
+    sharedMetric: {
+      assessmentModule: "biomech",
+      assessmentBodyPart: "neck",
+      assessmentMovements: ["flexion_extension"],
+      unit: "°",
+      betterDirection: "higher",
+      label: "Cervical ROM",
+      caveat: "Rehab side uses forward-head offset (lower = better) — chart plots the raw values; interpretation notes the direction difference.",
+    },
   },
   "back-extension": {
     slug: "back-extension",
@@ -298,6 +360,14 @@ export const EXERCISE_INDICATIONS = {
       },
     ],
     note: "Shoulder abduction ROM + elevation-compensation retraining.",
+    sharedMetric: {
+      assessmentModule: "biomech",
+      assessmentBodyPart: "shoulder",
+      assessmentMovements: ["abduction_adduction", "abduction"],
+      unit: "°",
+      betterDirection: "higher",
+      label: "Shoulder abduction ROM",
+    },
   },
   "wall-clock": {
     slug: "wall-clock",
@@ -311,6 +381,14 @@ export const EXERCISE_INDICATIONS = {
       },
     ],
     note: "Multi-plane reach ROM.",
+    sharedMetric: {
+      assessmentModule: "biomech",
+      assessmentBodyPart: "shoulder",
+      assessmentMovements: ["flexion_extension", "abduction_adduction", "flexion", "abduction"],
+      unit: "°",
+      betterDirection: "higher",
+      label: "Shoulder ROM",
+    },
   },
   "pendulum": {
     slug: "pendulum",
@@ -328,6 +406,14 @@ export const EXERCISE_INDICATIONS = {
       },
     ],
     note: "Codman-style passive-motion for early post-op / adhesive capsulitis.",
+    sharedMetric: {
+      assessmentModule: "biomech",
+      assessmentBodyPart: "shoulder",
+      assessmentMovements: ["rotation", "flexion_extension", "external_rotation", "internal_rotation"],
+      unit: "°",
+      betterDirection: "higher",
+      label: "Shoulder rotation / ROM",
+    },
   },
   "wall-slide": {
     slug: "wall-slide",
@@ -345,6 +431,14 @@ export const EXERCISE_INDICATIONS = {
       },
     ],
     note: "Overhead flexion ROM + scapulohumeral rhythm.",
+    sharedMetric: {
+      assessmentModule: "biomech",
+      assessmentBodyPart: "shoulder",
+      assessmentMovements: ["flexion_extension", "flexion"],
+      unit: "°",
+      betterDirection: "higher",
+      label: "Shoulder flexion ROM",
+    },
   },
   "external-rotation": {
     slug: "external-rotation",
@@ -380,3 +474,10 @@ export const INDICATED_SLUGS = Object.keys(EXERCISE_INDICATIONS);
 export function indicationOf(slug) {
   return EXERCISE_INDICATIONS[slug] ?? null;
 }
+
+/** Slugs that have a shared-metric proof-of-progress link declared.
+ *  The Progress page iterates through these to render one chart per
+ *  exercise (with data). */
+export const SHARED_METRIC_SLUGS = INDICATED_SLUGS.filter(
+  (slug) => EXERCISE_INDICATIONS[slug]?.sharedMetric,
+);

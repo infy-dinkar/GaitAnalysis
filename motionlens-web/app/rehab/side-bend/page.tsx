@@ -48,6 +48,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { TargetReachShell } from "@/components/rehab/mechanics/TargetReachShell";
+import type { TargetReachState, Score as MechanicScore } from "@/lib/rehab/gameState";
 import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
 import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import { computeLateralTrunkFlexionDeg } from "@/lib/rehab/poseMetrics";
@@ -94,6 +95,10 @@ function Inner() {
   const { patient, isDoctorFlow } = usePatientContext();
 
   const sessionStartRef = useRef<number>(performance.now());
+  const reachStateRef = useRef<TargetReachState | null>(null);
+  const handleReachSnapshot = useCallback((state: TargetReachState, _score: MechanicScore) => {
+    reachStateRef.current = state;
+  }, []);
   const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
   const lastKpRef = useRef<PoseSnapshot | null>(null);
   const peakBendRef = useRef<number>(0);
@@ -155,7 +160,7 @@ function Inner() {
         started_at_ms: sessionStartRef.current,
         duration_sec: elapsedSecondsSince(sessionStartRef.current),
         score: { points: 0, streak: 0, bestStreak: 0 },
-        mechanic_state: null,
+        mechanic_state: reachStateRef.current,
         signal: {
           name: "lateral_trunk_flexion",
           unit: "deg",
@@ -244,7 +249,7 @@ function Inner() {
                     </div>
                   )}
                   <div className="flex min-h-0 flex-1 flex-col">
-                    <TargetReachShell cursor={cursor} config={REACH_CONFIG} compact />
+                    <TargetReachShell cursor={cursor} config={REACH_CONFIG} compact onSnapshot={handleReachSnapshot} />
                   </div>
                   <div className="no-pdf"><RehabSessionFooter buildPayload={buildRehabPayload} label="Save session" compact /></div>
                 </>

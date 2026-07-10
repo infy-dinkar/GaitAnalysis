@@ -39,6 +39,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { TargetReachShell } from "@/components/rehab/mechanics/TargetReachShell";
+import type { TargetReachState, Score as MechanicScore } from "@/lib/rehab/gameState";
 import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
 import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import { RehabStartCard } from "@/components/rehab/RehabStartCard";
@@ -92,6 +93,10 @@ function Inner() {
   const { patient, isDoctorFlow } = usePatientContext();
 
   const sessionStartRef = useRef<number>(performance.now());
+  const reachStateRef = useRef<TargetReachState | null>(null);
+  const handleReachSnapshot = useCallback((state: TargetReachState, _score: MechanicScore) => {
+    reachStateRef.current = state;
+  }, []);
   const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
   const lastKpRef = useRef<PoseSnapshot | null>(null);
   const peakExtensionRef = useRef<number>(0);
@@ -160,7 +165,7 @@ function Inner() {
         started_at_ms: sessionStartRef.current,
         duration_sec: elapsedSecondsSince(sessionStartRef.current),
         score: { points: 0, streak: 0, bestStreak: 0 },
-        mechanic_state: null,
+        mechanic_state: reachStateRef.current,
         signal: {
           name: "knee_extension",
           unit: "deg",
@@ -279,7 +284,7 @@ function Inner() {
 
                   <div className="flex min-h-0 flex-1 flex-col">
                     {started ? (
-                      <TargetReachShell cursor={cursor} config={REACH_CONFIG} compact />
+                      <TargetReachShell cursor={cursor} config={REACH_CONFIG} compact onSnapshot={handleReachSnapshot} />
                     ) : (
                       <RehabStartCard onStart={() => setStarted(true)} />
                     )}
