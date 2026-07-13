@@ -29,6 +29,8 @@ export interface ReportSummaryDTO {
     | "functional_reach"
     | "single_leg_hop"
     | "counter_movement_jump"
+    | "tuck_jump"
+    | "overhead_squat"
     | "rehab";
   body_part: string | null;
   movement: string | null;
@@ -81,6 +83,8 @@ export interface ReportCreatePayload {
     | "functional_reach"
     | "single_leg_hop"
     | "counter_movement_jump"
+    | "tuck_jump"
+    | "overhead_squat"
     | "rehab";
   body_part?: "shoulder" | "neck" | "knee" | "hip" | "ankle";
   movement?: string;

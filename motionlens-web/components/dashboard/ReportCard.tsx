@@ -141,6 +141,16 @@ const MODULE_META: Record<
     icon: MoveRight,
     tone: "bg-violet-500/10 text-violet-700 dark:text-violet-400",
   },
+  tuck_jump: {
+    label: "Tuck Jump (Myer's TJA)",
+    icon: MoveRight,
+    tone: "bg-fuchsia-500/10 text-fuchsia-700 dark:text-fuchsia-400",
+  },
+  overhead_squat: {
+    label: "Overhead Squat",
+    icon: MoveRight,
+    tone: "bg-sky-500/10 text-sky-700 dark:text-sky-400",
+  },
   rehab: {
     label: "Rehab session",
     icon: Dumbbell,

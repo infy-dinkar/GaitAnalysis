@@ -218,6 +218,24 @@ const MODULES = [
     tone: "from-violet-500/15 to-violet-500/5",
     iconTone: "text-violet-600",
   },
+  {
+    href: "orthopedic/tuck-jump",
+    eyebrow: "Injury-risk screen · frontal",
+    title: "Tuck Jump Assessment",
+    body: "Myer's TJA — continuous ~10 s tuck-jump session (frontal). Scored against Myer's 10-item checklist and classified good / moderate / poor. 8 items measurable single-camera; items 5 (foot yaw) and 7 (contact noise) honestly marked not assessed.",
+    icon: MoveRight,
+    tone: "from-fuchsia-500/15 to-fuchsia-500/5",
+    iconTone: "text-fuchsia-600",
+  },
+  {
+    href: "orthopedic/overhead-squat",
+    eyebrow: "Movement screen · frontal",
+    title: "Overhead Squat Assessment",
+    body: "NASM/FMS-style overhead-squat screen — 3-5 slow reps with arms overhead (frontal). Scored against a 7-item checklist: knee valgus, pelvic drop, foot placement, arm drop, depth proxy. Items 6 (torso lean) and 7 (heel rise) need sagittal/feet close-up so honestly not assessed.",
+    icon: MoveRight,
+    tone: "from-sky-500/15 to-sky-500/5",
+    iconTone: "text-sky-600",
+  },
 ];
 
 export default function AnalyzePage({
