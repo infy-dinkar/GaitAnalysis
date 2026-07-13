@@ -57,6 +57,8 @@ import { SavedPronatorDriftReport } from "@/components/orthopedic/SavedPronatorD
 import { SavedFunctionalReachReport } from "@/components/orthopedic/SavedFunctionalReachReport";
 import { SavedSingleLegHopReport } from "@/components/orthopedic/SavedSingleLegHopReport";
 import { SavedCMJReport } from "@/components/orthopedic/SavedCMJReport";
+import { SavedTuckJumpReport } from "@/components/orthopedic/SavedTuckJumpReport";
+import { SavedOverheadSquatReport } from "@/components/orthopedic/SavedOverheadSquatReport";
 import { SavedRehabReport } from "@/components/dashboard/SavedRehabReport";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { getReport, type ReportDTO } from "@/lib/reports";
@@ -95,6 +97,8 @@ const MODULE_META: Record<
   functional_reach: { label: "Functional Reach", icon: MoveRight },
   single_leg_hop: { label: "Single-Leg Hop", icon: MoveRight },
   counter_movement_jump: { label: "Counter-Movement Jump", icon: MoveRight },
+  tuck_jump: { label: "Tuck Jump (Myer's TJA)", icon: MoveRight },
+  overhead_squat: { label: "Overhead Squat", icon: MoveRight },
   rehab: { label: "Rehab session", icon: Dumbbell },
 };
 
@@ -405,6 +409,24 @@ function ReportView({ id }: { id: string }) {
 
         {report.module === "counter_movement_jump" && (
           <SavedCMJReport
+            patientName={patient?.name ?? null}
+            patient={patient}
+            metrics={report.metrics as Record<string, unknown>}
+            observations={report.observations as Record<string, unknown>}
+          />
+        )}
+
+        {report.module === "tuck_jump" && (
+          <SavedTuckJumpReport
+            patientName={patient?.name ?? null}
+            patient={patient}
+            metrics={report.metrics as Record<string, unknown>}
+            observations={report.observations as Record<string, unknown>}
+          />
+        )}
+
+        {report.module === "overhead_squat" && (
+          <SavedOverheadSquatReport
             patientName={patient?.name ?? null}
             patient={patient}
             metrics={report.metrics as Record<string, unknown>}

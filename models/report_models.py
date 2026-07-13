@@ -48,6 +48,8 @@ class ReportCreate(BaseModel):
         # error detail array can't stringify cleanly.
         "counter_movement_jump",
         "single_leg_hop",
+        "tuck_jump",
+        "overhead_squat",
         # Rehab game sessions — one report per exercise session
         # (K1 Squat, K5 Wall Sit, ...). Payload shape lives in
         # `metrics` (provider-agnostic dict) so all 24 exercises share
