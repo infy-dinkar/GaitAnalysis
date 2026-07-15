@@ -32,6 +32,15 @@ export function GaitCyclePercentBlock({ data }: Props) {
     || data.variabilityPct !== null;
   if (!hasAny) return null;
 
+  // Phase-timing (stance/swing) requires ≥ 2 gait cycles AND a
+  // physiologically-plausible mask sum (see the sanity guard in
+  // engines/gait_engine.py:_gait_cycle_percentages). When those
+  // don't hold the engine returns null for all 5 phase keys, but
+  // we still surface cadence + variability + the physics-independent
+  // Y-axis so the block isn't useless — just muted.
+  const phaseUnavailable =
+    data.left.stancePct === null && data.right.stancePct === null;
+
   // Chart layout (viewBox-based so it scales at any width).
   const width = 720;
   const height = 220;
@@ -58,6 +67,13 @@ export function GaitCyclePercentBlock({ data }: Props) {
         <Legend />
       </div>
 
+      {phaseUnavailable ? (
+        <div className="mt-4 rounded-md border border-border bg-elevated/40 px-4 py-3 text-sm text-muted">
+          Stance / swing not computed — insufficient validated
+          walking data. Cadence + variability below are reported
+          from the same clip.
+        </div>
+      ) : (
       <div className="mt-4 overflow-x-auto">
         <svg
           viewBox={`0 0 ${width} ${height}`}
@@ -154,6 +170,7 @@ export function GaitCyclePercentBlock({ data }: Props) {
           </text>
         </svg>
       </div>
+      )}
 
       {/* Text lines under chart */}
       <div className="mt-3 space-y-1 text-center text-sm text-foreground">

@@ -6,15 +6,13 @@
 // existing `stride_cv` (variability) and `cadence`. Everything here
 // is a plain function — no data fetching, no side effects.
 //
-// Cadence's "expected" upper-bound comes from the shared TS
-// `NORMAL_RANGES.cadence` (defined in lib/gait/metrics.ts) — the
-// engine has a different hard-coded 100-120 range for its
-// text-observation obs strings, but we deliberately reuse the TS
-// constant so the on-screen "[expected]" pill is a single source
-// for display. The engine's obs text is left untouched.
-
+// Cadence's "expected" marker is DISPLAY-ONLY and lives here — set
+// to 120 to match the doctor-validated reference system that this
+// block was aligned against. `NORMAL_RANGES.cadence` in
+// lib/gait/metrics.ts and the engine's obs-string range remain
+// untouched (both still used by their own callers for OK / low /
+// high grading of individual sessions).
 import type { MetricsBlockDTO } from "@/lib/api";
-import { NORMAL_RANGES } from "@/lib/gait/metrics";
 
 export interface GaitCycleSide {
   stancePct: number | null;
@@ -61,10 +59,11 @@ export function getGaitCycleBlock(metrics: MetricsBlockDTO | null | undefined): 
       : null;
 
   // Cadence — pass through from the same metrics block. Expected =
-  // upper bound of the shared TS NORMAL_RANGES.cadence constant, so
-  // the report card shows something like "[130]".
+  // display-only marker matching the doctor-validated reference
+  // system. NOT read from NORMAL_RANGES (which is a session-grading
+  // range, not a single reference value).
   const cadence = n(m.cadence);
-  const cadenceExpected = NORMAL_RANGES.cadence[1];
+  const cadenceExpected = 120;
 
   return {
     left: { stancePct: stanceL, swingPct: swingL },
