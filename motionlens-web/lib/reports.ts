@@ -31,6 +31,7 @@ export interface ReportSummaryDTO {
     | "counter_movement_jump"
     | "tuck_jump"
     | "overhead_squat"
+    | "squat_lateral"
     | "rehab";
   body_part: string | null;
   movement: string | null;
@@ -85,6 +86,7 @@ export interface ReportCreatePayload {
     | "counter_movement_jump"
     | "tuck_jump"
     | "overhead_squat"
+    | "squat_lateral"
     | "rehab";
   body_part?: "shoulder" | "neck" | "knee" | "hip" | "ankle";
   movement?: string;

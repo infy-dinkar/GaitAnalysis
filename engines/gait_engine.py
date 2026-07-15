@@ -543,6 +543,78 @@ def _stance_mask_per_leg(ankle_y_px: np.ndarray) -> np.ndarray:
     return vel <= np.percentile(vel, 30)
 
 
+def _gait_cycle_percentages(
+    mask_L: np.ndarray,
+    mask_R: np.ndarray,
+    hs_L: np.ndarray,
+    hs_R: np.ndarray,
+    fps: float,  # noqa: ARG001 — kept for signature parity / future use
+) -> dict:
+    """Return stance %, swing %, and double-support % per side over the
+    heel-strike-bounded analysis window (first HS to last HS across
+    both sides). Additive helper — does NOT mutate the existing stance
+    or heel-strike math; consumes their outputs by call only.
+
+    Args:
+      mask_L, mask_R : full-length boolean stance masks from
+                       `_stance_mask_per_leg(ts["<side>_ankle"]["y_px"])`.
+      hs_L, hs_R     : integer heel-strike frame indices for each side
+                       (as produced by `_detect_strikes` and then
+                       optionally filtered by the caller's analysis mask).
+      fps            : video FPS (unused today; reserved so the signature
+                       matches the spec and stays stable if we later add
+                       time-based aggregates).
+
+    Guards: if <2 heel strikes total OR the resulting window has zero
+    length, every value returns None. Never divides by zero, never raises.
+    """
+    hs_L_arr = np.asarray(hs_L, dtype=int) if hs_L is not None else np.array([], dtype=int)
+    hs_R_arr = np.asarray(hs_R, dtype=int) if hs_R is not None else np.array([], dtype=int)
+    total_hs = int(len(hs_L_arr) + len(hs_R_arr))
+    null_result = {
+        "stance_pct_left":    None,
+        "stance_pct_right":   None,
+        "swing_pct_left":     None,
+        "swing_pct_right":    None,
+        "double_support_pct": None,
+    }
+    if total_hs < 2:
+        return null_result
+
+    all_strikes = np.concatenate([hs_L_arr, hs_R_arr])
+    w_start = int(all_strikes.min())
+    w_end = int(all_strikes.max())
+    if w_end <= w_start:
+        return null_result
+
+    n_L = int(len(mask_L)) if mask_L is not None else 0
+    n_R = int(len(mask_R)) if mask_R is not None else 0
+    n_min = min(n_L, n_R)
+    if n_min == 0:
+        return null_result
+    # Clamp the window to what the masks actually cover — defends
+    # against strike arrays that outrun the mask (shouldn't happen,
+    # but keeps the helper crash-free on odd inputs).
+    w_start = max(0, min(w_start, n_min - 1))
+    w_end = max(w_start, min(w_end, n_min - 1))
+    win_len = w_end - w_start + 1
+    if win_len <= 0:
+        return null_result
+
+    L_win = np.asarray(mask_L[w_start: w_end + 1], dtype=bool)
+    R_win = np.asarray(mask_R[w_start: w_end + 1], dtype=bool)
+    stance_L = 100.0 * float(L_win.sum()) / float(win_len)
+    stance_R = 100.0 * float(R_win.sum()) / float(win_len)
+    ds = 100.0 * float((L_win & R_win).sum()) / float(win_len)
+    return {
+        "stance_pct_left":    round(stance_L, 1),
+        "stance_pct_right":   round(stance_R, 1),
+        "swing_pct_left":     round(100.0 - stance_L, 1),
+        "swing_pct_right":    round(100.0 - stance_R, 1),
+        "double_support_pct": round(ds, 1),
+    }
+
+
 def compute_meters_per_pixel(ts: dict, user_height_cm: float,
                              pass_segments=None, stance_frames: dict = None):
     """
@@ -1113,6 +1185,19 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         "right_y": ts["right_ankle"]["y"],
     }
 
+    # --- gait-cycle % (stance / swing per side + double support) ---
+    # Additive block — reuses `_stance_mask_per_leg` and the already-
+    # filtered heel-strike indices (`L_idx`, `R_idx`) by call only. The
+    # helper is self-guarded: <2 strikes → every value is None so no
+    # downstream code sees a spurious 0.
+    _cycle_pct = _gait_cycle_percentages(
+        mask_L=_stance_mask_per_leg(ts["left_ankle"]["y_px"]),
+        mask_R=_stance_mask_per_leg(ts["right_ankle"]["y_px"]),
+        hs_L=L_idx,
+        hs_R=R_idx,
+        fps=fps,
+    )
+
     return {
         "step_data":        step_data,
         "cadence":          cadence,
@@ -1125,6 +1210,12 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         "torso_lean":       torso_lean,
         "duration_sec":     dur_sec,
         "n_frames":         n_mask,
+        # New — gait-cycle percentages (may be None on short recordings).
+        "stance_pct_left":    _cycle_pct["stance_pct_left"],
+        "stance_pct_right":   _cycle_pct["stance_pct_right"],
+        "swing_pct_left":     _cycle_pct["swing_pct_left"],
+        "swing_pct_right":    _cycle_pct["swing_pct_right"],
+        "double_support_pct": _cycle_pct["double_support_pct"],
     }
 
 

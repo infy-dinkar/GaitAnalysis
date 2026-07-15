@@ -9,6 +9,8 @@ import { MetricsSection } from "@/components/gait/MetricsSection";
 import { JointTabs, TabDef } from "@/components/gait/JointTabs";
 import { InfoBox } from "@/components/gait/InfoBox";
 import { GaitCycleSection } from "@/components/gait/GaitCycleSection";
+import { GaitCyclePercentBlock } from "@/components/gait/GaitCyclePercentBlock";
+import { getGaitCycleBlock } from "@/lib/gait/gaitCycle";
 import {
   PlotlyChart,
   passShapes,
@@ -168,6 +170,18 @@ export function GaitResultsView({ data, patientNameOverride, patientOverride }: 
           variant="clean"
           metrics={data.metrics_clean}
           walkingDirection={data.walking_direction}
+        />
+        {/* Gait Cycle % block — additive, reads the 5 optional keys
+            from metrics_clean (falls back to metrics_total if the
+            clean pass produced no reliable strikes). Component
+            self-hides when there is no data to render. */}
+        <GaitCyclePercentBlock
+          data={getGaitCycleBlock(
+            data.metrics_clean?.stance_pct_left != null
+              || data.metrics_clean?.cadence != null
+              ? data.metrics_clean
+              : data.metrics_total,
+          )}
         />
       </div>
 

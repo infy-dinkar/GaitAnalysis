@@ -151,6 +151,11 @@ const MODULE_META: Record<
     icon: MoveRight,
     tone: "bg-sky-500/10 text-sky-700 dark:text-sky-400",
   },
+  squat_lateral: {
+    label: "Squat (Lateral)",
+    icon: MoveRight,
+    tone: "bg-teal-500/10 text-teal-700 dark:text-teal-400",
+  },
   rehab: {
     label: "Rehab session",
     icon: Dumbbell,

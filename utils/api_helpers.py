@@ -317,6 +317,17 @@ def _build_metrics_block(
 
     window_seconds = float(metrics.get("duration_sec", 0.0) or 0.0)
 
+    # Gait-cycle % — additive keys from _gait_cycle_percentages.
+    # Preserve None (engine returns None on short clips).
+    _cyc = {
+        "stance_pct_left":    metrics.get("stance_pct_left"),
+        "stance_pct_right":   metrics.get("stance_pct_right"),
+        "swing_pct_left":     metrics.get("swing_pct_left"),
+        "swing_pct_right":    metrics.get("swing_pct_right"),
+        "double_support_pct": metrics.get("double_support_pct"),
+    }
+    _cyc = {k: (float(v) if isinstance(v, (int, float)) else None) for k, v in _cyc.items()}
+
     if is_clean:
         total_frames = int(features.get("total_frames", 0) or 0)
         frames_used = int(features.get("frames_used", 0) or 0)
@@ -340,6 +351,7 @@ def _build_metrics_block(
             window_description=window_desc,
             validated_passes=num_passes,
             video_coverage_pct=round(coverage, 1),
+            **_cyc,
         )
     else:
         window_desc = f"{window_seconds:.1f}s — all frames included"
@@ -355,6 +367,7 @@ def _build_metrics_block(
             step_time=step_time_v,
             window_seconds=window_seconds,
             window_description=window_desc,
+            **_cyc,
         )
 
 

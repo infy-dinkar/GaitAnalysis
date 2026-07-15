@@ -52,6 +52,104 @@ export interface PostureAnalysisResult {
   findings?: PostureFinding[];
 }
 
+// ─── Additive multi-view types (4-view expansion) ─────────────
+// All fields OPTIONAL so old saved reports typecheck as-is.
+
+/** Back-view measurements — the honest subset a single flat 2D
+ *  back-view can compute. Everything else lives on the sibling
+ *  `not_assessed` array with a reason. */
+export interface BackMeasurements {
+  shoulderTilt: number | null;         // deg
+  hipTilt: number | null;              // deg
+  lateralTrunkShiftPct: number | null; // % of body height
+  leftKneeAlignment: number | null;    // interior angle
+  rightKneeAlignment: number | null;
+}
+
+/** One item on the back view's not_assessed list. */
+export interface PostureNotAssessed {
+  label: string;
+  reason: string;
+}
+
+/** Back-view analysis result. `view` is "back". */
+export interface PostureBackResult {
+  view: "back";
+  imageUrl: string;
+  imageWidth: number;
+  imageHeight: number;
+  keypoints: PostureKeypoint[];
+  back?: BackMeasurements;
+  not_assessed?: PostureNotAssessed[];
+  findings?: PostureFinding[];
+  /** True when the L/R keypoint swap was applied. Honest debug
+   *  affordance — see engines/posture_engine_multi_view.py. */
+  lr_swap_applied?: boolean;
+}
+
+/** Explicit-side (left_side / right_side) analysis result. Uses the
+ *  same SideMeasurements shape as the auto-picked `side` view, but
+ *  `pickedSide` is FORCED to the declared side. */
+export interface PostureExplicitSideResult {
+  view: "left_side" | "right_side";
+  imageUrl: string;
+  imageWidth: number;
+  imageHeight: number;
+  keypoints: PostureKeypoint[];
+  side?: SideMeasurements;
+  findings?: PostureFinding[];
+  explicit_side?: "left" | "right";
+}
+
+/** Union of every posture view result the multi-view API returns. */
+export type PostureViewResult =
+  | PostureAnalysisResult
+  | PostureBackResult
+  | PostureExplicitSideResult;
+
+/** Optional-input shape for the multi-view analyzer. `front` +
+ *  `side` remain REQUIRED to preserve the existing endpoint
+ *  contract; the three new views are OPTIONAL. */
+export interface PostureMultiViewInput {
+  frontFile: File;
+  sideFile: File;
+  backFile?: File;
+  leftSideFile?: File;
+  rightSideFile?: File;
+}
+
+/** Multi-view analyzer result. Existing `front` + `side` keys are
+ *  the SAME shape as `analyzePostureCombined` returns today. New
+ *  view keys are populated only when their file was provided AND
+ *  the analysis succeeded. Per-view failures land as
+ *    { view: "<key>", error: "<code>" }
+ *  so one bad view doesn't break the rest. */
+export interface PostureMultiViewResult {
+  front: PostureAnalysisResult;
+  side: PostureAnalysisResult;
+  back?: PostureBackResult | PostureViewError;
+  left_side?: PostureExplicitSideResult | PostureViewError;
+  right_side?: PostureExplicitSideResult | PostureViewError;
+  relativeUnits: boolean;
+}
+
+/** Per-view failure shape. Present under a view key when that
+ *  view's analysis failed but other views succeeded. */
+export interface PostureViewError {
+  view: string;
+  error: string;
+}
+
+/** Type guard — narrow a view union to "error". */
+export function isPostureViewError(
+  v: unknown,
+): v is PostureViewError {
+  return (
+    !!v && typeof v === "object"
+    && typeof (v as { error?: unknown }).error === "string"
+  );
+}
+
 /** Combined two-photo posture analysis. Single HTTP POST to the
  *  backend with both photos in one multipart body. Returns the
  *  TWO PostureAnalysisResult objects (front + side) so the
@@ -162,4 +260,188 @@ function formatPostureError(detail: unknown, status: number): string {
     return "Analysis failed. Please check your connection and try again.";
   }
   return raw || `Analysis failed (HTTP ${status}).`;
+}
+
+// ─── Additive: multi-view analyzer (4 views) ───────────────────
+// Existing `analyzePostureCombined` above stays byte-identical for
+// back-compat. This new function is the way callers request the new
+// back / left_side / right_side views. It POSTs to the SAME endpoint
+// with the additional optional file fields the api.py handler now
+// accepts.
+export async function analyzePostureMultiView(
+  input: PostureMultiViewInput,
+): Promise<PostureMultiViewResult> {
+  const {
+    frontFile, sideFile, backFile, leftSideFile, rightSideFile,
+  } = input;
+
+  const form = new FormData();
+  form.append(
+    "front_image", frontFile, frontFile.name || "posture_front.jpg",
+  );
+  form.append(
+    "side_image", sideFile, sideFile.name || "posture_side.jpg",
+  );
+  if (backFile) {
+    form.append(
+      "back_image", backFile, backFile.name || "posture_back.jpg",
+    );
+  }
+  if (leftSideFile) {
+    form.append(
+      "left_side_image", leftSideFile,
+      leftSideFile.name || "posture_left_side.jpg",
+    );
+  }
+  if (rightSideFile) {
+    form.append(
+      "right_side_image", rightSideFile,
+      rightSideFile.name || "posture_right_side.jpg",
+    );
+  }
+
+  const res = await authedFetch("/api/analyze-posture", {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+    throw new Error(formatPostureError(body.detail, res.status));
+  }
+  const wrapper = (await res.json()) as {
+    success: boolean;
+    data: {
+      front: {
+        view: "front";
+        imageWidth: number;
+        imageHeight: number;
+        keypoints: PostureKeypoint[];
+        front?: FrontMeasurements;
+        findings: PostureFinding[];
+      };
+      side: {
+        view: "side";
+        imageWidth: number;
+        imageHeight: number;
+        keypoints: PostureKeypoint[];
+        side?: SideMeasurements;
+        findings: PostureFinding[];
+      };
+      back?: {
+        view: "back";
+        imageWidth: number;
+        imageHeight: number;
+        keypoints: PostureKeypoint[];
+        back?: BackMeasurements;
+        not_assessed?: PostureNotAssessed[];
+        findings: PostureFinding[];
+        lr_swap_applied?: boolean;
+      } | PostureViewError;
+      left_side?: {
+        view: "left_side";
+        imageWidth: number;
+        imageHeight: number;
+        keypoints: PostureKeypoint[];
+        side?: SideMeasurements;
+        findings: PostureFinding[];
+        explicit_side?: "left";
+      } | PostureViewError;
+      right_side?: {
+        view: "right_side";
+        imageWidth: number;
+        imageHeight: number;
+        keypoints: PostureKeypoint[];
+        side?: SideMeasurements;
+        findings: PostureFinding[];
+        explicit_side?: "right";
+      } | PostureViewError;
+      relative_units: boolean;
+    } | null;
+    error: string | null;
+  };
+  if (!wrapper.success || !wrapper.data) {
+    throw new Error(
+      wrapper.error ?? "Posture analysis failed. Please try again.",
+    );
+  }
+  const data = wrapper.data;
+
+  const frontUrl = URL.createObjectURL(frontFile);
+  const sideUrl  = URL.createObjectURL(sideFile);
+  const backUrl = backFile ? URL.createObjectURL(backFile) : null;
+  const leftUrl = leftSideFile ? URL.createObjectURL(leftSideFile) : null;
+  const rightUrl = rightSideFile ? URL.createObjectURL(rightSideFile) : null;
+
+  const out: PostureMultiViewResult = {
+    front: {
+      view: "front",
+      imageUrl: frontUrl,
+      imageWidth: data.front.imageWidth,
+      imageHeight: data.front.imageHeight,
+      keypoints: data.front.keypoints,
+      front: data.front.front,
+      findings: data.front.findings,
+    },
+    side: {
+      view: "side",
+      imageUrl: sideUrl,
+      imageWidth: data.side.imageWidth,
+      imageHeight: data.side.imageHeight,
+      keypoints: data.side.keypoints,
+      side: data.side.side,
+      findings: data.side.findings,
+    },
+    relativeUnits: !!data.relative_units,
+  };
+
+  if (data.back && backUrl) {
+    if (isPostureViewError(data.back)) {
+      out.back = data.back;
+    } else {
+      out.back = {
+        view: "back",
+        imageUrl: backUrl,
+        imageWidth: data.back.imageWidth,
+        imageHeight: data.back.imageHeight,
+        keypoints: data.back.keypoints,
+        back: data.back.back,
+        not_assessed: data.back.not_assessed,
+        findings: data.back.findings,
+        lr_swap_applied: data.back.lr_swap_applied,
+      };
+    }
+  }
+  if (data.left_side && leftUrl) {
+    if (isPostureViewError(data.left_side)) {
+      out.left_side = data.left_side;
+    } else {
+      out.left_side = {
+        view: "left_side",
+        imageUrl: leftUrl,
+        imageWidth: data.left_side.imageWidth,
+        imageHeight: data.left_side.imageHeight,
+        keypoints: data.left_side.keypoints,
+        side: data.left_side.side,
+        findings: data.left_side.findings,
+        explicit_side: data.left_side.explicit_side,
+      };
+    }
+  }
+  if (data.right_side && rightUrl) {
+    if (isPostureViewError(data.right_side)) {
+      out.right_side = data.right_side;
+    } else {
+      out.right_side = {
+        view: "right_side",
+        imageUrl: rightUrl,
+        imageWidth: data.right_side.imageWidth,
+        imageHeight: data.right_side.imageHeight,
+        keypoints: data.right_side.keypoints,
+        side: data.right_side.side,
+        findings: data.right_side.findings,
+        explicit_side: data.right_side.explicit_side,
+      };
+    }
+  }
+  return out;
 }

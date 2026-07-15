@@ -65,6 +65,13 @@ class MetricsBlock(BaseModel):
     # Clean-only fields (None on the total block):
     validated_passes: Optional[int] = None
     video_coverage_pct: Optional[float] = None
+    # Gait-cycle % (additive) — populated by _gait_cycle_percentages
+    # in gait_engine.compute_metrics. Optional; None on short clips.
+    stance_pct_left: Optional[float] = None
+    stance_pct_right: Optional[float] = None
+    swing_pct_left: Optional[float] = None
+    swing_pct_right: Optional[float] = None
+    double_support_pct: Optional[float] = None
 
 
 class JointDetail(BaseModel):
