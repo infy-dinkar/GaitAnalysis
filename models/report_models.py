@@ -50,6 +50,7 @@ class ReportCreate(BaseModel):
         "single_leg_hop",
         "tuck_jump",
         "overhead_squat",
+        "squat_lateral",
         # Rehab game sessions — one report per exercise session
         # (K1 Squat, K5 Wall Sit, ...). Payload shape lives in
         # `metrics` (provider-agnostic dict) so all 24 exercises share

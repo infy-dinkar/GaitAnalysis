@@ -20,6 +20,10 @@ import {
 } from "@/lib/posture/measurements";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import type { PatientDTO } from "@/lib/patients";
+import type {
+  BackMeasurements,
+  PostureNotAssessed,
+} from "@/lib/posture/analyzer";
 
 /** Compressed source-photo blob persisted into the report's `metrics`
  *  field by PostureCapture. Width/height are the actual pixel
@@ -45,6 +49,22 @@ interface Props {
   sideKeypoints?: Keypoint[] | null;
   patient?: PatientDTO | null;
   patientName?: string | null;
+  // ── Additive multi-view (4-view expansion). All optional — old
+  // saved reports (front+side only) render byte-identical.
+  back?: BackMeasurements | null;
+  backFindings?: PostureFinding[] | null;
+  backImage?: SavedPostureImage | null;
+  backKeypoints?: Keypoint[] | null;
+  backNotAssessed?: PostureNotAssessed[] | null;
+  backLrSwapApplied?: boolean | null;
+  leftSide?: SideMeasurements | null;
+  leftSideFindings?: PostureFinding[] | null;
+  leftSideImage?: SavedPostureImage | null;
+  leftSideKeypoints?: Keypoint[] | null;
+  rightSide?: SideMeasurements | null;
+  rightSideFindings?: PostureFinding[] | null;
+  rightSideImage?: SavedPostureImage | null;
+  rightSideKeypoints?: Keypoint[] | null;
 }
 
 export function SavedPostureReport({
@@ -58,6 +78,20 @@ export function SavedPostureReport({
   sideKeypoints,
   patient,
   patientName,
+  back,
+  backFindings,
+  backImage,
+  backKeypoints,
+  backNotAssessed,
+  backLrSwapApplied,
+  leftSide,
+  leftSideFindings,
+  leftSideImage,
+  leftSideKeypoints,
+  rightSide,
+  rightSideFindings,
+  rightSideImage,
+  rightSideKeypoints,
 }: Props) {
   const fFindings = useMemo<PostureFinding[]>(() => {
     if (frontFindings && frontFindings.length > 0) return frontFindings;
@@ -143,6 +177,38 @@ export function SavedPostureReport({
         </div>
       )}
 
+      {/* ── Additive multi-view saved blocks — render only when present ── */}
+      {(back || backImage || (backFindings && backFindings.length > 0)) && (
+        <SavedBackBlock
+          back={back ?? null}
+          backFindings={backFindings ?? null}
+          backImage={backImage ?? null}
+          backKeypoints={backKeypoints ?? null}
+          backNotAssessed={backNotAssessed ?? null}
+          backLrSwapApplied={backLrSwapApplied ?? null}
+        />
+      )}
+      {(leftSide || leftSideImage
+        || (leftSideFindings && leftSideFindings.length > 0)) && (
+        <SavedExplicitSideBlock
+          title="Left-side view (explicit)"
+          side={leftSide ?? null}
+          findings={leftSideFindings ?? null}
+          image={leftSideImage ?? null}
+          keypoints={leftSideKeypoints ?? null}
+        />
+      )}
+      {(rightSide || rightSideImage
+        || (rightSideFindings && rightSideFindings.length > 0)) && (
+        <SavedExplicitSideBlock
+          title="Right-side view (explicit)"
+          side={rightSide ?? null}
+          findings={rightSideFindings ?? null}
+          image={rightSideImage ?? null}
+          keypoints={rightSideKeypoints ?? null}
+        />
+      )}
+
       {fFindings.length === 0 && sFindings.length === 0 && (
         <p className="rounded-card border border-border bg-surface p-5 text-center text-sm text-muted">
           No measurements were available for this saved report.
@@ -151,6 +217,158 @@ export function SavedPostureReport({
 
       <ReportDisclaimer />
     </div>
+  );
+}
+
+// ─── Saved-report back-view block ─────────────────────────────
+function SavedBackBlock({
+  back,
+  backFindings,
+  backImage,
+  backKeypoints,
+  backNotAssessed,
+  backLrSwapApplied,
+}: {
+  back: BackMeasurements | null;
+  backFindings: PostureFinding[] | null;
+  backImage: SavedPostureImage | null;
+  backKeypoints: Keypoint[] | null;
+  backNotAssessed: PostureNotAssessed[] | null;
+  backLrSwapApplied: boolean | null;
+}) {
+  return (
+    <section className="space-y-4">
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+          Back view
+        </p>
+        <h3 className="mt-1 text-base font-semibold tracking-tight">
+          Frontal-plane items measured from behind
+        </h3>
+      </div>
+      <div className="grid gap-6 md:grid-cols-2">
+        {backImage && backKeypoints && (
+          <div className="space-y-3">
+            <PostureImageOverlay
+              view="front"
+              imageUrl={backImage.data_url}
+              imageWidth={backImage.width}
+              imageHeight={backImage.height}
+              keypoints={backKeypoints}
+            />
+            {backLrSwapApplied && (
+              <p className="rounded-md border border-border bg-surface px-3 py-2 text-[11px] text-muted">
+                L/R keypoint swap was applied on this analysis.
+              </p>
+            )}
+          </div>
+        )}
+        <div className="space-y-3 text-sm">
+          {back && (
+            <dl className="grid grid-cols-[auto_auto] gap-x-4 gap-y-1 tabular">
+              <dt className="text-muted">Shoulder tilt</dt>
+              <dd className="text-foreground">
+                {back.shoulderTilt !== null ? `${back.shoulderTilt.toFixed(1)}°` : "—"}
+              </dd>
+              <dt className="text-muted">Hip tilt</dt>
+              <dd className="text-foreground">
+                {back.hipTilt !== null ? `${back.hipTilt.toFixed(1)}°` : "—"}
+              </dd>
+              <dt className="text-muted">Lateral trunk shift</dt>
+              <dd className="text-foreground">
+                {back.lateralTrunkShiftPct !== null
+                  ? `${back.lateralTrunkShiftPct.toFixed(1)}%`
+                  : "—"}
+              </dd>
+              <dt className="text-muted">Left knee alignment</dt>
+              <dd className="text-foreground">
+                {back.leftKneeAlignment !== null
+                  ? `${(180 - back.leftKneeAlignment).toFixed(1)}° dev`
+                  : "—"}
+              </dd>
+              <dt className="text-muted">Right knee alignment</dt>
+              <dd className="text-foreground">
+                {back.rightKneeAlignment !== null
+                  ? `${(180 - back.rightKneeAlignment).toFixed(1)}° dev`
+                  : "—"}
+              </dd>
+            </dl>
+          )}
+          {backNotAssessed && backNotAssessed.length > 0 && (
+            <div>
+              <p className="mt-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-subtle">
+                Not assessed from this view
+              </p>
+              <ul className="mt-2 space-y-2 text-[12px]">
+                {backNotAssessed.map((na) => (
+                  <li
+                    key={na.label}
+                    className="rounded-md border border-border bg-surface px-3 py-2"
+                  >
+                    <p className="font-medium text-foreground">{na.label}</p>
+                    <p className="mt-0.5 text-muted">{na.reason}</p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      </div>
+      {backFindings && backFindings.length > 0 && (
+        <FindingsTable
+          title="Back view findings"
+          findings={backFindings}
+        />
+      )}
+    </section>
+  );
+}
+
+// ─── Saved-report explicit-side block ─────────────────────────
+function SavedExplicitSideBlock({
+  title,
+  side,
+  findings,
+  image,
+  keypoints,
+}: {
+  title: string;
+  side: SideMeasurements | null;
+  findings: PostureFinding[] | null;
+  image: SavedPostureImage | null;
+  keypoints: Keypoint[] | null;
+}) {
+  return (
+    <section className="space-y-4">
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+          {title}
+        </p>
+      </div>
+      <div className="grid gap-6 md:grid-cols-2">
+        {image && keypoints && (
+          <PostureImageOverlay
+            view="side"
+            imageUrl={image.data_url}
+            imageWidth={image.width}
+            imageHeight={image.height}
+            keypoints={keypoints}
+            side={side ?? undefined}
+          />
+        )}
+        <div className="rounded-md border border-border bg-surface p-3 text-xs text-muted">
+          Only the camera-facing (near-side) leg is analysed. The
+          far-side limb is occluded and its keypoints are unreliable
+          from this view.
+        </div>
+      </div>
+      {findings && findings.length > 0 && (
+        <FindingsTable
+          title={`${title} findings`}
+          findings={findings}
+        />
+      )}
+    </section>
   );
 }
 

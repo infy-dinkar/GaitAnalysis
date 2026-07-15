@@ -42,6 +42,14 @@ export interface MetricsBlockDTO {
   window_description: string;
   validated_passes: number | null;
   video_coverage_pct: number | null;
+  // Gait-cycle % (additive) — populated by the backend
+  // `_gait_cycle_percentages` helper. All optional; older saved
+  // reports that predate the helper simply omit these fields.
+  stance_pct_left?: number | null;
+  stance_pct_right?: number | null;
+  swing_pct_left?: number | null;
+  swing_pct_right?: number | null;
+  double_support_pct?: number | null;
 }
 
 export interface JointDetailDTO {

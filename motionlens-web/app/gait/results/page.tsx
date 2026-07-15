@@ -12,6 +12,8 @@ import { MetricsSection } from "@/components/gait/MetricsSection";
 import { JointTabs, TabDef } from "@/components/gait/JointTabs";
 import { InfoBox } from "@/components/gait/InfoBox";
 import { GaitCycleSection } from "@/components/gait/GaitCycleSection";
+import { GaitCyclePercentBlock } from "@/components/gait/GaitCyclePercentBlock";
+import { getGaitCycleBlock } from "@/lib/gait/gaitCycle";
 import {
   PlotlyChart,
   passShapes,
@@ -329,6 +331,18 @@ export default function GaitResultsPage() {
               variant="clean"
               metrics={data.metrics_clean}
               walkingDirection={data.walking_direction}
+            />
+            {/* Gait Cycle % block — mirrors the same insertion in
+                GaitResultsView (saved-report path). Self-hides when
+                metrics are absent, so a fresh backend that hasn't
+                been restarted yet simply renders nothing here. */}
+            <GaitCyclePercentBlock
+              data={getGaitCycleBlock(
+                data.metrics_clean?.stance_pct_left != null
+                  || data.metrics_clean?.cadence != null
+                  ? data.metrics_clean
+                  : data.metrics_total,
+              )}
             />
           </div>
 

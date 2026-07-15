@@ -99,6 +99,7 @@ from engines.orthopedic.single_leg_hop_engine import analyze_single_leg_hop
 from engines.orthopedic.counter_movement_jump_engine import analyze_counter_movement_jump
 from engines.orthopedic.tuck_jump_engine import analyze_tuck_jump
 from engines.orthopedic.overhead_squat_engine import analyze_overhead_squat
+from engines.orthopedic.squat_lateral_engine import analyze_squat_lateral
 
 # ─── 5x Sit-to-Stand — Test C2 upload mode ───────────────────────
 # SINGLE trial (no L/R split). Engine math mirrors
@@ -144,6 +145,10 @@ from engines.biomech.hip_engine import analyze_hip as analyze_hip_engine
 # ─── Posture — IMAGE-mode MediaPipe (separate pipeline) ─────────
 from engines.posture_engine import (
     analyze_posture_combined as analyze_posture_combined_engine,
+)
+from engines.posture_engine_multi_view import (
+    analyze_posture_back,
+    analyze_posture_side_explicit,
 )
 
 # ─── SPPB Component 1 (Balance) — reuses gait MediaPipe pipeline ─
@@ -3529,6 +3534,230 @@ async def analyze_overhead_squat_endpoint(
 
 
 # ══════════════════════════════════════════════════════════════════════
+# Squat (Lateral) — sagittal-plane physio squat, near-side leg only
+# ══════════════════════════════════════════════════════════════════════
+# Frontal-plane items (knee valgus) are honestly `not_assessed` — see
+# `valgus.status` + caveats[]. Six per-rep metrics reported at each
+# rep's bottom frame: peak knee flexion, peak hip flexion, ankle
+# dorsiflexion (shank-to-vertical), trunk lean (trunk-to-vertical),
+# hip-knee ratio, heel-rise (bool). Three-tier classification:
+# good / moderate / poor / (insufficient_data). Never raises on
+# short / occluded / no-rep clips.
+class SquatLateralValgusNoteDTO(BaseModel):
+    status: Literal["not_assessed"]
+    reason: str
+
+
+class SquatLateralCaveatDTO(BaseModel):
+    code: str
+    label: str
+    detail: Optional[str] = None
+
+
+class SquatLateralRepDTO(BaseModel):
+    rep_index: int
+    bottom_frame_index: int
+    bottom_t_ms: float
+    peak_knee_flexion_deg: Optional[float] = None
+    peak_hip_flexion_deg: Optional[float] = None
+    ankle_dorsiflexion_deg: Optional[float] = None
+    trunk_lean_deg: Optional[float] = None
+    hip_knee_ratio: Optional[float] = None
+    heel_rise: bool
+    heel_rise_px: float
+
+
+class SquatLateralAngleTraceDTO(BaseModel):
+    t_ms: List[float]
+    knee: List[Optional[float]]
+    hip: List[Optional[float]]
+    bottom_frame_indices: List[int]
+    bottom_t_ms: List[float]
+
+
+class SquatLateralResultDTO(BaseModel):
+    side: Literal["left", "right"]
+    patient_height_cm: Optional[float] = None
+    calibration: Optional[Dict[str, Any]] = None
+    baseline_hip_y_px: float
+    baseline_heel_y_px: float
+    leg_length_px: float
+    heel_rise_threshold_px: float
+    reps: List[SquatLateralRepDTO]
+    rep_count: int
+    peak_knee_flexion_deg: Optional[float] = None
+    peak_hip_flexion_deg: Optional[float] = None
+    ankle_dorsiflexion_deg: Optional[float] = None
+    trunk_lean_deg: Optional[float] = None
+    hip_knee_ratio: Optional[float] = None
+    heel_rise: bool = False
+    any_heel_rise: bool = False
+    deepest_rep_index: int = -1
+    mean_peak_knee_flexion_deg: Optional[float] = None
+    mean_trunk_lean_deg: Optional[float] = None
+    classification: Literal["good", "moderate", "poor", "insufficient_data"]
+    guard_reason: Optional[str] = None
+    valgus: SquatLateralValgusNoteDTO
+    caveats: List[SquatLateralCaveatDTO]
+    peak_screenshot_data_url: Optional[str] = None
+    angle_trace: SquatLateralAngleTraceDTO
+    duration_seconds: float
+    fps: Optional[float] = None
+    total_frames: Optional[int] = None
+    valid_frames: Optional[int] = None
+    interpretation: Optional[str] = None
+
+
+class SquatLateralResponse(BaseModel):
+    success: bool
+    data: Optional[SquatLateralResultDTO] = None
+    error: Optional[str] = None
+    fps_warning: Optional[str] = None
+    duration_warning: Optional[str] = None
+
+
+@app.post(
+    "/api/analyze-squat-lateral",
+    response_model=SquatLateralResponse,
+)
+async def analyze_squat_lateral_endpoint(
+    video: UploadFile = File(...),
+    side: str = Form(...),                 # "left" or "right"
+    calibration: Optional[str] = Form(None),
+    patient_height_cm: Optional[float] = Form(None),
+) -> SquatLateralResponse:
+    """Run the Squat (Lateral) pipeline. Near-side leg only."""
+    if side not in ("left", "right"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"`side` must be 'left' or 'right', got {side!r}.",
+        )
+
+    parsed_calibration: Optional[Dict[str, Any]] = None
+    if calibration:
+        import json as _json
+        try:
+            parsed_calibration = _json.loads(calibration)
+            if not isinstance(parsed_calibration, dict):
+                parsed_calibration = None
+            else:
+                ppc = parsed_calibration.get("pixels_per_cm")
+                if not isinstance(ppc, (int, float)) or ppc <= 0:
+                    parsed_calibration = None
+        except (ValueError, TypeError):
+            parsed_calibration = None
+
+    tmp_path: Optional[str] = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(
+            contents, video.filename or "squat_lateral.mp4",
+        )
+        log.info(
+            "squat_lateral: file=%s side=%s size=%.2f MB calibration=%s",
+            video.filename, side, size_mb,
+            "client" if parsed_calibration else "server-auto",
+        )
+
+        probe = cv2.VideoCapture(tmp_path)
+        try:
+            probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
+            probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            probe.release()
+
+        if probe_fps <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not determine video frame rate. "
+                    "Please upload a different file."
+                ),
+            )
+
+        fps_warning: Optional[str] = None
+        duration_warning: Optional[str] = None
+
+        if probe_fps < MIN_REQUIRED_FPS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video frame rate too low ({probe_fps:.1f} FPS). "
+                    f"Minimum {MIN_REQUIRED_FPS} FPS required. "
+                    f"Recommended: {RECOMMENDED_FPS}+ FPS."
+                ),
+            )
+        if probe_fps < RECOMMENDED_FPS:
+            fps_warning = (
+                f"Note: Video is {probe_fps:.1f} FPS, below recommended "
+                f"{RECOMMENDED_FPS} FPS — rep-bottom timing may be coarse."
+            )
+        if probe_total_frames <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not determine video length.",
+            )
+
+        duration_seconds = probe_total_frames / probe_fps
+        if duration_seconds > MAX_GAIT_DURATION_SEC:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video too long ({duration_seconds:.1f}s). "
+                    f"Maximum {MAX_GAIT_DURATION_SEC} seconds allowed."
+                ),
+            )
+        if duration_seconds < MIN_GAIT_DURATION_SEC:
+            duration_warning = (
+                f"Video is short ({duration_seconds:.1f}s) — the squat "
+                f"assessment recommends 3-6 slow reps (~15-25 s total)."
+            )
+
+        pose_options = _build_gait_pose_options()
+        result: Dict[str, Any] = analyze_squat_lateral(
+            video_path=tmp_path,
+            pose_options=pose_options,
+            side=side,
+            calibration=parsed_calibration,
+            patient_height_cm=patient_height_cm,
+        )
+
+        return SquatLateralResponse(
+            success=True,
+            data=SquatLateralResultDTO(**result),
+            error=None,
+            fps_warning=fps_warning,
+            duration_warning=duration_warning,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        log.warning("squat_lateral validation: %s", e)
+        return SquatLateralResponse(success=False, data=None, error=str(e))
+    except Exception as e:
+        log.exception("squat_lateral analysis failed")
+        return SquatLateralResponse(
+            success=False, data=None, error=f"Analysis failed: {e}",
+        )
+    finally:
+        cleanup_temp_file(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════
 # 5x Sit-to-Stand — Test C2, single-trial upload analysis
 # ══════════════════════════════════════════════════════════════════════
 # SINGLE trial — no `side` form field. The frontend uploads ONE
@@ -5017,6 +5246,14 @@ async def analyze_posture(
     front_image: UploadFile = File(...),
     side_image:  UploadFile = File(...),
     patient_name: Optional[str] = Form(None),
+    # ── Additive multi-view fields (Phase 4-view expansion) ────
+    # Each is optional. Absence = the corresponding response key
+    # is simply not populated. Presence = the view is analysed
+    # and added to the response. `front` + `side` above stay
+    # REQUIRED to preserve the existing endpoint contract.
+    back_image: Optional[UploadFile] = File(None),
+    left_side_image: Optional[UploadFile] = File(None),
+    right_side_image: Optional[UploadFile] = File(None),
 ):
     """Posture analysis endpoint — accepts two photos in one
     multipart request (front view + side view), runs BlazePose
@@ -5032,7 +5269,7 @@ async def analyze_posture(
         → emitted when the engine can't see the trunk anchors
           (both shoulders + both hips) in either photo.
 
-    Response shape:
+    Response shape (existing keys unchanged):
       {
         "success": true,
         "data": {
@@ -5041,6 +5278,17 @@ async def analyze_posture(
           "side":  { view, imageWidth, imageHeight, keypoints,
                      side:  {...}, findings: [...] },
           "relative_units": true,
+          # NEW (additive; present only when the corresponding
+          # optional file field was sent):
+          "back":       { view, imageWidth, imageHeight, keypoints,
+                          back: {...}, not_assessed: [...],
+                          findings: [...], lr_swap_applied: bool },
+          "left_side":  { view, imageWidth, imageHeight, keypoints,
+                          side: {...}, findings: [...],
+                          explicit_side: "left" },
+          "right_side": { view, imageWidth, imageHeight, keypoints,
+                          side: {...}, findings: [...],
+                          explicit_side: "right" },
         },
         "error": null,
       }
@@ -5051,6 +5299,9 @@ async def analyze_posture(
     """
     front_path: Optional[str] = None
     side_path: Optional[str] = None
+    back_path: Optional[str] = None
+    left_side_path: Optional[str] = None
+    right_side_path: Optional[str] = None
     try:
         front_bytes = await front_image.read()
         side_bytes  = await side_image.read()
@@ -5106,20 +5357,83 @@ async def analyze_posture(
         side_path = _save_image(
             side_bytes, side_image.filename or "", "posture_side.jpg",
         )
+
+        # ── Additive: save the optional 3 new views if provided ───
+        async def _maybe_save(
+            uf: Optional[UploadFile], tag: str, fallback: str,
+        ) -> Optional[str]:
+            if uf is None:
+                return None
+            payload = await uf.read()
+            if not payload:
+                return None
+            size_mb = len(payload) / (1024 * 1024)
+            if size_mb > _MAX_POSTURE_PHOTO_MB:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"file_too_large ({size_mb:.1f} MB {tag} photo). "
+                        f"Maximum {_MAX_POSTURE_PHOTO_MB} MB per photo."
+                    ),
+                )
+            return _save_image(payload, uf.filename or "", fallback)
+
+        back_path = await _maybe_save(back_image, "back", "posture_back.jpg")
+        left_side_path = await _maybe_save(
+            left_side_image, "left_side", "posture_left_side.jpg",
+        )
+        right_side_path = await _maybe_save(
+            right_side_image, "right_side", "posture_right_side.jpg",
+        )
+
         log.info(
-            "posture: front=%s (%.2f MB) side=%s (%.2f MB)",
+            "posture: front=%s (%.2f MB) side=%s (%.2f MB) "
+            "back=%s left_side=%s right_side=%s",
             front_image.filename,
             len(front_bytes) / 1024 / 1024,
             side_image.filename,
             len(side_bytes) / 1024 / 1024,
+            "yes" if back_path else "no",
+            "yes" if left_side_path else "no",
+            "yes" if right_side_path else "no",
         )
 
         _ = patient_name  # accepted for parity; not used here
 
+        # Existing behaviour — unchanged. `front` + `side` come from
+        # the historical combined function so the existing response
+        # shape is preserved byte-for-byte when the new views are
+        # absent.
         result = analyze_posture_combined_engine(
             front_image_path=front_path,
             side_image_path=side_path,
         )
+
+        # Additive multi-view keys. Each is best-effort: a per-view
+        # failure yields {"view": "<key>", "error": "<code>"} on that
+        # key and never breaks the front/side response.
+        def _safe_add(view_key: str, fn, *args) -> None:
+            try:
+                result[view_key] = fn(*args)
+            except ValueError as e:
+                result[view_key] = {"view": view_key, "error": str(e)}
+            except Exception as e:  # pragma: no cover — defensive
+                log.exception("posture %s failed: %s", view_key, e)
+                result[view_key] = {"view": view_key, "error": "analysis_failed"}
+
+        if back_path:
+            _safe_add("back", analyze_posture_back, back_path)
+        if left_side_path:
+            _safe_add(
+                "left_side", analyze_posture_side_explicit,
+                left_side_path, "left",
+            )
+        if right_side_path:
+            _safe_add(
+                "right_side", analyze_posture_side_explicit,
+                right_side_path, "right",
+            )
+
         return {"success": True, "data": result, "error": None}
 
     except HTTPException:
@@ -5141,6 +5455,9 @@ async def analyze_posture(
         # succeeded or failed.
         cleanup_temp_file(front_path)
         cleanup_temp_file(side_path)
+        cleanup_temp_file(back_path)
+        cleanup_temp_file(left_side_path)
+        cleanup_temp_file(right_side_path)
 
 
 @app.post("/api/analyze-neck", response_model=BiomechResponse)
