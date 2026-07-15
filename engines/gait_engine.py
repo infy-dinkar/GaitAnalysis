@@ -543,6 +543,62 @@ def _stance_mask_per_leg(ankle_y_px: np.ndarray) -> np.ndarray:
     return vel <= np.percentile(vel, 30)
 
 
+def _event_guided_stance_mask(
+    ankle_y_px: np.ndarray,
+    hs: np.ndarray,
+    n_total: int,
+) -> np.ndarray:
+    """Full-length boolean stance mask derived from heel-strike-
+    bounded stride windows.
+
+    Design note: `_stance_mask_per_leg` above uses a 30-th-percentile
+    velocity threshold — it's a CALIBRATION ANCHOR (only the most
+    stationary ~30 % of frames) and NEVER reaches a physiological
+    stance percentage. That helper stays untouched.
+
+    This function is additive and event-guided: for each stride
+    (consecutive same-side heel strikes hs[i] → hs[i+1]), it marks
+    the top 60 % of frames BY ANKLE-Y POSITION as stance. In image
+    y-down coords the ankle Y is highest (closest to ground) during
+    the planted phase and lowest at mid-swing, so the top-60 %-of-
+    range cut approximates heel-strike → toe-off without needing an
+    explicit toe-off event. The 60 % target matches adult symmetric
+    gait's known stance:swing ratio; the per-stride local threshold
+    is invariant to overall walking speed.
+
+    Returns a bool array of length n_total. Frames outside any
+    stride window (before the first heel strike or after the last)
+    stay False.
+    """
+    mask = np.zeros(n_total, dtype=bool)
+    if len(hs) < 2:
+        return mask
+    ay = np.asarray(ankle_y_px, dtype=float)
+    n_ay = int(len(ay))
+    hs_arr = np.asarray(hs, dtype=int)
+    for i in range(len(hs_arr) - 1):
+        a = int(hs_arr[i])
+        b = int(hs_arr[i + 1])
+        if a < 0 or b <= a or b > n_ay or b > n_total:
+            continue
+        window = ay[a:b]
+        if window.size < 3:
+            continue
+        # Use the 40-th percentile of ankle-y within the stride as
+        # the stance cutoff — frames at or above it (closer to
+        # ground in image coords) are marked stance. This gives
+        # ~60 % of the stride's frames as stance, matching adult
+        # gait biomechanics without inventing a toe-off event.
+        try:
+            cutoff = float(np.nanpercentile(window, 40.0))
+        except Exception:
+            continue
+        if not np.isfinite(cutoff):
+            continue
+        mask[a:b] = window >= cutoff
+    return mask
+
+
 def _gait_cycle_percentages(
     mask_L: np.ndarray,
     mask_R: np.ndarray,
@@ -578,7 +634,10 @@ def _gait_cycle_percentages(
         "swing_pct_right":    None,
         "double_support_pct": None,
     }
-    if total_hs < 2:
+    # Need at least one full stride on EACH side (2 same-side heel
+    # strikes = one bounded stride window) so the event-guided mask
+    # has something to score. Below that, return nulls.
+    if len(hs_L_arr) < 2 or len(hs_R_arr) < 2:
         return null_result
 
     all_strikes = np.concatenate([hs_L_arr, hs_R_arr])
@@ -606,6 +665,27 @@ def _gait_cycle_percentages(
     stance_L = 100.0 * float(L_win.sum()) / float(win_len)
     stance_R = 100.0 * float(R_win.sum()) / float(win_len)
     ds = 100.0 * float((L_win & R_win).sum()) / float(win_len)
+
+    # ── Physiological-plausibility sanity guard ─────────────────
+    # In gait at least one foot is always grounded, so
+    # stance_L + stance_R MUST be ≥ 100 % (the overlap counts as
+    # double support). The existing `_stance_mask_per_leg` marks
+    # only the slowest 30 % of frames per leg — that helper is
+    # designed as a LEG-LENGTH CALIBRATION ANCHOR (see
+    # compute_meters_per_pixel), NOT a full heel-strike-to-toe-off
+    # stance phase. When we borrow it for phase timing the sum can
+    # collapse well below 100 %, which would be a wrong clinical
+    # number and worse than no number.
+    #
+    # Toe-off detection does NOT exist in this codebase (see
+    # gait_cycle.py — only detect_heel_strikes is defined), so we
+    # can't event-derive stance here. Return None on any
+    # implausible reading; the frontend renders a clear
+    # "Stance/swing not computed — insufficient validated walking
+    # data" line rather than a misleading 26 % / 23 %.
+    if (stance_L + stance_R) < 100.0:
+        return null_result
+
     return {
         "stance_pct_left":    round(stance_L, 1),
         "stance_pct_right":   round(stance_R, 1),
@@ -1186,13 +1266,21 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
     }
 
     # --- gait-cycle % (stance / swing per side + double support) ---
-    # Additive block — reuses `_stance_mask_per_leg` and the already-
-    # filtered heel-strike indices (`L_idx`, `R_idx`) by call only. The
-    # helper is self-guarded: <2 strikes → every value is None so no
-    # downstream code sees a spurious 0.
+    # Uses the event-guided per-stride ankle-Y mask (see docstring on
+    # `_event_guided_stance_mask`) rather than the 30-th-percentile
+    # velocity mask from `_stance_mask_per_leg`. The velocity mask
+    # is a calibration anchor and structurally can't reach the ~60 %
+    # stance fraction gait actually has; the event-guided mask does.
+    # `_stance_mask_per_leg` itself is untouched and still owned by
+    # compute_meters_per_pixel.
+    _n_total = int(len(ts["left_hip"]["y"]))
     _cycle_pct = _gait_cycle_percentages(
-        mask_L=_stance_mask_per_leg(ts["left_ankle"]["y_px"]),
-        mask_R=_stance_mask_per_leg(ts["right_ankle"]["y_px"]),
+        mask_L=_event_guided_stance_mask(
+            ts["left_ankle"]["y_px"], L_idx, _n_total,
+        ),
+        mask_R=_event_guided_stance_mask(
+            ts["right_ankle"]["y_px"], R_idx, _n_total,
+        ),
         hs_L=L_idx,
         hs_R=R_idx,
         fps=fps,
