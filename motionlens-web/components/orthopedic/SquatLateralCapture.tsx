@@ -168,12 +168,22 @@ export function SquatLateralCapture() {
     const file = new File([blob], "squat_lateral.webm", { type: blob.type });
     setPhase("uploading");
     setError(null);
+    // MediaRecorder wall-clock duration — backend uses this to
+    // repair WebM containers whose duration header is broken (see
+    // analyzeSquatLateralUpload doc + api.py _ensure_decodable_video).
+    // Without this hint, cv2 truncates in-app recordings to a
+    // handful of frames and the engine returns an 0.8s
+    // "insufficient data" result.
+    const recStart = recordingStartedAtRef.current;
+    const recDurationMs = recStart > 0 ? Date.now() - recStart : null;
     try {
       const data = await analyzeSquatLateralUpload(
         file,
         side,
         calibration,
         null,
+        undefined,
+        recDurationMs,
       );
       setResult(data);
       setPhase("done");

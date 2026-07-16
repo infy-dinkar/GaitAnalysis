@@ -124,13 +124,23 @@ function humanizeUploadError(raw: string | null | undefined): string {
   return raw || "Squat analysis failed.";
 }
 
-/** Upload a lateral-squat clip. */
+/** Upload a lateral-squat clip.
+ *
+ *  `recordingDurationMs` should be passed by the LIVE record path
+ *  (MediaRecorder start→stop wall-clock ms). MediaRecorder-produced
+ *  WebMs often ship with a broken duration header, which makes cv2
+ *  return a wrong FPS on the backend and truncates the decoded
+ *  video to a handful of frames — the backend's WebM-repair helper
+ *  (_ensure_decodable_video) uses this hint to re-mux the file
+ *  before pose extraction runs. File-upload callers pass null and
+ *  the helper is a safe no-op. */
 export async function analyzeSquatLateralUpload(
   file: File,
   side: SquatLateralSide,
   calibration: CalibrationResult | null,
   patientHeightCm: number | null,
   onProgress?: (pct: number) => void,
+  recordingDurationMs?: number | null,
 ): Promise<SquatLateralResult> {
   const form = new FormData();
   form.append("video", file, file.name || "squat_lateral.mp4");
@@ -144,6 +154,14 @@ export async function analyzeSquatLateralUpload(
     && patientHeightCm > 0
   ) {
     form.append("patient_height_cm", String(patientHeightCm));
+  }
+  if (
+    recordingDurationMs !== null
+    && recordingDurationMs !== undefined
+    && Number.isFinite(recordingDurationMs)
+    && recordingDurationMs > 0
+  ) {
+    form.append("recording_duration_ms", String(Math.round(recordingDurationMs)));
   }
 
   onProgress?.(5);

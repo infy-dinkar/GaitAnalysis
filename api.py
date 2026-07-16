@@ -3612,8 +3612,22 @@ async def analyze_squat_lateral_endpoint(
     side: str = Form(...),                 # "left" or "right"
     calibration: Optional[str] = Form(None),
     patient_height_cm: Optional[float] = Form(None),
+    recording_duration_ms: Optional[int] = Form(None),
 ) -> SquatLateralResponse:
-    """Run the Squat (Lateral) pipeline. Near-side leg only."""
+    """Run the Squat (Lateral) pipeline. Near-side leg only.
+
+    `recording_duration_ms` is set by the in-app record-then-upload
+    path. MediaRecorder WebM containers often ship with broken
+    duration metadata, which makes cv2 report a wrong FPS / decode
+    only a few frames, producing an 0.8s "insufficient data" result
+    even when the operator recorded a full 15-25s session. When
+    present, we re-mux the file via `_ensure_decodable_video`
+    (same helper the gait + biomech upload paths use) so the pose
+    extractor sees a proper CFR video. Normal file uploads pass
+    `recording_duration_ms=None` and the helper is a safe no-op.
+    """
+    from engines.orthopedic.tug_engine import _ensure_decodable_video
+
     if side not in ("left", "right"):
         raise HTTPException(
             status_code=400,
@@ -3635,6 +3649,7 @@ async def analyze_squat_lateral_endpoint(
             parsed_calibration = None
 
     tmp_path: Optional[str] = None
+    fixed_path_cleanup: Optional[str] = None
     try:
         contents = await video.read()
         if not contents:
@@ -3654,12 +3669,19 @@ async def analyze_squat_lateral_endpoint(
             contents, video.filename or "squat_lateral.mp4",
         )
         log.info(
-            "squat_lateral: file=%s side=%s size=%.2f MB calibration=%s",
+            "squat_lateral: file=%s side=%s size=%.2f MB calibration=%s recording_ms=%s",
             video.filename, side, size_mb,
             "client" if parsed_calibration else "server-auto",
+            recording_duration_ms,
         )
 
-        probe = cv2.VideoCapture(tmp_path)
+        # Repair MediaRecorder WebM with broken duration header BEFORE
+        # cv2 probes FPS. No-op when recording_duration_ms is None.
+        processed_path, fixed_path_cleanup = _ensure_decodable_video(
+            tmp_path, recording_duration_ms,
+        )
+
+        probe = cv2.VideoCapture(processed_path)
         try:
             probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
             probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
@@ -3715,7 +3737,7 @@ async def analyze_squat_lateral_endpoint(
 
         pose_options = _build_gait_pose_options()
         result: Dict[str, Any] = analyze_squat_lateral(
-            video_path=tmp_path,
+            video_path=processed_path,
             pose_options=pose_options,
             side=side,
             calibration=parsed_calibration,
@@ -3742,6 +3764,8 @@ async def analyze_squat_lateral_endpoint(
         )
     finally:
         cleanup_temp_file(tmp_path)
+        if fixed_path_cleanup:
+            cleanup_temp_file(fixed_path_cleanup)
 
 
 # ══════════════════════════════════════════════════════════════════════
