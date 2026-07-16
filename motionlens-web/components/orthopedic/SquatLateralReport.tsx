@@ -10,7 +10,7 @@
 //   • Deepest-rep screenshot
 //   • Interpretation + caveats block (frontal / in-plane / far-side)
 
-import { CheckCircle2, MinusCircle, XCircle } from "lucide-react";
+import { MinusCircle } from "lucide-react";
 
 import {
   type SquatLateralCaveat,
@@ -112,8 +112,8 @@ function ClassificationBanner({ result }: { result: SquatLateralResult }) {
             </span>
           </div>
           <p className="mt-3 text-xs text-muted">
-            Depth (peak knee flexion) + trunk lean + heel rise drive the
-            classification. Frontal-plane valgus is honestly not assessed —
+            Depth (peak knee flexion) drives the classification.
+            Frontal-plane valgus is honestly not assessed —
             see caveats.
           </p>
         </div>
@@ -156,7 +156,7 @@ function classificationTone(c: SquatLateralClassification): {
   };
 }
 
-// ─── Summary cards — the six metrics ───────────────────────────
+// ─── Summary cards — hip + knee only ──────────────────────────
 function SummaryCards({ result }: { result: SquatLateralResult }) {
   const cards: Array<{
     title: string;
@@ -175,45 +175,10 @@ function SummaryCards({ result }: { result: SquatLateralResult }) {
       title: "Peak hip flexion (deepest rep)",
       primary: fmtDeg(result.peak_hip_flexion_deg),
     },
-    {
-      title: "Ankle dorsiflexion (shank tilt)",
-      primary: fmtDeg(result.ankle_dorsiflexion_deg),
-      secondary: "Shank to vertical at the deepest rep",
-    },
-    {
-      title: "Trunk lean (from vertical)",
-      primary: fmtDeg(result.trunk_lean_deg),
-      secondary:
-        result.mean_trunk_lean_deg !== null
-          ? `Mean across reps: ${fmtDeg(result.mean_trunk_lean_deg)}`
-          : undefined,
-    },
-    {
-      title: "Hip : knee ratio",
-      primary:
-        result.hip_knee_ratio !== null
-          ? result.hip_knee_ratio.toFixed(2)
-          : "—",
-      secondary:
-        result.hip_knee_ratio !== null
-          ? result.hip_knee_ratio >= 1.05
-            ? "Hip-dominant (posterior-chain)"
-            : result.hip_knee_ratio <= 0.9
-              ? "Knee-dominant (quad)"
-              : "Balanced"
-          : undefined,
-    },
-    {
-      title: "Heel rise",
-      primary: result.any_heel_rise ? "Detected" : "None",
-      secondary: result.any_heel_rise
-        ? "Heel lifted on at least one rep — check ankle mobility"
-        : "Heels stayed grounded on all reps",
-    },
   ];
 
   return (
-    <section className="grid gap-4 md:grid-cols-3">
+    <section className="grid gap-4 md:grid-cols-2">
       {cards.map((c) => (
         <div
           key={c.title}
@@ -479,10 +444,6 @@ function RepTable({
                 <th className="w-14 px-4 py-3 font-semibold">Rep</th>
                 <th className="px-4 py-3 font-semibold">Knee</th>
                 <th className="px-4 py-3 font-semibold">Hip</th>
-                <th className="px-4 py-3 font-semibold">Ankle</th>
-                <th className="px-4 py-3 font-semibold">Trunk</th>
-                <th className="px-4 py-3 font-semibold">H : K</th>
-                <th className="px-4 py-3 font-semibold">Heel rise</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
@@ -506,30 +467,6 @@ function RepTable({
                     </td>
                     <td className="px-4 py-3 tabular text-foreground">
                       {fmtDeg(r.peak_hip_flexion_deg)}
-                    </td>
-                    <td className="px-4 py-3 tabular text-muted">
-                      {fmtDeg(r.ankle_dorsiflexion_deg)}
-                    </td>
-                    <td className="px-4 py-3 tabular text-muted">
-                      {fmtDeg(r.trunk_lean_deg)}
-                    </td>
-                    <td className="px-4 py-3 tabular text-muted">
-                      {r.hip_knee_ratio !== null
-                        ? r.hip_knee_ratio.toFixed(2)
-                        : "—"}
-                    </td>
-                    <td className="px-4 py-3">
-                      {r.heel_rise ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-rose-500/15 px-2 py-0.5 text-xs font-medium text-rose-700 dark:text-rose-300">
-                          <XCircle className="h-3.5 w-3.5" />
-                          Lifted
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:text-emerald-300">
-                          <CheckCircle2 className="h-3.5 w-3.5" />
-                          Grounded
-                        </span>
-                      )}
                     </td>
                   </tr>
                 );
@@ -595,24 +532,10 @@ export function buildSquatLateralInterpretation(
       `Depth reached ${result.peak_knee_flexion_deg.toFixed(0)}° peak knee flexion.`,
     );
   }
-  if (result.trunk_lean_deg !== null && result.trunk_lean_deg > 40) {
+  if (result.peak_hip_flexion_deg !== null) {
     notes.push(
-      `Trunk lean ${result.trunk_lean_deg.toFixed(0)}° at bottom — consider `
-      + "hip-hinge mechanics and thoracic mobility.",
+      `Peak hip flexion at bottom: ${result.peak_hip_flexion_deg.toFixed(0)}°.`,
     );
-  }
-  if (result.any_heel_rise) {
-    notes.push(
-      "Heel lifted on at least one rep — restricted ankle dorsiflexion or "
-      + "over-forward weight bias.",
-    );
-  }
-  if (result.hip_knee_ratio !== null) {
-    if (result.hip_knee_ratio >= 1.05) {
-      notes.push("Hip-dominant pattern (posterior chain).");
-    } else if (result.hip_knee_ratio <= 0.9) {
-      notes.push("Knee-dominant pattern (quad-forward).");
-    }
   }
   if (notes.length === 0) {
     notes.push(`${result.rep_count} rep${result.rep_count === 1 ? "" : "s"} scored.`);

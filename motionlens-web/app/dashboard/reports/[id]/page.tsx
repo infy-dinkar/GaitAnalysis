@@ -794,15 +794,13 @@ function PostureBody({
   const front = (m.front as FrontMeasurements | null | undefined) ?? null;
   const side = (m.side as SideMeasurements | null | undefined) ?? null;
 
-  // Source photos persisted by PostureCapture. May be null for reports
-  // saved BEFORE the image-persistence schema landed — SavedPostureReport
-  // handles that case by falling back to findings-only rendering.
-  const frontImage =
-    (m.front_image as { data_url: string; width: number; height: number } | null | undefined)
-      ?? null;
-  const sideImage =
-    (m.side_image as { data_url: string; width: number; height: number } | null | undefined)
-      ?? null;
+  // Source photos persisted by PostureCapture / PostureLiveCapture.
+  // May be null for reports saved BEFORE the image-persistence schema
+  // landed — SavedPostureReport handles that case by falling back to
+  // findings-only rendering.
+  type SavedImg = { data_url: string; width: number; height: number };
+  const frontImage = (m.front_image as SavedImg | null | undefined) ?? null;
+  const sideImage = (m.side_image as SavedImg | null | undefined) ?? null;
 
   // Keypoint arrays live on report.keypoints, separated by view.
   const kpRoot = (report.keypoints ?? {}) as Record<string, unknown>;
@@ -815,6 +813,30 @@ function PostureBody({
   const frontFindings = (o.front_findings as PostureFinding[] | undefined) ?? null;
   const sideFindings = (o.side_findings as PostureFinding[] | undefined) ?? null;
 
+  // ── Additive multi-view extraction (4-view live capture path) ──
+  // All optional — reports saved from the upload flow (2-view) will
+  // simply not populate these and SavedPostureReport hides the blocks.
+  type BackKp = Parameters<typeof SavedPostureReport>[0]["backKeypoints"];
+  type LeftKp = Parameters<typeof SavedPostureReport>[0]["leftSideKeypoints"];
+  type RightKp = Parameters<typeof SavedPostureReport>[0]["rightSideKeypoints"];
+  type BackMeasurementsProp = Parameters<typeof SavedPostureReport>[0]["back"];
+  type NotAssessedProp = Parameters<typeof SavedPostureReport>[0]["backNotAssessed"];
+
+  const back = (m.back as BackMeasurementsProp | undefined) ?? null;
+  const leftSide = (m.left_side as SideMeasurements | undefined) ?? null;
+  const rightSide = (m.right_side as SideMeasurements | undefined) ?? null;
+  const backImage = (m.back_image as SavedImg | null | undefined) ?? null;
+  const leftSideImage = (m.left_side_image as SavedImg | null | undefined) ?? null;
+  const rightSideImage = (m.right_side_image as SavedImg | null | undefined) ?? null;
+  const backKeypoints = (kpRoot.back as BackKp) ?? null;
+  const leftSideKeypoints = (kpRoot.left_side as LeftKp) ?? null;
+  const rightSideKeypoints = (kpRoot.right_side as RightKp) ?? null;
+  const backFindings = (o.back_findings as PostureFinding[] | undefined) ?? null;
+  const leftSideFindings = (o.left_side_findings as PostureFinding[] | undefined) ?? null;
+  const rightSideFindings = (o.right_side_findings as PostureFinding[] | undefined) ?? null;
+  const backNotAssessed = (m.back_not_assessed as NotAssessedProp) ?? null;
+  const backLrSwapApplied = (m.back_lr_swap_applied as boolean | null | undefined) ?? null;
+
   return (
     <div className="space-y-8">
       <SavedPostureReport
@@ -826,6 +848,20 @@ function PostureBody({
         sideImage={sideImage}
         frontKeypoints={frontKeypoints}
         sideKeypoints={sideKeypoints}
+        back={back}
+        backFindings={backFindings}
+        backImage={backImage}
+        backKeypoints={backKeypoints}
+        backNotAssessed={backNotAssessed}
+        backLrSwapApplied={backLrSwapApplied}
+        leftSide={leftSide}
+        leftSideFindings={leftSideFindings}
+        leftSideImage={leftSideImage}
+        leftSideKeypoints={leftSideKeypoints}
+        rightSide={rightSide}
+        rightSideFindings={rightSideFindings}
+        rightSideImage={rightSideImage}
+        rightSideKeypoints={rightSideKeypoints}
         patient={patient}
         patientName={patient?.name ?? null}
       />

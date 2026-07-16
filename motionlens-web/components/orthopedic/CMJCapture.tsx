@@ -137,7 +137,7 @@ export function CMJCapture() {
       const data = await analyzeCounterMovementJumpUpload(
         file,
         calibration,
-        null,
+        patient?.height_cm ?? null,
       );
       setResult(data);
       setPhase("done");
@@ -202,6 +202,13 @@ export function CMJCapture() {
       ? patient.height_cm.toFixed(0)
       : "",
   );
+  useEffect(() => {
+    if (patient?.height_cm && patient.height_cm > 0) {
+      setUploadHeightInput((prev) =>
+        prev === "" ? patient.height_cm!.toFixed(0) : prev,
+      );
+    }
+  }, [patient?.height_cm]);
   const [allowUncalibratedUpload, setAllowUncalibratedUpload] =
     useState<boolean>(false);
   const parsedUploadHeightCm = Number.parseFloat(uploadHeightInput);

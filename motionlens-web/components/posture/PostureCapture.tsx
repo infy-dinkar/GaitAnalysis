@@ -1,17 +1,25 @@
 "use client";
-// Two-slot posture capture flow: front-view photo + side-view photo.
-// Both photos are uploaded together to /api/analyze-posture, which
-// runs BlazePose Full IMAGE-mode on each (after EXIF rotation
-// correction) and returns combined metrics + findings + 17-keypoint
-// arrays in the MoveNet-indexed layout. MoveNet has been completely
-// removed from this module.
+// Four-slot posture upload flow: front + side (both REQUIRED) plus
+// back + left-side + right-side (all OPTIONAL). All uploaded photos
+// are analysed in ONE POST to /api/analyze-posture via the
+// analyzePostureMultiView client — the endpoint is 4-view-aware.
+//
+// Backwards-compatible: leave the 3 optional slots empty and the
+// endpoint / response / save payload behave EXACTLY like the old
+// 2-view flow. Only when the operator picks the extra photos do the
+// new views populate.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Image as ImageIcon, Play, RotateCcw, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import {
-  analyzePostureCombined,
+  analyzePostureMultiView,
+  isPostureViewError,
   type PostureAnalysisResult,
+  type PostureBackResult,
+  type PostureExplicitSideResult,
+  type PostureMultiViewResult,
+  type PostureViewError,
 } from "@/lib/posture/analyzer";
 import { PostureReport } from "@/components/posture/PostureReport";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
@@ -21,6 +29,7 @@ import {
   buildFrontFindings,
   buildSideFindings,
 } from "@/lib/posture/measurements";
+import type { KeypointDTO } from "@/lib/reports";
 
 // Compressed image data URL paired with its decoded pixel dimensions.
 // Stored alongside per-view metrics so the saved report can re-render
@@ -30,6 +39,10 @@ interface PersistedView {
   width: number;
   height: number;
 }
+
+// Slot identity — matches the FormData field names + save-payload
+// keys the backend/dispatch page already understands.
+type SlotKey = "front" | "side" | "back" | "left_side" | "right_side";
 
 // Resize-and-encode a source image File to a JPEG data URL at most
 // `maxWidth` pixels wide. Keeps the saved-report payload manageable
@@ -67,36 +80,44 @@ async function compressFileToDataUrl(
 export function PostureCapture() {
   const [frontFile, setFrontFile] = useState<File | null>(null);
   const [sideFile, setSideFile] = useState<File | null>(null);
+  const [backFile, setBackFile] = useState<File | null>(null);
+  const [leftSideFile, setLeftSideFile] = useState<File | null>(null);
+  const [rightSideFile, setRightSideFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [phase, setPhase] = useState<"idle" | "analysing" | "done" | "error">("idle");
-  const [front, setFront] = useState<PostureAnalysisResult | null>(null);
-  const [side, setSide] = useState<PostureAnalysisResult | null>(null);
+  const [result, setResult] = useState<PostureMultiViewResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Compressed image data URLs cached for the save payload — same
-  // image the analyzer ran on, but downscaled + JPEG-encoded so it's
-  // small enough to serialise into MongoDB.
-  const persistedRef = useRef<{ front: PersistedView | null; side: PersistedView | null }>({
+  // Compressed image data URLs cached for the save payload — one entry
+  // per slot. Only the ones the operator actually uploaded get set.
+  const persistedRef = useRef<Record<SlotKey, PersistedView | null>>({
     front: null,
     side: null,
+    back: null,
+    left_side: null,
+    right_side: null,
   });
 
-  // Doctor-flow context — save is explicit via SaveToPatientButton.
   const { isDoctorFlow, patient } = usePatientContext();
 
   useEffect(() => {
     // Reset cached payload images whenever a file is removed / swapped.
     if (!frontFile) persistedRef.current.front = null;
     if (!sideFile) persistedRef.current.side = null;
-  }, [frontFile, sideFile]);
+    if (!backFile) persistedRef.current.back = null;
+    if (!leftSideFile) persistedRef.current.left_side = null;
+    if (!rightSideFile) persistedRef.current.right_side = null;
+  }, [frontFile, sideFile, backFile, leftSideFile, rightSideFile]);
 
-  const onPick = useCallback(
-    (which: "front" | "side", f: File | null) => {
-      setError(null);
-      if (which === "front") setFrontFile(f);
-      else setSideFile(f);
-    },
-    [],
-  );
+  const onPick = useCallback((which: SlotKey, f: File | null) => {
+    setError(null);
+    switch (which) {
+      case "front":      setFrontFile(f); break;
+      case "side":       setSideFile(f); break;
+      case "back":       setBackFile(f); break;
+      case "left_side":  setLeftSideFile(f); break;
+      case "right_side": setRightSideFile(f); break;
+    }
+  }, []);
 
   async function run() {
     if (!frontFile || !sideFile) {
@@ -106,22 +127,40 @@ export function PostureCapture() {
     setBusy(true);
     setError(null);
     setPhase("analysing");
-    setFront(null);
-    setSide(null);
+    setResult(null);
     try {
-      // Single POST to /api/analyze-posture — backend runs
-      // BlazePose Full IMAGE-mode on both photos and returns
-      // combined metrics + findings + keypoints in one response.
-      const [{ front: frontResult, side: sideResult }, frontPersist, sidePersist] =
-        await Promise.all([
-          analyzePostureCombined(frontFile, sideFile),
-          compressFileToDataUrl(frontFile),
-          compressFileToDataUrl(sideFile),
-        ]);
+      // Single POST to /api/analyze-posture. The multi-view client
+      // sends whichever of the 3 optional file fields are present;
+      // the response shape stays back-compat when only front+side
+      // are uploaded (see analyzer.ts contract).
+      const compressFront = compressFileToDataUrl(frontFile);
+      const compressSide  = compressFileToDataUrl(sideFile);
+      const compressBack  = backFile ? compressFileToDataUrl(backFile) : Promise.resolve(null);
+      const compressLeft  = leftSideFile ? compressFileToDataUrl(leftSideFile) : Promise.resolve(null);
+      const compressRight = rightSideFile ? compressFileToDataUrl(rightSideFile) : Promise.resolve(null);
+      const [
+        multiResult, frontPersist, sidePersist,
+        backPersist, leftPersist, rightPersist,
+      ] = await Promise.all([
+        analyzePostureMultiView({
+          frontFile,
+          sideFile,
+          backFile: backFile ?? undefined,
+          leftSideFile: leftSideFile ?? undefined,
+          rightSideFile: rightSideFile ?? undefined,
+        }),
+        compressFront,
+        compressSide,
+        compressBack,
+        compressLeft,
+        compressRight,
+      ]);
       persistedRef.current.front = frontPersist;
       persistedRef.current.side = sidePersist;
-      setFront(frontResult);
-      setSide(sideResult);
+      persistedRef.current.back = backPersist;
+      persistedRef.current.left_side = leftPersist;
+      persistedRef.current.right_side = rightPersist;
+      setResult(multiResult);
       setPhase("done");
     } catch (e) {
       setPhase("error");
@@ -132,93 +171,45 @@ export function PostureCapture() {
   }
 
   function reset() {
-    if (front) URL.revokeObjectURL(front.imageUrl);
-    if (side) URL.revokeObjectURL(side.imageUrl);
+    if (result) {
+      URL.revokeObjectURL(result.front.imageUrl);
+      URL.revokeObjectURL(result.side.imageUrl);
+      if (result.back && !isPostureViewError(result.back)) {
+        URL.revokeObjectURL(result.back.imageUrl);
+      }
+      if (result.left_side && !isPostureViewError(result.left_side)) {
+        URL.revokeObjectURL(result.left_side.imageUrl);
+      }
+      if (result.right_side && !isPostureViewError(result.right_side)) {
+        URL.revokeObjectURL(result.right_side.imageUrl);
+      }
+    }
     setFrontFile(null);
     setSideFile(null);
-    setFront(null);
-    setSide(null);
+    setBackFile(null);
+    setLeftSideFile(null);
+    setRightSideFile(null);
+    setResult(null);
     setError(null);
     setPhase("idle");
   }
 
-  if (phase === "done" && (front || side)) {
+  if (phase === "done" && result) {
     return (
       <div className="space-y-8">
         <PostureReport
-          front={front}
-          side={side}
+          front={result.front}
+          side={result.side}
           patient={patient ?? null}
           patientName={patient?.name ?? null}
+          back={result.back ?? null}
+          leftSide={result.left_side ?? null}
+          rightSide={result.right_side ?? null}
         />
 
         {/* Explicit save button — only renders in doctor flow */}
         <SaveToPatientButton
-          buildPayload={() => {
-            const frontFindings = front?.front ? buildFrontFindings(front.front) : [];
-            const sideFindings = side?.side ? buildSideFindings(side.side) : [];
-            const fImg = persistedRef.current.front;
-            const sImg = persistedRef.current.side;
-
-            // Keypoints come out of the analyzer in ORIGINAL-image
-            // pixel space (e.g. a 4032×3024 phone photo's coordinates).
-            // The compressed source we persist alongside is ~800 px
-            // wide, so we scale the keypoints into the compressed
-            // image's coordinate space before saving — otherwise the
-            // SavedPostureReport overlay draws dots / lines / badges
-            // at the wrong positions when re-rendering.
-            const scaleKp = (
-              kps: typeof front extends infer T ? T extends { keypoints: infer K } ? K : null : null,
-              fromW: number | undefined,
-              toW: number | undefined,
-            ) => {
-              if (!kps || !fromW || !toW || fromW === 0) return kps;
-              const s = toW / fromW;
-              return (kps as Array<{ x: number; y: number; score?: number; name?: string }>).map((kp) => ({
-                ...kp,
-                x: kp.x * s,
-                y: kp.y * s,
-              }));
-            };
-            const frontKpScaled = scaleKp(front?.keypoints ?? null, front?.imageWidth, fImg?.width);
-            const sideKpScaled  = scaleKp(side?.keypoints  ?? null, side?.imageWidth,  sImg?.width);
-
-            return {
-              module: "posture",
-              metrics: {
-                front: front?.front ?? {},
-                side: side?.side ?? {},
-                // Compressed source images so the saved-report viewer
-                // can re-render the annotated overlay. JPEG-encoded at
-                // ~800 px max width.
-                front_image: fImg
-                  ? {
-                      data_url: fImg.dataUrl,
-                      width: fImg.width,
-                      height: fImg.height,
-                    }
-                  : null,
-                side_image: sImg
-                  ? {
-                      data_url: sImg.dataUrl,
-                      width: sImg.width,
-                      height: sImg.height,
-                    }
-                  : null,
-              },
-              observations: {
-                front_findings: frontFindings,
-                side_findings: sideFindings,
-              },
-              // Spec Section 2 (a): persist the raw landmark stream as
-              // JSON, but in the COMPRESSED image's coordinate space
-              // so it aligns with the saved photo at render time.
-              keypoints: {
-                front: frontKpScaled,
-                side: sideKpScaled,
-              },
-            };
-          }}
+          buildPayload={() => buildSavePayload(result, persistedRef.current)}
         />
 
         <div className="flex justify-center border-t border-border pt-6">
@@ -238,15 +229,35 @@ export function PostureCapture() {
       <div className="grid gap-5 md:grid-cols-2">
         <PhotoSlot
           label="Front view"
+          required
           file={frontFile}
           onPick={(f) => onPick("front", f)}
           hint="Patient stands facing the camera, full body in frame, arms relaxed at sides."
         />
         <PhotoSlot
           label="Side view"
+          required
           file={sideFile}
           onPick={(f) => onPick("side", f)}
           hint="Patient stands sideways to the camera (left or right side), full body in frame."
+        />
+        <PhotoSlot
+          label="Back view"
+          file={backFile}
+          onPick={(f) => onPick("back", f)}
+          hint="Optional. Patient turns around — back to camera, full body in frame."
+        />
+        <PhotoSlot
+          label="Left-side view"
+          file={leftSideFile}
+          onPick={(f) => onPick("left_side", f)}
+          hint="Optional. Patient turns so LEFT side faces the camera. Analysed with pickedSide forced left."
+        />
+        <PhotoSlot
+          label="Right-side view"
+          file={rightSideFile}
+          onPick={(f) => onPick("right_side", f)}
+          hint="Optional. Patient turns so RIGHT side faces the camera. Analysed with pickedSide forced right."
         />
       </div>
 
@@ -258,7 +269,7 @@ export function PostureCapture() {
           <p className="mt-3 text-[11px] text-subtle">
             Pose detection runs on the server. Photos are processed in memory
             and deleted immediately after analysis — only metrics and
-            keypoints are saved with the patient's report.
+            keypoints are saved with the patient&apos;s report.
           </p>
         </div>
       )}
@@ -286,6 +297,7 @@ export function PostureCapture() {
         {(!frontFile || !sideFile) && (
           <p className="text-xs text-subtle">
             Both front-view and side-view photos are required to run analysis.
+            Back / left / right views are optional.
           </p>
         )}
       </div>
@@ -293,21 +305,138 @@ export function PostureCapture() {
   );
 }
 
+// ─── Save payload builder ────────────────────────────────────────
+// Mirrors buildPayload in PostureLiveCapture 1:1 so both flows land
+// the same shape in Mongo and the dispatch page renders both
+// identically. Keypoints are scaled from the analyzer's returned
+// coordinate space (matches the source photo's dimensions) into the
+// compressed image's coordinate space so the saved-report overlay
+// draws dots at the right positions.
+function buildSavePayload(
+  result: PostureMultiViewResult,
+  persisted: Record<SlotKey, PersistedView | null>,
+) {
+  const frontFindings = result.front.front
+    ? buildFrontFindings(result.front.front)
+    : [];
+  const sideFindings = result.side.side
+    ? buildSideFindings(result.side.side)
+    : [];
+
+  const scaleKp = (
+    kps: unknown,
+    fromW: number | undefined,
+    toW: number | undefined,
+  ): KeypointDTO[] | null => {
+    if (!Array.isArray(kps) || !fromW || !toW || fromW === 0) {
+      return (kps as KeypointDTO[]) ?? null;
+    }
+    const s = toW / fromW;
+    return (kps as Array<{ x: number; y: number; score?: number; name?: string }>).map(
+      (kp) => ({ ...kp, x: kp.x * s, y: kp.y * s }),
+    ) as KeypointDTO[];
+  };
+
+  const backSuccess: PostureBackResult | null =
+    result.back && !isPostureViewError(result.back) ? result.back : null;
+  const leftSideSuccess: PostureExplicitSideResult | null =
+    result.left_side && !isPostureViewError(result.left_side) ? result.left_side : null;
+  const rightSideSuccess: PostureExplicitSideResult | null =
+    result.right_side && !isPostureViewError(result.right_side) ? result.right_side : null;
+
+  const asImg = (
+    p: PersistedView | null,
+  ): { data_url: string; width: number; height: number } | null =>
+    p ? { data_url: p.dataUrl, width: p.width, height: p.height } : null;
+
+  const frontKp = scaleKp(
+    result.front.keypoints, result.front.imageWidth,
+    persisted.front?.width,
+  );
+  const sideKp = scaleKp(
+    result.side.keypoints, result.side.imageWidth,
+    persisted.side?.width,
+  );
+  const backKp = backSuccess
+    ? scaleKp(backSuccess.keypoints, backSuccess.imageWidth, persisted.back?.width)
+    : null;
+  const leftKp = leftSideSuccess
+    ? scaleKp(leftSideSuccess.keypoints, leftSideSuccess.imageWidth, persisted.left_side?.width)
+    : null;
+  const rightKp = rightSideSuccess
+    ? scaleKp(rightSideSuccess.keypoints, rightSideSuccess.imageWidth, persisted.right_side?.width)
+    : null;
+
+  const keypoints: Record<string, KeypointDTO[] | null> = {
+    front: frontKp,
+    side: sideKp,
+  };
+  if (backKp) keypoints.back = backKp;
+  if (leftKp) keypoints.left_side = leftKp;
+  if (rightKp) keypoints.right_side = rightKp;
+
+  return {
+    module: "posture" as const,
+    metrics: {
+      front: result.front.front ?? {},
+      side: result.side.side ?? {},
+      // Existing image keys — read by the dispatch page PostureBody.
+      front_image: asImg(persisted.front),
+      side_image: asImg(persisted.side),
+      // Additive new-view blobs.
+      back: backSuccess?.back ?? null,
+      left_side: leftSideSuccess?.side ?? null,
+      right_side: rightSideSuccess?.side ?? null,
+      back_image: asImg(persisted.back),
+      left_side_image: asImg(persisted.left_side),
+      right_side_image: asImg(persisted.right_side),
+      // Back-view extras — SavedPostureReport surfaces these as the
+      // honest not_assessed list + the L/R swap chip.
+      back_not_assessed: backSuccess?.not_assessed ?? null,
+      back_lr_swap_applied: backSuccess?.lr_swap_applied ?? null,
+    } as Record<string, unknown>,
+    observations: {
+      // snake_case matches PostureBody at reports/[id]/page.tsx.
+      front_findings: frontFindings,
+      side_findings: sideFindings,
+      back_findings: backSuccess?.findings ?? [],
+      left_side_findings: leftSideSuccess?.findings ?? [],
+      right_side_findings: rightSideSuccess?.findings ?? [],
+    } as Record<string, unknown>,
+    keypoints,
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _EnsureAnalysisResultShapeStillUsed = PostureAnalysisResult;
+// Live-render error shape reserved for the same not-currently-rendered
+// error banner PostureLiveCapture uses. Kept for symmetry.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _EnsureViewErrorShapeStillUsed = PostureViewError;
+
+// ─── Photo slot ────────────────────────────────────────────────
 function PhotoSlot({
   label,
   file,
   onPick,
   hint,
+  required = false,
 }: {
   label: string;
   file: File | null;
   onPick: (f: File | null) => void;
   hint: string;
+  required?: boolean;
 }) {
   return (
     <label className="flex cursor-pointer flex-col gap-3 rounded-card border border-dashed border-border bg-surface p-5 transition hover:border-accent/60">
       <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-        {label} <span className="text-error">*</span>
+        {label}{" "}
+        {required ? (
+          <span className="text-error">*</span>
+        ) : (
+          <span className="text-subtle">(optional)</span>
+        )}
       </p>
       {file ? (
         <div className="flex items-center gap-3 rounded-md bg-elevated p-3 text-sm">

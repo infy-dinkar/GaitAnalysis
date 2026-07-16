@@ -176,12 +176,7 @@ export function GaitResultsView({ data, patientNameOverride, patientOverride }: 
             clean pass produced no reliable strikes). Component
             self-hides when there is no data to render. */}
         <GaitCyclePercentBlock
-          data={getGaitCycleBlock(
-            data.metrics_clean?.stance_pct_left != null
-              || data.metrics_clean?.cadence != null
-              ? data.metrics_clean
-              : data.metrics_total,
-          )}
+          data={getGaitCycleBlock(data.metrics_clean, data.metrics_total)}
         />
       </div>
 

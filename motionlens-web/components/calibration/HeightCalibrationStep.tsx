@@ -93,6 +93,19 @@ export function HeightCalibrationStep({
       ? defaultHeightCm.toFixed(0)
       : "",
   );
+
+  // Sync when the parent patient record hydrates after mount — the
+  // useState initializer captures whatever defaultHeightCm was at
+  // mount time (often null while usePatientContext is still loading).
+  // Only overwrite while the field is still empty so operator edits
+  // are never clobbered.
+  useEffect(() => {
+    if (defaultHeightCm && defaultHeightCm > 0) {
+      setHeightInput((prev) =>
+        prev === "" ? defaultHeightCm.toFixed(0) : prev,
+      );
+    }
+  }, [defaultHeightCm]);
   const [latestReading, setLatestReading] = useState<BodyHeightReading | null>(null);
   const [frameReason, setFrameReason] = useState<string>("torso_missing");
   const [stableCount, setStableCount] = useState<number>(0);

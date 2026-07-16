@@ -175,7 +175,7 @@ export function SingleLegHopCapture() {
         file,
         side,
         calibration,
-        null,
+        patient?.height_cm ?? null,
       );
       if (side === "left") setLeftResult(result);
       else setRightResult(result);
@@ -276,6 +276,13 @@ export function SingleLegHopCapture() {
       ? patient.height_cm.toFixed(0)
       : "",
   );
+  useEffect(() => {
+    if (patient?.height_cm && patient.height_cm > 0) {
+      setUploadHeightInput((prev) =>
+        prev === "" ? patient.height_cm!.toFixed(0) : prev,
+      );
+    }
+  }, [patient?.height_cm]);
   const [allowUncalibratedUpload, setAllowUncalibratedUpload] =
     useState<boolean>(false);
   const parsedUploadHeightCm = Number.parseFloat(uploadHeightInput);

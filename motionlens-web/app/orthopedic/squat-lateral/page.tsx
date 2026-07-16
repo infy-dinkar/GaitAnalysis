@@ -32,9 +32,11 @@ function Inner() {
                 Sagittal-plane squat screen — side-on single camera.
                 Patient stands with the analysed leg toward the camera
                 and performs 3-6 slow squats to about parallel depth.
-                Six metrics reported at the deepest rep: peak knee
-                flexion, peak hip flexion, ankle dorsiflexion (shank
-                tilt), trunk lean, hip:knee ratio, heel rise.
+                Two metrics at the deepest rep: peak knee flexion +
+                peak hip flexion. Trunk lean, hip:knee ratio, heel
+                rise and ankle dorsiflexion are intentionally not
+                scored — the 2D lateral proxies for those items were
+                too noisy in practice on BlazePose recordings.
               </p>
               <p className="mt-3 text-xs text-muted">
                 <strong>Frontal-plane items honestly not assessed:</strong>{" "}

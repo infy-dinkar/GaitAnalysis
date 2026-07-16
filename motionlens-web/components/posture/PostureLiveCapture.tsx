@@ -109,10 +109,15 @@ const STEPS: StepDef[] = [
 // use the LEFT clip for the boxed `side` field so the existing
 // front+side pipeline still fires; the explicit left_side/right_side
 // keys carry the same data with pickedSide forced.
-async function captureFrameToFile(
+async function captureFrameFromVideo(
   video: HTMLVideoElement,
   fileName: string,
-): Promise<File | null> {
+): Promise<{
+  file: File;
+  persisted: { dataUrl: string; width: number; height: number };
+  captureWidth: number;
+  captureHeight: number;
+} | null> {
   // *** MIRROR TRAP — see file header. Draw the RAW frame; do not
   // *** apply scale(-1,1) or any transform. CSS -scale-x-100 on the
   // *** video only affects display, not ctx.drawImage.
@@ -125,16 +130,48 @@ async function captureFrameToFile(
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
   ctx.drawImage(video, 0, 0, w, h);
+  // Full-resolution JPEG File for the upload analysis endpoint.
   const blob: Blob | null = await new Promise((resolve) => {
     canvas.toBlob((b) => resolve(b), "image/jpeg", 0.92);
   });
   if (!blob) return null;
-  return new File([blob], fileName, { type: "image/jpeg" });
+  const file = new File([blob], fileName, { type: "image/jpeg" });
+
+  // Compressed 800-px-wide data URL for save-to-report persistence.
+  // Same 800 / 0.8 encoding PostureCapture uses so the SavedPostureReport
+  // overlay renders identically for upload-mode and live-mode saves.
+  const persisted = await compressToPersistedDataUrl(canvas, 800, 0.8);
+  return { file, persisted, captureWidth: w, captureHeight: h };
+}
+
+async function compressToPersistedDataUrl(
+  sourceCanvas: HTMLCanvasElement,
+  maxWidth: number,
+  quality: number,
+): Promise<{ dataUrl: string; width: number; height: number }> {
+  const scale = Math.min(1, maxWidth / sourceCanvas.width);
+  const w = Math.round(sourceCanvas.width * scale);
+  const h = Math.round(sourceCanvas.height * scale);
+  const out = document.createElement("canvas");
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext("2d");
+  if (!ctx) throw new Error("Canvas 2D context unavailable");
+  ctx.drawImage(sourceCanvas, 0, 0, w, h);
+  const dataUrl = out.toDataURL("image/jpeg", quality);
+  return { dataUrl, width: w, height: h };
 }
 
 interface CapturedView {
   file: File;
   thumbUrl: string;
+  // Compressed source photo persisted into the saved-report
+  // payload — matches the shape PostureCapture stores.
+  persisted: { dataUrl: string; width: number; height: number };
+  // Raw capture dims so we can scale analyzed keypoints into the
+  // compressed image's coordinate space before saving.
+  captureWidth: number;
+  captureHeight: number;
 }
 
 type Phase = "capturing" | "analyzing" | "done" | "error";
@@ -198,19 +235,28 @@ export function PostureLiveCapture() {
     }
     setBusy(true);
     try {
-      const file = await captureFrameToFile(
+      const grabbed = await captureFrameFromVideo(
         video,
         `posture_${step.key}.jpg`,
       );
-      if (!file) {
+      if (!grabbed) {
         setError("Could not grab a frame. Try again once the video is playing.");
         return;
       }
-      const thumbUrl = URL.createObjectURL(file);
+      const thumbUrl = URL.createObjectURL(grabbed.file);
       // Revoke the previous thumb if we're overwriting.
       const prev = captures[step.key];
       if (prev) URL.revokeObjectURL(prev.thumbUrl);
-      setCaptures((c) => ({ ...c, [step.key]: { file, thumbUrl } }));
+      setCaptures((c) => ({
+        ...c,
+        [step.key]: {
+          file: grabbed.file,
+          thumbUrl,
+          persisted: grabbed.persisted,
+          captureWidth: grabbed.captureWidth,
+          captureHeight: grabbed.captureHeight,
+        },
+      }));
     } catch (e) {
       setError(
         e instanceof Error ? e.message : "Frame capture failed.",
@@ -299,6 +345,7 @@ export function PostureLiveCapture() {
     return (
       <DoneView
         result={result}
+        captures={captures}
         onReset={onReset}
         patientName={patient?.name ?? null}
       />
@@ -443,17 +490,26 @@ export function PostureLiveCapture() {
 // ─── Done view ─────────────────────────────────────────────
 function DoneView({
   result,
+  captures,
   onReset,
   patientName,
 }: {
   result: PostureMultiViewResult;
+  captures: Partial<Record<StepKey, CapturedView>>;
   onReset: () => void;
   patientName: string | null;
 }) {
   const { isDoctorFlow, patient } = usePatientContext();
 
-  // Build the save payload — mirror the shape PostureCapture uses,
-  // extended additively with the new views.
+  // Build the save payload — mirrors the PostureCapture (upload-mode)
+  // shape 1:1 so the dispatch page and SavedPostureReport render both
+  // flows identically. Two-step scale-then-persist:
+  //   • Analyzer runs on the FULL-RESOLUTION frame — keypoints come
+  //     back in that coordinate space.
+  //   • We persist a compressed ~800-px-wide JPEG data URL alongside
+  //     each view, plus a KEYPOINT ARRAY SCALED into that compressed
+  //     image's coordinate space so the SavedPostureReport overlay
+  //     draws dots and lines at the right positions.
   function buildPayload() {
     const frontFindings = result.front.front
       ? buildFrontFindings(result.front.front)
@@ -461,33 +517,138 @@ function DoneView({
     const sideFindings = result.side.side
       ? buildSideFindings(result.side.side)
       : [];
-    const keypoints: Record<string, KeypointDTO[] | null> = {
-      front: result.front.keypoints as unknown as KeypointDTO[],
-      side: result.side.keypoints as unknown as KeypointDTO[],
+
+    type ScaledKp = { x: number; y: number; score?: number; name?: string };
+    const scaleKp = (
+      kps: unknown,
+      fromW: number | undefined,
+      toW: number | undefined,
+    ): KeypointDTO[] | null => {
+      if (!Array.isArray(kps) || !fromW || !toW || fromW === 0) {
+        return (kps as KeypointDTO[]) ?? null;
+      }
+      const s = toW / fromW;
+      return (kps as ScaledKp[]).map((kp) => ({
+        ...kp,
+        x: kp.x * s,
+        y: kp.y * s,
+      })) as KeypointDTO[];
     };
-    const backKps = pickKeypoints(result.back);
-    if (backKps) keypoints.back = backKps;
-    const leftKps = pickKeypoints(result.left_side);
-    if (leftKps) keypoints.left_side = leftKps;
-    const rightKps = pickKeypoints(result.right_side);
-    if (rightKps) keypoints.right_side = rightKps;
+
+    // Front + side: `capture` widths come from the live capture at
+    // captureWidth, but the analyzer's returned imageWidth is what
+    // the BACKEND actually decoded (should match; use analyzer's
+    // number to be safe).
+    const fCap = captures.front;
+    const sCap = captures.left_side || captures.right_side;
+    const bCap = captures.back;
+    const lCap = captures.left_side;
+    const rCap = captures.right_side;
+
+    const frontKpScaled = scaleKp(
+      result.front.keypoints,
+      result.front.imageWidth,
+      fCap?.persisted.width,
+    );
+    const sideView = result.left_side && !isPostureViewError(result.left_side)
+      ? result.left_side
+      : result.right_side && !isPostureViewError(result.right_side)
+        ? result.right_side
+        : null;
+    const sideKpScaled = scaleKp(
+      result.side.keypoints,
+      result.side.imageWidth,
+      sCap?.persisted.width,
+    );
+
+    // Extract per-view data ONLY when the view succeeded — errors
+    // shouldn't corrupt the saved metrics.
+    const backSuccess =
+      result.back && !isPostureViewError(result.back) ? result.back : null;
+    const leftSideSuccess =
+      result.left_side && !isPostureViewError(result.left_side)
+        ? result.left_side
+        : null;
+    const rightSideSuccess =
+      result.right_side && !isPostureViewError(result.right_side)
+        ? result.right_side
+        : null;
+
+    const backKpScaled = backSuccess
+      ? scaleKp(
+          backSuccess.keypoints,
+          backSuccess.imageWidth,
+          bCap?.persisted.width,
+        )
+      : null;
+    const leftSideKpScaled = leftSideSuccess
+      ? scaleKp(
+          leftSideSuccess.keypoints,
+          leftSideSuccess.imageWidth,
+          lCap?.persisted.width,
+        )
+      : null;
+    const rightSideKpScaled = rightSideSuccess
+      ? scaleKp(
+          rightSideSuccess.keypoints,
+          rightSideSuccess.imageWidth,
+          rCap?.persisted.width,
+        )
+      : null;
+
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const _sideView = sideView; // touched so lints don't nag on shape audit
+
+    const keypoints: Record<string, KeypointDTO[] | null> = {
+      front: frontKpScaled,
+      side: sideKpScaled,
+    };
+    if (backKpScaled) keypoints.back = backKpScaled;
+    if (leftSideKpScaled) keypoints.left_side = leftSideKpScaled;
+    if (rightSideKpScaled) keypoints.right_side = rightSideKpScaled;
+
+    const asImg = (
+      cap: CapturedView | undefined,
+    ): { data_url: string; width: number; height: number } | null =>
+      cap
+        ? {
+            data_url: cap.persisted.dataUrl,
+            width: cap.persisted.width,
+            height: cap.persisted.height,
+          }
+        : null;
 
     return {
       module: "posture" as const,
       metrics: {
         front: result.front.front,
         side: result.side.side,
-        // Additive new-view metric blobs
+        // ── Existing PostureCapture image keys — used by the
+        // dispatch page's PostureBody at reports/[id]/page.tsx.
+        front_image: asImg(fCap),
+        side_image: asImg(sCap),
+        // ── Additive new-view metric blobs
         back: pickBack(result.back),
         left_side: pickSide(result.left_side),
         right_side: pickSide(result.right_side),
+        // ── Additive new-view images
+        back_image: asImg(bCap),
+        left_side_image: asImg(lCap),
+        right_side_image: asImg(rCap),
+        // ── Back-view extras (SavedPostureReport reads these as
+        // `backNotAssessed` + `backLrSwapApplied` props).
+        back_not_assessed: backSuccess?.not_assessed ?? null,
+        back_lr_swap_applied: backSuccess?.lr_swap_applied ?? null,
       } as Record<string, unknown>,
       observations: {
-        frontFindings,
-        sideFindings,
-        backFindings: pickFindings(result.back),
-        leftSideFindings: pickFindings(result.left_side),
-        rightSideFindings: pickFindings(result.right_side),
+        // snake_case to match the dispatch page's PostureBody
+        // (o.front_findings / o.side_findings). CamelCase versions
+        // would silently disappear on save.
+        front_findings: frontFindings,
+        side_findings: sideFindings,
+        back_findings: pickFindings(result.back),
+        left_side_findings: pickFindings(result.left_side),
+        right_side_findings: pickFindings(result.right_side),
       } as Record<string, unknown>,
       keypoints,
     };

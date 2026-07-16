@@ -236,15 +236,16 @@ const MODULES = [
     tone: "from-sky-500/15 to-sky-500/5",
     iconTone: "text-sky-600",
   },
-  {
-    href: "orthopedic/squat-lateral",
-    eyebrow: "Physio squat · lateral",
-    title: "Squat (Lateral)",
-    body: "Sagittal-plane squat — side-on single camera. Six metrics at the deepest rep: peak knee flexion, peak hip flexion, ankle dorsiflexion (shank tilt), trunk lean, hip:knee ratio, heel rise. Near-side leg only. Frontal-plane valgus honestly not assessed — use Overhead Squat or Single-Leg Squat for that.",
-    icon: MoveRight,
-    tone: "from-teal-500/15 to-teal-500/5",
-    iconTone: "text-teal-600",
-  },
+  // Squat (Lateral) hub card removed on request — the assessment is
+  // hidden from the analyze menu. All downstream surfaces are left
+  // intact so already-saved lateral-squat reports still render and
+  // the direct route `/orthopedic/squat-lateral` still works:
+  //   • module Literal `"squat_lateral"` in report_models.py + lib/reports.ts
+  //   • ReportCard MODULE_META entry (report-history rendering)
+  //   • reports/[id] dispatch (opening a saved report)
+  //   • backend endpoint, engine, TS client, capture, report tsx
+  // Re-add the hub card here to re-enable discovery from the
+  // assessments menu.
 ];
 
 export default function AnalyzePage({

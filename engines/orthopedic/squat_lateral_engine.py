@@ -2,36 +2,30 @@
 
 Clinical context:
   Patient stands SIDE-ON to a single camera (declared `side`) and
-  performs 3-6 slow squats. This is the classic sagittal-plane
-  physio squat screen: hip flexion, knee flexion, ankle
-  dorsiflexion, trunk lean at the squat bottom.
+  performs 3-6 slow squats. Sagittal-plane physio squat screen —
+  ONLY hip flexion + knee flexion at the squat bottom.
 
 Only the near-side (camera-facing) leg is analysed — the far-side
 leg is occluded and per-frame visibility is unreliable, so we NEVER
 average both sides.
 
-Scope — exactly six metrics per rep, taken at the deepest frame:
+Scope — exactly two metrics per rep, taken at the deepest frame:
   1. peak_knee_flexion_deg   — bend at knee (0° = straight)
   2. peak_hip_flexion_deg    — bend at hip  (magnitude)
-  3. ankle_dorsiflexion_deg  — shank tilt from vertical (positive = tibia
-                               forward over the toe)
-  4. trunk_lean_deg          — trunk tilt from vertical
-  5. hip_knee_ratio          — hip / knee flexion; high = hip-dominant
-                               (posterior-chain), low = knee-dominant (quad)
-  6. heel_rise: bool         — near-side heel Y lifts above the standing
-                               baseline by more than the heel-rise threshold
-                               (2 cm when calibration is available, else
-                               1.5% of leg length)
+
+Previously scored items REMOVED (kept as dead code where import-
+compatibility mattered): ankle dorsiflexion, trunk lean, hip-knee
+ratio, heel rise. Each was noisy or unreliable in practice on
+lateral MediaPipe recordings — the operator gets clean hip + knee
+readings and doesn't need to sift through misleading numbers.
 
 Aggregate:
   representative rep = deepest rep (max peak_knee_flexion_deg)
   classification (three-tier — matches the recommendation.js DSL's
   evalClassification at :247):
-    good     : deepest peak_knee_flexion ≥ 90° AND no heel_rise on ANY rep
-               AND trunk_lean ≤ 40°
-    poor     : deepest peak_knee_flexion < 70° OR any rep has heel_rise
-               OR trunk_lean > 55°
-    moderate : everything in between
+    good     : deepest peak_knee_flexion ≥ 90°
+    poor     : deepest peak_knee_flexion < 70°
+    moderate : between 70° and 90°
   0 reps or poor visibility → classification="insufficient_data",
   reps=[], and the guard fields explain why.
 
@@ -47,11 +41,10 @@ never mutates their state or overrides their outputs:
   • savgol_filter / find_peaks             — scipy.signal, same pattern
                                              used by gait_cycle.py
 
-Local helpers written new (walking-coupled originals not reusable):
-  • _shank_to_vertical_deg  — sagittal ankle dorsi/plantar, no baseline
-                              auto-detection, no walking-direction sign
-  • _trunk_to_vertical_deg  — sagittal trunk lean, no walking sign
-  • _find_squat_bottoms     — hip-Y trough detection tailored for squats
+Local helper written new: _find_squat_bottoms — hip-Y trough
+detection tailored for squats. `_trunk_to_vertical_deg` and
+`_shank_to_vertical_deg` are retained as dead code — imports from
+outside are safe — but no longer participate in the reported result.
 
 Valgus is honestly marked `not_assessed` — frontal plane not visible
 from a lateral camera. Use overhead-squat or single-leg-squat for that.
@@ -433,33 +426,15 @@ def analyze_squat_lateral(
         peak_knee = float(knee_angles[b]) if not np.isnan(knee_angles[b]) else None
         raw_hip = hip_angles_signed[b]
         peak_hip = float(abs(raw_hip)) if not np.isnan(raw_hip) else None
-        ankle_dorsi = _shank_to_vertical_deg(
-            float(knee_x[b]),  float(knee_y[b]),
-            float(ankle_x[b]), float(ankle_y[b]),
-        )
-        trunk_lean = _trunk_to_vertical_deg(
-            float(shoulder_x[b]), float(shoulder_y[b]),
-            float(hip_x[b]),      float(hip_y[b]),
-        )
-        if peak_hip is not None and peak_knee is not None and peak_knee > 1e-6:
-            hip_knee_ratio: Optional[float] = round(peak_hip / peak_knee, 3)
-        else:
-            hip_knee_ratio = None
-        heel_dy = float(baseline_heel_y - heel_y[b])
-        # In image y-down coords, heel LIFTING = y decreases → baseline − y_now > 0
-        heel_rise = bool(heel_dy >= heel_rise_thresh_px)
-
+        # Trunk lean, hip-knee ratio and heel rise are intentionally
+        # NOT scored — see the module docstring for why. Only hip +
+        # knee flexion make it into the per-rep entry.
         reps.append({
             "rep_index": len(reps),
             "bottom_frame_index": b,
             "bottom_t_ms": float(b / fps * 1000.0),
             "peak_knee_flexion_deg":  round(peak_knee, 1) if peak_knee is not None else None,
             "peak_hip_flexion_deg":   round(peak_hip, 1)  if peak_hip  is not None else None,
-            "ankle_dorsiflexion_deg": ankle_dorsi,
-            "trunk_lean_deg":         trunk_lean,
-            "hip_knee_ratio":         hip_knee_ratio,
-            "heel_rise":              heel_rise,
-            "heel_rise_px":           round(heel_dy, 1),
         })
 
     if len(reps) == 0:
@@ -479,14 +454,12 @@ def analyze_squat_lateral(
     else:
         deepest = reps[0]
     peak_knee_deepest = deepest["peak_knee_flexion_deg"] or 0.0
-    trunk_lean_deepest = deepest["trunk_lean_deg"] or 0.0
-    any_heel_rise = any(r["heel_rise"] for r in reps)
 
-    # 9) Classification (three-tier). See module docstring — this
-    #    matches recommendation.js evalClassification (:247).
-    if peak_knee_deepest >= _KNEE_GOOD_MIN_DEG and not any_heel_rise and trunk_lean_deepest <= _TRUNK_GOOD_MAX_DEG:
+    # 9) Classification (three-tier — knee-flexion only now that
+    #    heel-rise and trunk-lean have been stripped from the report).
+    if peak_knee_deepest >= _KNEE_GOOD_MIN_DEG:
         classification = "good"
-    elif peak_knee_deepest < _KNEE_POOR_MAX_DEG or any_heel_rise or trunk_lean_deepest > _TRUNK_POOR_MIN_DEG:
+    elif peak_knee_deepest < _KNEE_POOR_MAX_DEG:
         classification = "poor"
     else:
         classification = "moderate"
@@ -547,24 +520,15 @@ def analyze_squat_lateral(
         "patient_height_cm":        patient_height_cm,
         "calibration":              final_calibration,
         "baseline_hip_y_px":        float(baseline_hip_y),
-        "baseline_heel_y_px":       float(baseline_heel_y),
         "leg_length_px":            float(leg_length_px),
-        "heel_rise_threshold_px":   float(heel_rise_thresh_px),
         "reps":                     reps,
         "rep_count":                len(reps),
-        # Summary = the six metrics from the deepest rep.
+        # Summary = deepest-rep hip + knee flexion only.
         "peak_knee_flexion_deg":    deepest["peak_knee_flexion_deg"],
         "peak_hip_flexion_deg":     deepest["peak_hip_flexion_deg"],
-        "ankle_dorsiflexion_deg":   deepest["ankle_dorsiflexion_deg"],
-        "trunk_lean_deg":           deepest["trunk_lean_deg"],
-        "hip_knee_ratio":           deepest["hip_knee_ratio"],
-        "heel_rise":                bool(deepest["heel_rise"]),
-        "any_heel_rise":            bool(any_heel_rise),
         "deepest_rep_index":        int(deepest["rep_index"]),
         "mean_peak_knee_flexion_deg": round(_mean([r["peak_knee_flexion_deg"] for r in rep_with_knee]), 1)
             if rep_with_knee else None,
-        "mean_trunk_lean_deg":      round(_mean([r["trunk_lean_deg"] for r in reps if r["trunk_lean_deg"] is not None]), 1)
-            if reps else None,
         "classification":           classification,
         "valgus":                   valgus_note,
         "caveats":                  caveats,
@@ -619,21 +583,13 @@ def _empty_result(
         "patient_height_cm":        patient_height_cm,
         "calibration":              calibration,
         "baseline_hip_y_px":        0.0,
-        "baseline_heel_y_px":       0.0,
         "leg_length_px":            float(leg_length_px),
-        "heel_rise_threshold_px":   0.0,
         "reps":                     [],
         "rep_count":                0,
         "peak_knee_flexion_deg":    None,
         "peak_hip_flexion_deg":     None,
-        "ankle_dorsiflexion_deg":   None,
-        "trunk_lean_deg":           None,
-        "hip_knee_ratio":           None,
-        "heel_rise":                False,
-        "any_heel_rise":            False,
         "deepest_rep_index":        -1,
         "mean_peak_knee_flexion_deg": None,
-        "mean_trunk_lean_deg":      None,
         "classification":           "insufficient_data",
         "guard_reason":             reason,
         "valgus": {

@@ -3560,11 +3560,6 @@ class SquatLateralRepDTO(BaseModel):
     bottom_t_ms: float
     peak_knee_flexion_deg: Optional[float] = None
     peak_hip_flexion_deg: Optional[float] = None
-    ankle_dorsiflexion_deg: Optional[float] = None
-    trunk_lean_deg: Optional[float] = None
-    hip_knee_ratio: Optional[float] = None
-    heel_rise: bool
-    heel_rise_px: float
 
 
 class SquatLateralAngleTraceDTO(BaseModel):
@@ -3580,21 +3575,13 @@ class SquatLateralResultDTO(BaseModel):
     patient_height_cm: Optional[float] = None
     calibration: Optional[Dict[str, Any]] = None
     baseline_hip_y_px: float
-    baseline_heel_y_px: float
     leg_length_px: float
-    heel_rise_threshold_px: float
     reps: List[SquatLateralRepDTO]
     rep_count: int
     peak_knee_flexion_deg: Optional[float] = None
     peak_hip_flexion_deg: Optional[float] = None
-    ankle_dorsiflexion_deg: Optional[float] = None
-    trunk_lean_deg: Optional[float] = None
-    hip_knee_ratio: Optional[float] = None
-    heel_rise: bool = False
-    any_heel_rise: bool = False
     deepest_rep_index: int = -1
     mean_peak_knee_flexion_deg: Optional[float] = None
-    mean_trunk_lean_deg: Optional[float] = None
     classification: Literal["good", "moderate", "poor", "insufficient_data"]
     guard_reason: Optional[str] = None
     valgus: SquatLateralValgusNoteDTO

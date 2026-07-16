@@ -49,11 +49,6 @@ export interface SquatLateralRep {
   bottom_t_ms: number;
   peak_knee_flexion_deg: number | null;
   peak_hip_flexion_deg: number | null;
-  ankle_dorsiflexion_deg: number | null;
-  trunk_lean_deg: number | null;
-  hip_knee_ratio: number | null;
-  heel_rise: boolean;
-  heel_rise_px: number;
 }
 
 export interface SquatLateralAngleTrace {
@@ -69,21 +64,13 @@ export interface SquatLateralResult {
   patient_height_cm: number | null;
   calibration: CalibrationResult | null;
   baseline_hip_y_px: number;
-  baseline_heel_y_px: number;
   leg_length_px: number;
-  heel_rise_threshold_px: number;
   reps: SquatLateralRep[];
   rep_count: number;
   peak_knee_flexion_deg: number | null;
   peak_hip_flexion_deg: number | null;
-  ankle_dorsiflexion_deg: number | null;
-  trunk_lean_deg: number | null;
-  hip_knee_ratio: number | null;
-  heel_rise: boolean;
-  any_heel_rise: boolean;
   deepest_rep_index: number;
   mean_peak_knee_flexion_deg: number | null;
-  mean_trunk_lean_deg: number | null;
   classification: SquatLateralClassification;
   guard_reason?: string | null;
   valgus: SquatLateralValgusNote;

@@ -337,12 +337,7 @@ export default function GaitResultsPage() {
                 metrics are absent, so a fresh backend that hasn't
                 been restarted yet simply renders nothing here. */}
             <GaitCyclePercentBlock
-              data={getGaitCycleBlock(
-                data.metrics_clean?.stance_pct_left != null
-                  || data.metrics_clean?.cadence != null
-                  ? data.metrics_clean
-                  : data.metrics_total,
-              )}
+              data={getGaitCycleBlock(data.metrics_clean, data.metrics_total)}
             />
           </div>
 

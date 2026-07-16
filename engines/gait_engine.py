@@ -660,29 +660,68 @@ def _gait_cycle_percentages(
     if win_len <= 0:
         return null_result
 
-    L_win = np.asarray(mask_L[w_start: w_end + 1], dtype=bool)
-    R_win = np.asarray(mask_R[w_start: w_end + 1], dtype=bool)
-    stance_L = 100.0 * float(L_win.sum()) / float(win_len)
-    stance_R = 100.0 * float(R_win.sum()) / float(win_len)
-    ds = 100.0 * float((L_win & R_win).sum()) / float(win_len)
+    # ── Per-stride stance % (robust to strike-detection gaps) ──
+    # The window may not be fully covered by consecutive same-side
+    # strides — recorded (in-app) videos have jitterier pose
+    # detection and occasional missed heel-strikes, which creates
+    # gaps in stride coverage. Summing the mask across the whole
+    # window would under-count stance in those gaps and drop the
+    # per-leg number below the ~60 % biomechanical target even
+    # though the mask is fine WITHIN each stride window it does
+    # cover. Fix: compute stance % PER STRIDE (event-guided mask
+    # targets 60 % of each stride by construction), then average.
+    def _mean_stance_per_stride(
+        mask: np.ndarray, hs: np.ndarray, wa: int, wb: int,
+    ) -> "float | None":
+        vals: list[float] = []
+        for i in range(len(hs) - 1):
+            a = int(hs[i]); b = int(hs[i + 1])
+            if a < wa or b > wb + 1 or b <= a:
+                continue
+            stride_len = b - a
+            stance_frames = int(np.asarray(mask[a:b], dtype=bool).sum())
+            vals.append(100.0 * float(stance_frames) / float(stride_len))
+        if not vals:
+            return None
+        return float(np.mean(vals))
+
+    stance_L_opt = _mean_stance_per_stride(mask_L, hs_L_arr, w_start, w_end)
+    stance_R_opt = _mean_stance_per_stride(mask_R, hs_R_arr, w_start, w_end)
+    if stance_L_opt is None or stance_R_opt is None:
+        return null_result
+    stance_L = float(stance_L_opt)
+    stance_R = float(stance_R_opt)
+
+    # Double-support: for each L stride window, fraction of frames
+    # where BOTH masks are True. Averaged across L strides so it's
+    # comparable to the per-stride stance numbers above.
+    def _mean_ds_per_stride(
+        mL: np.ndarray, mR: np.ndarray,
+        hs: np.ndarray, wa: int, wb: int,
+    ) -> "float | None":
+        vals: list[float] = []
+        for i in range(len(hs) - 1):
+            a = int(hs[i]); b = int(hs[i + 1])
+            if a < wa or b > wb + 1 or b <= a:
+                continue
+            stride_len = b - a
+            L_seg = np.asarray(mL[a:b], dtype=bool)
+            R_seg = np.asarray(mR[a:b], dtype=bool)
+            overlap = int((L_seg & R_seg).sum())
+            vals.append(100.0 * float(overlap) / float(stride_len))
+        if not vals:
+            return None
+        return float(np.mean(vals))
+
+    ds_opt = _mean_ds_per_stride(mask_L, mask_R, hs_L_arr, w_start, w_end)
+    ds = float(ds_opt) if ds_opt is not None else 0.0
 
     # ── Physiological-plausibility sanity guard ─────────────────
     # In gait at least one foot is always grounded, so
     # stance_L + stance_R MUST be ≥ 100 % (the overlap counts as
-    # double support). The existing `_stance_mask_per_leg` marks
-    # only the slowest 30 % of frames per leg — that helper is
-    # designed as a LEG-LENGTH CALIBRATION ANCHOR (see
-    # compute_meters_per_pixel), NOT a full heel-strike-to-toe-off
-    # stance phase. When we borrow it for phase timing the sum can
-    # collapse well below 100 %, which would be a wrong clinical
-    # number and worse than no number.
-    #
-    # Toe-off detection does NOT exist in this codebase (see
-    # gait_cycle.py — only detect_heel_strikes is defined), so we
-    # can't event-derive stance here. Return None on any
-    # implausible reading; the frontend renders a clear
-    # "Stance/swing not computed — insufficient validated walking
-    # data" line rather than a misleading 26 % / 23 %.
+    # double support). Per-stride normalization above makes this
+    # gap-robust; if the sum still lands below 100 % the underlying
+    # pose signal is too corrupted to score honestly.
     if (stance_L + stance_R) < 100.0:
         return null_result
 

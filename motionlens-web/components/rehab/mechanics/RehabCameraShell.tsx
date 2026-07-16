@@ -139,6 +139,15 @@ export interface RehabCameraShellProps {
    *  Used inside LiveModeLayout where the shell must expand to the
    *  entire left half of the viewport. */
   fill?: boolean;
+  /** Auto-request the camera on mount instead of waiting for the
+   *  operator to click "Start camera". Hides the Start button while
+   *  the browser resolves the permission prompt. Used by the reduced-
+   *  click doctor flow — parent has already gated this behind a
+   *  user gesture (e.g. side pick) so autoplay policies pass. */
+  autoStart?: boolean;
+  /** Hide the Start/Stop button row entirely. Useful when the parent
+   *  owns session control (auto-start + no manual stop). */
+  hideControls?: boolean;
 }
 
 export function RehabCameraShell({
@@ -147,6 +156,8 @@ export function RehabCameraShell({
   children,
   angleArc,
   fill = false,
+  autoStart = false,
+  hideControls = false,
 }: RehabCameraShellProps) {
   const { videoRef, active, error: camError, start, stop } = useCamera();
   const { ready: detectorReady, error: detectorError, detect } =
@@ -327,6 +338,23 @@ export function RehabCameraShell({
 
   useEffect(() => () => stop(), [stop]);
 
+  // Auto-start: fires exactly once on mount when the parent opted in.
+  // Guarded by a ref so a re-render (or React 18 strict-mode double
+  // effect) never re-triggers the camera request after the operator
+  // has manually stopped it.
+  const autoStartFiredRef = useRef(false);
+  useEffect(() => {
+    if (!autoStart || autoStartFiredRef.current) return;
+    autoStartFiredRef.current = true;
+    setBusy(true);
+    start()
+      .catch(() => {
+        // useCamera surfaces its own error via camError → onError; no
+        // extra handling needed here beyond dropping the busy flag.
+      })
+      .finally(() => setBusy(false));
+  }, [autoStart, start]);
+
   async function handleStart() {
     setBusy(true);
     try { await start(); } finally { setBusy(false); }
@@ -382,21 +410,23 @@ export function RehabCameraShell({
         )}
       </div>
       {camError && <p className={fill ? "mt-1 text-xs text-error" : "mt-3 text-xs text-error"}>{camError}</p>}
-      <div className={fill ? "mt-2 flex shrink-0 flex-wrap gap-2" : "mt-4 flex flex-wrap gap-3"}>
-        {!active ? (
-          <Button onClick={handleStart} disabled={busy}>
-            {busy
-              ? <Loader2 className="h-4 w-4 animate-spin" />
-              : <Camera className="h-4 w-4" />}
-            Start camera
-          </Button>
-        ) : (
-          <Button variant="secondary" onClick={stop}>
-            <CameraOff className="h-4 w-4" />
-            Stop
-          </Button>
-        )}
-      </div>
+      {!hideControls && (
+        <div className={fill ? "mt-2 flex shrink-0 flex-wrap gap-2" : "mt-4 flex flex-wrap gap-3"}>
+          {!active ? (
+            <Button onClick={handleStart} disabled={busy}>
+              {busy
+                ? <Loader2 className="h-4 w-4 animate-spin" />
+                : <Camera className="h-4 w-4" />}
+              Start camera
+            </Button>
+          ) : (
+            <Button variant="secondary" onClick={stop}>
+              <CameraOff className="h-4 w-4" />
+              Stop
+            </Button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
