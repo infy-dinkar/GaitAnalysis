@@ -87,11 +87,16 @@ _MAX_SESSION_DURATION_SEC = 30.0
 _STANDING_TOLERANCE_FRAC_OF_LEG = 0.04
 _STANDING_TOLERANCE_FALLBACK_MULT = 3.0
 
-# Squat-rep detection — hip Y trough on the smoothed signal.
-# Prominence = trough must be at least this frac-of-leg-length deep
-# below its shoulders (measured against the smoothed hip signal).
+# Squat-rep detection — knee-flexion peaks on the smoothed signal.
+# Prominence = knee flexion must peak by at least this many degrees
+# above its surrounding baseline to count as a real squat rep. A
+# proper squat reaches 90-130° at bottom, so 40° cleanly separates
+# real squats from bobs, breathing, or camera shake.
+_MIN_REP_PROMINENCE_DEG = 40.0
+_MIN_REP_GAP_SEC = 1.2
+# Legacy hip-Y prominence constant — retained so external callers
+# that referenced it don't break at import. No longer used internally.
 _TROUGH_PROMINENCE_FRAC_OF_LEG = 0.06
-_MIN_REP_GAP_SEC = 0.6
 
 # Heel-rise thresholds.
 #   Calibrated  → any lift ≥ _HEEL_RISE_CM above standing baseline.
@@ -174,32 +179,55 @@ def _trunk_to_vertical_deg(
 
 
 def _find_squat_bottoms(
-    hip_y: np.ndarray,
+    knee_flexion_deg: np.ndarray,
     fps: float,
-    leg_length_px: float,
 ) -> np.ndarray:
-    """Return integer frame indices of squat bottoms (deepest hip Y
-    per rep). Smooths hip_y with savgol_filter then finds peaks on
-    the NEGATED signal (troughs in Y = high in −Y). Prominence gate
-    keeps micro-oscillations from counting as reps.
+    """Return integer frame indices of squat bottoms — the frames of
+    PEAK KNEE FLEXION per rep.
+
+    Design note: earlier this used hip-Y with `find_peaks(-smoothed)`,
+    which had two problems:
+      1. Sign bug — in image y-down coords a squat MAX hip_y, not
+         min. Finding peaks in the negated signal returned STANDING
+         frames (hip_y minimum = tallest) instead of squat bottoms.
+      2. Weak prominence — 6 % of leg length let breathing / camera
+         shake register as reps.
+
+    Using knee-flexion angle sidesteps both:
+      • Real squat → knee flexion peaks at 90-130°; standing → 0-15°.
+      • Prominence gate of 40° cleanly rejects any bob or noise that
+        doesn't correspond to a real depth change.
+      • Signal is measured directly from the hip-knee-ankle chain, so
+        it's robust to whole-body postural drift.
     """
-    n = int(len(hip_y))
+    n = int(len(knee_flexion_deg))
     if n < 5:
         return np.array([], dtype=int)
-    # savgol window — odd, ≥5, ≤ len(signal). Use ~0.4 s or 5, whichever bigger.
+    # savgol window — odd, ≥5, capped by signal length. ~0.4 s smoothing
+    # window (12 frames at 30 fps) preserves the squat shape while
+    # rejecting per-frame pose jitter.
     win = int(round(max(5, min(n if n % 2 == 1 else n - 1, fps * 0.4))))
     if win % 2 == 0:
         win -= 1
     win = max(5, win)
     if win >= n:
         return np.array([], dtype=int)
+    signal = np.asarray(knee_flexion_deg, dtype=float)
+    # Replace NaN samples with the mean so savgol / find_peaks don't
+    # trip on invisible-frame gaps. Empty result if the whole signal
+    # is NaN.
+    if not np.isfinite(signal).any():
+        return np.array([], dtype=int)
+    if np.isnan(signal).any():
+        signal = np.where(np.isnan(signal), float(np.nanmean(signal)), signal)
     try:
-        smoothed = savgol_filter(hip_y, win, polyorder=3)
+        smoothed = savgol_filter(signal, win, polyorder=3)
     except Exception:
-        smoothed = hip_y
-    prom = max(1.0, _TROUGH_PROMINENCE_FRAC_OF_LEG * leg_length_px)
+        smoothed = signal
+    prom = _MIN_REP_PROMINENCE_DEG
     min_dist = max(3, int(round(_MIN_REP_GAP_SEC * fps)))
-    peaks, _ = find_peaks(-smoothed, prominence=prom, distance=min_dist)
+    # Peaks of knee flexion = squat bottoms. NO negation this time.
+    peaks, _ = find_peaks(smoothed, prominence=prom, distance=min_dist)
     return peaks.astype(int)
 
 
@@ -393,19 +421,26 @@ def analyze_squat_lateral(
     else:
         heel_rise_thresh_px = float(_HEEL_RISE_FALLBACK_FRAC_OF_LEG * leg_length_px)
 
-    # 6) Rep segmentation — find hip-Y troughs within [baseline_lock_idx, session_end].
+    # 6) Rep segmentation — find KNEE-FLEXION peaks (squat bottoms)
+    # within [baseline_lock_idx, session_end]. Knee angle is the
+    # cleanest signal for rep detection: standing ≈ 0-15°, deep squat
+    # ≈ 90-130°. Prominence gate at 40° filters noise / bobs / camera
+    # shake cleanly. See _find_squat_bottoms docstring.
     max_frames = int(round(_MAX_SESSION_DURATION_SEC * fps))
     session_start_idx = baseline_lock_idx + 1
     session_end_idx = min(n, session_start_idx + max_frames)
-    session_hip = hip_y[session_start_idx:session_end_idx].copy()
+    session_knee = np.asarray(knee_angles[session_start_idx:session_end_idx], dtype=float)
     session_valid = valid[session_start_idx:session_end_idx]
     # Interpolate through invalid frames so savgol / find_peaks don't
-    # chase visibility noise.
+    # chase visibility noise. NaN entries (visibility gate) are
+    # handled by _find_squat_bottoms internally as a fallback.
     if not session_valid.all() and session_valid.any():
-        idx_arr = np.arange(len(session_hip), dtype=float)
-        session_hip = np.interp(idx_arr, idx_arr[session_valid], session_hip[session_valid])
-    local_troughs = _find_squat_bottoms(session_hip, fps, leg_length_px)
-    bottom_frames = (local_troughs + session_start_idx).astype(int)
+        idx_arr = np.arange(len(session_knee), dtype=float)
+        good = session_valid & np.isfinite(session_knee)
+        if good.any():
+            session_knee = np.interp(idx_arr, idx_arr[good], session_knee[good])
+    local_peaks = _find_squat_bottoms(session_knee, fps)
+    bottom_frames = (local_peaks + session_start_idx).astype(int)
 
     if len(bottom_frames) == 0:
         return _empty_result(
