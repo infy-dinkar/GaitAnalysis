@@ -49,7 +49,6 @@ export interface SquatLateralRep {
   bottom_t_ms: number;
   peak_knee_flexion_deg: number | null;
   peak_hip_flexion_deg: number | null;
-  ankle_dorsiflexion_deg: number | null;
   trunk_lean_deg: number | null;
   hip_knee_ratio: number | null;
   heel_rise: boolean;
@@ -76,7 +75,6 @@ export interface SquatLateralResult {
   rep_count: number;
   peak_knee_flexion_deg: number | null;
   peak_hip_flexion_deg: number | null;
-  ankle_dorsiflexion_deg: number | null;
   trunk_lean_deg: number | null;
   hip_knee_ratio: number | null;
   heel_rise: boolean;

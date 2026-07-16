@@ -3560,7 +3560,6 @@ class SquatLateralRepDTO(BaseModel):
     bottom_t_ms: float
     peak_knee_flexion_deg: Optional[float] = None
     peak_hip_flexion_deg: Optional[float] = None
-    ankle_dorsiflexion_deg: Optional[float] = None
     trunk_lean_deg: Optional[float] = None
     hip_knee_ratio: Optional[float] = None
     heel_rise: bool
@@ -3587,7 +3586,6 @@ class SquatLateralResultDTO(BaseModel):
     rep_count: int
     peak_knee_flexion_deg: Optional[float] = None
     peak_hip_flexion_deg: Optional[float] = None
-    ankle_dorsiflexion_deg: Optional[float] = None
     trunk_lean_deg: Optional[float] = None
     hip_knee_ratio: Optional[float] = None
     heel_rise: bool = False

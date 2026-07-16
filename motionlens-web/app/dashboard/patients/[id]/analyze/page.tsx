@@ -240,7 +240,7 @@ const MODULES = [
     href: "orthopedic/squat-lateral",
     eyebrow: "Physio squat · lateral",
     title: "Squat (Lateral)",
-    body: "Sagittal-plane squat — side-on single camera. Six metrics at the deepest rep: peak knee flexion, peak hip flexion, ankle dorsiflexion (shank tilt), trunk lean, hip:knee ratio, heel rise. Near-side leg only. Frontal-plane valgus honestly not assessed — use Overhead Squat or Single-Leg Squat for that.",
+    body: "Sagittal-plane squat — side-on single camera. Five metrics at the deepest rep: peak knee flexion, peak hip flexion, trunk lean, hip:knee ratio, heel rise. Near-side leg only. Ankle dorsiflexion and frontal-plane valgus honestly not assessed — use Overhead Squat or Single-Leg Squat for valgus.",
     icon: MoveRight,
     tone: "from-teal-500/15 to-teal-500/5",
     iconTone: "text-teal-600",

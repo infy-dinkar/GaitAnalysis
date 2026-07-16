@@ -3,25 +3,30 @@
 Clinical context:
   Patient stands SIDE-ON to a single camera (declared `side`) and
   performs 3-6 slow squats. This is the classic sagittal-plane
-  physio squat screen: hip flexion, knee flexion, ankle
-  dorsiflexion, trunk lean at the squat bottom.
+  physio squat screen: hip flexion, knee flexion, trunk lean at
+  the squat bottom.
 
 Only the near-side (camera-facing) leg is analysed — the far-side
 leg is occluded and per-frame visibility is unreliable, so we NEVER
 average both sides.
 
-Scope — exactly six metrics per rep, taken at the deepest frame:
+Scope — five metrics per rep, taken at the deepest frame:
   1. peak_knee_flexion_deg   — bend at knee (0° = straight)
   2. peak_hip_flexion_deg    — bend at hip  (magnitude)
-  3. ankle_dorsiflexion_deg  — shank tilt from vertical (positive = tibia
-                               forward over the toe)
-  4. trunk_lean_deg          — trunk tilt from vertical
-  5. hip_knee_ratio          — hip / knee flexion; high = hip-dominant
+  3. trunk_lean_deg          — trunk tilt from vertical
+  4. hip_knee_ratio          — hip / knee flexion; high = hip-dominant
                                (posterior-chain), low = knee-dominant (quad)
-  6. heel_rise: bool         — near-side heel Y lifts above the standing
+  5. heel_rise: bool         — near-side heel Y lifts above the standing
                                baseline by more than the heel-rise threshold
                                (2 cm when calibration is available, else
                                1.5% of leg length)
+
+Ankle dorsiflexion (previously #3) was REMOVED — the 2D shank-to-
+vertical proxy was too noisy in practice. Near-side ankle keypoints
+jitter under occlusion, and BlazePose foot landmarks aren't reliable
+for a sagittal dorsi/plantar angle from a lateral view. The hip +
+knee flexion angles are stable geometric readings from the shoulder-
+hip-knee-ankle chain and are what's actually scored.
 
 Aggregate:
   representative rep = deepest rep (max peak_knee_flexion_deg)
@@ -48,10 +53,11 @@ never mutates their state or overrides their outputs:
                                              used by gait_cycle.py
 
 Local helpers written new (walking-coupled originals not reusable):
-  • _shank_to_vertical_deg  — sagittal ankle dorsi/plantar, no baseline
-                              auto-detection, no walking-direction sign
   • _trunk_to_vertical_deg  — sagittal trunk lean, no walking sign
   • _find_squat_bottoms     — hip-Y trough detection tailored for squats
+  (_shank_to_vertical_deg is retained as dead code — see the note on
+   the function itself — since removing it entirely would break any
+   external callers that import it. It is no longer used internally.)
 
 Valgus is honestly marked `not_assessed` — frontal plane not visible
 from a lateral camera. Use overhead-squat or single-leg-squat for that.
@@ -433,10 +439,13 @@ def analyze_squat_lateral(
         peak_knee = float(knee_angles[b]) if not np.isnan(knee_angles[b]) else None
         raw_hip = hip_angles_signed[b]
         peak_hip = float(abs(raw_hip)) if not np.isnan(raw_hip) else None
-        ankle_dorsi = _shank_to_vertical_deg(
-            float(knee_x[b]),  float(knee_y[b]),
-            float(ankle_x[b]), float(ankle_y[b]),
-        )
+        # ── Ankle dorsiflexion intentionally removed ────────────
+        # A lateral 2D shank-to-vertical proxy was too noisy in
+        # practice — near-side ankle keypoint jitters under
+        # occlusion and BlazePose foot landmarks are unreliable
+        # for the dorsi/plantar angle. Only hip + knee flexion are
+        # scored now, which are stable geometric angles from the
+        # shoulder-hip-knee-ankle chain.
         trunk_lean = _trunk_to_vertical_deg(
             float(shoulder_x[b]), float(shoulder_y[b]),
             float(hip_x[b]),      float(hip_y[b]),
@@ -455,7 +464,6 @@ def analyze_squat_lateral(
             "bottom_t_ms": float(b / fps * 1000.0),
             "peak_knee_flexion_deg":  round(peak_knee, 1) if peak_knee is not None else None,
             "peak_hip_flexion_deg":   round(peak_hip, 1)  if peak_hip  is not None else None,
-            "ankle_dorsiflexion_deg": ankle_dorsi,
             "trunk_lean_deg":         trunk_lean,
             "hip_knee_ratio":         hip_knee_ratio,
             "heel_rise":              heel_rise,
@@ -552,10 +560,11 @@ def analyze_squat_lateral(
         "heel_rise_threshold_px":   float(heel_rise_thresh_px),
         "reps":                     reps,
         "rep_count":                len(reps),
-        # Summary = the six metrics from the deepest rep.
+        # Summary = deepest-rep metrics (hip + knee + trunk + ratio +
+        # heel-rise). Ankle dorsi removed — see note in the per-rep
+        # append above.
         "peak_knee_flexion_deg":    deepest["peak_knee_flexion_deg"],
         "peak_hip_flexion_deg":     deepest["peak_hip_flexion_deg"],
-        "ankle_dorsiflexion_deg":   deepest["ankle_dorsiflexion_deg"],
         "trunk_lean_deg":           deepest["trunk_lean_deg"],
         "hip_knee_ratio":           deepest["hip_knee_ratio"],
         "heel_rise":                bool(deepest["heel_rise"]),
@@ -626,7 +635,6 @@ def _empty_result(
         "rep_count":                0,
         "peak_knee_flexion_deg":    None,
         "peak_hip_flexion_deg":     None,
-        "ankle_dorsiflexion_deg":   None,
         "trunk_lean_deg":           None,
         "hip_knee_ratio":           None,
         "heel_rise":                False,

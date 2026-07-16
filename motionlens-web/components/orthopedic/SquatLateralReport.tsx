@@ -176,11 +176,6 @@ function SummaryCards({ result }: { result: SquatLateralResult }) {
       primary: fmtDeg(result.peak_hip_flexion_deg),
     },
     {
-      title: "Ankle dorsiflexion (shank tilt)",
-      primary: fmtDeg(result.ankle_dorsiflexion_deg),
-      secondary: "Shank to vertical at the deepest rep",
-    },
-    {
       title: "Trunk lean (from vertical)",
       primary: fmtDeg(result.trunk_lean_deg),
       secondary:
@@ -479,7 +474,6 @@ function RepTable({
                 <th className="w-14 px-4 py-3 font-semibold">Rep</th>
                 <th className="px-4 py-3 font-semibold">Knee</th>
                 <th className="px-4 py-3 font-semibold">Hip</th>
-                <th className="px-4 py-3 font-semibold">Ankle</th>
                 <th className="px-4 py-3 font-semibold">Trunk</th>
                 <th className="px-4 py-3 font-semibold">H : K</th>
                 <th className="px-4 py-3 font-semibold">Heel rise</th>
@@ -506,9 +500,6 @@ function RepTable({
                     </td>
                     <td className="px-4 py-3 tabular text-foreground">
                       {fmtDeg(r.peak_hip_flexion_deg)}
-                    </td>
-                    <td className="px-4 py-3 tabular text-muted">
-                      {fmtDeg(r.ankle_dorsiflexion_deg)}
                     </td>
                     <td className="px-4 py-3 tabular text-muted">
                       {fmtDeg(r.trunk_lean_deg)}
