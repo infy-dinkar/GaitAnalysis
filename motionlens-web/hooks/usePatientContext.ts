@@ -18,6 +18,9 @@ import { createReport, type ReportCreatePayload } from "@/lib/reports";
 interface SaveOutcome {
   ok: boolean;
   message: string;
+  /** Report id returned by the server on a successful save — used by
+   *  auto-save toasts to offer an "Undo" (deleteReport) action. */
+  reportId?: string;
 }
 
 export function usePatientContext() {
@@ -61,12 +64,13 @@ export function usePatientContext() {
         return { ok: false, message: "" };
       }
       try {
-        await createReport(patientId, payload);
+        const created = await createReport(patientId, payload);
         const out: SaveOutcome = {
           ok: true,
           message: patient
             ? `Saved to ${patient.name}'s record.`
             : "Report saved.",
+          reportId: created.id,
         };
         setLastSave(out);
         return out;

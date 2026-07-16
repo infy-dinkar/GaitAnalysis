@@ -62,7 +62,7 @@ import {
   buildTuckJumpInterpretation,
 } from "@/components/orthopedic/TuckJumpReport";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { AutoSaveToast } from "@/components/dashboard/AutoSaveToast";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import {
   analyzeTuckJumpUpload,
@@ -536,11 +536,12 @@ function LiveSection(props: LiveSectionProps) {
         <div className="flex flex-wrap gap-3">
           <Button onClick={onStartCamera}>
             <Camera className="h-4 w-4" />
-            Start camera (fullscreen)
+            Start Assessment
           </Button>
           <p className="w-full text-xs text-muted">
-            Clicking &quot;Start camera&quot; opens the immersive full-
-            screen capture shell. You can Exit any time from the header.
+            Camera opens fullscreen. Calibration, 3-2-1 countdown and
+            recording all happen automatically once the patient is in
+            frame. You can Exit any time from the header.
           </p>
         </div>
       </div>
@@ -668,20 +669,77 @@ function FullscreenLiveShell(props: FullscreenLiveShellProps) {
     [handleFrame, phase, calibLocked, heightCmValid, heightCm],
   );
 
-  function calibConfirm() {
+  const calibConfirm = useCallback(() => {
     const r = lockedResultRef.current;
     if (!r) return;
     onCalibrated(r);
-  }
-  function calibRetake() {
+  }, [onCalibrated]);
+  const calibRetake = useCallback(() => {
     recentReadingsRef.current = [];
     setStableCount(0);
     setCalibLocked(false);
     lockedResultRef.current = null;
-  }
-  function calibSkip() {
+  }, []);
+  const calibSkip = useCallback(() => {
     onCalibrated(null);
-  }
+  }, [onCalibrated]);
+
+  // Auto-flow: once calibration locks, show the "Calibrated ✓" banner
+  // for ~1.5s and advance without a click. Doctor can still press
+  // "Re-take" during the window if the reading looked wrong.
+  const [autoAdvancing, setAutoAdvancing] = useState<boolean>(false);
+  useEffect(() => {
+    if (phase !== "calibration" || !calibLocked) return;
+    setAutoAdvancing(true);
+    const id = window.setTimeout(() => {
+      calibConfirm();
+      setAutoAdvancing(false);
+    }, 1500);
+    return () => {
+      window.clearTimeout(id);
+      setAutoAdvancing(false);
+    };
+  }, [phase, calibLocked, calibConfirm]);
+
+  // Auto-flow: on entering "armed", start a 3-2-1 countdown and then
+  // fire startRecording without a click. Cancelable via the sidebar
+  // button or Escape/Space keys.
+  const [countdown, setCountdown] = useState<number | null>(null);
+  // startRecording is recreated on every parent render — hold it in
+  // a ref so the tick effect below can depend only on `countdown`.
+  const startRecordingRef = useRef(startRecording);
+  startRecordingRef.current = startRecording;
+  useEffect(() => {
+    if (phase === "armed") {
+      setCountdown(3);
+    } else {
+      setCountdown(null);
+    }
+  }, [phase]);
+  useEffect(() => {
+    if (countdown === null) return;
+    if (countdown <= 0) {
+      startRecordingRef.current();
+      setCountdown(null);
+      return;
+    }
+    const id = window.setTimeout(() => {
+      setCountdown((c) => (c === null ? null : c - 1));
+    }, 1000);
+    return () => window.clearTimeout(id);
+  }, [countdown]);
+  const cancelCountdown = useCallback(() => setCountdown(null), []);
+  useEffect(() => {
+    if (countdown === null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" || e.key === " " || e.code === "Space") {
+        e.preventDefault();
+        cancelCountdown();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [countdown, cancelCountdown]);
 
   const coachingMessage = (() => {
     if (calibLocked) return null;
@@ -761,6 +819,21 @@ function FullscreenLiveShell(props: FullscreenLiveShellProps) {
               <div className="flex items-center gap-2 rounded-lg border border-white/15 bg-black/70 px-4 py-3 text-sm text-white">
                 <Loader2 className="h-4 w-4 animate-spin" />
                 Analysing session…
+              </div>
+            </div>
+          )}
+          {phase === "armed" && countdown !== null && (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/30 backdrop-blur-[1px]">
+              <div className="rounded-full bg-black/70 px-10 py-6 text-center text-white shadow-2xl ring-2 ring-white/20">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-emerald-300">
+                  Recording in
+                </p>
+                <p className="tabular text-7xl font-semibold leading-none">
+                  {countdown}
+                </p>
+                <p className="mt-2 text-[10px] uppercase tracking-[0.14em] text-white/60">
+                  Space / Esc to cancel
+                </p>
               </div>
             </div>
           )}
@@ -861,11 +934,13 @@ function FullscreenLiveShell(props: FullscreenLiveShellProps) {
               <div className="mt-auto flex flex-wrap gap-2">
                 {calibLocked ? (
                   <>
-                    <Button onClick={calibConfirm}>
-                      <CheckCircle2 className="h-4 w-4" />
-                      Use this calibration
-                    </Button>
-                    <Button variant="secondary" onClick={calibRetake}>
+                    {autoAdvancing ? (
+                      <div className="flex w-full items-center gap-2 rounded-md bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200 ring-1 ring-emerald-400/30">
+                        <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                        Calibrated · continuing in 1.5s…
+                      </div>
+                    ) : null}
+                    <Button variant="secondary" size="sm" onClick={calibRetake}>
                       <RefreshCw className="h-4 w-4" />
                       Re-take
                     </Button>
@@ -932,8 +1007,24 @@ function FullscreenLiveShell(props: FullscreenLiveShellProps) {
                 </div>
               )}
 
+              {phase === "armed" && countdown !== null && (
+                <div className="rounded-card border border-accent/40 bg-accent/10 p-3 text-sm">
+                  <p className="font-medium text-foreground">
+                    Recording starts in {countdown}s
+                  </p>
+                  <p className="mt-1 text-[11px] text-muted">
+                    Press Space or Escape to cancel and start manually.
+                  </p>
+                </div>
+              )}
+
               <div className="mt-auto flex flex-wrap gap-2">
-                {phase === "armed" && (
+                {phase === "armed" && countdown !== null && (
+                  <Button variant="secondary" size="sm" onClick={cancelCountdown}>
+                    Cancel countdown
+                  </Button>
+                )}
+                {phase === "armed" && countdown === null && (
                   <Button onClick={startRecording}>
                     <Play className="h-4 w-4" />
                     Start recording
@@ -1134,8 +1225,20 @@ function DoneView({
   interpretation: string;
   onReset: () => void;
 }) {
+  const buildPayload = useCallback(
+    () => ({
+      module: "tuck_jump" as const,
+      metrics: { result },
+      observations: { interpretation },
+    }),
+    [result, interpretation],
+  );
+
   return (
     <div className="space-y-10">
+      {/* Auto-fire save in the doctor flow — no-ops in public flow. */}
+      <AutoSaveToast buildPayload={buildPayload} />
+
       <TuckJumpReport
         patientName={patientName}
         patient={patient ?? null}
@@ -1148,16 +1251,6 @@ function DoneView({
           <RotateCcw className="h-4 w-4" />
           New session
         </Button>
-
-        <SaveToPatientButton
-          buildPayload={() => ({
-            module: "tuck_jump",
-            metrics: {
-              result,
-            },
-            observations: { interpretation },
-          })}
-        />
       </div>
     </div>
   );
