@@ -101,6 +101,15 @@ export function SquatLateralCapture() {
       : "",
   );
 
+  // Sync from patient record on async hydration — see TuckJumpCapture.
+  useEffect(() => {
+    if (patient?.height_cm && patient.height_cm > 0) {
+      setHeightInput((prev) =>
+        prev === "" ? patient.height_cm!.toFixed(0) : prev,
+      );
+    }
+  }, [patient?.height_cm]);
+
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordingChunksRef = useRef<Blob[]>([]);
   const recordingStartedAtRef = useRef<number>(0);
@@ -252,6 +261,13 @@ export function SquatLateralCapture() {
       ? patient.height_cm.toFixed(0)
       : "",
   );
+  useEffect(() => {
+    if (patient?.height_cm && patient.height_cm > 0) {
+      setUploadHeightInput((prev) =>
+        prev === "" ? patient.height_cm!.toFixed(0) : prev,
+      );
+    }
+  }, [patient?.height_cm]);
   const [allowUncalibratedUpload, setAllowUncalibratedUpload] =
     useState<boolean>(false);
   const parsedUploadHeightCm = Number.parseFloat(uploadHeightInput);

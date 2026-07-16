@@ -103,6 +103,18 @@ export function OverheadSquatCapture() {
       : "",
   );
 
+  // Sync from the patient record when it loads asynchronously. The
+  // useState initializer captures whatever patient.height_cm is at
+  // mount time (often null while usePatientContext is still hydrating).
+  // Only overwrite while the field is empty so operator edits stick.
+  useEffect(() => {
+    if (patient?.height_cm && patient.height_cm > 0) {
+      setHeightInput((prev) =>
+        prev === "" ? patient.height_cm!.toFixed(0) : prev,
+      );
+    }
+  }, [patient?.height_cm]);
+
   // ── Recording ────────────────────────────────────────────────
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordingChunksRef = useRef<Blob[]>([]);
@@ -236,6 +248,13 @@ export function OverheadSquatCapture() {
       ? patient.height_cm.toFixed(0)
       : "",
   );
+  useEffect(() => {
+    if (patient?.height_cm && patient.height_cm > 0) {
+      setUploadHeightInput((prev) =>
+        prev === "" ? patient.height_cm!.toFixed(0) : prev,
+      );
+    }
+  }, [patient?.height_cm]);
   const [allowUncalibratedUpload, setAllowUncalibratedUpload] =
     useState<boolean>(false);
   const parsedUploadHeightCm = Number.parseFloat(uploadHeightInput);
