@@ -101,23 +101,6 @@ export function SquatLateralCapture() {
       : "",
   );
 
-  // Auto-skip the pre-camera height step when patient's height is on
-  // file — no manual entry needed. Requires the operator to pick a
-  // side first (side_picker phase); once side is chosen and phase
-  // transitions to calibration, we auto-advance straight to the
-  // fullscreen shell.
-  useEffect(() => {
-    if (
-      side !== null
-      && phase === "calibration"
-      && !cameraStarted
-      && patient?.height_cm
-      && patient.height_cm > 0
-    ) {
-      setCameraStarted(true);
-    }
-  }, [side, phase, cameraStarted, patient?.height_cm]);
-
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordingChunksRef = useRef<Blob[]>([]);
   const recordingStartedAtRef = useRef<number>(0);

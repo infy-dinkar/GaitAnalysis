@@ -103,19 +103,6 @@ export function OverheadSquatCapture() {
       : "",
   );
 
-  // Auto-skip the pre-camera height step when patient's height is on
-  // file — no manual entry needed. See TuckJumpCapture for details.
-  useEffect(() => {
-    if (
-      phase === "calibration"
-      && !cameraStarted
-      && patient?.height_cm
-      && patient.height_cm > 0
-    ) {
-      setCameraStarted(true);
-    }
-  }, [phase, cameraStarted, patient?.height_cm]);
-
   // ── Recording ────────────────────────────────────────────────
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordingChunksRef = useRef<Blob[]>([]);

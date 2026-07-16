@@ -237,29 +237,6 @@ export function SingleLegHopCapture() {
     [firstSide],
   );
 
-  // Auto-skip HeightCalibrationStep when patient height is on file —
-  // backend derives px/cm from patient_height_cm at analyse time. Runs
-  // only after the side_picker step has resolved firstSide.
-  useEffect(() => {
-    if (
-      mode === "live" &&
-      phase === "calibration" &&
-      firstSide !== null &&
-      !calibration &&
-      patient?.height_cm &&
-      patient.height_cm > 0
-    ) {
-      handleCalibrated(null);
-    }
-  }, [
-    mode,
-    phase,
-    firstSide,
-    calibration,
-    patient?.height_cm,
-    handleCalibrated,
-  ]);
-
   function reset() {
     mediaRecorderRef.current = null;
     recordingChunksRef.current = [];

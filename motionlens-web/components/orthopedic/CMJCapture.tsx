@@ -174,20 +174,6 @@ export function CMJCapture() {
     [],
   );
 
-  // Auto-skip HeightCalibrationStep when patient height is already on
-  // file — backend derives px/cm from patient_height_cm at analyse time.
-  useEffect(() => {
-    if (
-      mode === "live" &&
-      phase === "calibration" &&
-      !calibration &&
-      patient?.height_cm &&
-      patient.height_cm > 0
-    ) {
-      handleCalibrated(null);
-    }
-  }, [mode, phase, calibration, patient?.height_cm, handleCalibrated]);
-
   function reset() {
     mediaRecorderRef.current = null;
     recordingChunksRef.current = [];

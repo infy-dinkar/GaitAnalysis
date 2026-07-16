@@ -114,21 +114,6 @@ export function TuckJumpCapture() {
       : "",
   );
 
-  // Auto-skip the pre-camera height step when patient's height is
-  // already on file — no manual entry needed. Fires whenever we land
-  // on the calibration phase without the camera started; user can
-  // still Exit → re-enter and it re-auto-skips.
-  useEffect(() => {
-    if (
-      phase === "calibration"
-      && !cameraStarted
-      && patient?.height_cm
-      && patient.height_cm > 0
-    ) {
-      setCameraStarted(true);
-    }
-  }, [phase, cameraStarted, patient?.height_cm]);
-
   // ── Recording ────────────────────────────────────────────────
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordingChunksRef = useRef<Blob[]>([]);
