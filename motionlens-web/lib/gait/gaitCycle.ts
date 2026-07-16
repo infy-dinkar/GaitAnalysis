@@ -33,15 +33,32 @@ function n(v: number | null | undefined): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
-/** Derive the block from a MetricsBlockDTO (metrics_clean preferred).
- *  Returns nulls gracefully when the additive keys are absent, so
- *  old saved reports render nothing rather than crashing. */
-export function getGaitCycleBlock(metrics: MetricsBlockDTO | null | undefined): GaitCycleBlockData {
-  const m = metrics ?? ({} as Partial<MetricsBlockDTO>);
-  const stanceL = n(m.stance_pct_left);
-  const stanceR = n(m.stance_pct_right);
-  const swingL = n(m.swing_pct_left);
-  const swingR = n(m.swing_pct_right);
+/** Derive the block from up-to-two MetricsBlockDTOs. Prefers the
+ *  primary block's phase keys (stance/swing/DS); falls back to the
+ *  secondary block per key when the primary's is null. Cadence +
+ *  variability follow the same per-key fallback. This is the
+ *  fix for the recorded-video path where the pass-validation
+ *  gates zero out `metrics_clean` but `metrics_total` still has
+ *  a usable signal — old behaviour would pick clean-only and
+ *  show "not computed"; now the block shows whichever numbers
+ *  are actually present.
+ *
+ *  Old callers passing a single block still work: undefined
+ *  secondary → per-key fallback is a no-op. */
+export function getGaitCycleBlock(
+  primary: MetricsBlockDTO | null | undefined,
+  secondary?: MetricsBlockDTO | null,
+): GaitCycleBlockData {
+  const p = primary ?? ({} as Partial<MetricsBlockDTO>);
+  const s = secondary ?? ({} as Partial<MetricsBlockDTO>);
+  const pick = <K extends keyof MetricsBlockDTO>(
+    k: K,
+  ): number | null => n((p[k] ?? s[k]) as number | null | undefined);
+
+  const stanceL = pick("stance_pct_left");
+  const stanceR = pick("stance_pct_right");
+  const swingL = pick("swing_pct_left");
+  const swingR = pick("swing_pct_right");
 
   // Optimum-deviation = how far the mean stance % is from the
   // clinical target of 60 % (typical adult single-limb stance
@@ -58,19 +75,19 @@ export function getGaitCycleBlock(metrics: MetricsBlockDTO | null | undefined): 
       ? Math.round(Math.abs(meanStance - 60) * 10) / 10
       : null;
 
-  // Cadence — pass through from the same metrics block. Expected =
+  // Cadence — same per-key fallback as the phase keys. Expected =
   // display-only marker matching the doctor-validated reference
   // system. NOT read from NORMAL_RANGES (which is a session-grading
   // range, not a single reference value).
-  const cadence = n(m.cadence);
+  const cadence = pick("cadence");
   const cadenceExpected = 120;
 
   return {
     left: { stancePct: stanceL, swingPct: swingL },
     right: { stancePct: stanceR, swingPct: swingR },
-    doubleSupport: n(m.double_support_pct),
+    doubleSupport: pick("double_support_pct"),
     // Variability = existing stride_cv (percent). Do NOT recompute.
-    variabilityPct: n(m.stride_cv),
+    variabilityPct: pick("stride_cv"),
     optimumDeviationPct,
     cadence,
     cadenceExpected,
