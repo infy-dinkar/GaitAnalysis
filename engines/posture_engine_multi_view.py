@@ -404,25 +404,216 @@ def _compute_side_measurements_forced(
     return out
 
 
-def analyze_posture_side_explicit(image_path: str, side: str) -> dict:
-    """Left/right explicit-side wrapper. Same shape as
-    analyze_posture_image(view="side") but pickedSide is FORCED to
-    the declared side instead of being auto-picked.
+# ─── Facing detection + sagittal sign correction (explicit views) ──
+# AUDIT FIX B1: the four shift percentages coming out of
+# _compute_side_measurements are raw `landmark_x − ankle_x` — positive
+# means "toward image-right", NOT "anatomically forward". Whether
+# image-right IS forward depends on which way the patient faces on
+# screen, and real capture photos proved the declared side is NOT a
+# reliable proxy for that (mirrored live captures + free-form phone
+# photos both invert the assumed mapping). So facing is derived from
+# the keypoints themselves.
+#
+# Screen-x ↔ anterior mapping used everywhere below:
+#   facing "right" (anterior = image +x) → raw positive already means
+#                                          forward → keep the sign.
+#   facing "left"  (anterior = image −x) → raw positive means backward
+#                                          → negate all four shifts.
+# Post-correction convention: FORWARD = POSITIVE, backward = negative.
+
+# Minimum head↔ankle horizontal separation for a confident facing
+# call, as a fraction of body height (shoulder→ankle vertical
+# distance). In any normal standing profile the head sits well
+# anterior of the ankle plumb line (typically 5–15% of body height),
+# so 2% is far below every legitimate profile and only rejects
+# genuinely ambiguous poses (true frontal photo, tracking noise).
+_FACING_MIN_SEP_FRAC: float = 0.02
+
+# The four sagittal shift fields the correction applies to.
+_EXPLICIT_SHIFT_KEYS = (
+    "forwardHeadPct",
+    "shoulderShiftPct",
+    "hipShiftPct",
+    "kneeShiftPct",
+)
+
+
+def _derive_facing(kps: list[dict], declared_side: str) -> Optional[str]:
+    """Derive which way the patient faces on screen from keypoint
+    geometry: "left" = anterior toward image −x, "right" = anterior
+    toward image +x, None = cannot tell (don't guess).
+
+    Signal: sign(head_x − ankle_x) on the declared side. The head
+    (nose preferred, declared-side ear as fallback) is always anterior
+    of the ankle plumb line in a standing profile — even a patient
+    with a backward-shifted trunk keeps the nose forward of the
+    ankle — so its horizontal offset from the ankle gives the facing
+    direction. Below the _FACING_MIN_SEP_FRAC threshold (or with the
+    needed landmarks missing) return None; callers then mark the
+    shifts as insufficient data instead of guessing a sign.
     """
-    if side not in ("left", "right"):
-        raise ValueError(f"Unsupported explicit side: {side!r}")
+    idx = (
+        {"ear": 3, "sh": 5, "ank": 15}
+        if declared_side == "left"
+        else {"ear": 4, "sh": 6, "ank": 16}
+    )
+    sh = kps[idx["sh"]]
+    ank = kps[idx["ank"]]
+    if not (_is_visible(sh) and _is_visible(ank)):
+        return None
+    nose = kps[0]
+    ear = kps[idx["ear"]]
+    head = nose if _is_visible(nose) else (ear if _is_visible(ear) else None)
+    if head is None:
+        return None
+    body_h = abs(ank["y"] - sh["y"])
+    if body_h <= 0:
+        return None
+    dx = head["x"] - ank["x"]
+    if abs(dx) < _FACING_MIN_SEP_FRAC * body_h:
+        return None
+    return "right" if dx > 0 else "left"
 
-    rgb, img_w, img_h = _load_image_rgb(image_path)
-    kps = _extract_posture_keypoints(rgb, img_w, img_h)
 
+def _correct_shifts_for_facing(block: dict, facing: str) -> dict:
+    """Return a copy of a per-side metric block with the four shift
+    percentages re-signed so FORWARD = POSITIVE. See the mapping
+    comment above: facing right keeps raw signs, facing left negates.
+    trunkLeanDeg is NOT touched here — it keeps the pre-existing
+    declared-side anchoring from _compute_side_measurements_forced.
+    """
+    out = dict(block)
+    if facing == "left":
+        for key in _EXPLICIT_SHIFT_KEYS:
+            val = out.get(key)
+            if val is not None:
+                out[key] = -val
+    return out
+
+
+def _build_explicit_side_findings(
+    side_block: dict, declared_side: str, shifts_available: bool,
+) -> list[dict]:
+    """AUDIT FIX B2: findings for an explicit view come from the
+    DECLARED side's block ONLY — the far-side block is occluded from
+    a profile camera and its (hallucinated) values previously leaked
+    contradictory rows into the table. Row tags use the VIEW name so
+    a right-side view never shows "(left side view)" rows.
+
+    Severity + direction reuse `_grade_shift` BY CALL — its internal
+    `direction = "forward" if value >= 0` branch is correct because it
+    receives the already-corrected value (forward = positive). Only
+    the label tag is overridden. The legacy `_build_side_findings` is
+    not modified or called here.
+    """
+    out: list[dict] = []
+    tag = f"({declared_side} side view)"
+    block = side_block.get(declared_side)
+    if isinstance(block, dict) and shifts_available:
+        for key, label in (
+            ("forwardHeadPct", "Head"),
+            ("shoulderShiftPct", "Shoulders"),
+            ("hipShiftPct", "Hips"),
+            ("kneeShiftPct", "Knees"),
+        ):
+            val = block.get(key)
+            if val is None:
+                continue
+            finding = _grade_shift(val, label)
+            finding["label"] = f"{label} {tag}"
+            out.append(finding)
+    elif not shifts_available:
+        out.append({
+            "label": f"Sagittal shifts {tag}",
+            "value": "—",
+            "severity": "mild",
+            "detail": (
+                "Facing direction could not be determined from the "
+                "keypoints, so forward/backward signs are unreliable "
+                "on this photo. Retake with a clear full-profile view."
+            ),
+        })
+
+    # Trunk lean — bilateral, emit once. Same 2°/5° buckets as the
+    # legacy side findings (replicated here because the legacy builder
+    # also emits far-side shift rows we must exclude).
+    other = "right" if declared_side == "left" else "left"
+    trunk = None
+    if isinstance(block, dict):
+        trunk = block.get("trunkLeanDeg")
+    if trunk is None:
+        other_block = side_block.get(other)
+        if isinstance(other_block, dict):
+            trunk = other_block.get("trunkLeanDeg")
+    if trunk is not None:
+        abs_t = abs(trunk)
+        if abs_t < 2.0:
+            severity = "ok"
+            detail = "Trunk is upright."
+        elif abs_t < 5.0:
+            severity = "mild"
+            direction = "forward" if trunk > 0 else "backward"
+            detail = f"Trunk leans {direction} {abs_t:.1f}° from vertical."
+        else:
+            severity = "notable"
+            direction = "forward" if trunk > 0 else "backward"
+            detail = f"Trunk leans {direction} {abs_t:.1f}° from vertical."
+        out.append({
+            "label": "Trunk lean",
+            "value": f"{trunk:.1f}°",
+            "severity": severity,
+            "detail": detail,
+        })
+    return out
+
+
+def _analyze_explicit_from_kps(
+    kps: list[dict], side: str, img_w: int, img_h: int,
+) -> dict:
+    """Everything after keypoint extraction for an explicit side view.
+    Split out of analyze_posture_side_explicit so it can be exercised
+    with synthetic keypoints (no image / model needed).
+    """
     trunk_anchors = [kps[5], kps[6], kps[11], kps[12]]
     if not all(_is_visible(k) for k in trunk_anchors):
         raise ValueError("poor_visibility")
 
     side_block = _compute_side_measurements_forced(kps, side)
-    findings = _build_side_findings(side_block)
 
+    # B1 — facing-derived sign correction on the DECLARED block only.
+    facing = _derive_facing(kps, side)
+    shifts_available = facing is not None
+    forced_block = side_block.get(side)
+    if isinstance(forced_block, dict):
+        if shifts_available:
+            forced_block = _correct_shifts_for_facing(forced_block, facing)
+        else:
+            # Can't determine the sign — publish no signed shifts
+            # rather than guessing (overlay then draws no badges).
+            forced_block = dict(forced_block)
+            for key in _EXPLICIT_SHIFT_KEYS:
+                forced_block[key] = None
+        side_block = dict(side_block)
+        side_block[side] = forced_block
+
+    # Non-mirrored profile geometry: the patient's LEFT side toward
+    # the camera means the patient faces image-LEFT (and vice versa).
+    # (An older comment claimed the opposite; real capture photos
+    # contradicted it — see audit.) A mismatch usually means the
+    # capture was mirrored or the operator declared the wrong side —
+    # keypoints win, but the caveat surfaces it.
     view_key = "left_side" if side == "left" else "right_side"
+    facing_caveat: Optional[str] = None
+    if facing is not None and facing != side:
+        facing_caveat = (
+            f"Declared {view_key.replace('_', '-')} but the image "
+            f"appears {facing}-facing — check the capture (mirroring "
+            "or side mix-up). Shift signs follow the keypoints."
+        )
+
+    # B2 — findings from the declared block only, view-name tags.
+    findings = _build_explicit_side_findings(side_block, side, shifts_available)
+
     return {
         "view": view_key,
         "imageWidth": img_w,
@@ -431,7 +622,76 @@ def analyze_posture_side_explicit(image_path: str, side: str) -> dict:
         "side": side_block,
         "findings": findings,
         "explicit_side": side,
+        # Additive disclosure fields (frontend may ignore them).
+        "facing": facing,
+        "facing_caveat": facing_caveat,
+        "shifts_insufficient_data": not shifts_available,
     }
+
+
+def analyze_posture_side_explicit(image_path: str, side: str) -> dict:
+    """Left/right explicit-side wrapper. Same shape as
+    analyze_posture_image(view="side") but pickedSide is FORCED to
+    the declared side instead of being auto-picked, sagittal shift
+    signs are corrected to keypoint-derived facing (forward =
+    positive), and findings come from the declared block only.
+    """
+    if side not in ("left", "right"):
+        raise ValueError(f"Unsupported explicit side: {side!r}")
+
+    rgb, img_w, img_h = _load_image_rgb(image_path)
+    kps = _extract_posture_keypoints(rgb, img_w, img_h)
+    return _analyze_explicit_from_kps(kps, side, img_w, img_h)
+
+
+def apply_side_facing_correction(side_result: dict) -> dict:
+    """Post-process the LEGACY auto-pick `side` view result (the
+    dict `analyze_posture_image(path, "side")` returns) so its
+    pickedSide block + findings use the same facing-corrected
+    FORWARD = POSITIVE convention as the explicit views.
+
+    Additive by design: posture_engine.py stays byte-identical — the
+    endpoint calls this on the already-built result. The auto-picked
+    side plays the role the declared side plays for explicit views;
+    facing itself still comes from keypoint geometry (_derive_facing),
+    so mirrored captures and either facing direction are handled.
+
+    Never raises; if the result is missing the pieces we need
+    (per-view error dict, no pickedSide, no keypoints) it is
+    returned unchanged.
+    """
+    if not isinstance(side_result, dict) or "error" in side_result:
+        return side_result
+    kps = side_result.get("keypoints")
+    side_block = side_result.get("side")
+    if not isinstance(kps, list) or not isinstance(side_block, dict):
+        return side_result
+    picked = side_block.get("pickedSide")
+    if picked not in ("left", "right"):
+        return side_result
+
+    facing = _derive_facing(kps, picked)
+    shifts_available = facing is not None
+    picked_block = side_block.get(picked)
+
+    new_side_block = dict(side_block)
+    if isinstance(picked_block, dict):
+        if shifts_available:
+            picked_block = _correct_shifts_for_facing(picked_block, facing)
+        else:
+            picked_block = dict(picked_block)
+            for key in _EXPLICIT_SHIFT_KEYS:
+                picked_block[key] = None
+        new_side_block[picked] = picked_block
+
+    out = dict(side_result)
+    out["side"] = new_side_block
+    out["findings"] = _build_explicit_side_findings(
+        new_side_block, picked, shifts_available,
+    )
+    out["facing"] = facing
+    out["shifts_insufficient_data"] = not shifts_available
+    return out
 
 
 # ─── Multi-view combined entry ─────────────────────────────────
@@ -491,6 +751,7 @@ __all__ = (
     "analyze_posture_back",
     "analyze_posture_side_explicit",
     "analyze_posture_combined_multi",
+    "apply_side_facing_correction",
     "_BACK_VIEW_SWAP_LR_LABELS",
     "_SUPPORTED_VIEWS",
 )

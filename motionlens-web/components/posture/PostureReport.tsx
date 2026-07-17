@@ -274,11 +274,6 @@ function ExplicitSideBlock({
           keypoints={side.keypoints}
           side={side.side}
         />
-        <div className="rounded-md border border-border bg-surface p-3 text-xs text-muted">
-          Only the camera-facing (near-side) leg is analysed. The
-          far-side limb is occluded and its keypoints are unreliable
-          from this view.
-        </div>
       </div>
       {findings.length > 0 && (
         <FindingsTable
