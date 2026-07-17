@@ -149,6 +149,7 @@ from engines.posture_engine import (
 from engines.posture_engine_multi_view import (
     analyze_posture_back,
     analyze_posture_side_explicit,
+    apply_side_facing_correction,
 )
 
 # ─── SPPB Component 1 (Balance) — reuses gait MediaPipe pipeline ─
@@ -5395,6 +5396,14 @@ async def analyze_posture(
             front_image_path=front_path,
             side_image_path=side_path,
         )
+
+        # Facing-corrected sagittal signs for the legacy side view —
+        # same FORWARD = POSITIVE convention + picked-block-only
+        # findings the explicit views use. Additive post-processing:
+        # posture_engine's own math is untouched; a result we can't
+        # correct (missing pickedSide etc.) passes through unchanged.
+        if isinstance(result.get("side"), dict):
+            result["side"] = apply_side_facing_correction(result["side"])
 
         # Additive multi-view keys. Each is best-effort: a per-view
         # failure yields {"view": "<key>", "error": "<code>"} on that

@@ -345,8 +345,8 @@ function SavedExplicitSideBlock({
           {title}
         </p>
       </div>
-      <div className="grid gap-6 md:grid-cols-2">
-        {image && keypoints && (
+      {image && keypoints && (
+        <div className="grid gap-6 md:grid-cols-2">
           <PostureImageOverlay
             view="side"
             imageUrl={image.data_url}
@@ -355,13 +355,8 @@ function SavedExplicitSideBlock({
             keypoints={keypoints}
             side={side ?? undefined}
           />
-        )}
-        <div className="rounded-md border border-border bg-surface p-3 text-xs text-muted">
-          Only the camera-facing (near-side) leg is analysed. The
-          far-side limb is occluded and its keypoints are unreliable
-          from this view.
         </div>
-      </div>
+      )}
       {findings && findings.length > 0 && (
         <FindingsTable
           title={`${title} findings`}
