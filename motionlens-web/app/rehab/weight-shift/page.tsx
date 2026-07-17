@@ -41,7 +41,13 @@ import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { WeightShiftShell } from "@/components/rehab/mechanics/WeightShiftShell";
 import type { WeightShiftState, Score as MechanicScore } from "@/lib/rehab/gameState";
-import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
+import {
+  AutoFlowCompleteOverlay,
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+  AutoFlowFooter,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import {
   buildSkeletonPosePayload,
@@ -135,14 +141,38 @@ function Inner() {
   const maxAbsShiftRef = useRef<number>(0);
   const stepCountRef = useRef<number>(0);
   const prevStepDetectedRef = useRef<boolean>(false);
+  const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
+  const lastKpRef = useRef<PoseSnapshot | null>(null);
+  const peakShiftRef = useRef<number>(0);
+
+  // Auto-flow: baseline lock → 3-2-1 countdown → live → complete →
+  // auto-save. Session-scoped refs reset at the live transition so
+  // cursor motion during the countdown never counts toward the
+  // payload's trackers or duration.
+  const {
+    phase: sessionPhase,
+    countdown,
+    skipCountdown,
+    markComplete,
+  } = useRehabAutoFlow(phase === "playing", () => {
+    weightShiftStateRef.current = null;
+    maxAbsShiftRef.current = 0;
+    stepCountRef.current = 0;
+    prevStepDetectedRef.current = false;
+    bestPoseRef.current = null;
+    peakShiftRef.current = 0;
+    sessionStartRef.current = performance.now();
+  });
+
   const handleWSShapshot = useCallback((state: WeightShiftState, _score: MechanicScore) => {
     weightShiftStateRef.current = state;
     const abs = Math.abs(state.cursor);
     if (abs > maxAbsShiftRef.current) maxAbsShiftRef.current = abs;
-  }, []);
-  const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
-  const lastKpRef = useRef<PoseSnapshot | null>(null);
-  const peakShiftRef = useRef<number>(0);
+    // Auto-complete once every configured zone has been captured.
+    if (state.capturedZoneIds.length >= WEIGHT_SHIFT_CONFIG.zones.length) {
+      markComplete();
+    }
+  }, [markComplete]);
 
   const { patient, isDoctorFlow } = usePatientContext();
 
@@ -353,7 +383,7 @@ function Inner() {
             }
             onExit={resetSession}
             camera={(
-              <RehabCameraShell onFrame={handleFrame}>
+              <RehabCameraShell onFrame={handleFrame} autoStart hideControls>
                 <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
                   <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">Lateral shift</p>
                   <p className="tabular text-2xl font-semibold text-white">{shift > 0 ? "+" : ""}{shift.toFixed(2)}</p>
@@ -361,6 +391,10 @@ function Inner() {
                     <p className="mt-1 inline-flex items-center gap-1 rounded-full bg-rose-500/30 px-1.5 py-0.5 text-[10px] font-semibold text-rose-100">STEP</p>
                   )}
                 </div>
+                {sessionPhase === "countdown" && countdown !== null && (
+                  <AutoFlowCountdownOverlay countdown={countdown} />
+                )}
+                {sessionPhase === "complete" && <AutoFlowCompleteOverlay />}
               </RehabCameraShell>
             )}
             sidebar={(
@@ -380,10 +414,25 @@ function Inner() {
                     <p className="border-t border-border bg-surface px-2 py-1 text-center text-[10px] uppercase tracking-[0.12em] text-muted">Reference form</p>
                   </div>
                 )}
-                <div className="flex min-h-0 flex-1 flex-col">
-                  <WeightShiftShell shift={shift} stepDetected={stepDetected} config={WEIGHT_SHIFT_CONFIG} compact onSnapshot={handleWSShapshot} />
+                {sessionPhase === "countdown" && countdown !== null && (
+                  <AutoFlowCountdownCard
+                    countdown={countdown}
+                    onSkip={skipCountdown}
+                    hint="Stand still and centred, feet fixed, full body in frame."
+                  />
+                )}
+                {(sessionPhase === "live" || sessionPhase === "complete") && (
+                  <div className="flex min-h-0 flex-1 flex-col">
+                    <WeightShiftShell shift={shift} stepDetected={stepDetected} config={WEIGHT_SHIFT_CONFIG} compact onSnapshot={handleWSShapshot} />
+                  </div>
+                )}
+                <div className="no-pdf">
+                  <AutoFlowFooter
+                    complete={sessionPhase === "complete"}
+                    buildPayload={buildRehabPayload}
+                    completeHint="All zones captured — saving to record automatically."
+                  />
                 </div>
-                <div className="no-pdf"><RehabSessionFooter buildPayload={buildRehabPayload} label="Save session" compact /></div>
               </>
             )}
           />

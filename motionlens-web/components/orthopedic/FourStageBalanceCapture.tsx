@@ -47,7 +47,13 @@ import { Button } from "@/components/ui/Button";
 import { FourStageBalanceLiveCamera } from "@/components/orthopedic/FourStageBalanceLiveCamera";
 import { FourStageBalanceReport } from "@/components/orthopedic/FourStageBalanceReport";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { AutoSaveToast } from "@/components/dashboard/AutoSaveToast";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
+import {
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import {
   POSITION_LOCK_MS,
@@ -133,6 +139,18 @@ export function FourStageBalanceCapture() {
 
   const runRef = useRef<RunState | null>(null);
 
+  // ── Auto-flow (fullscreen less-click live mode) ────────────────
+  // One click ("Start Assessment") opens the fullscreen shell; the
+  // camera auto-starts. The WHOLE 4-stage machine runs inside this
+  // single fullscreen session: a 3-2-1 countdown runs before EACH
+  // stage (`countdownFor` re-arms the hook's started input between
+  // stances), then the stage's own position-lock → 10 s hold machine
+  // takes over. The final "Generate report" leaves fullscreen and
+  // the done view auto-saves the combined session (doctor flow).
+  const [liveFullscreen, setLiveFullscreen] = useState<boolean>(false);
+  const [camActive, setCamActive] = useState<boolean>(false);
+  const [countdownFor, setCountdownFor] = useState<StageIndex | null>(null);
+
   useEffect(() => {
     if (phase !== "running") return;
     const id = window.setInterval(() => setTick((v) => v + 1), 200);
@@ -187,6 +205,27 @@ export function FourStageBalanceCapture() {
     // Force a re-render so the pass/fail card appears.
     setTick((v) => v + 1);
   }, []);
+
+  // Countdown runs once the camera stream is live AND a stage is
+  // armed (`countdownFor`). Clearing countdownFor inside onLive lets
+  // the hook's started input toggle naturally between stances, so
+  // every stage gets its own 3-2-1 before its position-lock window
+  // starts ticking. startTest / beginStage are declared below
+  // (hoisted function declarations).
+  const {
+    phase: flowPhase,
+    countdown,
+    skipCountdown,
+  } = useRehabAutoFlow(
+    liveFullscreen && camActive && countdownFor !== null,
+    () => {
+      const stage = countdownFor;
+      setCountdownFor(null);
+      if (stage === null) return;
+      if (stage === 1) startTest();
+      else beginStage(stage);
+    },
+  );
 
   // ─── Per-frame loop ──────────────────────────────────────────
   const handleFrame = useCallback((kp: Keypoint[], _video: HTMLVideoElement) => {
@@ -439,8 +478,31 @@ export function FourStageBalanceCapture() {
     lastCoachRef.current = "";
     setPhase("idle");
     setError(null);
+    setLiveFullscreen(false);
+    setCamActive(false);
+    setCountdownFor(null);
     resetUpload();
     setMode(next);
+  }
+
+  // Enter the fullscreen auto-flow shell (the single click of the
+  // live mode). Camera auto-starts inside; a countdown for stage 1
+  // begins once frames are flowing.
+  function enterLive() {
+    setError(null);
+    setLiveFullscreen(true);
+    setCountdownFor(1);
+  }
+
+  function exitLive() {
+    runRef.current = null;
+    setStageResults({});
+    setCoachMsg("");
+    lastCoachRef.current = "";
+    setPhase("idle");
+    setCountdownFor(null);
+    setLiveFullscreen(false);
+    setCamActive(false);
   }
 
   function startTest() {
@@ -452,6 +514,19 @@ export function FourStageBalanceCapture() {
     setPhase("running");
   }
 
+  // Start a later stage directly (called by the auto-flow hook once
+  // the between-stance countdown finishes). Identical to the old
+  // advance path — per-stage machine untouched.
+  function beginStage(stage: StageIndex) {
+    runRef.current = freshRunState(stage);
+    setCoachMsg(STAGE_INSTRUCTION[stage]);
+    lastCoachRef.current = STAGE_INSTRUCTION[stage];
+    setTick((v) => v + 1);
+  }
+
+  // "Advance" on the passed card — arms the countdown for the next
+  // stage instead of starting it immediately, so the patient gets a
+  // 3-2-1 before the position-lock window starts ticking.
   function advanceToNextStage() {
     const run = runRef.current;
     if (!run) return;
@@ -459,16 +534,16 @@ export function FourStageBalanceCapture() {
       finalizeRun();
       return;
     }
-    const next = (run.stage + 1) as StageIndex;
-    runRef.current = freshRunState(next);
-    setCoachMsg(STAGE_INSTRUCTION[next]);
-    lastCoachRef.current = STAGE_INSTRUCTION[next];
-    setTick((v) => v + 1);
+    setCountdownFor((run.stage + 1) as StageIndex);
   }
 
   function finalizeRun() {
     runRef.current = null;
+    setCountdownFor(null);
     setPhase("done");
+    // Leave the fullscreen shell — the done view renders the report.
+    setLiveFullscreen(false);
+    setCamActive(false);
   }
 
   function stopEarly() {
@@ -486,27 +561,31 @@ export function FourStageBalanceCapture() {
     setError(null);
     setCoachMsg("");
     lastCoachRef.current = "";
+    setCountdownFor(null);
   }
 
   // ─── Done view ──────────────────────────────────────────────
   if (phase === "done") {
     const session = buildSession(stageResults, patient?.age ?? null);
     const interpretation = buildInterpretation(session);
+    const buildPayload = () => ({
+      module: "four_stage_balance" as const,
+      metrics: { session },
+      observations: { interpretation },
+    });
     return (
       <div className="space-y-8">
+        {/* The FINAL combined session auto-saves in the doctor flow
+            (toast with a 10s undo) for both live and upload runs. */}
+        <AutoSaveToast buildPayload={buildPayload} />
+
         <FourStageBalanceReport
           patientName={patient?.name ?? null}
           patient={patient ?? null}
           session={session}
           interpretation={interpretation}
         />
-        <SaveToPatientButton
-          buildPayload={() => ({
-            module: "four_stage_balance",
-            metrics: { session },
-            observations: { interpretation },
-          })}
-        />
+
         <div className="flex justify-center border-t border-border pt-6">
           <Button variant="secondary" onClick={reset}>
             <RotateCcw className="h-4 w-4" />
@@ -650,23 +729,12 @@ export function FourStageBalanceCapture() {
         </div>
       )}
 
-      {/* ─── LIVE MODE (unchanged behaviour) ─────────────────────── */}
-      {mode === "live" && (
-      <>
-      {/* Stage progression strip — full-width, always visible. */}
-      <StageProgressStrip
-        currentStage={run?.stage ?? null}
-        results={stageResults}
-      />
-
-      {/* ─── 2-column layout (instructions+status | camera) ─────── */}
-      <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
-        {/* LEFT — instructions + per-phase controls */}
-        <div className="space-y-5">
-          {/* Idle: full 4-stage protocol stacked vertically in the
-              narrower left column. */}
-          {phase === "idle" && (
-            <>
+      {/* ─── LIVE MODE — pre-fullscreen: instructions + one click ── */}
+      {mode === "live" && !liveFullscreen && (
+        <>
+          <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
+            {/* LEFT — full 4-stage protocol. */}
+            <div className="space-y-5">
               <div className="rounded-card border border-border bg-surface p-5">
                 <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
                   What the patient will do
@@ -719,198 +787,284 @@ export function FourStageBalanceCapture() {
                 </div>
               </div>
 
-              <div className="rounded-card border border-border bg-surface p-5">
-                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-                  Ready to begin?
+              <p className="text-xs text-muted">
+                CDC fall-risk thresholds (PDF Test C4): unable to hold tandem
+                (stage 3) for {STAGE_HOLD_SEC} s = significantly elevated fall
+                risk. Single-leg (stage 4) &lt; 5 s for age &gt; 60 = high
+                fall risk.
+              </p>
+            </div>
+
+            {/* RIGHT — one-click start card. */}
+            <div className="space-y-4">
+              <div className="rounded-card border border-border bg-surface p-6 text-center">
+                <p className="text-sm text-muted">
+                  One click — the camera opens fullscreen and all four
+                  stages run in a single session. A 3-2-1 countdown runs
+                  before each stage; positions are auto-detected and each{" "}
+                  {STAGE_HOLD_SEC} s hold is auto-timed. The test stops at
+                  the first failure and the combined report saves to the
+                  patient record.
                 </p>
-                <p className="mt-2 text-sm text-muted">
-                  Patient barefoot, level surface, no support within
-                  arm&apos;s reach. The camera should be at hip height,
-                  ~2 m from the patient. Start when you&apos;re both ready.
-                </p>
-                <div className="mt-4">
-                  <Button onClick={startTest}>
-                    <Play className="h-4 w-4" />
-                    Start test
+                <div className="mt-4 flex justify-center">
+                  <Button onClick={enterLive}>
+                    <Camera className="h-4 w-4" />
+                    Start Assessment
                   </Button>
                 </div>
               </div>
-            </>
-          )}
-
-      {/* Running — preparing or holding. */}
-      {phase === "running" && run && (run.stagePhase === "preparing" || run.stagePhase === "holding") && (
-        <div className="rounded-card border border-accent/40 bg-accent/5 p-5">
-          <div className="flex items-center justify-between">
-            <p className="text-sm font-medium text-foreground">
-              {STAGE_LABEL[run.stage]}{" "}
-              <span className="text-muted">·{" "}
-                {run.stagePhase === "preparing" ? "Get into position" : "Holding"}
-              </span>
-            </p>
-            {run.stagePhase === "holding" && (
-              <p className="tabular text-2xl font-semibold text-accent">
-                {heldSec.toFixed(1)}s
+              <p className="text-xs text-muted">
+                Patient barefoot, level surface, no support within
+                arm&apos;s reach. The camera should be at hip height,
+                ~2 m from the patient, with the full body in frame.
               </p>
-            )}
+            </div>
           </div>
-          {/* Show the full stage instruction list during the preparing
-              phase so the patient (and operator) have the protocol in
-              front of them while getting into position — not just the
-              brief auto-detected coach line. */}
-          {run.stagePhase === "preparing" && (
-            <div className="mt-3 rounded-md border border-accent/20 bg-background/40 px-3 py-2 text-xs leading-relaxed">
-              <p className="font-semibold text-foreground">
-                {STAGE_PROTOCOL[run.stage].headline} — how to do it
-              </p>
-              <ol className="mt-1.5 space-y-1 text-muted">
-                {STAGE_PROTOCOL[run.stage].steps.map((step, i) => (
-                  <li key={i} className="flex gap-2">
-                    <span className="tabular shrink-0 text-accent">
-                      {i + 1}.
-                    </span>
-                    <span>{step}</span>
-                  </li>
-                ))}
-              </ol>
+
+          {error && (
+            <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
+              <p className="text-foreground">{error}</p>
             </div>
           )}
-          {run.stagePhase === "holding" && (
-            <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-elevated">
-              <div
-                className="h-full bg-accent transition-all"
-                style={{ width: `${Math.min(100, (heldSec / STAGE_HOLD_SEC) * 100)}%` }}
+        </>
+      )}
+
+      {/* ─── LIVE MODE — fullscreen auto-flow shell ──────────────── */}
+      {mode === "live" && liveFullscreen && (
+        <LiveModeLayout
+          title="4-Stage Balance Test"
+          subtitle={
+            run
+              ? `${STAGE_LABEL[run.stage]} · ${
+                  run.stagePhase === "preparing"
+                    ? "Get into position"
+                    : run.stagePhase === "holding"
+                      ? "Holding"
+                      : run.stagePhase === "passed"
+                        ? "Stage passed"
+                        : "Stage ended"
+                }`
+              : countdownFor !== null
+                ? `${STAGE_LABEL[countdownFor]} — starting`
+                : "Patient barefoot, facing the camera, full body in frame"
+          }
+          onExit={exitLive}
+          camera={(
+            <FourStageBalanceLiveCamera
+              onFrame={handleFrame}
+              onError={setError}
+              autoStart
+              hideControls
+              fill
+              onActiveChange={setCamActive}
+            >
+              {!camActive && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <p className="rounded-full bg-black/60 px-4 py-2 text-sm text-white/80">
+                    Starting camera…
+                  </p>
+                </div>
+              )}
+              {flowPhase === "countdown" && countdown !== null && countdownFor !== null && (
+                <AutoFlowCountdownOverlay
+                  countdown={countdown}
+                  label={countdownFor === 1 ? "Test starts in" : `Stage ${countdownFor} starts in`}
+                />
+              )}
+              {run && (run.stagePhase === "preparing" || run.stagePhase === "holding") && (
+                <div className="absolute left-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+                  <p className="text-[10px] uppercase tracking-[0.14em] text-rose-300">
+                    ● Stage {run.stage} of 4
+                  </p>
+                  <p className="tabular text-2xl font-semibold text-white">
+                    {run.stagePhase === "holding" ? `${heldSec.toFixed(1)}s` : "—"}
+                  </p>
+                  <p className="text-[10px] text-white/70">
+                    {run.stagePhase === "preparing"
+                      ? "Get into position"
+                      : `Hold ${STAGE_HOLD_SEC}s`}
+                  </p>
+                </div>
+              )}
+            </FourStageBalanceLiveCamera>
+          )}
+          sidebar={(
+            <>
+              {/* Stage progression strip — the 4 traffic lights. */}
+              <StageProgressStrip
+                currentStage={run?.stage ?? countdownFor}
+                results={stageResults}
               />
-            </div>
-          )}
-          {coachMsg && (
-            <p className="mt-3 rounded-md border border-accent/30 bg-background/60 px-3 py-2 text-sm font-medium text-foreground">
-              {coachMsg}
-            </p>
-          )}
-          <div className="mt-3 flex justify-end">
-            <Button variant="ghost" size="sm" onClick={stopEarly}>
-              Stop test
-            </Button>
-          </div>
-        </div>
-      )}
 
-      {/* Stage passed — handoff card. */}
-      {phase === "running" && run && run.stagePhase === "passed" && (
-        <div className="rounded-card border border-emerald-500/30 bg-emerald-500/5 p-5">
-          <div className="flex items-center gap-2">
-            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-            <p className="text-sm font-medium text-foreground">
-              {STAGE_LABEL[run.stage]} held for the full {STAGE_HOLD_SEC} s.
-            </p>
-          </div>
-          {run.stage < 4 ? (
-            <>
-              <p className="mt-1 text-xs text-muted">
-                Get the patient into the next position, then advance when
-                they&apos;re ready.
-              </p>
-              {/* Preview next-stage instructions inline so the operator
-                  knows exactly what to coach the patient into BEFORE
-                  clicking Advance. */}
-              <div className="mt-3 rounded-md border border-emerald-500/20 bg-background/40 p-3">
-                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-emerald-700 dark:text-emerald-400">
-                  Next — {STAGE_PROTOCOL[(run.stage + 1) as StageIndex].headline}
-                </p>
-                <ol className="mt-2 space-y-1 text-xs leading-relaxed text-muted">
-                  {STAGE_PROTOCOL[(run.stage + 1) as StageIndex].steps.map(
-                    (step, i) => (
-                      <li key={i} className="flex gap-2">
-                        <span className="tabular shrink-0 text-emerald-700 dark:text-emerald-400">
-                          {i + 1}.
-                        </span>
-                        <span>{step}</span>
-                      </li>
-                    ),
+              {flowPhase === "countdown" && countdown !== null && countdownFor !== null && (
+                <AutoFlowCountdownCard
+                  countdown={countdown}
+                  onSkip={skipCountdown}
+                  hint={STAGE_INSTRUCTION[countdownFor]}
+                />
+              )}
+
+              {/* Running — preparing or holding. */}
+              {phase === "running" && run && (run.stagePhase === "preparing" || run.stagePhase === "holding") && (
+                <div className="rounded-card border border-accent/40 bg-accent/5 p-4">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-medium text-foreground">
+                      {STAGE_LABEL[run.stage]}{" "}
+                      <span className="text-muted">·{" "}
+                        {run.stagePhase === "preparing" ? "Get into position" : "Holding"}
+                      </span>
+                    </p>
+                    {run.stagePhase === "holding" && (
+                      <p className="tabular text-2xl font-semibold text-accent">
+                        {heldSec.toFixed(1)}s
+                      </p>
+                    )}
+                  </div>
+                  {/* Show the full stage instruction list during the
+                      preparing phase so the patient (and operator) have
+                      the protocol in front of them while getting into
+                      position — not just the brief coach line. */}
+                  {run.stagePhase === "preparing" && (
+                    <div className="mt-3 rounded-md border border-accent/20 bg-background/40 px-3 py-2 text-xs leading-relaxed">
+                      <p className="font-semibold text-foreground">
+                        {STAGE_PROTOCOL[run.stage].headline} — how to do it
+                      </p>
+                      <ol className="mt-1.5 space-y-1 text-muted">
+                        {STAGE_PROTOCOL[run.stage].steps.map((step, i) => (
+                          <li key={i} className="flex gap-2">
+                            <span className="tabular shrink-0 text-accent">
+                              {i + 1}.
+                            </span>
+                            <span>{step}</span>
+                          </li>
+                        ))}
+                      </ol>
+                    </div>
                   )}
-                </ol>
-              </div>
-              <div className="mt-3 flex gap-2">
-                <Button onClick={advanceToNextStage}>
-                  <ChevronRight className="h-4 w-4" />
-                  Advance to {STAGE_LABEL[(run.stage + 1) as StageIndex]}
-                </Button>
-                <Button variant="ghost" onClick={finalizeRun}>
-                  Finish here
-                </Button>
-              </div>
-            </>
-          ) : (
-            <>
-              <p className="mt-1 text-xs text-muted">
-                All four stages completed.
-              </p>
-              <div className="mt-3 flex gap-2">
-                <Button onClick={finalizeRun}>
-                  <Play className="h-4 w-4" />
-                  Generate report
+                  {run.stagePhase === "holding" && (
+                    <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-elevated">
+                      <div
+                        className="h-full bg-accent transition-all"
+                        style={{ width: `${Math.min(100, (heldSec / STAGE_HOLD_SEC) * 100)}%` }}
+                      />
+                    </div>
+                  )}
+                  {coachMsg && (
+                    <p className="mt-3 rounded-md border border-accent/30 bg-background/60 px-3 py-2 text-sm font-medium text-foreground">
+                      {coachMsg}
+                    </p>
+                  )}
+                  <div className="mt-3 flex justify-end">
+                    <Button variant="ghost" size="sm" onClick={stopEarly}>
+                      Stop test
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              {/* Stage passed — handoff card (hidden while the next
+                  stage's countdown is already running). */}
+              {phase === "running" && run && run.stagePhase === "passed" && countdownFor === null && (
+                <div className="rounded-card border border-emerald-500/30 bg-emerald-500/5 p-4">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                    <p className="text-sm font-medium text-foreground">
+                      {STAGE_LABEL[run.stage]} held for the full {STAGE_HOLD_SEC} s.
+                    </p>
+                  </div>
+                  {run.stage < 4 ? (
+                    <>
+                      <p className="mt-1 text-xs text-muted">
+                        Get the patient into the next position, then advance
+                        when they&apos;re ready — a 3-2-1 countdown runs
+                        before the stage begins.
+                      </p>
+                      {/* Preview next-stage instructions inline so the
+                          operator knows exactly what to coach the patient
+                          into BEFORE clicking Advance. */}
+                      <div className="mt-3 rounded-md border border-emerald-500/20 bg-background/40 p-3">
+                        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-emerald-700 dark:text-emerald-400">
+                          Next — {STAGE_PROTOCOL[(run.stage + 1) as StageIndex].headline}
+                        </p>
+                        <ol className="mt-2 space-y-1 text-xs leading-relaxed text-muted">
+                          {STAGE_PROTOCOL[(run.stage + 1) as StageIndex].steps.map(
+                            (step, i) => (
+                              <li key={i} className="flex gap-2">
+                                <span className="tabular shrink-0 text-emerald-700 dark:text-emerald-400">
+                                  {i + 1}.
+                                </span>
+                                <span>{step}</span>
+                              </li>
+                            ),
+                          )}
+                        </ol>
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Button onClick={advanceToNextStage}>
+                          <ChevronRight className="h-4 w-4" />
+                          Advance to {STAGE_LABEL[(run.stage + 1) as StageIndex]}
+                        </Button>
+                        <Button variant="ghost" onClick={finalizeRun}>
+                          Finish here
+                        </Button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <p className="mt-1 text-xs text-muted">
+                        All four stages completed.
+                      </p>
+                      <div className="mt-3 flex gap-2">
+                        <Button onClick={finalizeRun}>
+                          <Play className="h-4 w-4" />
+                          Generate report
+                        </Button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* Stage failed — terminal card. */}
+              {phase === "running" && run && run.stagePhase === "failed" && (
+                <div className="rounded-card border border-red-500/30 bg-red-500/5 p-4">
+                  <div className="flex items-center gap-2">
+                    <XCircle className="h-4 w-4 text-red-600" />
+                    <p className="text-sm font-medium text-foreground">
+                      {STAGE_LABEL[run.stage]} ended — {failureLabel(run.pendingFailure)}.
+                    </p>
+                  </div>
+                  <p className="mt-1 text-xs text-muted">
+                    Per the CDC protocol, the test stops at the first stage the
+                    patient cannot hold for {STAGE_HOLD_SEC} s. Generate the
+                    report to see the classification.
+                  </p>
+                  <div className="mt-3 flex gap-2">
+                    <Button onClick={finalizeRun}>
+                      <Play className="h-4 w-4" />
+                      Generate report
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              {error && (
+                <div className="rounded-card border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-foreground">
+                  <AlertTriangle className="mr-2 inline h-4 w-4 text-rose-500" />
+                  {error}
+                </div>
+              )}
+
+              <div className="mt-auto flex flex-wrap gap-2">
+                <Button variant="ghost" size="sm" onClick={exitLive}>
+                  <RotateCcw className="h-4 w-4" />
+                  Reset
                 </Button>
               </div>
             </>
           )}
-        </div>
-      )}
-
-      {/* Stage failed — terminal card. */}
-      {phase === "running" && run && run.stagePhase === "failed" && (
-        <div className="rounded-card border border-red-500/30 bg-red-500/5 p-5">
-          <div className="flex items-center gap-2">
-            <XCircle className="h-4 w-4 text-red-600" />
-            <p className="text-sm font-medium text-foreground">
-              {STAGE_LABEL[run.stage]} ended — {failureLabel(run.pendingFailure)}.
-            </p>
-          </div>
-          <p className="mt-1 text-xs text-muted">
-            Per the CDC protocol, the test stops at the first stage the
-            patient cannot hold for {STAGE_HOLD_SEC} s. Generate the
-            report to see the classification.
-          </p>
-          <div className="mt-3 flex gap-2">
-            <Button onClick={finalizeRun}>
-              <Play className="h-4 w-4" />
-              Generate report
-            </Button>
-            <Button variant="ghost" onClick={reset}>
-              <RotateCcw className="h-4 w-4" />
-              Reset
-            </Button>
-          </div>
-        </div>
-      )}
-
-          <p className="text-xs text-muted">
-            CDC fall-risk thresholds (PDF Test C4): unable to hold tandem
-            (stage 3) for {STAGE_HOLD_SEC} s = significantly elevated fall
-            risk. Single-leg (stage 4) &lt; 5 s for age &gt; 60 = high
-            fall risk.
-          </p>
-        </div>
-
-        {/* RIGHT — sticky camera */}
-        <div className="lg:sticky lg:top-28">
-          <FourStageBalanceLiveCamera onFrame={handleFrame} onError={setError} />
-          <p className="mt-3 text-xs text-subtle">
-            Start the camera and have the patient stand barefoot facing the
-            lens. The on-screen skeleton tracks foot, ankle, hip, and
-            shoulder positions in real time — keep the full body inside
-            the frame.
-          </p>
-        </div>
-      </div>
-
-      {error && (
-        <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
-          <p className="text-foreground">{error}</p>
-        </div>
-      )}
-      </>
+        />
       )}
     </div>
   );

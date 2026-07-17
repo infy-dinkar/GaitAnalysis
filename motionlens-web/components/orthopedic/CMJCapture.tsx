@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
+  CheckCircle2,
   FileVideo,
   Loader2,
   Play,
@@ -31,7 +32,16 @@ import {
   buildCMJInterpretation,
 } from "@/components/orthopedic/CMJReport";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { AutoSaveToast } from "@/components/dashboard/AutoSaveToast";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
+import {
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import {
+  useRehabAutoFlow,
+  type RehabAutoFlowPhase,
+} from "@/lib/rehab/useAutoFlow";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import {
   analyzeCounterMovementJumpUpload,
@@ -67,6 +77,25 @@ export function CMJCapture() {
   const [calibration, setCalibration] = useState<CalibrationResult | null>(null);
   const [result, setResult] = useState<CMJResult | null>(null);
   const [now, setNow] = useState<number>(0);
+
+  // ── Auto-flow (fullscreen less-click live mode) ───────────────
+  // After calibration the armed/recording phases render inside a
+  // fullscreen LiveModeLayout. The camera auto-starts; once frames
+  // are actually flowing (camActive) a 3-2-1 countdown runs and
+  // startRecording fires without a click. Recording auto-stops via
+  // the existing RECORDING_DURATION_SEC timer.
+  const [camActive, setCamActive] = useState<boolean>(false);
+
+  const {
+    phase: flowPhase,
+    countdown,
+    skipCountdown,
+  } = useRehabAutoFlow(
+    mode === "live" && phase === "armed" && camActive,
+    () => {
+      startRecording();
+    },
+  );
 
   // ── Recording ────────────────────────────────────────────────
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -174,12 +203,23 @@ export function CMJCapture() {
     [],
   );
 
+  // Reset back to the pre-live calibration step. Also serves as the
+  // fullscreen shell's Exit handler — detach the recorder handlers
+  // first so a stop() during exit can't fire a ghost upload for a
+  // session the operator just abandoned.
   function reset() {
+    const rec = mediaRecorderRef.current;
+    if (rec) {
+      rec.ondataavailable = null;
+      rec.onstop = null;
+      try { rec.stop(); } catch { /* ignore */ }
+    }
     mediaRecorderRef.current = null;
     recordingChunksRef.current = [];
     setResult(null);
     setCalibration(null);
     setError(null);
+    setCamActive(false);
     setPhase("calibration");
   }
 
@@ -342,6 +382,11 @@ export function CMJCapture() {
           recordingStartedAt={recordingStartedAtRef.current}
           onResetSession={reset}
           error={error}
+          camActive={camActive}
+          onCamActiveChange={setCamActive}
+          flowPhase={flowPhase}
+          countdown={countdown}
+          skipCountdown={skipCountdown}
         />
       ) : (
         <UploadSection
@@ -374,8 +419,14 @@ interface LiveSectionProps {
   stopRecording: () => void;
   now: number;
   recordingStartedAt: number;
+  /** Exit the fullscreen shell / reset back to the calibration step. */
   onResetSession: () => void;
   error: string | null;
+  camActive: boolean;
+  onCamActiveChange: (v: boolean) => void;
+  flowPhase: RehabAutoFlowPhase | null;
+  countdown: number | null;
+  skipCountdown: () => void;
 }
 
 function LiveSection(props: LiveSectionProps) {
@@ -391,6 +442,11 @@ function LiveSection(props: LiveSectionProps) {
     recordingStartedAt,
     onResetSession,
     error,
+    camActive,
+    onCamActiveChange,
+    flowPhase,
+    countdown,
+    skipCountdown,
   } = props;
 
   if (phase === "calibration") {
@@ -410,6 +466,7 @@ function LiveSection(props: LiveSectionProps) {
           <HeightCalibrationStep
             defaultHeightCm={patientHeightCm}
             onCalibrated={onCalibrated}
+            autoConfirm
           />
         </div>
       </div>
@@ -419,72 +476,146 @@ function LiveSection(props: LiveSectionProps) {
   const isRecording = phase === "recording";
   const isUploading = phase === "uploading";
   const elapsedSec = Math.max(0, (now - recordingStartedAt) / 1000);
-  const remainingSec = Math.max(0, 25 - elapsedSec);
+  const remainingSec = Math.max(0, RECORDING_DURATION_SEC - elapsedSec);
 
+  // ── Fullscreen auto-flow shell: armed → recording → uploading ──
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center gap-3">
-        {calibration ? (
-          <span className="rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-medium text-emerald-700 dark:text-emerald-300">
-            Calibrated · {calibration.pixels_per_cm.toFixed(2)} px/cm
-          </span>
-        ) : (
-          <span className="rounded-full bg-amber-500/15 px-3 py-1 text-xs font-medium text-amber-700 dark:text-amber-300">
-            <AlertTriangle className="mr-1 inline h-3 w-3" />
-            Uncalibrated — pixel heights only (flight time still valid)
-          </span>
-        )}
-      </div>
-
-      <CMJLiveCamera onFrame={handleFrame} onError={() => {}} />
-
-      {isRecording && (
-        <div className="rounded-card border border-rose-500/30 bg-rose-500/5 p-4 text-sm">
-          <p className="font-medium text-foreground">
-            ● Recording —{" "}
-            <span className="tabular">{remainingSec.toFixed(1)}s</span>{" "}
-            remaining
-          </p>
-          <p className="mt-1 text-xs text-muted">
-            Stand still for ~1 s, then perform up to 3 counter-movement
-            jumps. Land on both feet each time.
-          </p>
-        </div>
+    <LiveModeLayout
+      title="Counter-Movement Jump"
+      subtitle={
+        isRecording
+          ? `Recording — ${remainingSec.toFixed(1)}s remaining`
+          : isUploading
+            ? "Analysing jump…"
+            : calibration
+              ? `Calibrated · ${calibration.pixels_per_cm.toFixed(2)} px/cm — ready`
+              : "Uncalibrated — pixel heights only (flight time still valid)"
+      }
+      onExit={onResetSession}
+      camera={(
+        <CMJLiveCamera
+          onFrame={handleFrame}
+          onError={() => {}}
+          autoStart
+          hideControls
+          fill
+          onActiveChange={onCamActiveChange}
+        >
+          {!camActive && (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <p className="rounded-full bg-black/60 px-4 py-2 text-sm text-white/80">
+                Starting camera…
+              </p>
+            </div>
+          )}
+          {flowPhase === "countdown" && countdown !== null && (
+            <AutoFlowCountdownOverlay countdown={countdown} label="Recording in" />
+          )}
+          {isRecording && (
+            <div className="absolute left-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+              <p className="text-[10px] uppercase tracking-[0.14em] text-rose-300">
+                ● Recording
+              </p>
+              <p className="tabular text-2xl font-semibold text-white">
+                {remainingSec.toFixed(1)}s
+              </p>
+            </div>
+          )}
+          {isUploading && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+              <div className="flex items-center gap-2 rounded-lg border border-white/15 bg-black/70 px-4 py-3 text-sm text-white">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Analysing jump…
+              </div>
+            </div>
+          )}
+        </CMJLiveCamera>
       )}
-      {isUploading && (
-        <div className="rounded-card border border-blue-500/30 bg-blue-500/5 p-4 text-sm">
-          <p className="flex items-center gap-2 font-medium text-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Analysing jump…
-          </p>
-        </div>
-      )}
+      sidebar={(
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            {calibration ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-semibold text-emerald-200 ring-1 ring-emerald-400/40">
+                <CheckCircle2 className="h-3 w-3" />
+                Calibrated · {calibration.pixels_per_cm.toFixed(2)} px/cm
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/15 px-3 py-1 text-xs font-semibold text-amber-200 ring-1 ring-amber-400/40">
+                <AlertTriangle className="h-3 w-3" />
+                Uncalibrated
+              </span>
+            )}
+          </div>
 
-      {error && (
-        <div className="rounded-card border border-rose-500/30 bg-rose-500/5 p-4 text-sm text-foreground">
-          <AlertTriangle className="mr-2 inline h-4 w-4 text-rose-600" />
-          {error}
-        </div>
-      )}
+          <div className="rounded-card border border-border bg-surface p-3 text-xs text-muted">
+            <p className="font-semibold text-foreground">Session brief</p>
+            <ol className="mt-2 list-decimal space-y-1 pl-4">
+              <li>Stand still ~1 s, full body in frame.</li>
+              <li>Perform up to 3 counter-movement jumps.</li>
+              <li>
+                Land on both feet each time — auto-stops at{" "}
+                {RECORDING_DURATION_SEC}s.
+              </li>
+            </ol>
+          </div>
 
-      <div className="flex flex-wrap gap-3">
-        {phase === "armed" && (
-          <Button onClick={startRecording}>
-            <Play className="h-4 w-4" />
-            Start recording
-          </Button>
-        )}
-        {isRecording && (
-          <Button variant="secondary" onClick={stopRecording}>
-            Stop early
-          </Button>
-        )}
-        <Button variant="secondary" onClick={onResetSession}>
-          <RotateCcw className="h-4 w-4" />
-          Reset session
-        </Button>
-      </div>
-    </div>
+          {flowPhase === "countdown" && countdown !== null && (
+            <AutoFlowCountdownCard
+              countdown={countdown}
+              onSkip={skipCountdown}
+              hint="Patient standing still, full body in frame."
+            />
+          )}
+
+          {isRecording && (
+            <div className="rounded-card border border-rose-500/30 bg-rose-500/10 p-3 text-sm">
+              <p className="font-medium text-foreground">
+                ● Recording — {remainingSec.toFixed(1)}s remaining
+              </p>
+              <p className="mt-1 text-[11px] text-muted">
+                Stand still for ~1 s, then perform up to 3 counter-
+                movement jumps.
+              </p>
+            </div>
+          )}
+          {isUploading && (
+            <div className="rounded-card border border-blue-500/30 bg-blue-500/10 p-3 text-sm">
+              <p className="flex items-center gap-2 font-medium text-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Analysing jump…
+              </p>
+            </div>
+          )}
+
+          {error && (
+            <div className="rounded-card border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-foreground">
+              <AlertTriangle className="mr-2 inline h-4 w-4 text-rose-500" />
+              {error}
+            </div>
+          )}
+
+          <div className="mt-auto flex flex-wrap gap-2">
+            {/* Manual fallback — only reachable if the auto-start
+                failed (e.g. camera stream error at countdown end). */}
+            {phase === "armed" && flowPhase === "live" && (
+              <Button onClick={startRecording}>
+                <Play className="h-4 w-4" />
+                Start recording
+              </Button>
+            )}
+            {isRecording && (
+              <Button variant="secondary" onClick={stopRecording}>
+                Stop early
+              </Button>
+            )}
+            <Button variant="ghost" size="sm" onClick={onResetSession}>
+              <RotateCcw className="h-4 w-4" />
+              Reset
+            </Button>
+          </div>
+        </>
+      )}
+    />
   );
 }
 
@@ -660,8 +791,22 @@ function DoneView({
   interpretation: string;
   onReset: () => void;
 }) {
+  const buildPayload = useCallback(
+    () => ({
+      module: "counter_movement_jump" as const,
+      metrics: {
+        result,
+      },
+      observations: { interpretation },
+    }),
+    [result, interpretation],
+  );
+
   return (
     <div className="space-y-10">
+      {/* Auto-fire save for live and upload results — no-ops in public flow. */}
+      <AutoSaveToast buildPayload={buildPayload} />
+
       <CMJReport
         patientName={patientName}
         patient={patient ?? null}
@@ -674,16 +819,6 @@ function DoneView({
           <RotateCcw className="h-4 w-4" />
           New session
         </Button>
-
-        <SaveToPatientButton
-          buildPayload={() => ({
-            module: "counter_movement_jump",
-            metrics: {
-              result,
-            },
-            observations: { interpretation },
-          })}
-        />
       </div>
     </div>
   );

@@ -5,7 +5,7 @@ import { VideoUpload } from "@/components/analysis/VideoUpload";
 import { Button } from "@/components/ui/Button";
 import { AssessmentReport } from "@/components/biomech/AssessmentReport";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { AutoSaveToast } from "@/components/dashboard/AutoSaveToast";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { BiomechDataDTO } from "@/lib/api";
 import { analyzeBiomechVideo } from "@/lib/biomech/uploadAnalyze";
@@ -86,8 +86,8 @@ export function ApiUploadAssessment({
   const [result, setResult] = useState<BiomechDataDTO | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Doctor-flow context — analysis result will be saved on explicit
-  // user click via the SaveToPatientButton in the report view.
+  // Doctor-flow context — analysis result auto-saves via the
+  // AutoSaveToast in the report view (10s undo window).
   const { isDoctorFlow, patient } = usePatientContext();
 
   const onSelect = useCallback((f: File) => {
@@ -177,8 +177,9 @@ export function ApiUploadAssessment({
           compensations={result.compensations}
         />
 
-        {/* Explicit "Save to patient history" — only shows in doctor flow */}
-        <SaveToPatientButton
+        {/* Auto-save to patient history — only fires in doctor flow
+            (toast with a 10s undo). */}
+        <AutoSaveToast
           buildPayload={() => ({
             module: "biomech",
             body_part: bodyPart,

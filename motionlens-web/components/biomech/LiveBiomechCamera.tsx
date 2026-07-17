@@ -53,6 +53,22 @@ interface Props {
    *  (e.g. neck / shoulder rotation calibration) without duplicating
    *  the EMA smoothing or the detector wiring. */
   onSmoothedKeypoints?: (keypoints: Keypoint[]) => void;
+  /** Auto-request the camera on mount (parent already gated behind a
+   *  user gesture, e.g. "Start Assessment"). Same pattern as
+   *  SitToStandLiveCamera.autoStart. Default off — existing consumers
+   *  keep the manual Start-camera button flow. */
+  autoStart?: boolean;
+  /** Hide the Start/Stop/PiP button row — parent owns session control. */
+  hideControls?: boolean;
+  /** Fill the parent container (LiveModeLayout camera slot) instead of
+   *  the fixed 16:9 aspect card. */
+  fill?: boolean;
+  /** Notified when the camera stream turns on/off — lets the parent
+   *  hold its countdown until frames are actually flowing. */
+  onActiveChange?: (active: boolean) => void;
+  /** Overlay slot rendered above the skeleton canvas (countdown,
+   *  starting placeholder, HUD chips). */
+  children?: React.ReactNode;
 }
 
 const LINE_COLOR = "#FFFFFF";
@@ -164,9 +180,28 @@ export function LiveBiomechCamera({
   neckRotationBaseline,
   shoulderRotationBaseline,
   onSmoothedKeypoints,
+  autoStart = false,
+  hideControls = false,
+  fill = false,
+  onActiveChange,
+  children,
 }: Props) {
   const { videoRef, active, error, start, stop } = useCamera();
   const { ready, error: poseError, detect } = usePoseDetection();
+
+  // Mirror stream state up to the parent.
+  const onActiveChangeRef = useRef(onActiveChange);
+  useEffect(() => { onActiveChangeRef.current = onActiveChange; });
+  useEffect(() => { onActiveChangeRef.current?.(active); }, [active]);
+
+  // Auto-start exactly once on mount when opted in (StrictMode-safe;
+  // parent already gated this behind a user gesture).
+  const autoStartFiredRef = useRef(false);
+  useEffect(() => {
+    if (!autoStart || autoStartFiredRef.current) return;
+    autoStartFiredRef.current = true;
+    start().catch(() => {});
+  }, [autoStart, start]);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
@@ -616,10 +651,14 @@ export function LiveBiomechCamera({
   }, [captureFrame]);
 
   return (
-    <div>
+    <div className={fill ? "flex h-full w-full flex-col" : undefined}>
       <div
         ref={containerRef}
-        className="relative aspect-video overflow-hidden rounded-card border border-border bg-gradient-to-br from-[#0A0A0B] via-[#0d0d10] to-[#15151a]"
+        className={
+          fill
+            ? "relative min-h-0 w-full flex-1 overflow-hidden rounded-card border border-border bg-gradient-to-br from-[#0A0A0B] via-[#0d0d10] to-[#15151a]"
+            : "relative aspect-video overflow-hidden rounded-card border border-border bg-gradient-to-br from-[#0A0A0B] via-[#0d0d10] to-[#15151a]"
+        }
       >
         {/* Skeleton canvas — primary view on dark bg. CSS-mirrored so
             movement direction matches the PiP selfie preview. */}
@@ -672,33 +711,44 @@ export function LiveBiomechCamera({
           </div>
         )}
 
+        {/* Parent overlay slot (countdown / starting placeholder /
+            HUD chips). Rendered last (below only the PiP's z-10) so
+            overlays sit above the placeholders. */}
+        <div className="pointer-events-none absolute inset-0">{children}</div>
+
       </div>
 
-      {error && <p className="mt-3 text-xs text-error">{error}</p>}
+      {error && (
+        <p className={fill ? "mt-1 text-xs text-error" : "mt-3 text-xs text-error"}>
+          {error}
+        </p>
+      )}
 
-      <div className="mt-4 flex flex-wrap gap-3">
-        {!active ? (
-          <Button onClick={start}>
-            <Camera className="h-4 w-4" />
-            Start camera
-          </Button>
-        ) : (
-          <Button variant="secondary" onClick={stop}>
-            <CameraOff className="h-4 w-4" />
-            Stop
-          </Button>
-        )}
-        {active && (
-          <Button
-            variant="secondary"
-            onClick={() => setShowPip((v) => !v)}
-            aria-pressed={showPip}
-          >
-            {showPip ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-            {showPip ? "Hide preview" : "Show preview"}
-          </Button>
-        )}
-      </div>
+      {!hideControls && (
+        <div className="mt-4 flex flex-wrap gap-3">
+          {!active ? (
+            <Button onClick={start}>
+              <Camera className="h-4 w-4" />
+              Start camera
+            </Button>
+          ) : (
+            <Button variant="secondary" onClick={stop}>
+              <CameraOff className="h-4 w-4" />
+              Stop
+            </Button>
+          )}
+          {active && (
+            <Button
+              variant="secondary"
+              onClick={() => setShowPip((v) => !v)}
+              aria-pressed={showPip}
+            >
+              {showPip ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              {showPip ? "Hide preview" : "Show preview"}
+            </Button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

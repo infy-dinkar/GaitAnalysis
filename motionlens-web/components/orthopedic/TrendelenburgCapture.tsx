@@ -22,7 +22,6 @@ import {
   CheckCircle2,
   FileVideo,
   Loader2,
-  Play,
   RotateCcw,
   Upload,
   Video,
@@ -33,7 +32,13 @@ import { Button } from "@/components/ui/Button";
 import { TrendelenburgLiveCamera } from "@/components/orthopedic/TrendelenburgLiveCamera";
 import { TrendelenburgReport } from "@/components/orthopedic/TrendelenburgReport";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { AutoSaveToast } from "@/components/dashboard/AutoSaveToast";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
+import {
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import {
   COMPENSATORY_TRUNK_LEAN_DEG,
@@ -132,6 +137,26 @@ export function TrendelenburgCapture() {
   // Currently-armed side (set when user clicks "Start <side>-leg stance").
   const [armedSide, setArmedSide] = useState<Side | null>(null);
 
+  // ── Auto-flow (fullscreen less-click live mode) ────────────────
+  // Picking a side opens the fullscreen shell; the camera auto-starts;
+  // once frames are flowing a 3-2-1 countdown runs and the hold starts
+  // by itself. The countdown re-runs before EACH side: finishing a
+  // side clears `armedSide` (resetting the hook), and arming the next
+  // side flips it back on.
+  const [liveFullscreen, setLiveFullscreen] = useState<boolean>(false);
+  const [camActive, setCamActive] = useState<boolean>(false);
+
+  const {
+    phase: flowPhase,
+    countdown,
+    skipCountdown,
+  } = useRehabAutoFlow(
+    liveFullscreen && camActive && armedSide !== null,
+    () => {
+      startRecording();
+    },
+  );
+
   // 250 ms tick for the live UI (countdown timer + current-tilt readout).
   useEffect(() => {
     if (phase !== "recording") return;
@@ -174,11 +199,15 @@ export function TrendelenburgCapture() {
     setArmedSide(null);
     setCoachMsg("");
     lastCoachMsgRef.current = "";
-    // If both sides done → render report. Else go back to ready.
-    setPhase((prevPhase) => {
-      const bothDone = completedSidesIncluding(prevPhase, rec.side);
-      return bothDone ? "done" : "ready";
-    });
+    // If both sides done → render report (leave the fullscreen shell
+    // so the done view renders). Else go back to ready — the sidebar
+    // offers the other side and the countdown re-runs on arm.
+    const bothDone = completedSidesIncluding("ready", rec.side);
+    setPhase(bothDone ? "done" : "ready");
+    if (bothDone) {
+      setLiveFullscreen(false);
+      setCamActive(false);
+    }
   }, []);
 
   // Helper: check whether THE OTHER side has already been recorded
@@ -427,6 +456,8 @@ export function TrendelenburgCapture() {
     lastCoachMsgRef.current = "";
     setPhase("idle");
     setError(null);
+    setLiveFullscreen(false);
+    setCamActive(false);
     resetUpload();
     setMode(next);
   }
@@ -436,6 +467,24 @@ export function TrendelenburgCapture() {
     setError(null);
     setArmedSide(side);
     setPhase("ready");
+  }
+
+  // Enter the fullscreen auto-flow shell — picking a side is the
+  // single click of the live mode. Camera auto-starts inside;
+  // countdown → recording of that side.
+  function enterLive(side: Side) {
+    arm(side);
+    setLiveFullscreen(true);
+  }
+
+  function exitLive() {
+    recordingRef.current = null;
+    setArmedSide(null);
+    setCoachMsg("");
+    lastCoachMsgRef.current = "";
+    setPhase("idle");
+    setLiveFullscreen(false);
+    setCamActive(false);
   }
 
   function startRecording() {
@@ -469,6 +518,8 @@ export function TrendelenburgCapture() {
     lastCoachMsgRef.current = "";
     setPhase("idle");
     setError(null);
+    setLiveFullscreen(false);
+    setCamActive(false);
   }
 
   // ── Done view (shared between live + upload modes) ────────────
@@ -481,8 +532,25 @@ export function TrendelenburgCapture() {
     const onRunAgain = isUploadDone
       ? () => { resetUpload(); }
       : reset;
+    const buildPayload = () => ({
+      module: "trendelenburg" as const,
+      // Per-frame keypoints + samples + screenshot data-URL all
+      // live inside each per-side TrendelenburgSideResult on the
+      // metrics blob (PDF Section 2 (a) compliance). The top-
+      // level `keypoints` field is reserved for single-snapshot
+      // modules (posture) and is left unset here.
+      metrics: {
+        left:  result.left,
+        right: result.right,
+      },
+      observations: { interpretation },
+    });
     return (
       <div className="space-y-8">
+        {/* Results auto-save in the doctor flow (toast with a 10s
+            undo) for both live and upload runs. */}
+        <AutoSaveToast buildPayload={buildPayload} />
+
         {/* Per-side upload errors — surface alongside the report so
             the operator can see which side failed and re-record it
             without losing the side that succeeded. */}
@@ -514,22 +582,6 @@ export function TrendelenburgCapture() {
           patient={patient ?? null}
           result={result}
           interpretation={interpretation}
-        />
-
-        <SaveToPatientButton
-          buildPayload={() => ({
-            module: "trendelenburg",
-            // Per-frame keypoints + samples + screenshot data-URL all
-            // live inside each per-side TrendelenburgSideResult on the
-            // metrics blob (PDF Section 2 (a) compliance). The top-
-            // level `keypoints` field is reserved for single-snapshot
-            // modules (posture) and is left unset here.
-            metrics: {
-              left:  result.left,
-              right: result.right,
-            },
-            observations: { interpretation },
-          })}
         />
 
         <div className="flex justify-center border-t border-border pt-6">
@@ -697,163 +749,222 @@ export function TrendelenburgCapture() {
         </div>
       )}
 
-      {/* ─── LIVE MODE (unchanged behaviour) ─────────────────────── */}
-      {mode === "live" && (
-      <>
-      {/* ─── 2-column layout (instructions+status | camera) ─────── */}
-      <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
-        {/* LEFT — instructions + recording controls */}
-        <div className="space-y-5">
-          <div className="rounded-card border border-border bg-surface p-5">
-            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-              Movement instructions
-            </p>
-            <ol className="mt-3 space-y-2.5 text-sm text-foreground">
-              {[
-                "Stand barefoot facing the camera, both hips visible end-to-end.",
-                "Keep your arms relaxed at your sides or crossed across the chest.",
-                `Lift one leg by bending the hip and knee to about 90°. Don't reach for support.`,
-                `Hold the position steady for ${TARGET_HOLD_SECONDS} seconds. Keep the standing leg straight.`,
-                "When the timer ends, lower the leg and repeat the same hold on the opposite side.",
-              ].map((s, i) => (
-                <li key={i} className="flex gap-2.5">
-                  <span className="tabular shrink-0 text-accent">{i + 1}.</span>
-                  <span className="leading-relaxed">{s}</span>
-                </li>
-              ))}
-            </ol>
+      {/* ─── LIVE MODE — pre-fullscreen: instructions + one click ── */}
+      {mode === "live" && !liveFullscreen && (
+        <>
+          <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
+            <div className="space-y-5">
+              <div className="rounded-card border border-border bg-surface p-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+                  Movement instructions
+                </p>
+                <ol className="mt-3 space-y-2.5 text-sm text-foreground">
+                  {[
+                    "Stand barefoot facing the camera, both hips visible end-to-end.",
+                    "Keep your arms relaxed at your sides or crossed across the chest.",
+                    `Lift one leg by bending the hip and knee to about 90°. Don't reach for support.`,
+                    `Hold the position steady for ${TARGET_HOLD_SECONDS} seconds. Keep the standing leg straight.`,
+                    "When the timer ends, lower the leg and repeat the same hold on the opposite side.",
+                  ].map((s, i) => (
+                    <li key={i} className="flex gap-2.5">
+                      <span className="tabular shrink-0 text-accent">{i + 1}.</span>
+                      <span className="leading-relaxed">{s}</span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+              <p className="text-xs text-muted">
+                Recording auto-stops if the lifted foot touches down for
+                longer than {POST_LIFT_LOSS_GRACE_SEC.toFixed(0)} s, or if
+                pelvic tilt exceeds {PELVIC_SPIKE_TERMINATION_DEG}°.
+                Compensatory trunk lean beyond {COMPENSATORY_TRUNK_LEAN_DEG}°
+                toward the stance side will be flagged.
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <div className="rounded-card border border-border bg-surface p-6 text-center">
+                <p className="text-sm text-muted">
+                  Pick a side — the camera opens fullscreen, a 3-2-1
+                  countdown runs, and the {TARGET_HOLD_SECONDS}-second
+                  hold records by itself. After both sides the report
+                  saves to the patient record.
+                </p>
+                <div className="mt-4 flex flex-wrap justify-center gap-3">
+                  {sidesRemaining.map((s) => (
+                    <Button key={s} onClick={() => enterLive(s)}>
+                      <Camera className="h-4 w-4" />
+                      {s === "left" ? "Left" : "Right"}-leg stance
+                    </Button>
+                  ))}
+                </div>
+                {completedSides.size > 0 && (
+                  <p className="mt-3 inline-flex items-center gap-1 text-xs text-emerald-600">
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    {completedSides.size === 1
+                      ? "1 side recorded"
+                      : "Both sides recorded"}
+                  </p>
+                )}
+              </div>
+            </div>
           </div>
 
-          <div className="rounded-card border border-border bg-surface p-5">
-            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-              Live status
-            </p>
+          {error && (
+            <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
+              <p className="text-foreground">{error}</p>
+            </div>
+          )}
+        </>
+      )}
 
-            {/* Recording panel — shown only while a side is recording */}
-            {phase === "recording" && recordingRef.current && (
-              <div className="mt-3 space-y-3">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-medium text-foreground">
-                    {recordingRef.current.firstStanceAt === null
-                      ? `Waiting for stance — ${liveSide === "left" ? "Left" : "Right"}-leg test`
-                      : `Recording — ${liveSide === "left" ? "Left" : "Right"}-leg stance`}
+      {/* ─── LIVE MODE — fullscreen auto-flow shell ──────────────── */}
+      {mode === "live" && liveFullscreen && (
+        <LiveModeLayout
+          title="Trendelenburg Test"
+          subtitle={
+            phase === "recording"
+              ? `${liveSide === "left" ? "Left" : "Right"}-leg stance — hold ${TARGET_HOLD_SECONDS}s`
+              : armedSide
+                ? `${armedSide === "left" ? "Left" : "Right"}-leg stance — get ready`
+                : "Choose the next side"
+          }
+          onExit={exitLive}
+          camera={(
+            <TrendelenburgLiveCamera
+              onFrame={handleFrame}
+              onError={setError}
+              autoStart
+              hideControls
+              fill
+              onActiveChange={setCamActive}
+            >
+              {!camActive && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <p className="rounded-full bg-black/60 px-4 py-2 text-sm text-white/80">
+                    Starting camera…
                   </p>
-                  <p className="tabular text-2xl font-semibold text-accent">
+                </div>
+              )}
+              {flowPhase === "countdown" && countdown !== null && (
+                <AutoFlowCountdownOverlay countdown={countdown} label="Hold starts in" />
+              )}
+              {phase === "recording" && recordingRef.current && (
+                <div className="absolute left-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+                  <p className="text-[10px] uppercase tracking-[0.14em] text-rose-300">
+                    ● Recording — {liveSide === "left" ? "Left" : "Right"} stance
+                  </p>
+                  <p className="tabular text-2xl font-semibold text-white">
                     {recordingRef.current.firstStanceAt === null
                       ? "—"
                       : `${remaining.toFixed(1)}s`}
                   </p>
-                </div>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
-                  <div
-                    className="h-full bg-accent transition-all"
-                    style={{
-                      width: `${Math.min(
-                        100,
-                        recordingRef.current.firstStanceAt === null
-                          ? 0
-                          : (elapsed / TARGET_HOLD_SECONDS) * 100,
-                      )}%`,
-                    }}
-                  />
-                </div>
-                {coachMsg && (
-                  <p className="rounded-md border border-accent/30 bg-background/60 px-3 py-2 text-sm font-medium text-foreground">
-                    {coachMsg}
+                  <p className="text-[10px] text-white/70">
+                    {recordingRef.current.firstStanceAt === null
+                      ? "Waiting for the leg lift"
+                      : "Hold steady"}
                   </p>
-                )}
-                <p className="text-xs text-muted">
-                  Recording auto-stops if the lifted foot touches down for
-                  longer than {POST_LIFT_LOSS_GRACE_SEC.toFixed(0)} s, or if
-                  pelvic tilt exceeds {PELVIC_SPIKE_TERMINATION_DEG}°.
-                  Compensatory trunk lean beyond {COMPENSATORY_TRUNK_LEAN_DEG}°
-                  toward the stance side will be flagged.
-                </p>
-                <div className="flex justify-end">
-                  <Button variant="ghost" size="sm" onClick={stopEarly}>
-                    Stop early
-                  </Button>
                 </div>
-              </div>
-            )}
+              )}
+            </TrendelenburgLiveCamera>
+          )}
+          sidebar={(
+            <>
+              {flowPhase === "countdown" && countdown !== null && (
+                <AutoFlowCountdownCard
+                  countdown={countdown}
+                  onSkip={skipCountdown}
+                  hint={`Patient facing the camera, ready to stand on the ${armedSide ?? "test"} leg.`}
+                />
+              )}
 
-            {/* Side-selection / armed panel — shown while not recording */}
-            {phase !== "recording" && (
-              <div className="mt-3">
-                {sidesRemaining.length === 0 ? (
-                  <p className="text-sm text-muted">
-                    Both sides recorded. Compiling the report…
-                  </p>
-                ) : armedSide ? (
-                  <div className="space-y-3">
-                    <p className="text-sm">
-                      Ready to record:{" "}
-                      <span className="font-medium text-foreground">
-                        {armedSide === "left" ? "Left" : "Right"}-leg stance
-                      </span>
-                      .
-                    </p>
-                    <p className="text-xs text-muted">
-                      Patient stands on the{" "}
-                      {armedSide === "left" ? "left" : "right"} leg with the{" "}
-                      opposite leg lifted. Click <em>Start hold</em> when ready;
-                      a {TARGET_HOLD_SECONDS}-second timer will begin.
-                    </p>
-                    <div className="flex gap-2">
-                      <Button onClick={startRecording}>
-                        <Play className="h-4 w-4" />
-                        Start hold ({armedSide})
-                      </Button>
-                      <Button variant="ghost" onClick={() => setArmedSide(null)}>
-                        Cancel
-                      </Button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="space-y-3">
+              {phase === "recording" && recordingRef.current && (
+                <div className="rounded-card border border-border bg-surface p-4 space-y-3">
+                  <div className="flex items-center justify-between">
                     <p className="text-sm font-medium text-foreground">
-                      Choose which side to record next:
+                      {recordingRef.current.firstStanceAt === null
+                        ? `Waiting for stance — ${liveSide === "left" ? "Left" : "Right"}-leg test`
+                        : `Recording — ${liveSide === "left" ? "Left" : "Right"}-leg stance`}
                     </p>
-                    <div className="flex flex-wrap gap-3">
-                      {sidesRemaining.map((s) => (
-                        <Button key={s} onClick={() => arm(s)}>
-                          {s === "left" ? "Left" : "Right"}-leg stance
-                        </Button>
-                      ))}
-                    </div>
-                    {completedSides.size > 0 && (
-                      <p className="inline-flex items-center gap-1 text-xs text-emerald-600">
-                        <CheckCircle2 className="h-3.5 w-3.5" />
-                        {completedSides.size === 1
-                          ? "1 side recorded"
-                          : "Both sides recorded"}
-                      </p>
-                    )}
+                    <p className="tabular text-2xl font-semibold text-accent">
+                      {recordingRef.current.firstStanceAt === null
+                        ? "—"
+                        : `${remaining.toFixed(1)}s`}
+                    </p>
                   </div>
-                )}
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
+                    <div
+                      className="h-full bg-accent transition-all"
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          recordingRef.current.firstStanceAt === null
+                            ? 0
+                            : (elapsed / TARGET_HOLD_SECONDS) * 100,
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                  {coachMsg && (
+                    <p className="rounded-md border border-accent/30 bg-background/60 px-3 py-2 text-sm font-medium text-foreground">
+                      {coachMsg}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {phase !== "recording" && !armedSide && sidesRemaining.length > 0 && (
+                <div className="rounded-card border border-border bg-surface p-4 space-y-3">
+                  <p className="text-sm font-medium text-foreground">
+                    {completedSides.size === 0
+                      ? "Choose which side to record:"
+                      : "Now record the other side:"}
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {sidesRemaining.map((s) => (
+                      <Button key={s} onClick={() => arm(s)}>
+                        {s === "left" ? "Left" : "Right"}-leg stance
+                      </Button>
+                    ))}
+                  </div>
+                  {completedSides.size > 0 && (
+                    <p className="inline-flex items-center gap-1 text-xs text-emerald-600">
+                      <CheckCircle2 className="h-3.5 w-3.5" />
+                      1 side recorded
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <div className="rounded-card border border-border bg-surface p-3 text-xs text-muted">
+                <p className="font-semibold text-foreground">Session brief</p>
+                <ol className="mt-2 list-decimal space-y-1 pl-4">
+                  <li>Stand facing the camera, both hips in frame.</li>
+                  <li>Lift the opposite leg — hold {TARGET_HOLD_SECONDS}s on the stance leg.</li>
+                  <li>Auto-stops on foot touch-down or pelvic spike; then the other side.</li>
+                </ol>
               </div>
-            )}
-          </div>
-        </div>
 
-        {/* RIGHT — sticky camera */}
-        <div className="lg:sticky lg:top-28">
-          <TrendelenburgLiveCamera onFrame={handleFrame} onError={setError} />
-          <p className="mt-3 text-xs text-subtle">
-            Start the camera and have the patient stand barefoot facing the
-            lens. The on-screen skeleton tracks pelvis and trunk in real
-            time — keep both hips inside the frame.
-          </p>
-        </div>
-      </div>
+              {error && (
+                <div className="rounded-card border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-foreground">
+                  <AlertTriangle className="mr-2 inline h-4 w-4 text-rose-500" />
+                  {error}
+                </div>
+              )}
 
-      {error && (
-        <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
-          <p className="text-foreground">{error}</p>
-        </div>
-      )}
-      </>
+              <div className="mt-auto flex flex-wrap gap-2">
+                {phase === "recording" && (
+                  <Button variant="secondary" onClick={stopEarly}>Stop early</Button>
+                )}
+                <Button variant="ghost" size="sm" onClick={exitLive}>
+                  <RotateCcw className="h-4 w-4" />
+                  Reset
+                </Button>
+              </div>
+            </>
+          )}
+        />
       )}
     </div>
   );

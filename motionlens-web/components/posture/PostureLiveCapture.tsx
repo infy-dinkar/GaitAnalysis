@@ -38,7 +38,7 @@ import { Button } from "@/components/ui/Button";
 import { AssessmentCameraShell } from "@/components/orthopedic/AssessmentCameraShell";
 import { PostureReport } from "@/components/posture/PostureReport";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { AutoSaveToast } from "@/components/dashboard/AutoSaveToast";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import {
   analyzePostureMultiView,
@@ -666,15 +666,16 @@ function DoneView({
         rightSide={result.right_side ?? null}
       />
 
+      {/* Auto-save — fires as soon as the report renders (doctor
+          flow only; AutoSaveToast no-ops otherwise), big banner
+          with a 10s Undo. */}
+      {isDoctorFlow && <AutoSaveToast buildPayload={buildPayload} />}
+
       <div className="no-pdf flex flex-wrap items-center justify-between gap-3 border-t border-border pt-6">
         <Button variant="secondary" onClick={onReset}>
           <RotateCcw className="h-4 w-4" />
           New session
         </Button>
-
-        {isDoctorFlow && (
-          <SaveToPatientButton buildPayload={buildPayload} />
-        )}
       </div>
     </div>
   );

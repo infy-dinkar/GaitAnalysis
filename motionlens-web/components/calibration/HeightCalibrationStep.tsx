@@ -64,6 +64,12 @@ interface Props {
   onCalibrated: (result: CalibrationResult | null) => void;
   /** Render a "Skip" button. Default true. */
   allowSkip?: boolean;
+  /** Auto-confirm ~1.5s after the calibration locks (TJA-style
+   *  less-click flow). The "Re-take" button stays available during
+   *  the window; the manual "Use this calibration" button is hidden.
+   *  Default false — every other consumer keeps today's manual
+   *  confirm click. */
+  autoConfirm?: boolean;
 }
 
 interface Norm {
@@ -76,6 +82,7 @@ export function HeightCalibrationStep({
   defaultHeightCm,
   onCalibrated,
   allowSkip = true,
+  autoConfirm = false,
 }: Props) {
   const { videoRef, active, error: camError, start, stop } = useCamera();
   const { ready: detectorReady, error: detectorError, detect } = usePoseDetection();
@@ -285,6 +292,21 @@ export function HeightCalibrationStep({
     onCalibrated(null);
   }
 
+  // Auto-confirm: when enabled, the lock-in advances by itself after
+  // 1.5s — the doctor can still press "Re-take" during the window
+  // (locked flips false, which clears the timer via the effect
+  // cleanup). Timer is also cleared on unmount.
+  useEffect(() => {
+    if (!autoConfirm || !locked) return;
+    const id = window.setTimeout(() => {
+      const r = lockedResultRef.current;
+      if (!r) return;
+      stop();
+      onCalibrated(r);
+    }, 1500);
+    return () => window.clearTimeout(id);
+  }, [autoConfirm, locked, stop, onCalibrated]);
+
   // ── Coaching message ─────────────────────────────────────────
   const coachingMessage = (() => {
     if (locked) return null;
@@ -368,10 +390,17 @@ export function HeightCalibrationStep({
             )}
             {locked && (
               <>
-                <Button onClick={handleConfirm}>
-                  <CheckCircle2 className="h-4 w-4" />
-                  Use this calibration
-                </Button>
+                {autoConfirm ? (
+                  <div className="flex items-center gap-2 rounded-md bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-700 ring-1 ring-emerald-500/30 dark:text-emerald-300">
+                    <CheckCircle2 className="h-4 w-4" />
+                    Calibrated — continuing in 1.5s…
+                  </div>
+                ) : (
+                  <Button onClick={handleConfirm}>
+                    <CheckCircle2 className="h-4 w-4" />
+                    Use this calibration
+                  </Button>
+                )}
                 <Button variant="secondary" onClick={handleRetake}>
                   <RefreshCw className="h-4 w-4" />
                   Re-take

@@ -27,7 +27,13 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { RepCountShell } from "@/components/rehab/mechanics/RepCountShell";
-import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
+import {
+  AutoFlowCompleteOverlay,
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+  AutoFlowFooter,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import { computeKneeAngle } from "@/lib/biomech/knee-live";
 import { DEFAULT_LEVEL_INDEX } from "@/lib/rehab/progressionLadders";
@@ -97,6 +103,22 @@ function Inner() {
     if (side !== null) sessionStartRef.current = performance.now();
   }, [side]);
 
+  // Auto-flow: side pick → 3-2-1 countdown → live → complete →
+  // auto-save. Session-scoped refs reset again at the live
+  // transition so the countdown seconds never count into the
+  // payload's duration or trackers.
+  const {
+    phase: sessionPhase,
+    countdown,
+    skipCountdown,
+    markComplete,
+  } = useRehabAutoFlow(side !== null, () => {
+    peakInteriorRef.current = 180;
+    bestPoseRef.current = null;
+    snapshotRef.current = null;
+    sessionStartRef.current = performance.now();
+  });
+
   const handleFrame = useCallback(
     (kp: Keypoint[], video: HTMLVideoElement) => {
       if (!side) return;
@@ -134,8 +156,9 @@ function Inner() {
   const handleSnapshot = useCallback(
     (state: RepCountState, score: Score) => {
       snapshotRef.current = { state, score };
+      if (state.reps >= TARGET_REPS) markComplete();
     },
-    [],
+    [markComplete],
   );
 
   const buildRehabPayload = useCallback(() => {
@@ -255,6 +278,8 @@ function Inner() {
               camera={(
                 <RehabCameraShell
                   onFrame={handleFrame}
+                  autoStart
+                  hideControls
                   angleArc={{
                     vertex: side === "left" ? LM_LIVE.LEFT_KNEE : LM_LIVE.RIGHT_KNEE,
                     armA: side === "left" ? LM_LIVE.LEFT_HIP : LM_LIVE.RIGHT_HIP,
@@ -267,6 +292,10 @@ function Inner() {
                     <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">{side === "left" ? "L" : "R"} knee</p>
                     <p className="tabular text-2xl font-semibold text-white">{interior.toFixed(0)}°</p>
                   </div>
+                  {sessionPhase === "countdown" && countdown !== null && (
+                    <AutoFlowCountdownOverlay countdown={countdown} />
+                  )}
+                  {sessionPhase === "complete" && <AutoFlowCompleteOverlay />}
                 </RehabCameraShell>
               )}
               sidebar={(
@@ -282,10 +311,19 @@ function Inner() {
                       <p className="border-t border-border bg-surface px-2 py-1 text-center text-[10px] uppercase tracking-[0.12em] text-muted">Reference form</p>
                     </div>
                   )}
-                  <div className="flex min-h-0 flex-1 flex-col">
-                    <RepCountShell signal={interior} signalLabel="Knee angle (°)" signalDisplayName="knee_interior" targetReps={TARGET_REPS} config={STEP_UP_CONFIG} onSnapshot={handleSnapshot} compact />
-                  </div>
-                  <div className="no-pdf"><RehabSessionFooter buildPayload={buildRehabPayload} label="Save session" compact /></div>
+                  {sessionPhase === "countdown" && countdown !== null && (
+                    <AutoFlowCountdownCard
+                      countdown={countdown}
+                      onSkip={skipCountdown}
+                      hint="Patient beside the platform, working leg toward the camera."
+                    />
+                  )}
+                  {(sessionPhase === "live" || sessionPhase === "complete") && (
+                    <div className="flex min-h-0 flex-1 flex-col">
+                      <RepCountShell signal={interior} signalLabel="Knee angle (°)" signalDisplayName="knee_interior" targetReps={TARGET_REPS} config={STEP_UP_CONFIG} onSnapshot={handleSnapshot} compact />
+                    </div>
+                  )}
+                  <div className="no-pdf"><AutoFlowFooter complete={sessionPhase === "complete"} buildPayload={buildRehabPayload} /></div>
                 </>
               )}
             />

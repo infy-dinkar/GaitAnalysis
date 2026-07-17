@@ -24,8 +24,15 @@
 // each item finishes its analysis the inline <AssessmentReport>
 // replaces its file-picker card. The Save All + Download PDF buttons
 // at the bottom enable only when every queued item is `done`.
+//
+// Doctor-flow auto-save: when EVERY queued item completes cleanly
+// (no upload ever failed this session), the combined report saves
+// itself once — same reduced-click behaviour as AutoSaveToast, with
+// a 10s Undo banner. Sessions that saw a failure (even if retried)
+// keep the manual Save All button so the operator decides.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import {
   AlertCircle,
   CheckCircle2,
@@ -33,6 +40,7 @@ import {
   Loader2,
   RotateCcw,
   Save,
+  Undo2,
   Upload,
   X,
 } from "lucide-react";
@@ -41,7 +49,7 @@ import { AssessmentReport } from "@/components/biomech/AssessmentReport";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import { exportReportPdf } from "@/lib/pdf/exportReportPdf";
-import { createReport, type ReportCreatePayload } from "@/lib/reports";
+import { createReport, deleteReport, type ReportCreatePayload } from "@/lib/reports";
 import { analyzeBiomechVideo } from "@/lib/biomech/uploadAnalyze";
 import { SHOULDER_MOVEMENTS } from "@/lib/biomech/shoulder";
 import { NECK_MOVEMENTS } from "@/lib/biomech/neck";
@@ -334,6 +342,11 @@ export function BatchSession() {
           progress: 1,
         });
       } catch (e) {
+        // Remember that this session saw a failure — the combined
+        // report then stays on the MANUAL "Save all" path (the
+        // auto-save fires only for sessions where every item
+        // completed cleanly on the first try).
+        hadFailureRef.current = true;
         updateItem(uid, {
           status: "error",
           errorMsg: e instanceof Error ? e.message : "Analysis failed",
@@ -364,6 +377,10 @@ export function BatchSession() {
     setQueue([]);
     setSelected({});
     setPhase("select");
+    setSaveState({ kind: "idle" });
+    setAutoBanner(null);
+    autoFiredRef.current = false;
+    hadFailureRef.current = false;
   }
 
   // ── Save All + PDF ─────────────────────────────────────────────
@@ -379,7 +396,7 @@ export function BatchSession() {
   const someErrored = queue.some((it) => it.status === "error");
   const anySaved = queue.some((it) => it.saved);
 
-  async function saveAll() {
+  async function saveAll(auto = false) {
     if (!patientId || !allDone) return;
     const completed = queue.filter((it) => it.status === "done");
     if (completed.length === 0 || queue.some((it) => it.saved)) return;
@@ -398,17 +415,92 @@ export function BatchSession() {
       },
     };
     try {
-      await createReport(patientId, payload);
+      const created = await createReport(patientId, payload);
       setQueue((prev) =>
         prev.map((it) =>
           it.status === "done" ? { ...it, saved: true } : it,
         ),
       );
       setSaveState({ kind: "saved", count: completed.length });
+      if (auto) {
+        setAutoBanner({
+          kind: "saved",
+          reportId: created.id,
+          secondsLeft: 10,
+        });
+      }
     } catch (e) {
       setSaveState({
         kind: "error",
         msg: e instanceof Error ? e.message : "Could not save batch report.",
+      });
+    }
+  }
+
+  // ── Auto-save (doctor flow) ──────────────────────────────────
+  // The combined report auto-saves ONCE, mirroring AutoSaveToast's
+  // reduced-click behaviour, but ONLY when every queued item
+  // completed successfully without any failure along the way. If any
+  // upload errored (even if later retried to success) the session
+  // stays on the manual "Save all" button so the operator decides.
+  // AutoSaveToast itself is not used here because the batch save is
+  // one combined createReport call that also flips per-item `saved`
+  // pills + the shared saveState — so we auto-fire the existing
+  // saveAll() behind a fired-once ref and render an equivalent big
+  // banner (10s Undo via deleteReport) below.
+  const autoFiredRef = useRef(false);
+  const hadFailureRef = useRef(false);
+  const [autoBanner, setAutoBanner] = useState<
+    | { kind: "saved"; reportId: string; secondsLeft: number }
+    | { kind: "undoing" }
+    | { kind: "undone" }
+    | { kind: "error"; message: string }
+    | null
+  >(null);
+
+  useEffect(() => {
+    if (!isDoctorFlow || !patientId) return;
+    if (!allDone || hadFailureRef.current) return;
+    if (autoFiredRef.current) return;
+    autoFiredRef.current = true;
+    void saveAll(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allDone, isDoctorFlow, patientId]);
+
+  // Countdown tick for the auto-saved banner — decrements once per
+  // second and auto-dismisses at zero (same rhythm as AutoSaveToast).
+  useEffect(() => {
+    if (!autoBanner || autoBanner.kind !== "saved") return;
+    if (autoBanner.secondsLeft <= 0) {
+      setAutoBanner(null);
+      return;
+    }
+    const id = window.setTimeout(() => {
+      setAutoBanner((prev) =>
+        prev && prev.kind === "saved"
+          ? { ...prev, secondsLeft: prev.secondsLeft - 1 }
+          : prev,
+      );
+    }, 1000);
+    return () => window.clearTimeout(id);
+  }, [autoBanner]);
+
+  async function undoAutoSave() {
+    if (!autoBanner || autoBanner.kind !== "saved") return;
+    const id = autoBanner.reportId;
+    setAutoBanner({ kind: "undoing" });
+    try {
+      await deleteReport(id);
+      // Clear the saved flags + saveState so the operator can re-save
+      // deliberately via the manual "Save all" button.
+      setQueue((prev) => prev.map((it) => ({ ...it, saved: false })));
+      setSaveState({ kind: "idle" });
+      setAutoBanner({ kind: "undone" });
+      window.setTimeout(() => setAutoBanner(null), 3000);
+    } catch (e) {
+      setAutoBanner({
+        kind: "error",
+        message: e instanceof Error ? e.message : "Undo failed.",
       });
     }
   }
@@ -587,6 +679,97 @@ export function BatchSession() {
     <div className="space-y-8">
       {isDoctorFlow && <SaveStatusBanner patient={patient} saveStatus={null} />}
 
+      {/* Auto-save confirmation — same look/behaviour as
+          AutoSaveToast's "saved" banner: big emerald banner with a
+          10s Undo window, then it dismisses itself. */}
+      {autoBanner?.kind === "saved" && (
+        <div className="fixed inset-x-0 top-4 z-[60] mx-auto flex w-full max-w-2xl justify-center px-4">
+          <div className="pointer-events-auto w-full rounded-card border-2 border-emerald-500/60 bg-emerald-600 px-6 py-4 shadow-2xl">
+            <div className="flex items-center gap-4">
+              <CheckCircle2 className="h-10 w-10 shrink-0 text-white" />
+              <div className="min-w-0 flex-1">
+                <p className="text-xl font-bold leading-tight text-white">
+                  Batch report auto-saved ✓
+                </p>
+                <p className="mt-0.5 truncate text-sm text-emerald-50">
+                  Stored in {patient?.name ?? "the patient"}&apos;s record
+                  <span className="ml-2 tabular text-emerald-200">
+                    · undo closes in {autoBanner.secondsLeft}s
+                  </span>
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <button
+                  type="button"
+                  onClick={undoAutoSave}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-white/15 px-3 py-2 text-sm font-semibold text-white transition hover:bg-white/25"
+                >
+                  <Undo2 className="h-4 w-4" /> Undo
+                </button>
+                {patientId && (
+                  <Link
+                    href={`/dashboard/patients/${patientId}`}
+                    className="rounded-md bg-white px-3 py-2 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-50"
+                  >
+                    View
+                  </Link>
+                )}
+                <button
+                  type="button"
+                  aria-label="Dismiss"
+                  onClick={() => setAutoBanner(null)}
+                  className="rounded-md p-2 text-emerald-100 transition hover:bg-white/15 hover:text-white"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {autoBanner && autoBanner.kind !== "saved" && (
+        <div className="fixed inset-x-0 top-4 z-[60] mx-auto flex w-full max-w-md justify-center px-4">
+          <div className="pointer-events-auto flex w-full items-center gap-3 rounded-full border border-border bg-elevated/95 px-4 py-2.5 text-sm shadow-lg backdrop-blur">
+            {autoBanner.kind === "undoing" && (
+              <>
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted" />
+                <span className="flex-1 text-foreground">Undoing save…</span>
+              </>
+            )}
+            {autoBanner.kind === "undone" && (
+              <>
+                <Undo2 className="h-4 w-4 shrink-0 text-muted" />
+                <span className="flex-1 text-foreground">
+                  Save undone — the batch report was deleted.
+                </span>
+                <button
+                  type="button"
+                  aria-label="Dismiss"
+                  onClick={() => setAutoBanner(null)}
+                  className="rounded-full p-1 text-muted hover:bg-surface hover:text-foreground"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </>
+            )}
+            {autoBanner.kind === "error" && (
+              <>
+                <AlertCircle className="h-4 w-4 shrink-0 text-error" />
+                <span className="flex-1 text-foreground">{autoBanner.message}</span>
+                <button
+                  type="button"
+                  aria-label="Dismiss"
+                  onClick={() => setAutoBanner(null)}
+                  className="rounded-full p-1 text-muted hover:bg-surface hover:text-foreground"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="eyebrow">Batch session</p>
@@ -709,7 +892,7 @@ export function BatchSession() {
           <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
             {isDoctorFlow && (
               <Button
-                onClick={saveAll}
+                onClick={() => saveAll()}
                 disabled={
                   !allDone ||
                   saveState.kind === "saving" ||
