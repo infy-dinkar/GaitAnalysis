@@ -165,17 +165,28 @@ function Inner() {
       if (flexion !== null) {
         const interiorAngle = 180 - flexion;
         setInterior(interiorAngle);
-        // Track session-wide deepest squat = smallest interior seen.
-        // On a new deepest frame that is actually squatting (below
-        // topThreshold — filters out standing-still noise), snapshot
-        // the landmark coords. The report redraws from these coords
-        // rather than saving pixels.
-        if (interiorAngle < peakInteriorRef.current) {
+        // Self-contained tracker gate. Two guards, no dependency on
+        // any engine-phase ref (see prior audit — the shell's
+        // delta-gated onSnapshot only fires at rep close, so
+        // "actively descending / below depth / ascending" was
+        // permanently unobservable from the page):
+        //   1. `interiorAngle < topThreshold - 5` — patient has
+        //      actually left the standing window; idle framing
+        //      frames sit near 180 and are excluded.
+        //   2. `interiorAngle >= 40` — sanity clamp: values below
+        //      40° interior are physically implausible in a
+        //      standing squat and always come from a tracking
+        //      glitch; drop the frame.
+        // Session-scoped ref resets (see live-transition effects
+        // below) handle idle frames from a previous session; this
+        // gate handles idle + glitchy frames in the current one.
+        if (
+          interiorAngle < activeConfig.topThreshold - 5
+          && interiorAngle >= 40
+          && interiorAngle < peakInteriorRef.current
+        ) {
           peakInteriorRef.current = interiorAngle;
-          if (
-            interiorAngle <= activeConfig.topThreshold
-            && lastKpRef.current
-          ) {
+          if (lastKpRef.current) {
             bestPoseRef.current = {
               landmarks: lastKpRef.current.landmarks,
               source_frame: lastKpRef.current.source_frame,
@@ -224,8 +235,12 @@ function Inner() {
       setSessionPhase("live");
       setCountdown(null);
       // Session actually starts NOW — reset the anchor so duration in
-      // the payload doesn't include the countdown seconds.
+      // the payload doesn't include the countdown seconds. Also reset
+      // every session-scoped ref so pre-session framing noise cannot
+      // leak into this session's peak / best-pose / engine-phase.
       sessionStartRef.current = performance.now();
+      peakInteriorRef.current = 180;
+      bestPoseRef.current = null;
       return;
     }
     const id = window.setTimeout(() => {
@@ -236,10 +251,13 @@ function Inner() {
 
   const cancelCountdown = useCallback(() => {
     // Skip the countdown → go live immediately. Doctor can still
-    // press Space / Escape via the keydown handler below.
+    // press Space / Escape via the keydown handler below. Same
+    // session-scoped ref reset as the natural 3-2-1 arrival.
     setCountdown(null);
     setSessionPhase("live");
     sessionStartRef.current = performance.now();
+    peakInteriorRef.current = 180;
+    bestPoseRef.current = null;
   }, []);
 
   useEffect(() => {
@@ -265,43 +283,50 @@ function Inner() {
       0,
       (performance.now() - sessionStartRef.current) / 1000,
     );
-    const interpretation = reps > 0
-      ? `${reps} rep${reps === 1 ? "" : "s"} completed`
-        + (goodReps !== reps ? `, ${goodReps} clean` : ", all clean")
-        + `. Deepest knee interior: ${peakInteriorRef.current.toFixed(0)}°.`
-      : "Session ended before any reps were counted.";
+    // Captured = the min-tracker actually latched onto something
+    // below the standing window (i.e. a real rep landed inside the
+    // tracker gate). If the gate never opened, `peakInteriorRef.current`
+    // is still 180 and we persist null rather than a fake 0 — the
+    // renderer shows "Not captured" instead of "0 deg / Outside band".
+    const captured = peakInteriorRef.current < 180;
+    const deepestFlexionDeg = captured ? 180 - peakInteriorRef.current : null;
+    const interpretation = captured
+      ? (reps > 0
+          ? `${reps} rep${reps === 1 ? "" : "s"} completed`
+            + (goodReps !== reps ? `, ${goodReps} clean` : ", all clean")
+            + `. Deepest knee angle: ${deepestFlexionDeg!.toFixed(0)}°.`
+          : `Deepest knee angle: ${deepestFlexionDeg!.toFixed(0)}°.`)
+      : (reps > 0
+          ? `${reps} rep${reps === 1 ? "" : "s"} counted. Knee depth not captured.`
+          : "Knee depth not captured.");
 
     // Skeleton pose: prefer the deepest-rep pose we captured during
-    // play. If none was captured (patient stood still, or never
-    // dipped below topThreshold), fall back to the last-known-good
-    // frame so the report always shows a skeleton.
-    const best = bestPoseRef.current;
+    // play. If none was captured, fall back to the last-known-good
+    // frame BUT with angle: null — a fallback frame is a standing
+    // pose and must never be labelled with a depth number.
+    const best = captured ? bestPoseRef.current : null;
     const fallback = lastKpRef.current;
-    const pose = best
+    const skeletonPose = best
       ? {
           landmarks: best.landmarks,
           source_frame: best.source_frame,
-          angle: best.angle,
+          angle: 180 - best.angle,
+          angle_convention: "flexion" as const,
           captured_at_ms: best.capturedAtMs,
+          side,
+          label: `Deepest squat — ${(180 - best.angle).toFixed(0)}° knee angle`,
         }
       : fallback
         ? {
             landmarks: fallback.landmarks,
             source_frame: fallback.source_frame,
-            angle: peakInteriorRef.current,
+            angle: null,
+            angle_convention: "flexion" as const,
             captured_at_ms: performance.now(),
+            side,
+            label: "Knee depth not captured",
           }
         : null;
-    const skeletonPose = pose
-      ? {
-          landmarks: pose.landmarks,
-          source_frame: pose.source_frame,
-          angle: pose.angle,
-          captured_at_ms: pose.captured_at_ms,
-          side,
-          label: `Deepest squat — ${pose.angle.toFixed(0)}° knee interior`,
-        }
-      : null;
     return {
       module: "rehab" as const,
       // Reuse the existing `movement` slot for the exercise slug —
@@ -316,13 +341,22 @@ function Inner() {
         duration_sec: durationSec,
         score,
         mechanic_state: state,
+        // Signal persisted in FLEXION convention (0° standing,
+        // higher = deeper). The rep-count engine still runs on
+        // interior — this is a display-side convention only. See
+        // lib/rehab/kneeAngleDisplay.js for the discrimination rule
+        // that keeps old (knee_interior) sessions readable too.
         signal: {
-          name: "knee_interior",
+          name: "knee_flexion",
           unit: "deg",
-          value_at_peak: peakInteriorRef.current,
+          // null when the tracker gate never opened this session
+          // (patient never left the standing window OR every frame
+          // fell in the sanity-clamp glitch band). Preserves the
+          // "no data" case downstream instead of a fake 0° reading.
+          value_at_peak: captured ? deepestFlexionDeg : null,
           target_band: {
-            min: activeConfig.depthThreshold,
-            max: activeConfig.topThreshold,
+            min: 180 - activeConfig.topThreshold,
+            max: 180 - activeConfig.depthThreshold,
           },
         },
         target_reps: TARGET_REPS,
@@ -504,7 +538,8 @@ function Inner() {
                     <div className="flex min-h-0 flex-1 flex-col">
                       <RepCountShell
                         signal={interior}
-                        signalLabel={`${side === "left" ? "L" : "R"} knee (°)`}
+                        signalLabel="Knee angle (°)"
+                        signalDisplayName="knee_interior"
                         targetReps={activeConfig.targetReps ?? TARGET_REPS}
                         config={activeConfig}
                         onSnapshot={handleSnapshot}

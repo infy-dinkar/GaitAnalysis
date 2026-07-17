@@ -63,9 +63,9 @@ export const REHAB_EXERCISES = [
     title: "Controlled Squat",
     mechanic: "rep_count",
     publicBody:
-      "Quality-gated squat rep counter. Each rep checked against depth (110° interior knee), amplitude (50° excursion), and starting position. Shallow reps flagged transparently. Powered by the Rep-Count mechanic.",
+      "Quality-gated squat rep counter. Each rep checked against depth (70° knee angle), amplitude (50° excursion), and starting position. Shallow reps flagged transparently. Powered by the Rep-Count mechanic.",
     patientBody:
-      "Quality-gated squat rep counter — depth 110°, amplitude 50°, knee-interior signal. Powered by the Rep-Count mechanic. Side picker before recording.",
+      "Quality-gated squat rep counter — depth 70° knee angle, amplitude 50°, knee-angle signal. Powered by the Rep-Count mechanic. Side picker before recording.",
     icon: Dumbbell,
     iconTone: "text-indigo-500",
     tone: "from-indigo-500/15 to-indigo-500/5",

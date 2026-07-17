@@ -7,8 +7,8 @@
 
 /**
  * @typedef {object} TargetVsValueProps
- * @property {string} label          e.g. "Knee interior"
- * @property {number} value          the peak / achieved value
+ * @property {string} label          e.g. "Knee angle (°)"
+ * @property {number | null} value   the peak / achieved value; null → "Not captured"
  * @property {string} [unit]         e.g. "°", "%"
  * @property {{min: number, max: number}} [band]  Target band; if omitted, marker plotted on a bare axis
  * @property {number} [axisMin]      Optional axis floor; defaults to smart pick around value+band
@@ -52,16 +52,19 @@ export function TargetVsValue({
   const range = Math.max(1e-3, max - min);
   const toX = (v) => padX + ((v - min) / range) * usableW;
 
+  const hasValue = Number.isFinite(value);
   const inBand =
-    band != null
-      && Number.isFinite(value)
+    hasValue
+      && band != null
       && value >= band.min
       && value <= band.max;
-  const markerColor = band == null
-    ? "rgb(56,189,248)"
-    : inBand
-      ? "rgb(34,197,94)"
-      : "rgb(245,158,11)";
+  const markerColor = !hasValue
+    ? "rgba(255,255,255,0.25)"
+    : band == null
+      ? "rgb(56,189,248)"
+      : inBand
+        ? "rgb(34,197,94)"
+        : "rgb(245,158,11)";
   const bandColor = "rgba(34,197,94,0.28)";
   const bandStroke = "rgba(34,197,94,0.55)";
   const markerX = toX(Number.isFinite(value) ? value : min);
@@ -74,10 +77,11 @@ export function TargetVsValue({
         </p>
         <p className="tabular text-xs text-muted">
           {Number.isFinite(value) ? formatVal(value) : "—"}
-          {unit}
+          {unit ? ` ${unit}` : ""}
           {band && (
             <span className="ml-2 text-subtle">
-              target {formatVal(band.min)}–{formatVal(band.max)}{unit}
+              target {formatVal(band.min)}–{formatVal(band.max)}
+              {unit ? ` ${unit}` : ""}
             </span>
           )}
         </p>
@@ -143,9 +147,11 @@ export function TargetVsValue({
         <p className="mt-1 text-[11px] text-muted">
           {caption
             ? caption
-            : inBand
-              ? "In target band."
-              : "Outside target band."}
+            : !hasValue
+              ? "Not captured."
+              : inBand
+                ? "In target band."
+                : "Outside target band."}
         </p>
       )}
     </div>

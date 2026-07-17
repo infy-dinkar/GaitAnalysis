@@ -17,6 +17,9 @@ import {
 } from "@/lib/rehab/gameState";
 import { repCountStep } from "@/lib/rehab/mechanics";
 import { ScoreHUD } from "@/components/rehab/mechanics/ScoreHUD";
+import {
+  interiorToDisplayFlexion,
+} from "@/lib/rehab/kneeAngleDisplay";
 
 interface Props {
   signal: number;
@@ -34,6 +37,13 @@ interface Props {
   /** Compact mode — tighter card + shorter depth bar + no verbose
    *  phase/currentMin/etc rows. Used inside the live-mode sidebar. */
   compact?: boolean;
+  /** Display-side convention hint. When the caller feeds the engine
+   *  with `interior` (squat-family pages), pass "knee_interior" and
+   *  the HUD readouts (`now`, `top`, `depth`) are transformed via
+   *  `interiorToDisplayFlexion` before render. The bar math and the
+   *  engine input are UNCHANGED — this only relabels displayed
+   *  numbers so physios see flexion (0° standing, ~70° deep). */
+  signalDisplayName?: "knee_interior" | "knee_flexion";
 }
 
 export function RepCountShell({
@@ -43,6 +53,7 @@ export function RepCountShell({
   config,
   onSnapshot,
   compact = false,
+  signalDisplayName,
 }: Props) {
   const stateRef = useRef<RepCountState>(emptyRepCountState());
   const scoreRef = useRef<Score>(emptyScore());
@@ -127,6 +138,9 @@ export function RepCountShell({
   const complete = targetReps != null && s.reps >= targetReps;
 
   // Depth bar: 0 % at topThreshold, 100 % at depthThreshold.
+  // Math stays in raw engine (interior) units — the visual is
+  // symmetric either way (deep = full bar). Only the number labels
+  // below get transformed.
   const range = Math.max(
     1e-6,
     config.topThreshold - config.depthThreshold,
@@ -135,6 +149,20 @@ export function RepCountShell({
     100,
     Math.max(0, ((config.topThreshold - signal) / range) * 100),
   );
+
+  // HUD label transform — flex when the caller opted into flexion
+  // display. Applies to signal (now), topThreshold (top), and
+  // depthThreshold (depth). Guards against non-finite/undefined.
+  const isKneeFlexionDisplay = signalDisplayName === "knee_interior";
+  const displaySignal = isKneeFlexionDisplay
+    ? (interiorToDisplayFlexion(signal) ?? signal)
+    : signal;
+  const displayTopThreshold = isKneeFlexionDisplay
+    ? (interiorToDisplayFlexion(config.topThreshold) ?? config.topThreshold)
+    : config.topThreshold;
+  const displayDepthThreshold = isKneeFlexionDisplay
+    ? (interiorToDisplayFlexion(config.depthThreshold) ?? config.depthThreshold)
+    : config.depthThreshold;
 
   const timer =
     targetReps != null
@@ -183,13 +211,13 @@ export function RepCountShell({
                 </div>
                 <div className="flex flex-1 flex-col justify-between py-1 text-[10px] text-zinc-400">
                   <span className="tabular">
-                    top {config.topThreshold.toFixed(0)}
+                    top {displayTopThreshold.toFixed(0)}
                   </span>
                   <span className="tabular text-zinc-100">
-                    now <span className="font-semibold">{signal.toFixed(0)}</span>
+                    now <span className="font-semibold">{displaySignal.toFixed(0)}</span>
                   </span>
                   <span className="tabular">
-                    depth {config.depthThreshold.toFixed(0)}
+                    depth {displayDepthThreshold.toFixed(0)}
                   </span>
                 </div>
               </div>
@@ -243,13 +271,13 @@ export function RepCountShell({
               </div>
               <div className="flex flex-col justify-between text-[10px] text-zinc-400">
                 <span className="tabular">
-                  top {config.topThreshold.toFixed(0)}
+                  top {displayTopThreshold.toFixed(0)}
                 </span>
                 <span className="tabular text-zinc-200">
-                  now <span className="font-semibold">{signal.toFixed(1)}</span>
+                  now <span className="font-semibold">{displaySignal.toFixed(1)}</span>
                 </span>
                 <span className="tabular">
-                  depth {config.depthThreshold.toFixed(0)}
+                  depth {displayDepthThreshold.toFixed(0)}
                 </span>
               </div>
               <div className="flex-1 space-y-2 text-xs text-zinc-300">
