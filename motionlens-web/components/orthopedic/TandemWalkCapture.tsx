@@ -33,7 +33,13 @@ import { Button } from "@/components/ui/Button";
 import { TandemWalkLiveCamera } from "@/components/orthopedic/TandemWalkLiveCamera";
 import { TandemWalkReport } from "@/components/orthopedic/TandemWalkReport";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { AutoSaveToast } from "@/components/dashboard/AutoSaveToast";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
+import {
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import {
   MIN_SWING_DISPLACEMENT_RATIO,
@@ -106,6 +112,15 @@ export function TandemWalkCapture() {
 
   const recordingRef = useRef<RecordingState | null>(null);
 
+  // ── Auto-flow (fullscreen less-click live mode) ────────────────
+  // One click ("Start Assessment") opens the fullscreen shell; the
+  // camera auto-starts. The countdown is additionally gated on the
+  // patient being fully trackable, so the 3-2-1 only runs once the
+  // full body is in frame. The trial auto-finishes on the 10th
+  // footstrike and the done view auto-saves (doctor flow).
+  const [liveFullscreen, setLiveFullscreen] = useState<boolean>(false);
+  const [camActive, setCamActive] = useState<boolean>(false);
+
   useEffect(() => {
     if (phase !== "recording") return;
     const id = window.setInterval(() => setNow(Date.now()), 250);
@@ -145,7 +160,26 @@ export function TandemWalkCapture() {
     setCoachMsg("");
     lastCoachRef.current = "";
     setPhase("done");
+    // Leave the fullscreen shell — the done view renders the report.
+    setLiveFullscreen(false);
+    setCamActive(false);
   }, [patient]);
+
+  // Countdown starts only once the camera stream is live AND the
+  // patient is fully trackable (otherwise the trial timer would eat
+  // the framing time). While recording, trackability flicker must
+  // NOT re-arm the countdown — hence the `phase === "recording"`
+  // escape. onLive fires startRecording (declared below; hoisted).
+  const {
+    phase: flowPhase,
+    countdown,
+    skipCountdown,
+  } = useRehabAutoFlow(
+    liveFullscreen && camActive && (patientTrackable || phase === "recording"),
+    () => {
+      startRecording();
+    },
+  );
 
   // Per-frame callback ------------------------------------------------
   const handleFrame = useCallback((kp: Keypoint[], _video: HTMLVideoElement) => {
@@ -308,8 +342,28 @@ export function TandemWalkCapture() {
     lastCoachRef.current = "";
     setPhase("idle");
     setError(null);
+    setLiveFullscreen(false);
+    setCamActive(false);
     resetUpload();
     setMode(next);
+  }
+
+  // Enter the fullscreen auto-flow shell (the single click of the
+  // live mode). Camera auto-starts inside; once the patient is fully
+  // trackable a countdown runs and the trial starts by itself.
+  function enterLive() {
+    setError(null);
+    setLiveFullscreen(true);
+  }
+
+  function exitLive() {
+    recordingRef.current = null;
+    setCoachMsg("");
+    lastCoachRef.current = "";
+    setPhase("idle");
+    setError(null);
+    setLiveFullscreen(false);
+    setCamActive(false);
   }
 
   function startRecording() {
@@ -356,21 +410,22 @@ export function TandemWalkCapture() {
   if ((isLiveDone || isUploadDone) && result) {
     const interpretation = buildInterpretation(result);
     const onRunAgain = isUploadDone ? () => { resetUpload(); } : reset;
+    const buildPayload = () => ({
+      module: "tandem_walk" as const,
+      metrics: { result },
+      observations: { interpretation },
+    });
     return (
       <div className="space-y-8">
+        {/* Results auto-save in the doctor flow (toast with a 10s
+            undo) for both live and upload runs. */}
+        <AutoSaveToast buildPayload={buildPayload} />
+
         <TandemWalkReport
           patientName={patient?.name ?? null}
           patient={patient ?? null}
           result={result}
           interpretation={interpretation}
-        />
-
-        <SaveToPatientButton
-          buildPayload={() => ({
-            module: "tandem_walk",
-            metrics: { result },
-            observations: { interpretation },
-          })}
         />
 
         <div className="flex justify-center border-t border-border pt-6">
@@ -505,133 +560,224 @@ export function TandemWalkCapture() {
         </div>
       )}
 
-      {/* ─── LIVE MODE ────────────────────────────────────────── */}
-      {mode === "live" && (
-      <>
-      <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
-        <div className="space-y-5">
-          <div className="rounded-card border border-border bg-surface p-5">
-            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-              Movement instructions
-            </p>
-            <ol className="mt-3 space-y-2.5 text-sm text-foreground">
-              {[
-                "Mark a straight line on the floor with tape (about 3 m long).",
-                "Camera at the END of the line, at hip height. Patient stands at the FAR end.",
-                "Eyes open, hands relaxed at the sides. No socks (bare feet or grippy shoes).",
-                `Patient walks heel-to-toe along the line — each new step plants the advancing heel touching the previous foot's toe. ${TARGET_STEP_COUNT} steps total.`,
-                "Trial auto-finishes after the 10th step, or stop early if the patient cannot continue.",
-              ].map((s, i) => (
-                <li key={i} className="flex gap-2.5">
-                  <span className="tabular shrink-0 text-accent">{i + 1}.</span>
-                  <span className="leading-relaxed">{s}</span>
-                </li>
-              ))}
-            </ol>
+      {/* ─── LIVE MODE — pre-fullscreen: instructions + one click ── */}
+      {mode === "live" && !liveFullscreen && (
+        <>
+          <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
+            <div className="space-y-5">
+              <div className="rounded-card border border-border bg-surface p-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+                  Movement instructions
+                </p>
+                <ol className="mt-3 space-y-2.5 text-sm text-foreground">
+                  {[
+                    "Mark a straight line on the floor with tape (about 3 m long).",
+                    "Camera at the END of the line, at hip height. Patient stands at the FAR end.",
+                    "Eyes open, hands relaxed at the sides. No socks (bare feet or grippy shoes).",
+                    `Patient walks heel-to-toe along the line — each new step plants the advancing heel touching the previous foot's toe. ${TARGET_STEP_COUNT} steps total.`,
+                    "Trial auto-finishes after the 10th step, or stop early if the patient cannot continue.",
+                  ].map((s, i) => (
+                    <li key={i} className="flex gap-2.5">
+                      <span className="tabular shrink-0 text-accent">{i + 1}.</span>
+                      <span className="leading-relaxed">{s}</span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+              <p className="text-xs text-muted">
+                Frontal view — the patient walks DIRECTLY toward the camera.
+                The on-screen skeleton tracks both ankles, both wrists, and
+                the trunk.
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <div className="rounded-card border border-border bg-surface p-6 text-center">
+                <p className="text-sm text-muted">
+                  One click — the camera opens fullscreen. Once the
+                  patient&apos;s full body is trackable a 3-2-1 countdown
+                  runs and the trial starts by itself. The test finishes
+                  automatically after the {TARGET_STEP_COUNT}th footstrike
+                  (or {TRIAL_TIMEOUT_SEC} s) and the report saves to the
+                  patient record.
+                </p>
+                <div className="mt-4 flex justify-center">
+                  <Button onClick={enterLive}>
+                    <Camera className="h-4 w-4" />
+                    Start Assessment
+                  </Button>
+                </div>
+              </div>
+            </div>
           </div>
 
-          {phase !== "recording" && (
-            <div
-              className={`rounded-card border p-4 text-sm ${
-                patientTrackable
-                  ? "border-emerald-500/30 bg-emerald-500/5"
-                  : "border-amber-500/40 bg-amber-500/5"
-              }`}
-            >
-              <div className="flex items-center gap-2">
-                {patientTrackable ? (
-                  <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                ) : (
-                  <AlertTriangle className="h-4 w-4 text-amber-600" />
-                )}
-                <span className="font-medium text-foreground">
-                  {patientTrackable
-                    ? "Patient fully trackable"
-                    : "Waiting for full body visibility…"}
-                </span>
-              </div>
-              {!patientTrackable && (
-                <p className="mt-1 text-xs text-muted">
-                  Adjust the camera so both shoulders, both hips, and both ankles
-                  are in the same frame.
-                </p>
-              )}
+          {error && (
+            <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
+              <p className="text-foreground">{error}</p>
             </div>
           )}
+        </>
+      )}
 
-          <div className="rounded-card border border-border bg-surface p-5">
-            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-              Live status
-            </p>
-
-            {phase === "recording" && recordingRef.current && (
-              <div className="mt-3 space-y-3">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-medium text-foreground">
-                    Recording — Tandem walk
+      {/* ─── LIVE MODE — fullscreen auto-flow shell ──────────────── */}
+      {mode === "live" && liveFullscreen && (
+        <LiveModeLayout
+          title="Tandem Walk"
+          subtitle={
+            phase === "recording"
+              ? `Step ${Math.min(stepsCaptured + 1, TARGET_STEP_COUNT)} of ${TARGET_STEP_COUNT}`
+              : "Patient at the far end of the line, walking toward the camera"
+          }
+          onExit={exitLive}
+          camera={(
+            <TandemWalkLiveCamera
+              onFrame={handleFrame}
+              onError={setError}
+              autoStart
+              hideControls
+              fill
+              onActiveChange={setCamActive}
+            >
+              {!camActive && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <p className="rounded-full bg-black/60 px-4 py-2 text-sm text-white/80">
+                    Starting camera…
                   </p>
-                  <p className="tabular text-2xl font-semibold text-accent">
+                </div>
+              )}
+              {camActive && phase === "idle" && !patientTrackable && flowPhase !== "countdown" && (
+                <div className="absolute inset-x-0 top-4 flex justify-center">
+                  <p className="rounded-full bg-black/60 px-4 py-2 text-sm text-amber-300">
+                    Waiting for full body visibility…
+                  </p>
+                </div>
+              )}
+              {flowPhase === "countdown" && countdown !== null && (
+                <AutoFlowCountdownOverlay countdown={countdown} label="Trial starts in" />
+              )}
+              {phase === "recording" && (
+                <div className="absolute left-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+                  <p className="text-[10px] uppercase tracking-[0.14em] text-rose-300">
+                    ● Recording
+                  </p>
+                  <p className="tabular text-2xl font-semibold text-white">
                     {stepsCaptured} / {TARGET_STEP_COUNT}
                   </p>
-                </div>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
-                  <div
-                    className="h-full bg-accent transition-all"
-                    style={{ width: `${(stepsCaptured / TARGET_STEP_COUNT) * 100}%` }}
-                  />
-                </div>
-                <p className="text-xs text-muted">
-                  {remainingSec.toFixed(0)} s remaining before timeout.
-                </p>
-                {coachMsg && (
-                  <p className="rounded-md border border-accent/30 bg-background/60 px-3 py-2 text-sm font-medium text-foreground">
-                    {coachMsg}
+                  <p className="text-[10px] text-white/70">
+                    steps · timeout {remainingSec.toFixed(0)}s
                   </p>
+                </div>
+              )}
+            </TandemWalkLiveCamera>
+          )}
+          sidebar={(
+            <>
+              {flowPhase === "countdown" && countdown !== null && (
+                <AutoFlowCountdownCard
+                  countdown={countdown}
+                  onSkip={skipCountdown}
+                  hint="Patient at the far end of the taped line, eyes open, hands relaxed at the sides."
+                />
+              )}
+
+              {/* Waiting for trackability — countdown is held. */}
+              {phase === "idle" && flowPhase !== "countdown" && (
+                <div
+                  className={`rounded-card border p-4 text-sm ${
+                    patientTrackable
+                      ? "border-emerald-500/30 bg-emerald-500/5"
+                      : "border-amber-500/40 bg-amber-500/5"
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    {patientTrackable ? (
+                      <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                    ) : (
+                      <AlertTriangle className="h-4 w-4 text-amber-600" />
+                    )}
+                    <span className="font-medium text-foreground">
+                      {patientTrackable
+                        ? "Patient fully trackable"
+                        : "Waiting for full body visibility…"}
+                    </span>
+                  </div>
+                  {!patientTrackable && (
+                    <p className="mt-1 text-xs text-muted">
+                      Adjust the camera so both shoulders, both hips, and both
+                      ankles are in the same frame. The countdown starts by
+                      itself once the patient is trackable.
+                    </p>
+                  )}
+                  {/* Safety hatch — if the auto-start was skipped (e.g. the
+                      trackability flag flickered at the exact countdown end),
+                      offer a manual start. */}
+                  {flowPhase === "live" && (
+                    <div className="mt-3">
+                      <Button size="sm" onClick={startRecording} disabled={!patientTrackable}>
+                        <Play className="h-4 w-4" />
+                        Start trial
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {phase === "recording" && recordingRef.current && (
+                <div className="rounded-card border border-border bg-surface p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-medium text-foreground">
+                      Recording — Tandem walk
+                    </p>
+                    <p className="tabular text-2xl font-semibold text-accent">
+                      {stepsCaptured} / {TARGET_STEP_COUNT}
+                    </p>
+                  </div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
+                    <div
+                      className="h-full bg-accent transition-all"
+                      style={{ width: `${(stepsCaptured / TARGET_STEP_COUNT) * 100}%` }}
+                    />
+                  </div>
+                  <p className="text-xs text-muted">
+                    {remainingSec.toFixed(0)} s remaining before timeout.
+                  </p>
+                  {coachMsg && (
+                    <p className="rounded-md border border-accent/30 bg-background/60 px-3 py-2 text-sm font-medium text-foreground">
+                      {coachMsg}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <div className="rounded-card border border-border bg-surface p-3 text-xs text-muted">
+                <p className="font-semibold text-foreground">Session brief</p>
+                <ol className="mt-2 list-decimal space-y-1 pl-4">
+                  <li>Patient at the far end of the line, facing the camera.</li>
+                  <li>Walk heel-to-toe along the line — {TARGET_STEP_COUNT} steps.</li>
+                  <li>Auto-finishes on the {TARGET_STEP_COUNT}th footstrike or at {TRIAL_TIMEOUT_SEC} s.</li>
+                </ol>
+              </div>
+
+              {error && (
+                <div className="rounded-card border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-foreground">
+                  <AlertTriangle className="mr-2 inline h-4 w-4 text-rose-500" />
+                  {error}
+                </div>
+              )}
+
+              <div className="mt-auto flex flex-wrap gap-2">
+                {phase === "recording" && (
+                  <Button variant="secondary" onClick={stopEarly}>Stop early</Button>
                 )}
-                <div className="flex justify-end">
-                  <Button variant="ghost" size="sm" onClick={stopEarly}>
-                    Stop early
-                  </Button>
-                </div>
+                <Button variant="ghost" size="sm" onClick={exitLive}>
+                  <RotateCcw className="h-4 w-4" />
+                  Reset
+                </Button>
               </div>
-            )}
-
-            {phase !== "recording" && (
-              <div className="mt-3 space-y-3">
-                <p className="text-sm font-medium text-foreground">
-                  Ready when the patient is at the far end of the line.
-                </p>
-                <p className="text-xs text-muted">
-                  Trial auto-stops after the {TARGET_STEP_COUNT}th footstrike or
-                  after {TRIAL_TIMEOUT_SEC} s.
-                </p>
-                <div className="flex gap-2">
-                  <Button onClick={startRecording} disabled={!patientTrackable}>
-                    <Play className="h-4 w-4" />
-                    Start
-                  </Button>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="lg:sticky lg:top-28">
-          <TandemWalkLiveCamera onFrame={handleFrame} onError={setError} />
-          <p className="mt-3 text-xs text-subtle">
-            Frontal view — the patient should walk DIRECTLY toward the camera.
-            The on-screen skeleton tracks both ankles, both wrists, and the trunk.
-          </p>
-        </div>
-      </div>
-
-      {error && (
-        <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
-          <p className="text-foreground">{error}</p>
-        </div>
-      )}
-      </>
+            </>
+          )}
+        />
       )}
     </div>
   );

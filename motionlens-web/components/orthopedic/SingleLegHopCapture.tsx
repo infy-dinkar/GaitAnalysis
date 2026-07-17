@@ -37,7 +37,16 @@ import {
   buildSingleLegHopInterpretation,
 } from "@/components/orthopedic/SingleLegHopReport";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { AutoSaveToast } from "@/components/dashboard/AutoSaveToast";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
+import {
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import {
+  useRehabAutoFlow,
+  type RehabAutoFlowPhase,
+} from "@/lib/rehab/useAutoFlow";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import {
   analyzeSingleLegHopUpload,
@@ -96,6 +105,32 @@ export function SingleLegHopCapture() {
   const [leftResult, setLeftResult] = useState<SingleLegHopResult | null>(null);
   const [rightResult, setRightResult] = useState<SingleLegHopResult | null>(null);
   const [now, setNow] = useState<number>(0);
+
+  // ── Auto-flow (fullscreen less-click live mode) ───────────────
+  // After calibration, both legs' armed/recording phases render
+  // inside one fullscreen LiveModeLayout. A 3-2-1 countdown runs
+  // before EACH leg's recording: the hook's `started` input is
+  // driven by `phase.startsWith("armed")`, so after the first leg's
+  // result lands and phase flips to armed_<other> the input toggles
+  // false→true (armed → recording/uploading → armed) and the
+  // countdown re-seeds automatically.
+  const [camActive, setCamActive] = useState<boolean>(false);
+
+  const {
+    phase: flowPhase,
+    countdown,
+    skipCountdown,
+  } = useRehabAutoFlow(
+    mode === "live" &&
+      (phase === "armed_left" || phase === "armed_right") &&
+      camActive,
+    () => {
+      // The hook always calls the latest closure — `phase` here is
+      // the armed_<side> value at countdown end.
+      if (phase === "armed_left") startRecording("left");
+      else if (phase === "armed_right") startRecording("right");
+    },
+  );
 
   // ── Recording (per leg) ──────────────────────────────────────
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -237,7 +272,17 @@ export function SingleLegHopCapture() {
     [firstSide],
   );
 
+  // Full reset back to the side picker. Also serves as the
+  // fullscreen shell's Exit handler — detach the recorder handlers
+  // first so a stop() during exit can't fire a ghost upload for a
+  // session the operator just abandoned.
   function reset() {
+    const rec = mediaRecorderRef.current;
+    if (rec) {
+      rec.ondataavailable = null;
+      rec.onstop = null;
+      try { rec.stop(); } catch { /* ignore */ }
+    }
     mediaRecorderRef.current = null;
     recordingChunksRef.current = [];
     currentRecordingSideRef.current = null;
@@ -246,6 +291,7 @@ export function SingleLegHopCapture() {
     setCalibration(null);
     setFirstSide(null);
     setError(null);
+    setCamActive(false);
     setPhase("side_picker");
   }
 
@@ -439,6 +485,11 @@ export function SingleLegHopCapture() {
           rightDone={rightResult !== null}
           onResetSession={reset}
           error={error}
+          camActive={camActive}
+          onCamActiveChange={setCamActive}
+          flowPhase={flowPhase}
+          countdown={countdown}
+          skipCountdown={skipCountdown}
         />
       ) : (
         <UploadSection
@@ -477,8 +528,14 @@ interface LiveSectionProps {
   recordingStartedAt: number;
   leftDone: boolean;
   rightDone: boolean;
+  /** Exit the fullscreen shell / full reset to the side picker. */
   onResetSession: () => void;
   error: string | null;
+  camActive: boolean;
+  onCamActiveChange: (v: boolean) => void;
+  flowPhase: RehabAutoFlowPhase | null;
+  countdown: number | null;
+  skipCountdown: () => void;
 }
 
 function LiveSection(props: LiveSectionProps) {
@@ -497,6 +554,11 @@ function LiveSection(props: LiveSectionProps) {
     rightDone,
     onResetSession,
     error,
+    camActive,
+    onCamActiveChange,
+    flowPhase,
+    countdown,
+    skipCountdown,
   } = props;
 
   if (phase === "side_picker") {
@@ -530,6 +592,7 @@ function LiveSection(props: LiveSectionProps) {
           <HeightCalibrationStep
             defaultHeightCm={patientHeightCm}
             onCalibrated={onCalibrated}
+            autoConfirm
           />
         </div>
       </div>
@@ -543,83 +606,160 @@ function LiveSection(props: LiveSectionProps) {
       ? "left"
       : "right";
 
+  const isArmed = phase === "armed_left" || phase === "armed_right";
   const isRecording =
     phase === "recording_left" || phase === "recording_right";
   const isUploading =
     phase === "uploading_left" || phase === "uploading_right";
   const elapsedSec = Math.max(0, (now - recordingStartedAt) / 1000);
   const remainingSec = Math.max(0, RECORDING_DURATION_SEC - elapsedSec);
+  const legLabel = currentSide === "left" ? "Left leg" : "Right leg";
+  const legOrdinal = leftDone || rightDone ? "second of 2" : "first of 2";
 
+  // ── Fullscreen auto-flow shell: both legs' armed → recording →
+  //    uploading phases live here; countdown re-runs per leg. ─────
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center gap-3">
-        <span className="rounded-full bg-elevated px-3 py-1 text-xs font-medium uppercase tracking-wide text-subtle">
-          {currentSide === "left" ? "Left leg" : "Right leg"} ·{" "}
-          {leftDone || rightDone ? "Second of 2" : "First of 2"}
-        </span>
-        {calibration && (
-          <span className="rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-medium text-emerald-700 dark:text-emerald-300">
-            <CheckCircle2 className="mr-1 inline h-3 w-3" />
-            Calibrated · {calibration.pixels_per_cm.toFixed(2)} px/cm
-          </span>
-        )}
-        {!calibration && (
-          <span className="rounded-full bg-amber-500/15 px-3 py-1 text-xs font-medium text-amber-700 dark:text-amber-300">
-            <AlertTriangle className="mr-1 inline h-3 w-3" />
-            Uncalibrated — relative units only
-          </span>
-        )}
-      </div>
-
-      <SingleLegHopLiveCamera onFrame={handleFrame} onError={() => {}} />
-
-      {isRecording && (
-        <div className="rounded-card border border-rose-500/30 bg-rose-500/5 p-4 text-sm">
-          <p className="font-medium text-foreground">
-            ● Recording {currentSide} leg —{" "}
-            <span className="tabular">{remainingSec.toFixed(1)}s</span>{" "}
-            remaining
-          </p>
-          <p className="mt-1 text-xs text-muted">
-            Stand still on the {currentSide} leg for ~1 s, then hop forward.
-            Up to 3 trials. Auto-stops at {RECORDING_DURATION_SEC} s.
-          </p>
-        </div>
+    <LiveModeLayout
+      title="Single-Leg Hop"
+      subtitle={
+        isRecording
+          ? `${legLabel} (${legOrdinal}) — recording, ${remainingSec.toFixed(1)}s remaining`
+          : isUploading
+            ? `${legLabel} (${legOrdinal}) — analysing…`
+            : `${legLabel} (${legOrdinal}) — ready`
+      }
+      onExit={onResetSession}
+      camera={(
+        <SingleLegHopLiveCamera
+          onFrame={handleFrame}
+          onError={() => {}}
+          autoStart
+          hideControls
+          fill
+          onActiveChange={onCamActiveChange}
+        >
+          {!camActive && (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <p className="rounded-full bg-black/60 px-4 py-2 text-sm text-white/80">
+                Starting camera…
+              </p>
+            </div>
+          )}
+          {flowPhase === "countdown" && countdown !== null && (
+            <AutoFlowCountdownOverlay
+              countdown={countdown}
+              label={`Recording ${currentSide} leg in`}
+            />
+          )}
+          {isRecording && (
+            <div className="absolute left-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+              <p className="text-[10px] uppercase tracking-[0.14em] text-rose-300">
+                ● Recording · {currentSide} leg
+              </p>
+              <p className="tabular text-2xl font-semibold text-white">
+                {remainingSec.toFixed(1)}s
+              </p>
+            </div>
+          )}
+          {isUploading && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+              <div className="flex items-center gap-2 rounded-lg border border-white/15 bg-black/70 px-4 py-3 text-sm text-white">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Analysing {currentSide} leg recording…
+              </div>
+            </div>
+          )}
+        </SingleLegHopLiveCamera>
       )}
-      {isUploading && (
-        <div className="rounded-card border border-blue-500/30 bg-blue-500/5 p-4 text-sm">
-          <p className="flex items-center gap-2 font-medium text-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Analysing {currentSide} leg recording…
-          </p>
-        </div>
-      )}
+      sidebar={(
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full bg-elevated px-3 py-1 text-xs font-medium uppercase tracking-wide text-subtle">
+              {legLabel} · {leftDone || rightDone ? "Second of 2" : "First of 2"}
+            </span>
+            {calibration ? (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-semibold text-emerald-200 ring-1 ring-emerald-400/40">
+                <CheckCircle2 className="h-3 w-3" />
+                Calibrated · {calibration.pixels_per_cm.toFixed(2)} px/cm
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/15 px-3 py-1 text-xs font-semibold text-amber-200 ring-1 ring-amber-400/40">
+                <AlertTriangle className="h-3 w-3" />
+                Uncalibrated
+              </span>
+            )}
+          </div>
 
-      {error && (
-        <div className="rounded-card border border-rose-500/30 bg-rose-500/5 p-4 text-sm text-foreground">
-          <AlertTriangle className="mr-2 inline h-4 w-4 text-rose-600" />
-          {error}
-        </div>
-      )}
+          <div className="rounded-card border border-border bg-surface p-3 text-xs text-muted">
+            <p className="font-semibold text-foreground">Session brief</p>
+            <ol className="mt-2 list-decimal space-y-1 pl-4">
+              <li>
+                Stand still on the {currentSide} leg ~1 s, then hop
+                forward.
+              </li>
+              <li>Up to 3 trials — auto-stops at {RECORDING_DURATION_SEC}s.</li>
+              <li>The other leg runs next with its own countdown.</li>
+            </ol>
+          </div>
 
-      <div className="flex flex-wrap gap-3">
-        {(phase === "armed_left" || phase === "armed_right") && (
-          <Button onClick={() => startRecording(currentSide)}>
-            <Play className="h-4 w-4" />
-            Start recording {currentSide} leg
-          </Button>
-        )}
-        {isRecording && (
-          <Button variant="secondary" onClick={stopRecording}>
-            Stop early
-          </Button>
-        )}
-        <Button variant="secondary" onClick={onResetSession}>
-          <RotateCcw className="h-4 w-4" />
-          Reset session
-        </Button>
-      </div>
-    </div>
+          {flowPhase === "countdown" && countdown !== null && (
+            <AutoFlowCountdownCard
+              countdown={countdown}
+              onSkip={skipCountdown}
+              hint={`Patient standing on the ${currentSide} leg, full body in frame.`}
+            />
+          )}
+
+          {isRecording && (
+            <div className="rounded-card border border-rose-500/30 bg-rose-500/10 p-3 text-sm">
+              <p className="font-medium text-foreground">
+                ● Recording {currentSide} leg —{" "}
+                {remainingSec.toFixed(1)}s remaining
+              </p>
+              <p className="mt-1 text-[11px] text-muted">
+                Stand still on the {currentSide} leg for ~1 s, then hop
+                forward. Up to 3 trials.
+              </p>
+            </div>
+          )}
+          {isUploading && (
+            <div className="rounded-card border border-blue-500/30 bg-blue-500/10 p-3 text-sm">
+              <p className="flex items-center gap-2 font-medium text-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Analysing {currentSide} leg recording…
+              </p>
+            </div>
+          )}
+
+          {error && (
+            <div className="rounded-card border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-foreground">
+              <AlertTriangle className="mr-2 inline h-4 w-4 text-rose-500" />
+              {error}
+            </div>
+          )}
+
+          <div className="mt-auto flex flex-wrap gap-2">
+            {/* Manual fallback — only reachable if the auto-start
+                failed (e.g. camera stream error at countdown end). */}
+            {isArmed && flowPhase === "live" && (
+              <Button onClick={() => startRecording(currentSide)}>
+                <Play className="h-4 w-4" />
+                Start recording {currentSide} leg
+              </Button>
+            )}
+            {isRecording && (
+              <Button variant="secondary" onClick={stopRecording}>
+                Stop early
+              </Button>
+            )}
+            <Button variant="ghost" size="sm" onClick={onResetSession}>
+              <RotateCcw className="h-4 w-4" />
+              Reset
+            </Button>
+          </div>
+        </>
+      )}
+    />
   );
 }
 
@@ -805,8 +945,29 @@ function DoneView({
   interpretation: string;
   onReset: () => void;
 }) {
+  const buildPayload = useCallback(
+    () => ({
+      module: "single_leg_hop" as const,
+      metrics: {
+        left: combined.left,
+        right: combined.right,
+        lsi_pct: combined.lsi_pct,
+        lsi_class: combined.lsi_class,
+        weaker_cm: combined.weaker_cm,
+        stronger_cm: combined.stronger_cm,
+        weaker_side: combined.weaker_side,
+        calibration: combined.calibration,
+      },
+      observations: { interpretation },
+    }),
+    [combined, interpretation],
+  );
+
   return (
     <div className="space-y-10">
+      {/* Auto-fire save for live and upload results — no-ops in public flow. */}
+      <AutoSaveToast buildPayload={buildPayload} />
+
       <SingleLegHopReport
         patientName={patientName}
         patient={patient ?? null}
@@ -819,23 +980,6 @@ function DoneView({
           <RotateCcw className="h-4 w-4" />
           New session
         </Button>
-
-        <SaveToPatientButton
-          buildPayload={() => ({
-            module: "single_leg_hop",
-            metrics: {
-              left: combined.left,
-              right: combined.right,
-              lsi_pct: combined.lsi_pct,
-              lsi_class: combined.lsi_class,
-              weaker_cm: combined.weaker_cm,
-              stronger_cm: combined.stronger_cm,
-              weaker_side: combined.weaker_side,
-              calibration: combined.calibration,
-            },
-            observations: { interpretation },
-          })}
-        />
       </div>
     </div>
   );

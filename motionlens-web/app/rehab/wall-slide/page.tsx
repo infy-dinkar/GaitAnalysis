@@ -30,7 +30,13 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { HoldInZoneShell } from "@/components/rehab/mechanics/HoldInZoneShell";
-import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
+import {
+  AutoFlowCompleteOverlay,
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+  AutoFlowFooter,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import { computeShoulderAngle } from "@/lib/biomech/shoulder-live";
 import { DEFAULT_LEVEL_INDEX } from "@/lib/rehab/progressionLadders";
@@ -94,6 +100,26 @@ function Inner() {
   const lastTickRef = useRef<number | null>(null);
   const wasInZoneRef = useRef<boolean>(false);
 
+  // Auto-flow: side pick → 3-2-1 countdown → live → complete →
+  // auto-save. Dwell refs reset at the live transition so time
+  // spent positioning during the countdown never counts toward the
+  // hold target.
+  const {
+    phase: sessionPhase,
+    countdown,
+    skipCountdown,
+    markComplete,
+  } = useRehabAutoFlow(side !== null, () => {
+    totalInZoneMsRef.current = 0;
+    currentDwellMsRef.current = 0;
+    bestDwellMsRef.current = 0;
+    lastTickRef.current = null;
+    wasInZoneRef.current = false;
+    bestPoseRef.current = null;
+    bestSignalRef.current = 0;
+    sessionStartRef.current = performance.now();
+  });
+
   const handleFrame = useCallback(
     (kp: Keypoint[], video: HTMLVideoElement) => {
       if (!side) return;
@@ -106,6 +132,12 @@ function Inner() {
       );
       if (angle !== null) {
         setShoulderAngle(angle);
+        // Dwell only accumulates while the session is live — frames
+        // during the countdown update the display but not the timer.
+        if (sessionPhase !== "live" && sessionPhase !== "complete") {
+          lastTickRef.current = null;
+          return;
+        }
         const inBand =
           angle >= WALL_SLIDE_CONFIG.min && angle <= WALL_SLIDE_CONFIG.max;
         const now = performance.now();
@@ -123,6 +155,10 @@ function Inner() {
         }
         lastTickRef.current = now;
         wasInZoneRef.current = inBand;
+        // Auto-complete once the cumulative hold target is reached.
+        if (totalInZoneMsRef.current >= WALL_SLIDE_CONFIG.targetHoldMs) {
+          markComplete();
+        }
         if (inBand && lastKpRef.current) {
           bestSignalRef.current = angle;
           bestPoseRef.current = {
@@ -134,7 +170,7 @@ function Inner() {
         }
       }
     },
-    [side],
+    [side, sessionPhase, markComplete],
   );
 
   const buildRehabPayload = useCallback(() => {
@@ -232,6 +268,8 @@ function Inner() {
               camera={(
                 <RehabCameraShell
                   onFrame={handleFrame}
+                  autoStart
+                  hideControls
                   angleArc={{
                     vertex: side === "left" ? LM_LIVE.LEFT_SHOULDER : LM_LIVE.RIGHT_SHOULDER,
                     armA: side === "left" ? LM_LIVE.LEFT_HIP : LM_LIVE.RIGHT_HIP,
@@ -244,6 +282,10 @@ function Inner() {
                     <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">{side === "left" ? "L" : "R"} shoulder</p>
                     <p className="tabular text-2xl font-semibold text-white">{shoulderAngle.toFixed(0)}°</p>
                   </div>
+                  {sessionPhase === "countdown" && countdown !== null && (
+                    <AutoFlowCountdownOverlay countdown={countdown} />
+                  )}
+                  {sessionPhase === "complete" && <AutoFlowCompleteOverlay />}
                 </RehabCameraShell>
               )}
               sidebar={(
@@ -259,10 +301,25 @@ function Inner() {
                       <p className="border-t border-border bg-surface px-2 py-1 text-center text-[10px] uppercase tracking-[0.12em] text-muted">Reference form</p>
                     </div>
                   )}
-                  <div className="flex min-h-0 flex-1 flex-col">
-                    <HoldInZoneShell signal={shoulderAngle} signalLabel={`${side === "left" ? "L" : "R"} shoulder (°)`} axisMin={AXIS_MIN} axisMax={AXIS_MAX} config={WALL_SLIDE_CONFIG} compact />
+                  {sessionPhase === "countdown" && countdown !== null && (
+                    <AutoFlowCountdownCard
+                      countdown={countdown}
+                      onSkip={skipCountdown}
+                      hint="Back against the wall, test arm toward the camera."
+                    />
+                  )}
+                  {(sessionPhase === "live" || sessionPhase === "complete") && (
+                    <div className="flex min-h-0 flex-1 flex-col">
+                      <HoldInZoneShell signal={shoulderAngle} signalLabel={`${side === "left" ? "L" : "R"} shoulder (°)`} axisMin={AXIS_MIN} axisMax={AXIS_MAX} config={WALL_SLIDE_CONFIG} compact />
+                    </div>
+                  )}
+                  <div className="no-pdf">
+                    <AutoFlowFooter
+                      complete={sessionPhase === "complete"}
+                      buildPayload={buildRehabPayload}
+                      completeHint="Hold target reached — saving to record automatically."
+                    />
                   </div>
-                  <div className="no-pdf"><RehabSessionFooter buildPayload={buildRehabPayload} label="Save session" compact /></div>
                 </>
               )}
             />

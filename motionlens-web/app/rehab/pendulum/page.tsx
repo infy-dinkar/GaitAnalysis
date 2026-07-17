@@ -35,7 +35,13 @@ import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { TraceShell } from "@/components/rehab/mechanics/TraceShell";
 import type { TraceState, Score as MechanicScore } from "@/lib/rehab/gameState";
-import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
+import {
+  AutoFlowCompleteOverlay,
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+  AutoFlowFooter,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import { DEFAULT_LEVEL_INDEX } from "@/lib/rehab/progressionLadders";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
@@ -112,6 +118,25 @@ function Inner() {
   }, []);
   const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
   const lastKpRef = useRef<PoseSnapshot | null>(null);
+
+  // Auto-flow: side pick → 3-2-1 countdown → live. Trace has no
+  // natural finite goal on this page (accuracy % over an endless
+  // circular pacer), so markComplete is never wired — the footer
+  // keeps the manual "Save session" button. Session-scoped refs
+  // reset at the live transition so countdown framing noise never
+  // leaks into the payload.
+  const {
+    phase: sessionPhase,
+    countdown,
+    skipCountdown,
+  } = useRehabAutoFlow(side !== null, () => {
+    traceStateRef.current = null;
+    bestPoseRef.current = null;
+    wristSeenRef.current = false;
+    setTracking(false);
+    setCursor({ x: 0.5, y: 0.5 });
+    sessionStartRef.current = performance.now();
+  });
 
   const handleFrame = useCallback(
     (kp: Keypoint[], video: HTMLVideoElement) => {
@@ -236,11 +261,15 @@ function Inner() {
               subtitle={isDoctorFlow && patient ? `Connected to ${patient.name}'s record.` : "Follow the circular pacer"}
               onExit={() => setSide(null)}
               camera={(
-                <RehabCameraShell onFrame={handleFrame}>
+                <RehabCameraShell onFrame={handleFrame} autoStart hideControls>
                   <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
                     <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">{side === "left" ? "L" : "R"} wrist</p>
                     <p className="tabular text-xs text-white">{tracking ? "tracking" : "waiting…"}</p>
                   </div>
+                  {sessionPhase === "countdown" && countdown !== null && (
+                    <AutoFlowCountdownOverlay countdown={countdown} />
+                  )}
+                  {sessionPhase === "complete" && <AutoFlowCompleteOverlay />}
                 </RehabCameraShell>
               )}
               sidebar={(
@@ -256,10 +285,24 @@ function Inner() {
                       <p className="border-t border-border bg-surface px-2 py-1 text-center text-[10px] uppercase tracking-[0.12em] text-muted">Reference form</p>
                     </div>
                   )}
-                  <div className="flex min-h-0 flex-1 flex-col">
-                    <TraceShell cursor={cursor} pathFn={circlePath} loopDurationMs={LOOP_DURATION_MS} config={TRACE_CONFIG} compact onSnapshot={handleTraceSnapshot} />
+                  {sessionPhase === "countdown" && countdown !== null && (
+                    <AutoFlowCountdownCard
+                      countdown={countdown}
+                      onSkip={skipCountdown}
+                      hint="Patient leans forward, test arm hanging free, wrist in frame."
+                    />
+                  )}
+                  {(sessionPhase === "live" || sessionPhase === "complete") && (
+                    <div className="flex min-h-0 flex-1 flex-col">
+                      <TraceShell cursor={cursor} pathFn={circlePath} loopDurationMs={LOOP_DURATION_MS} config={TRACE_CONFIG} compact onSnapshot={handleTraceSnapshot} />
+                    </div>
+                  )}
+                  <div className="no-pdf">
+                    <AutoFlowFooter
+                      complete={sessionPhase === "complete"}
+                      buildPayload={buildRehabPayload}
+                    />
                   </div>
-                  <div className="no-pdf"><RehabSessionFooter buildPayload={buildRehabPayload} label="Save session" compact /></div>
                 </>
               )}
             />

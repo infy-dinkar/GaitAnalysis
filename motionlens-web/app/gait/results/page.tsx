@@ -20,7 +20,7 @@ import {
   bandShape,
   hLineShape,
 } from "@/components/gait/PlotlyChart";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { AutoSaveToast } from "@/components/dashboard/AutoSaveToast";
 import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
 import { PatientHeader } from "@/components/dashboard/PatientHeader";
 import { REPORT_DISCLAIMER } from "@/lib/disclaimer";
@@ -300,29 +300,30 @@ export default function GaitResultsPage() {
             </Button>
           </div>
 
-          {/* ── Save to patient history (only when ?patientId in URL) ── */}
-          <div className="mt-8">
-            <SaveToPatientButton
-              buildPayload={() => ({
-                module: "gait",
-                metrics: {
-                  metrics_total: data.metrics_total,
-                  metrics_clean: data.metrics_clean,
-                  video_info: data.video_info,
-                  walking_direction: data.walking_direction,
-                  joint_angles: data.joint_angles,
-                  normalized_overview: data.normalized_overview,
-                  tabs_data: data.tabs_data,
-                  gait_cycle_data: data.gait_cycle_data,
-                },
-                observations: data.observations as unknown as Record<string, unknown>,
-                video_filename:
-                  (data as unknown as { _video_filename?: string })._video_filename,
-                video_size_bytes:
-                  (data as unknown as { _video_size_bytes?: number })._video_size_bytes,
-              })}
-            />
-          </div>
+          {/* ── Auto-save to patient history (only when ?patientId in
+              URL) — fires as soon as the results render, big banner
+              with a 10s Undo. Same payload the manual button built. */}
+          <AutoSaveToast
+            dedupeKey={`gait:${(data as unknown as { _video_filename?: string })._video_filename ?? "clip"}:${data.video_info?.total_frames ?? data.metrics_total?.cadence ?? ""}`}
+            buildPayload={() => ({
+              module: "gait",
+              metrics: {
+                metrics_total: data.metrics_total,
+                metrics_clean: data.metrics_clean,
+                video_info: data.video_info,
+                walking_direction: data.walking_direction,
+                joint_angles: data.joint_angles,
+                normalized_overview: data.normalized_overview,
+                tabs_data: data.tabs_data,
+                gait_cycle_data: data.gait_cycle_data,
+              },
+              observations: data.observations as unknown as Record<string, unknown>,
+              video_filename:
+                (data as unknown as { _video_filename?: string })._video_filename,
+              video_size_bytes:
+                (data as unknown as { _video_size_bytes?: number })._video_size_bytes,
+            })}
+          />
 
           {/* ── Total + Clean metric sections ───────────────────────── */}
           <div className="mt-12 space-y-12">

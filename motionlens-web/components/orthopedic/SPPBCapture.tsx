@@ -42,7 +42,9 @@ import type { Keypoint } from "@tensorflow-models/pose-detection";
 import { Button } from "@/components/ui/Button";
 import { SitToStandLiveCamera } from "@/components/orthopedic/SitToStandLiveCamera";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { AutoSaveToast } from "@/components/dashboard/AutoSaveToast";
+import { AutoFlowCountdownCard } from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import { SPPBReport } from "@/components/orthopedic/SPPBReport";
 import { SPPBBalanceManualEntry } from "@/components/orthopedic/SPPBBalanceManualEntry";
@@ -423,6 +425,29 @@ export function SPPBCapture() {
     setPhase("chair");
   }
 
+  // ── Chair auto-flow: countdown before "Go" ────────────────
+  // "Arm timer" puts the component in the "armed" phase; instead of
+  // requiring a second manual "Go" click, a 3-2-1 countdown fires the
+  // trial start automatically once the camera stream is live (the
+  // seated baseline must be captured from real frames, so the
+  // countdown is gated on camActive). The manual Go button stays as
+  // an immediate-start fallback, and Space / Esc skips the countdown.
+  const [chairCamActive, setChairCamActive] = useState(false);
+  useEffect(() => {
+    // The camera unmounts when the operator jumps to another
+    // component — clear the stale "active" flag so a later return to
+    // the chair test can't start the countdown with the camera off.
+    if (phase !== "chair") setChairCamActive(false);
+  }, [phase]);
+
+  const { countdown: chairCountdown, skipCountdown: skipChairCountdown } =
+    useRehabAutoFlow(
+      phase === "chair" && chairPhase === "armed" && chairCamActive,
+      () => {
+        startChairTrial();
+      },
+    );
+
   // ─── Explicit component switcher ─────────────────────────
   //
   // Lets the operator jump between Component 1, 2, 3 in any order
@@ -708,22 +733,23 @@ export function SPPBCapture() {
         </div>
       );
     }
+    const buildPayload = () => ({
+      module: "sppb" as const,
+      metrics: { result },
+      observations: {
+        interpretation: result.interpretation,
+        recommendation: result.recommendation,
+      },
+    });
     return (
       <div className="space-y-8">
+        {/* Composites auto-save in the doctor flow (toast with a 10s
+            undo) for both live and upload runs. */}
+        <AutoSaveToast buildPayload={buildPayload} />
         <SPPBReport
           patient={patient ?? null}
           patientName={patient?.name ?? null}
           result={result}
-        />
-        <SaveToPatientButton
-          buildPayload={() => ({
-            module: "sppb",
-            metrics: { result },
-            observations: {
-              interpretation: result.interpretation,
-              recommendation: result.recommendation,
-            },
-          })}
         />
         <div className="flex justify-center border-t border-border pt-6">
           <Button variant="secondary" onClick={reset}>
@@ -956,6 +982,10 @@ export function SPPBCapture() {
           result={chairResult}
           onFrame={handleChairFrame}
           onError={setError}
+          onCamActiveChange={setChairCamActive}
+          camActive={chairCamActive}
+          countdown={chairCountdown}
+          onSkipCountdown={skipChairCountdown}
           onStart={() => setChairPhase("armed")}
           onGo={startChairTrial}
           onStopEarly={stopChairEarly}
@@ -1714,6 +1744,10 @@ function ChairComponent({
   result,
   onFrame,
   onError,
+  onCamActiveChange,
+  camActive,
+  countdown,
+  onSkipCountdown,
   onStart,
   onGo,
   onStopEarly,
@@ -1725,6 +1759,10 @@ function ChairComponent({
   result: SitToStandResult | null;
   onFrame: (kp: Keypoint[]) => void;
   onError: (m: string) => void;
+  onCamActiveChange: (active: boolean) => void;
+  camActive: boolean;
+  countdown: number | null;
+  onSkipCountdown: () => void;
   onStart: () => void;
   onGo: () => void;
   onStopEarly: () => void;
@@ -1737,7 +1775,11 @@ function ChairComponent({
       <ComponentHeader number={3} title="Chair stand" subtitle="5x sit-to-stand, arms crossed" />
 
       <div className="sticky top-20 z-20 ml-auto w-full max-w-md rounded-card bg-background/85 p-1 shadow-lg backdrop-blur supports-[backdrop-filter]:bg-background/65">
-        <SitToStandLiveCamera onFrame={onFrame} onError={onError} />
+        <SitToStandLiveCamera
+          onFrame={onFrame}
+          onError={onError}
+          onActiveChange={onCamActiveChange}
+        />
       </div>
 
       {phase === "ready" && (
@@ -1855,12 +1897,13 @@ function ChairComponent({
               back against the chair, arms crossed. They must NOT be moving yet.
             </li>
             <li>
-              <strong>2.</strong> Click <strong>Go</strong> RIGHT NOW — while
-              the patient is still sitting still. The system needs to see
-              the seated position before the patient moves.
+              <strong>2.</strong> <strong>Go</strong> fires by itself after
+              the 3-2-1 countdown below (or click <strong>Go now</strong>) —
+              while the patient is still sitting still. The system needs to
+              see the seated position before the patient moves.
             </li>
             <li>
-              <strong>3.</strong> After clicking Go, say to the patient:
+              <strong>3.</strong> Once Go fires, say to the patient:
               <em>&quot;Ready, set, GO!&quot;</em> — they start their 5 reps then.
             </li>
           </ol>
@@ -1870,10 +1913,25 @@ function ChairComponent({
             mid-motion and reps won&apos;t count. Click Go first, verbal cue
             second.
           </p>
+          {countdown !== null && (
+            <div className="mt-3">
+              <AutoFlowCountdownCard
+                countdown={countdown}
+                onSkip={onSkipCountdown}
+                hint="Go fires automatically — patient must be seated STILL, arms crossed."
+              />
+            </div>
+          )}
+          {countdown === null && !camActive && (
+            <p className="mt-3 text-[11px] text-muted">
+              Start the camera above — the 3-2-1 countdown begins once the
+              stream is live, then Go fires by itself.
+            </p>
+          )}
           <div className="mt-3">
             <Button onClick={onGo}>
               <Play className="h-4 w-4" />
-              Go (while patient is still seated)
+              Go now (while patient is still seated)
             </Button>
           </div>
         </div>

@@ -40,9 +40,14 @@ import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { TargetReachShell } from "@/components/rehab/mechanics/TargetReachShell";
 import type { TargetReachState, Score as MechanicScore } from "@/lib/rehab/gameState";
-import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
+import {
+  AutoFlowCompleteOverlay,
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+  AutoFlowFooter,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { LiveModeLayout } from "@/components/live/LiveModeLayout";
-import { RehabStartCard } from "@/components/rehab/RehabStartCard";
 import { computeKneeAngle } from "@/lib/biomech/knee-live";
 import { DEFAULT_LEVEL_INDEX } from "@/lib/rehab/progressionLadders";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
@@ -79,7 +84,6 @@ export default function KneeExtensionPage() {
 
 function Inner() {
   const [side, setSide] = useState<Side | null>(null);
-  const [started, setStarted] = useState(false);
   // Default cursor at middle-centre — the cursor will glide into
   // position naturally once the patient is in long-sit / seated
   // and the first valid frame lands.
@@ -100,6 +104,22 @@ function Inner() {
   const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
   const lastKpRef = useRef<PoseSnapshot | null>(null);
   const peakExtensionRef = useRef<number>(0);
+
+  // Auto-flow: side pick → 3-2-1 countdown → live. No auto-complete
+  // — the Target-Reach spawner is open-ended (no finite target
+  // count on this page), so the manual Save stays available.
+  // Session-scoped refs reset at the live transition so countdown
+  // framing noise never leaks into the payload.
+  const {
+    phase: sessionPhase,
+    countdown,
+    skipCountdown,
+  } = useRehabAutoFlow(side !== null, () => {
+    peakExtensionRef.current = 0;
+    bestPoseRef.current = null;
+    reachStateRef.current = null;
+    sessionStartRef.current = performance.now();
+  });
 
   const handleFrame = useCallback(
     (kp: Keypoint[], video: HTMLVideoElement) => {
@@ -226,10 +246,12 @@ function Inner() {
                   ? `Connected to ${patient.name}'s record.`
                   : "Drive the cursor onto spawning targets."
               }
-              onExit={() => { setSide(null); setStarted(false); }}
+              onExit={() => setSide(null)}
               camera={(
                 <RehabCameraShell
                   onFrame={handleFrame}
+                  autoStart
+                  hideControls
                   angleArc={{
                     vertex: side === "left" ? LM.LEFT_KNEE : LM.RIGHT_KNEE,
                     armA: side === "left" ? LM.LEFT_HIP : LM.RIGHT_HIP,
@@ -249,6 +271,10 @@ function Inner() {
                       {liveExtension >= 165 ? "near terminal" : "extending"}
                     </p>
                   </div>
+                  {sessionPhase === "countdown" && countdown !== null && (
+                    <AutoFlowCountdownOverlay countdown={countdown} />
+                  )}
+                  {sessionPhase === "complete" && <AutoFlowCompleteOverlay />}
                 </RehabCameraShell>
               )}
               sidebar={(
@@ -260,7 +286,7 @@ function Inner() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={() => { setSide(null); setStarted(false); }}
+                      onClick={() => setSide(null)}
                     >
                       Change side
                     </Button>
@@ -282,19 +308,23 @@ function Inner() {
                     </div>
                   )}
 
-                  <div className="flex min-h-0 flex-1 flex-col">
-                    {started ? (
+                  {sessionPhase === "countdown" && countdown !== null && (
+                    <AutoFlowCountdownCard
+                      countdown={countdown}
+                      onSkip={skipCountdown}
+                      hint="Patient seated or long-sitting, test leg side-on to the camera, knee bent."
+                    />
+                  )}
+                  {(sessionPhase === "live" || sessionPhase === "complete") && (
+                    <div className="flex min-h-0 flex-1 flex-col">
                       <TargetReachShell cursor={cursor} config={REACH_CONFIG} compact onSnapshot={handleReachSnapshot} />
-                    ) : (
-                      <RehabStartCard onStart={() => setStarted(true)} />
-                    )}
-                  </div>
+                    </div>
+                  )}
 
                   <div className="no-pdf">
-                    <RehabSessionFooter
+                    <AutoFlowFooter
+                      complete={sessionPhase === "complete"}
                       buildPayload={buildRehabPayload}
-                      label="Save session"
-                      compact
                     />
                   </div>
                 </>

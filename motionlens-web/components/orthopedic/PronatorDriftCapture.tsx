@@ -34,7 +34,13 @@ import { Button } from "@/components/ui/Button";
 import { PronatorDriftLiveCamera } from "@/components/orthopedic/PronatorDriftLiveCamera";
 import { PronatorDriftReport } from "@/components/orthopedic/PronatorDriftReport";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { AutoSaveToast } from "@/components/dashboard/AutoSaveToast";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
+import {
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import {
   COUNTDOWN_SEC,
@@ -99,6 +105,16 @@ export function PronatorDriftCapture() {
   const recordingRef = useRef<RecordingState | null>(null);
   const countdownTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
+  // ── Auto-flow (fullscreen less-click live mode) ────────────────
+  // One click ("Start Assessment") opens the fullscreen shell; the
+  // camera auto-starts. The visual 3-2-1 is additionally gated on
+  // both arms being trackable; it then hands over to the test's own
+  // audible countdown + start beep (protocol — the patient's eyes
+  // are closed, so the beeps must stay). The hold auto-finishes and
+  // the done view auto-saves (doctor flow).
+  const [liveFullscreen, setLiveFullscreen] = useState<boolean>(false);
+  const [camActive, setCamActive] = useState<boolean>(false);
+
   useEffect(() => {
     if (phase !== "recording") return;
     const id = window.setInterval(() => setNow(Date.now()), 250);
@@ -137,7 +153,29 @@ export function PronatorDriftCapture() {
     setResult(summary);
     recordingRef.current = null;
     setPhase("done");
+    // Leave the fullscreen shell — the done view renders the report.
+    setLiveFullscreen(false);
+    setCamActive(false);
   }, []);
+
+  // Visual countdown starts only once the camera stream is live AND
+  // both arms are trackable (otherwise the audible countdown would
+  // fire before the patient is in position). Once the test's own
+  // countdown/recording is running, trackability flicker must NOT
+  // re-arm the hook — hence the phase escapes. onLive fires the
+  // existing startRecording (declared below; hoisted), which runs
+  // the audible 3-2-1 + START beep exactly as before.
+  const {
+    phase: flowPhase,
+    countdown: flowCountdown,
+    skipCountdown,
+  } = useRehabAutoFlow(
+    liveFullscreen && camActive &&
+      (armsTrackable || phase === "countdown" || phase === "recording"),
+    () => {
+      startRecording();
+    },
+  );
 
   // Per-frame callback ------------------------------------------------
   const handleFrame = useCallback((kp: Keypoint[], _video: HTMLVideoElement) => {
@@ -228,8 +266,30 @@ export function PronatorDriftCapture() {
     setResult(null);
     setPhase("idle");
     setError(null);
+    setLiveFullscreen(false);
+    setCamActive(false);
     resetUpload();
     setMode(next);
+  }
+
+  // Enter the fullscreen auto-flow shell (the single click of the
+  // live mode). Camera auto-starts inside; once both arms are
+  // trackable a visual countdown runs, then the audible countdown
+  // and the hold start by themselves.
+  function enterLive() {
+    setError(null);
+    setLiveFullscreen(true);
+  }
+
+  function exitLive() {
+    for (const h of countdownTimersRef.current) clearTimeout(h);
+    countdownTimersRef.current = [];
+    recordingRef.current = null;
+    setPhase("idle");
+    setError(null);
+    setCountdownRemaining(0);
+    setLiveFullscreen(false);
+    setCamActive(false);
   }
 
   // Live-mode session start: 3-second audible countdown, then begin
@@ -293,21 +353,22 @@ export function PronatorDriftCapture() {
   if ((isLiveDone || isUploadDone) && result) {
     const interpretation = buildInterpretation(result);
     const onRunAgain = isUploadDone ? () => { resetUpload(); } : reset;
+    const buildPayload = () => ({
+      module: "pronator_drift" as const,
+      metrics: { result },
+      observations: { interpretation },
+    });
     return (
       <div className="space-y-8">
+        {/* Results auto-save in the doctor flow (toast with a 10s
+            undo) for both live and upload runs. */}
+        <AutoSaveToast buildPayload={buildPayload} />
+
         <PronatorDriftReport
           patientName={patient?.name ?? null}
           patient={patient ?? null}
           result={result}
           interpretation={interpretation}
-        />
-
-        <SaveToPatientButton
-          buildPayload={() => ({
-            module: "pronator_drift",
-            metrics: { result },
-            observations: { interpretation },
-          })}
         />
 
         <div className="flex justify-center border-t border-border pt-6">
@@ -460,140 +521,244 @@ export function PronatorDriftCapture() {
         </div>
       )}
 
-      {/* ─── LIVE MODE ────────────────────────────────────────── */}
-      {mode === "live" && (
-      <>
-      <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
-        <div className="space-y-5">
-          <div className="rounded-card border border-border bg-surface p-5">
-            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-              Movement instructions
-            </p>
-            <ol className="mt-3 space-y-2.5 text-sm text-foreground">
-              {[
-                "Patient stands or sits facing the camera. Camera at CHEST height, ~2 m away.",
-                "Both arms extended FORWARD at shoulder height (90° flexion), elbows straight, palms UP.",
-                "Patient closes their eyes when the START beep sounds.",
-                `Hold the position still for ${TARGET_HOLD_DURATION_SEC} seconds. An END beep marks completion.`,
-                "Patient may open their eyes and lower the arms on the END beep.",
-              ].map((s, i) => (
-                <li key={i} className="flex gap-2.5">
-                  <span className="tabular shrink-0 text-accent">{i + 1}.</span>
-                  <span className="leading-relaxed">{s}</span>
-                </li>
-              ))}
-            </ol>
+      {/* ─── LIVE MODE — pre-fullscreen: instructions + one click ── */}
+      {mode === "live" && !liveFullscreen && (
+        <>
+          <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
+            <div className="space-y-5">
+              <div className="rounded-card border border-border bg-surface p-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+                  Movement instructions
+                </p>
+                <ol className="mt-3 space-y-2.5 text-sm text-foreground">
+                  {[
+                    "Patient stands or sits facing the camera. Camera at CHEST height, ~2 m away.",
+                    "Both arms extended FORWARD at shoulder height (90° flexion), elbows straight, palms UP.",
+                    "Patient closes their eyes when the START beep sounds.",
+                    `Hold the position still for ${TARGET_HOLD_DURATION_SEC} seconds. An END beep marks completion.`,
+                    "Patient may open their eyes and lower the arms on the END beep.",
+                  ].map((s, i) => (
+                    <li key={i} className="flex gap-2.5">
+                      <span className="tabular shrink-0 text-accent">{i + 1}.</span>
+                      <span className="leading-relaxed">{s}</span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+              <p className="text-xs text-muted">
+                Frontal view — both extended arms must be in frame. The skeleton
+                overlay tracks both wrists and shoulders for drift measurement.
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <div className="rounded-card border border-border bg-surface p-6 text-center">
+                <p className="text-sm text-muted">
+                  One click — the camera opens fullscreen. Once both arms
+                  are trackable, a 3-2-1 countdown runs, then the{" "}
+                  {COUNTDOWN_SEC}-second audible countdown and START beep
+                  begin the {TARGET_HOLD_DURATION_SEC}-second hold by
+                  themselves. The END beep finishes the test and the
+                  report saves to the patient record.
+                </p>
+                <div className="mt-4 flex justify-center">
+                  <Button onClick={enterLive}>
+                    <Camera className="h-4 w-4" />
+                    Start Assessment
+                  </Button>
+                </div>
+              </div>
+            </div>
           </div>
 
-          {phase === "idle" && (
-            <div
-              className={`rounded-card border p-4 text-sm ${
-                armsTrackable
-                  ? "border-emerald-500/30 bg-emerald-500/5"
-                  : "border-amber-500/40 bg-amber-500/5"
-              }`}
-            >
-              <div className="flex items-center gap-2">
-                {armsTrackable ? (
-                  <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                ) : (
-                  <AlertTriangle className="h-4 w-4 text-amber-600" />
-                )}
-                <span className="font-medium text-foreground">
-                  {armsTrackable
-                    ? "Both arms trackable"
-                    : "Waiting for both wrists + shoulders to be visible…"}
-                </span>
-              </div>
-              {!armsTrackable && (
-                <p className="mt-1 text-xs text-muted">
-                  Adjust framing so both extended wrists AND both shoulders sit
-                  inside the frame simultaneously.
-                </p>
-              )}
+          {error && (
+            <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
+              <p className="text-foreground">{error}</p>
             </div>
           )}
-
-          <div className="rounded-card border border-border bg-surface p-5">
-            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-              Live status
-            </p>
-
-            {phase === "countdown" && (
-              <div className="mt-3 space-y-3 text-center">
-                <p className="text-sm text-muted">
-                  Patient closes eyes when GO sounds. Get ready…
-                </p>
-                <p className="tabular text-6xl font-bold text-accent">
-                  {countdownRemaining > 0 ? countdownRemaining : "GO"}
-                </p>
-              </div>
-            )}
-
-            {phase === "recording" && recordingRef.current && (
-              <div className="mt-3 space-y-3">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-medium text-foreground">
-                    Recording — Pronator drift hold
-                  </p>
-                  <p className="tabular text-2xl font-semibold text-accent">
-                    {remainingSec.toFixed(0)} s
-                  </p>
-                </div>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
-                  <div
-                    className="h-full bg-accent transition-all"
-                    style={{ width: `${(elapsedSec / TARGET_HOLD_DURATION_SEC) * 100}%` }}
-                  />
-                </div>
-                <p className="rounded-md border border-accent/30 bg-background/60 px-3 py-2 text-sm font-medium text-foreground">
-                  Patient: hold the position still, eyes closed. The end beep will
-                  fire automatically.
-                </p>
-                <div className="flex justify-end">
-                  <Button variant="ghost" size="sm" onClick={stopEarly}>
-                    Stop early
-                  </Button>
-                </div>
-              </div>
-            )}
-
-            {phase === "idle" && (
-              <div className="mt-3 space-y-3">
-                <p className="text-sm font-medium text-foreground">
-                  Ready when the patient is in position with both arms extended.
-                </p>
-                <p className="text-xs text-muted">
-                  Click Start for a {COUNTDOWN_SEC}-second audible countdown, then a START
-                  beep marks the beginning of the {TARGET_HOLD_DURATION_SEC}-second hold.
-                </p>
-                <div className="flex gap-2">
-                  <Button onClick={startRecording} disabled={!armsTrackable}>
-                    <Play className="h-4 w-4" />
-                    Start
-                  </Button>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="lg:sticky lg:top-28">
-          <PronatorDriftLiveCamera onFrame={handleFrame} onError={setError} />
-          <p className="mt-3 text-xs text-subtle">
-            Frontal view — both extended arms must be in frame. The skeleton
-            overlay tracks both wrists and shoulders for drift measurement.
-          </p>
-        </div>
-      </div>
-
-      {error && (
-        <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
-          <p className="text-foreground">{error}</p>
-        </div>
+        </>
       )}
-      </>
+
+      {/* ─── LIVE MODE — fullscreen auto-flow shell ──────────────── */}
+      {mode === "live" && liveFullscreen && (
+        <LiveModeLayout
+          title="Pronator Drift"
+          subtitle={
+            phase === "recording"
+              ? `Holding — ${remainingSec.toFixed(0)} s left`
+              : "Patient frontal, both arms extended forward, palms up"
+          }
+          onExit={exitLive}
+          camera={(
+            <PronatorDriftLiveCamera
+              onFrame={handleFrame}
+              onError={setError}
+              autoStart
+              hideControls
+              fill
+              onActiveChange={setCamActive}
+            >
+              {!camActive && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <p className="rounded-full bg-black/60 px-4 py-2 text-sm text-white/80">
+                    Starting camera…
+                  </p>
+                </div>
+              )}
+              {camActive && phase === "idle" && !armsTrackable && flowPhase !== "countdown" && (
+                <div className="absolute inset-x-0 top-4 flex justify-center">
+                  <p className="rounded-full bg-black/60 px-4 py-2 text-sm text-amber-300">
+                    Waiting for both wrists + shoulders to be visible…
+                  </p>
+                </div>
+              )}
+              {flowPhase === "countdown" && flowCountdown !== null && (
+                <AutoFlowCountdownOverlay countdown={flowCountdown} label="Get ready in" />
+              )}
+              {/* The test's own audible countdown — big number + GO. */}
+              {phase === "countdown" && (
+                <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/30 backdrop-blur-[1px]">
+                  <div className="rounded-full bg-black/70 px-10 py-6 text-center text-white shadow-2xl ring-2 ring-white/20">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-emerald-300">
+                      Close eyes on GO
+                    </p>
+                    <p className="tabular text-7xl font-semibold leading-none">
+                      {countdownRemaining > 0 ? countdownRemaining : "GO"}
+                    </p>
+                  </div>
+                </div>
+              )}
+              {phase === "recording" && (
+                <div className="absolute left-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+                  <p className="text-[10px] uppercase tracking-[0.14em] text-rose-300">
+                    ● Recording
+                  </p>
+                  <p className="tabular text-2xl font-semibold text-white">
+                    {remainingSec.toFixed(0)}s
+                  </p>
+                  <p className="text-[10px] text-white/70">
+                    hold remaining · eyes closed
+                  </p>
+                </div>
+              )}
+            </PronatorDriftLiveCamera>
+          )}
+          sidebar={(
+            <>
+              {flowPhase === "countdown" && flowCountdown !== null && (
+                <AutoFlowCountdownCard
+                  countdown={flowCountdown}
+                  onSkip={skipCountdown}
+                  hint={`Both arms extended forward at shoulder height, palms up. The ${COUNTDOWN_SEC}-second audible countdown follows.`}
+                />
+              )}
+
+              {/* Waiting for trackability — visual countdown is held. */}
+              {phase === "idle" && flowPhase !== "countdown" && (
+                <div
+                  className={`rounded-card border p-4 text-sm ${
+                    armsTrackable
+                      ? "border-emerald-500/30 bg-emerald-500/5"
+                      : "border-amber-500/40 bg-amber-500/5"
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    {armsTrackable ? (
+                      <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                    ) : (
+                      <AlertTriangle className="h-4 w-4 text-amber-600" />
+                    )}
+                    <span className="font-medium text-foreground">
+                      {armsTrackable
+                        ? "Both arms trackable"
+                        : "Waiting for both wrists + shoulders to be visible…"}
+                    </span>
+                  </div>
+                  {!armsTrackable && (
+                    <p className="mt-1 text-xs text-muted">
+                      Adjust framing so both extended wrists AND both shoulders
+                      sit inside the frame simultaneously. The countdown starts
+                      by itself once both arms are trackable.
+                    </p>
+                  )}
+                  {/* Safety hatch — if the auto-start was skipped (e.g. the
+                      trackability flag flickered at the exact countdown end),
+                      offer a manual start. */}
+                  {flowPhase === "live" && (
+                    <div className="mt-3">
+                      <Button size="sm" onClick={startRecording} disabled={!armsTrackable}>
+                        <Play className="h-4 w-4" />
+                        Start hold
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Audible countdown status. */}
+              {phase === "countdown" && (
+                <div className="rounded-card border border-accent/40 bg-accent/10 p-4 text-center">
+                  <p className="text-sm text-muted">
+                    Patient closes eyes when GO sounds. Get ready…
+                  </p>
+                  <p className="tabular mt-2 text-6xl font-bold text-accent">
+                    {countdownRemaining > 0 ? countdownRemaining : "GO"}
+                  </p>
+                </div>
+              )}
+
+              {phase === "recording" && recordingRef.current && (
+                <div className="rounded-card border border-border bg-surface p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-medium text-foreground">
+                      Recording — Pronator drift hold
+                    </p>
+                    <p className="tabular text-2xl font-semibold text-accent">
+                      {remainingSec.toFixed(0)} s
+                    </p>
+                  </div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
+                    <div
+                      className="h-full bg-accent transition-all"
+                      style={{ width: `${(elapsedSec / TARGET_HOLD_DURATION_SEC) * 100}%` }}
+                    />
+                  </div>
+                  <p className="rounded-md border border-accent/30 bg-background/60 px-3 py-2 text-sm font-medium text-foreground">
+                    Patient: hold the position still, eyes closed. The end beep
+                    will fire automatically.
+                  </p>
+                </div>
+              )}
+
+              <div className="rounded-card border border-border bg-surface p-3 text-xs text-muted">
+                <p className="font-semibold text-foreground">Session brief</p>
+                <ol className="mt-2 list-decimal space-y-1 pl-4">
+                  <li>Both arms extended forward, palms up, elbows straight.</li>
+                  <li>Eyes closed on the START beep — hold {TARGET_HOLD_DURATION_SEC} s.</li>
+                  <li>The END beep finishes the test automatically.</li>
+                </ol>
+              </div>
+
+              {error && (
+                <div className="rounded-card border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-foreground">
+                  <AlertTriangle className="mr-2 inline h-4 w-4 text-rose-500" />
+                  {error}
+                </div>
+              )}
+
+              <div className="mt-auto flex flex-wrap gap-2">
+                {phase === "recording" && (
+                  <Button variant="secondary" onClick={stopEarly}>Stop early</Button>
+                )}
+                <Button variant="ghost" size="sm" onClick={exitLive}>
+                  <RotateCcw className="h-4 w-4" />
+                  Reset
+                </Button>
+              </div>
+            </>
+          )}
+        />
       )}
     </div>
   );

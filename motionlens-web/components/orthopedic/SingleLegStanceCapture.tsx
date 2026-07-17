@@ -32,7 +32,13 @@ import { Button } from "@/components/ui/Button";
 import { SingleLegStanceLiveCamera } from "@/components/orthopedic/SingleLegStanceLiveCamera";
 import { SingleLegStanceReport } from "@/components/orthopedic/SingleLegStanceReport";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { AutoSaveToast } from "@/components/dashboard/AutoSaveToast";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
+import {
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import {
   HOP_WINDOW_DURATION_MS,
@@ -122,6 +128,20 @@ export function SingleLegStanceCapture() {
 
   const recordingRef = useRef<RecordingState | null>(null);
 
+  // ── Auto-flow (fullscreen less-click live mode) ────────────────
+  // One click ("Start Assessment") opens the fullscreen shell; the
+  // camera auto-starts. Inside the shell the doctor picks a trial
+  // (side x eyes condition); a 3-2-1 countdown runs before EACH
+  // trial and the trial starts by itself. Trials auto-terminate as
+  // before; "Generate report" leaves fullscreen and the done view
+  // auto-saves (doctor flow).
+  const [liveFullscreen, setLiveFullscreen] = useState<boolean>(false);
+  const [camActive, setCamActive] = useState<boolean>(false);
+  const [pendingTrial, setPendingTrial] = useState<{
+    side: Side;
+    condition: Condition;
+  } | null>(null);
+
   useEffect(() => {
     if (phase !== "recording") return;
     const id = window.setInterval(() => setNow(Date.now()), 200);
@@ -170,9 +190,27 @@ export function SingleLegStanceCapture() {
     setCoachMsg("");
     lastCoachRef.current = "";
     setPhase("idle");
+    // Clear the auto-flow gate so the next trial pick re-arms the
+    // countdown machine.
+    setPendingTrial(null);
   // patient may change identity between trials in theory, capture once
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [patient]);
+
+  // Countdown starts once the camera stream is live AND a trial has
+  // been picked — the hook's started input toggles naturally between
+  // trials, so every trial gets its own 3-2-1. onLive fires the
+  // existing beginRecording (declared below; hoisted).
+  const {
+    phase: flowPhase,
+    countdown,
+    skipCountdown,
+  } = useRehabAutoFlow(
+    liveFullscreen && camActive && pendingTrial !== null,
+    () => {
+      if (pendingTrial) beginRecording(pendingTrial.side, pendingTrial.condition);
+    },
+  );
 
   // Per-frame callback ----------------------------------------------
   const handleFrame = useCallback((kp: Keypoint[], _video: HTMLVideoElement) => {
@@ -394,8 +432,44 @@ export function SingleLegStanceCapture() {
     lastCoachRef.current = "";
     setPhase("idle");
     setError(null);
+    setLiveFullscreen(false);
+    setCamActive(false);
+    setPendingTrial(null);
     resetUpload();
     setMode(next);
+  }
+
+  // Enter the fullscreen auto-flow shell (the single click of the
+  // live mode). Camera auto-starts inside; the doctor then picks a
+  // trial and a countdown leads into recording.
+  function enterLive() {
+    setError(null);
+    setLiveFullscreen(true);
+  }
+
+  function exitLive() {
+    recordingRef.current = null;
+    setCoachMsg("");
+    lastCoachRef.current = "";
+    setPhase("idle");
+    setPendingTrial(null);
+    setLiveFullscreen(false);
+    setCamActive(false);
+  }
+
+  // Arm the auto-flow countdown for a specific trial slot.
+  function pickTrial(side: Side, condition: Condition) {
+    setError(null);
+    setPendingTrial({ side, condition });
+  }
+
+  // "Generate report" — leaves the fullscreen shell; the done view
+  // auto-saves in the doctor flow.
+  function generateReport() {
+    setPhase("done");
+    setPendingTrial(null);
+    setLiveFullscreen(false);
+    setCamActive(false);
   }
 
   // Begin a trial directly. No audio cue — operator gives the
@@ -432,6 +506,7 @@ export function SingleLegStanceCapture() {
     setError(null);
     setCoachMsg("");
     lastCoachRef.current = "";
+    setPendingTrial(null);
   }
 
   // Done view ---------------------------------------------------------
@@ -445,21 +520,24 @@ export function SingleLegStanceCapture() {
 
   if (showReport) {
     const interpretation = buildInterpretation(session);
+    const buildPayload = () => ({
+      module: "single_leg_stance" as const,
+      metrics: { session },
+      observations: { interpretation },
+    });
     return (
       <div className="space-y-8">
+        {/* Results auto-save in the doctor flow (toast with a 10s
+            undo) for both live and upload runs. */}
+        <AutoSaveToast buildPayload={buildPayload} />
+
         <SingleLegStanceReport
           patientName={patient?.name ?? null}
           patient={patient ?? null}
           session={session}
           interpretation={interpretation}
         />
-        <SaveToPatientButton
-          buildPayload={() => ({
-            module: "single_leg_stance",
-            metrics: { session },
-            observations: { interpretation },
-          })}
-        />
+
         <div className="flex justify-center border-t border-border pt-6">
           <Button variant="secondary" onClick={reset}>
             <RotateCcw className="h-4 w-4" />
@@ -478,6 +556,7 @@ export function SingleLegStanceCapture() {
   const liveCondition = recordingRef.current?.condition ?? null;
   const cap = liveCondition === "eyes_closed" ? MAX_EYES_CLOSED_SEC : MAX_EYES_OPEN_SEC;
   const liveSide = recordingRef.current?.side ?? null;
+  const capturedCount = Object.keys(trials).length;
 
   const modeSwitchDisabled =
     phase === "recording" || uploadPhase === "analyzing";
@@ -637,154 +716,268 @@ export function SingleLegStanceCapture() {
         </div>
       )}
 
-      {/* ─── LIVE MODE (unchanged behaviour) ─────────────────────── */}
-      {mode === "live" && (
-      <>
-      {!patient?.age && isDoctorFlow && (
-        <div className="rounded-card border border-warning/40 bg-warning/5 p-4 text-sm">
-          <p className="font-medium text-foreground">Patient age missing</p>
-          <p className="mt-1 text-muted">
-            The age-based norm comparison will fall back to the strictest
-            band (under 60). Add the patient&apos;s age to the profile for
-            an accurate comparison.
-          </p>
-        </div>
-      )}
+      {/* ─── LIVE MODE — pre-fullscreen: instructions + one click ── */}
+      {mode === "live" && !liveFullscreen && (
+        <>
+          {!patient?.age && isDoctorFlow && (
+            <div className="rounded-card border border-warning/40 bg-warning/5 p-4 text-sm">
+              <p className="font-medium text-foreground">Patient age missing</p>
+              <p className="mt-1 text-muted">
+                The age-based norm comparison will fall back to the strictest
+                band (under 60). Add the patient&apos;s age to the profile for
+                an accurate comparison.
+              </p>
+            </div>
+          )}
 
-      {/* ─── 2-column layout (instructions+status | camera) ─────── */}
-      <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
-        {/* LEFT — instructions + trial controls */}
-        <div className="space-y-5">
-          <div className="rounded-card border border-border bg-surface p-5">
-            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-              Movement instructions
-            </p>
-            <ol className="mt-3 space-y-2.5 text-sm text-foreground">
-              {[
-                "Stand barefoot facing the camera, full body in frame.",
-                "Hands on hips or relaxed at your sides. Don't reach for support.",
-                "Lift one leg by bending the hip and knee to about 90°.",
-                "Stand on the supporting leg and hold balance for as long as you can.",
-                `Eyes-open trials run up to ${MAX_EYES_OPEN_SEC} seconds; eyes-closed up to ${MAX_EYES_CLOSED_SEC} seconds.`,
-                "The trial ends if the lifted foot touches down, if you reach for support, or if you hop.",
-              ].map((s, i) => (
-                <li key={i} className="flex gap-2.5">
-                  <span className="tabular shrink-0 text-accent">{i + 1}.</span>
-                  <span className="leading-relaxed">{s}</span>
-                </li>
-              ))}
-            </ol>
+          <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
+            <div className="space-y-5">
+              <div className="rounded-card border border-border bg-surface p-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+                  Movement instructions
+                </p>
+                <ol className="mt-3 space-y-2.5 text-sm text-foreground">
+                  {[
+                    "Stand barefoot facing the camera, full body in frame.",
+                    "Hands on hips or relaxed at your sides. Don't reach for support.",
+                    "Lift one leg by bending the hip and knee to about 90°.",
+                    "Stand on the supporting leg and hold balance for as long as you can.",
+                    `Eyes-open trials run up to ${MAX_EYES_OPEN_SEC} seconds; eyes-closed up to ${MAX_EYES_CLOSED_SEC} seconds.`,
+                    "The trial ends if the lifted foot touches down, if you reach for support, or if you hop.",
+                  ].map((s, i) => (
+                    <li key={i} className="flex gap-2.5">
+                      <span className="tabular shrink-0 text-accent">{i + 1}.</span>
+                      <span className="leading-relaxed">{s}</span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+              <p className="text-xs text-muted">
+                Cutoffs (PDF Test C5): age &lt;60 ≥ 10 s eyes-open, age 60–69 ≥ 7 s,
+                age 70+ ≥ 5 s. Eyes-closed thresholds halved per PDF guidance.
+                L–R asymmetry &gt; 30% indicates targeted intervention.
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <div className="rounded-card border border-border bg-surface p-6 text-center">
+                <p className="text-sm text-muted">
+                  One click — the camera opens fullscreen. Pick a trial
+                  (left / right, eyes open / closed); a 3-2-1 countdown
+                  runs and the trial starts by itself. Each trial ends
+                  automatically, and generating the report saves it to
+                  the patient record.
+                </p>
+                <div className="mt-4 flex justify-center">
+                  <Button onClick={enterLive}>
+                    <Camera className="h-4 w-4" />
+                    {capturedCount > 0 ? "Resume Assessment" : "Start Assessment"}
+                  </Button>
+                </div>
+              </div>
+
+              {capturedCount > 0 && (
+                <div className="rounded-card border border-border bg-surface p-5">
+                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+                    Captured trials
+                  </p>
+                  <ul className="mt-3 space-y-1.5 text-sm">
+                    {([
+                      ["left_open", "Left leg · eyes open"],
+                      ["right_open", "Right leg · eyes open"],
+                      ["left_closed", "Left leg · eyes closed"],
+                      ["right_closed", "Right leg · eyes closed"],
+                    ] as const).map(([k, label]) => (
+                      <li key={k} className="flex items-center gap-2 text-foreground">
+                        {trials[k] ? (
+                          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                        ) : (
+                          <span className="h-3.5 w-3.5 rounded-full border border-border" />
+                        )}
+                        {label}
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {allDesiredDone && (
+                      <Button onClick={generateReport}>
+                        <Play className="h-4 w-4" />
+                        Generate report
+                      </Button>
+                    )}
+                    <Button variant="ghost" onClick={reset}>
+                      <RotateCcw className="h-4 w-4" />
+                      Reset
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
-          <div className="rounded-card border border-border bg-surface p-5">
-            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-              Live status
-            </p>
+          {error && (
+            <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
+              <p className="text-foreground">{error}</p>
+            </div>
+          )}
+        </>
+      )}
 
-            {/* Trial selection — two top-level groups (only in idle state). */}
-            {phase === "idle" && (
-              <div className="mt-3 grid gap-3">
-                <ConditionGroup
-                  title="Eyes open"
-                  subtitle={`Max hold ${MAX_EYES_OPEN_SEC} s per side.`}
-                  icon={<Eye className="h-4 w-4 text-accent" />}
-                  leftDone={!!trials.left_open}
-                  rightDone={!!trials.right_open}
-                  onLeft={() => beginRecording("left", "eyes_open")}
-                  onRight={() => beginRecording("right", "eyes_open")}
-                />
-                <ConditionGroup
-                  title="Eyes closed"
-                  subtitle={`Max hold ${MAX_EYES_CLOSED_SEC} s per side. Tell the patient to close their eyes before clicking.`}
-                  icon={<EyeOff className="h-4 w-4 text-accent" />}
-                  leftDone={!!trials.left_closed}
-                  rightDone={!!trials.right_closed}
-                  onLeft={() => beginRecording("left", "eyes_closed")}
-                  onRight={() => beginRecording("right", "eyes_closed")}
-                />
-              </div>
-            )}
-
-            {/* Recording panel */}
-            {phase === "recording" && recordingRef.current && (
-              <div className="mt-3 space-y-3">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-medium text-foreground">
-                    {recordingRef.current.firstStanceAt === null
-                      ? `Waiting for stance — ${liveSide === "left" ? "Left" : "Right"}-leg ${liveCondition === "eyes_closed" ? "(eyes closed)" : "(eyes open)"}`
-                      : `Recording — ${liveSide === "left" ? "Left" : "Right"}-leg ${liveCondition === "eyes_closed" ? "(eyes closed)" : "(eyes open)"}`}
+      {/* ─── LIVE MODE — fullscreen auto-flow shell ──────────────── */}
+      {mode === "live" && liveFullscreen && (
+        <LiveModeLayout
+          title="Single-Leg Stance"
+          subtitle={
+            phase === "recording" && liveSide
+              ? `${liveSide === "left" ? "Left" : "Right"} leg · ${liveCondition === "eyes_closed" ? "eyes closed" : "eyes open"}`
+              : "Pick a trial — patient barefoot, facing the camera, full body in frame"
+          }
+          onExit={exitLive}
+          camera={(
+            <SingleLegStanceLiveCamera
+              onFrame={handleFrame}
+              onError={setError}
+              autoStart
+              hideControls
+              fill
+              onActiveChange={setCamActive}
+            >
+              {!camActive && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <p className="rounded-full bg-black/60 px-4 py-2 text-sm text-white/80">
+                    Starting camera…
                   </p>
-                  <p className="tabular text-2xl font-semibold text-accent">
+                </div>
+              )}
+              {flowPhase === "countdown" && countdown !== null && (
+                <AutoFlowCountdownOverlay countdown={countdown} label="Trial starts in" />
+              )}
+              {phase === "recording" && recordingRef.current && (
+                <div className="absolute left-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+                  <p className="text-[10px] uppercase tracking-[0.14em] text-rose-300">
+                    ● Recording
+                  </p>
+                  <p className="tabular text-2xl font-semibold text-white">
                     {recordingRef.current.firstStanceAt === null ? "—" : `${elapsedSec.toFixed(1)}s`}
                   </p>
-                </div>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
-                  <div
-                    className="h-full bg-accent transition-all"
-                    style={{ width: `${Math.min(100, (elapsedSec / cap) * 100)}%` }}
-                  />
-                </div>
-                {coachMsg && (
-                  <p className="rounded-md border border-accent/30 bg-background/60 px-3 py-2 text-sm font-medium text-foreground">
-                    {coachMsg}
+                  <p className="text-[10px] text-white/70">
+                    {liveSide === "left" ? "Left" : "Right"} leg ·{" "}
+                    {liveCondition === "eyes_closed" ? "eyes closed" : "eyes open"} · max {cap.toFixed(0)}s
                   </p>
+                </div>
+              )}
+            </SingleLegStanceLiveCamera>
+          )}
+          sidebar={(
+            <>
+              {flowPhase === "countdown" && countdown !== null && pendingTrial && (
+                <AutoFlowCountdownCard
+                  countdown={countdown}
+                  onSkip={skipCountdown}
+                  hint={`${pendingTrial.side === "left" ? "Left" : "Right"}-leg stance (${pendingTrial.condition === "eyes_closed" ? "eyes closed" : "eyes open"}) — the timer starts once the stance is detected.`}
+                />
+              )}
+
+              {/* Trial picker — idle, nothing armed. */}
+              {phase === "idle" && pendingTrial === null && (
+                <>
+                  <ConditionGroup
+                    title="Eyes open"
+                    subtitle={`Max hold ${MAX_EYES_OPEN_SEC} s per side.`}
+                    icon={<Eye className="h-4 w-4 text-accent" />}
+                    leftDone={!!trials.left_open}
+                    rightDone={!!trials.right_open}
+                    onLeft={() => pickTrial("left", "eyes_open")}
+                    onRight={() => pickTrial("right", "eyes_open")}
+                  />
+                  <ConditionGroup
+                    title="Eyes closed"
+                    subtitle={`Max hold ${MAX_EYES_CLOSED_SEC} s per side. Tell the patient to close their eyes before clicking.`}
+                    icon={<EyeOff className="h-4 w-4 text-accent" />}
+                    leftDone={!!trials.left_closed}
+                    rightDone={!!trials.right_closed}
+                    onLeft={() => pickTrial("left", "eyes_closed")}
+                    onRight={() => pickTrial("right", "eyes_closed")}
+                  />
+                  {allDesiredDone && (
+                    <div className="rounded-card border border-emerald-500/30 bg-emerald-500/5 p-3">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                        <p className="text-sm font-medium text-foreground">
+                          All required trials captured
+                        </p>
+                      </div>
+                      <p className="mt-1 text-xs text-muted">
+                        Eyes-closed trials are optional — add them or generate
+                        the report now.
+                      </p>
+                      <div className="mt-2">
+                        <Button size="sm" onClick={generateReport}>
+                          <Play className="h-4 w-4" />
+                          Generate report
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* Recording panel */}
+              {phase === "recording" && recordingRef.current && (
+                <div className="rounded-card border border-border bg-surface p-4 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-medium text-foreground">
+                      {recordingRef.current.firstStanceAt === null
+                        ? `Waiting for stance — ${liveSide === "left" ? "Left" : "Right"}-leg ${liveCondition === "eyes_closed" ? "(eyes closed)" : "(eyes open)"}`
+                        : `Recording — ${liveSide === "left" ? "Left" : "Right"}-leg ${liveCondition === "eyes_closed" ? "(eyes closed)" : "(eyes open)"}`}
+                    </p>
+                    <p className="tabular text-2xl font-semibold text-accent">
+                      {recordingRef.current.firstStanceAt === null ? "—" : `${elapsedSec.toFixed(1)}s`}
+                    </p>
+                  </div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
+                    <div
+                      className="h-full bg-accent transition-all"
+                      style={{ width: `${Math.min(100, (elapsedSec / cap) * 100)}%` }}
+                    />
+                  </div>
+                  {coachMsg && (
+                    <p className="rounded-md border border-accent/30 bg-background/60 px-3 py-2 text-sm font-medium text-foreground">
+                      {coachMsg}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <div className="rounded-card border border-border bg-surface p-3 text-xs text-muted">
+                <p className="font-semibold text-foreground">Session brief</p>
+                <ol className="mt-2 list-decimal space-y-1 pl-4">
+                  <li>Patient barefoot, facing the camera, full body in frame.</li>
+                  <li>Pick a trial — 3-2-1 countdown, then the timer starts on leg lift.</li>
+                  <li>Trials end on foot touchdown, arm grab, hop, or max time.</li>
+                </ol>
+              </div>
+
+              {error && (
+                <div className="rounded-card border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-foreground">
+                  <AlertTriangle className="mr-2 inline h-4 w-4 text-rose-500" />
+                  {error}
+                </div>
+              )}
+
+              <div className="mt-auto flex flex-wrap gap-2">
+                {phase === "recording" && (
+                  <Button variant="secondary" onClick={stopEarly}>Stop early</Button>
                 )}
-                <div className="flex justify-end">
-                  <Button variant="ghost" size="sm" onClick={stopEarly}>Stop early</Button>
-                </div>
+                <Button variant="ghost" size="sm" onClick={exitLive}>
+                  <RotateCcw className="h-4 w-4" />
+                  Reset
+                </Button>
               </div>
-            )}
-
-            {/* Done CTA — shown when in idle AND all required trials captured */}
-            {phase === "idle" && allDesiredDone && (
-              <div className="mt-3 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3">
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                  <p className="text-sm font-medium text-foreground">All trials captured</p>
-                </div>
-                <p className="mt-1 text-xs text-muted">
-                  Generate the report to review results and (in the doctor flow) save
-                  to the patient&apos;s history.
-                </p>
-                <div className="mt-3 flex gap-2">
-                  <Button onClick={() => setPhase("done")}>
-                    <Play className="h-4 w-4" />
-                    Generate report
-                  </Button>
-                  <Button variant="ghost" onClick={reset}>
-                    <RotateCcw className="h-4 w-4" />
-                    Reset
-                  </Button>
-                </div>
-              </div>
-            )}
-
-            <p className="mt-4 text-xs text-muted">
-              Cutoffs (PDF Test C5): age &lt;60 ≥ 10 s eyes-open, age 60–69 ≥ 7 s,
-              age 70+ ≥ 5 s. Eyes-closed thresholds halved per PDF guidance.
-              L–R asymmetry &gt; 30% indicates targeted intervention.
-            </p>
-          </div>
-        </div>
-
-        {/* RIGHT — sticky camera */}
-        <div className="lg:sticky lg:top-28">
-          <SingleLegStanceLiveCamera onFrame={handleFrame} onError={setError} />
-          <p className="mt-3 text-xs text-subtle">
-            Start the camera and have the patient stand barefoot facing the
-            lens. The on-screen skeleton tracks pelvis, knee, and trunk in
-            real time — keep the full body inside the frame.
-          </p>
-        </div>
-      </div>
-
-      {error && (
-        <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
-          <p className="text-foreground">{error}</p>
-        </div>
-      )}
-      </>
+            </>
+          )}
+        />
       )}
     </div>
   );

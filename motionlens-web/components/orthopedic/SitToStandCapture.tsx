@@ -32,7 +32,13 @@ import { Button } from "@/components/ui/Button";
 import { SitToStandLiveCamera } from "@/components/orthopedic/SitToStandLiveCamera";
 import { SitToStandReport } from "@/components/orthopedic/SitToStandReport";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { AutoSaveToast } from "@/components/dashboard/AutoSaveToast";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
+import {
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import {
   SAMPLE_INTERVAL_MS,
@@ -105,6 +111,14 @@ export function SitToStandCapture() {
 
   const recordingRef = useRef<RecordingState | null>(null);
 
+  // ── Auto-flow (fullscreen less-click live mode) ────────────────
+  // One click ("Start Assessment") opens the fullscreen shell; the
+  // camera auto-starts; once frames are flowing a 3-2-1 countdown
+  // runs and the trial starts by itself. The trial already auto-
+  // finishes at 5 reps, and the done view auto-saves (doctor flow).
+  const [liveFullscreen, setLiveFullscreen] = useState<boolean>(false);
+  const [camActive, setCamActive] = useState<boolean>(false);
+
   useEffect(() => {
     if (phase !== "recording") return;
     const id = window.setInterval(() => setNow(Date.now()), 200);
@@ -135,7 +149,21 @@ export function SitToStandCapture() {
     setCoachMsg("");
     lastCoachRef.current = "";
     setPhase("done");
+    // Leave the fullscreen shell — the done view renders the report.
+    setLiveFullscreen(false);
+    setCamActive(false);
   }, []);
+
+  // Countdown starts only once the camera stream is actually live —
+  // otherwise the trial timer would eat the getUserMedia permission
+  // delay. onLive fires startRecording (declared below; hoisted).
+  const {
+    phase: flowPhase,
+    countdown,
+    skipCountdown,
+  } = useRehabAutoFlow(liveFullscreen && camActive, () => {
+    startRecording();
+  });
 
   // Per-frame callback ----------------------------------------------
   const handleFrame = useCallback((kp: Keypoint[], _video: HTMLVideoElement) => {
@@ -298,18 +326,27 @@ export function SitToStandCapture() {
     lastCoachRef.current = "";
     setPhase("idle");
     setError(null);
+    setLiveFullscreen(false);
+    setCamActive(false);
     resetUpload();
     setMode(next);
   }
 
-  // Arming + start ----------------------------------------------------
-  function arm() {
+  // Enter the fullscreen auto-flow shell (the single click of the
+  // live mode). Camera auto-starts inside; countdown → recording.
+  function enterLive() {
     setError(null);
     setPhase("armed");
-    setCoachMsg(
-      "Patient should be seated, back against the chair, feet flat, arms crossed at chest. " +
-      "Click Start when ready — timer begins immediately and patient should stand up.",
-    );
+    setLiveFullscreen(true);
+  }
+
+  function exitLive() {
+    recordingRef.current = null;
+    setCoachMsg("");
+    lastCoachRef.current = "";
+    setPhase("idle");
+    setLiveFullscreen(false);
+    setCamActive(false);
   }
 
   function startRecording() {
@@ -352,21 +389,22 @@ export function SitToStandCapture() {
   if ((isLiveDone || isUploadDone) && result) {
     const interpretation = buildInterpretation(result);
     const onRunAgain = isUploadDone ? () => { resetUpload(); } : reset;
+    const buildPayload = () => ({
+      module: "sit_to_stand" as const,
+      metrics: { trial: result },
+      observations: { interpretation },
+    });
     return (
       <div className="space-y-8">
+        {/* Results auto-save in the doctor flow (toast with a 10s
+            undo) for both live and upload runs. */}
+        <AutoSaveToast buildPayload={buildPayload} />
+
         <SitToStandReport
           patientName={patient?.name ?? null}
           patient={patient ?? null}
           result={result}
           interpretation={interpretation}
-        />
-
-        <SaveToPatientButton
-          buildPayload={() => ({
-            module: "sit_to_stand",
-            metrics: { trial: result },
-            observations: { interpretation },
-          })}
         />
 
         <div className="flex justify-center border-t border-border pt-6">
@@ -545,140 +583,181 @@ export function SitToStandCapture() {
         </div>
       )}
 
-      {/* ─── LIVE MODE (unchanged behaviour) ─────────────────────── */}
-      {mode === "live" && (
-      <>
-      {/* ─── 2-column layout (instructions+status | camera) ─────── */}
-      <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
-        {/* LEFT — instructions + controls */}
-        <div className="space-y-5">
-          <div className="rounded-card border border-border bg-surface p-5">
-            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-              Movement instructions
-            </p>
-            <ol className="mt-3 space-y-2.5 text-sm text-foreground">
-              {[
-                "Sit on a sturdy chair with no armrests. Back against the backrest.",
-                "Turn so the camera sees your side (sideways / side view).",
-                "Both feet flat on the floor, shoulder-width apart.",
-                "Cross both arms over your chest — keep them crossed for the whole test.",
-                `On Start, stand up fully and sit back down — repeat ${TARGET_REP_COUNT} times as fast as you safely can.`,
-                "The timer ends when your buttocks touch the seat after the final stand.",
-              ].map((s, i) => (
-                <li key={i} className="flex gap-2.5">
-                  <span className="tabular shrink-0 text-accent">{i + 1}.</span>
-                  <span className="leading-relaxed">{s}</span>
-                </li>
-              ))}
-            </ol>
+      {/* ─── LIVE MODE — pre-fullscreen: instructions + one click ── */}
+      {mode === "live" && !liveFullscreen && (
+        <>
+          <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
+            <div className="space-y-5">
+              <div className="rounded-card border border-border bg-surface p-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+                  Movement instructions
+                </p>
+                <ol className="mt-3 space-y-2.5 text-sm text-foreground">
+                  {[
+                    "Sit on a sturdy chair with no armrests. Back against the backrest.",
+                    "Turn so the camera sees your side (sideways / side view).",
+                    "Both feet flat on the floor, shoulder-width apart.",
+                    "Cross both arms over your chest — keep them crossed for the whole test.",
+                    `After the 3-2-1 countdown, stand up fully and sit back down — repeat ${TARGET_REP_COUNT} times as fast as you safely can.`,
+                    "The timer ends when your buttocks touch the seat after the final stand.",
+                  ].map((s, i) => (
+                    <li key={i} className="flex gap-2.5">
+                      <span className="tabular shrink-0 text-accent">{i + 1}.</span>
+                      <span className="leading-relaxed">{s}</span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+              <p className="text-xs text-muted">
+                Cutoffs (PDF Test C2): &lt; 12 s normal, 12–15 s borderline, &gt; 15 s
+                weakness / fall risk. Last-rep duration &gt; 60% of first-rep duration
+                flags significant fatigue. Arm-uncrossing during the trial is reported
+                as an integrity warning.
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <div className="rounded-card border border-border bg-surface p-6 text-center">
+                <p className="text-sm text-muted">
+                  One click — the camera opens fullscreen, a 3-2-1
+                  countdown runs, and the trial starts by itself. The
+                  test finishes automatically after {TARGET_REP_COUNT}{" "}
+                  reps and the report saves to the patient record.
+                </p>
+                <div className="mt-4 flex justify-center">
+                  <Button onClick={enterLive}>
+                    <Camera className="h-4 w-4" />
+                    Start Assessment
+                  </Button>
+                </div>
+              </div>
+            </div>
           </div>
 
-          <div className="rounded-card border border-border bg-surface p-5">
-            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-              Live status
-            </p>
+          {error && (
+            <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
+              <p className="text-foreground">{error}</p>
+            </div>
+          )}
+        </>
+      )}
 
-            {phase === "recording" && recordingRef.current && (
-              <div className="mt-3 space-y-3">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-medium text-foreground">Recording</p>
-                  <p className="tabular text-2xl font-semibold text-accent">
+      {/* ─── LIVE MODE — fullscreen auto-flow shell ──────────────── */}
+      {mode === "live" && liveFullscreen && (
+        <LiveModeLayout
+          title="5x Sit-to-Stand"
+          subtitle={
+            phase === "recording"
+              ? `Rep ${Math.min(repsCaptured + 1, TARGET_REP_COUNT)} of ${TARGET_REP_COUNT}`
+              : "Patient seated in profile, arms crossed"
+          }
+          onExit={exitLive}
+          camera={(
+            <SitToStandLiveCamera
+              onFrame={handleFrame}
+              onError={setError}
+              autoStart
+              hideControls
+              fill
+              onActiveChange={setCamActive}
+            >
+              {!camActive && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <p className="rounded-full bg-black/60 px-4 py-2 text-sm text-white/80">
+                    Starting camera…
+                  </p>
+                </div>
+              )}
+              {flowPhase === "countdown" && countdown !== null && (
+                <AutoFlowCountdownOverlay countdown={countdown} label="Trial starts in" />
+              )}
+              {phase === "recording" && (
+                <div className="absolute left-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+                  <p className="text-[10px] uppercase tracking-[0.14em] text-rose-300">
+                    ● Recording
+                  </p>
+                  <p className="tabular text-2xl font-semibold text-white">
                     {repsCaptured} / {TARGET_REP_COUNT}
                   </p>
-                </div>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
-                  <div
-                    className="h-full bg-accent transition-all"
-                    style={{ width: `${(repsCaptured / TARGET_REP_COUNT) * 100}%` }}
-                  />
-                </div>
-                <div className="flex items-center justify-between text-xs text-muted">
-                  <span>Elapsed: <span className="tabular text-foreground">{elapsedSec.toFixed(1)}s</span></span>
-                  <span>Timeout in {remainingSec.toFixed(0)} s</span>
-                </div>
-                {coachMsg && (
-                  <p className="rounded-md border border-accent/30 bg-background/60 px-3 py-2 text-sm font-medium text-foreground">
-                    {coachMsg}
+                  <p className="text-[10px] text-white/70">
+                    {elapsedSec.toFixed(1)}s · timeout {remainingSec.toFixed(0)}s
                   </p>
-                )}
-                {armsFlag ? (
-                  <p className="inline-flex items-center gap-1 rounded-full bg-warning/10 px-2.5 py-1 text-[11px] font-medium text-warning">
-                    <AlertTriangle className="h-3 w-3" />
-                    Arm uncrossed during trial — will be flagged
-                  </p>
-                ) : (
-                  <p className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2.5 py-1 text-[11px] font-medium text-emerald-600">
-                    <CheckCircle2 className="h-3 w-3" />
-                    Arms crossed — good
-                  </p>
-                )}
-                <div className="flex justify-end">
-                  <Button variant="ghost" size="sm" onClick={stopEarly}>Stop early</Button>
                 </div>
-              </div>
-            )}
+              )}
+            </SitToStandLiveCamera>
+          )}
+          sidebar={(
+            <>
+              {flowPhase === "countdown" && countdown !== null && (
+                <AutoFlowCountdownCard
+                  countdown={countdown}
+                  onSkip={skipCountdown}
+                  hint="Patient seated in profile, feet flat, arms crossed at the chest."
+                />
+              )}
 
-            {phase !== "recording" && (
-              <div className="mt-3">
-                {phase === "armed" ? (
-                  <div className="space-y-3">
-                    <p className="text-sm font-medium text-foreground">Ready to record</p>
-                    <p className="text-xs text-muted">
-                      Patient seated, back against backrest, feet flat, arms crossed at
-                      chest. The timer starts the moment you click <em>Start</em> — instruct
-                      the patient to begin standing immediately.
+              {phase === "recording" && (
+                <div className="rounded-card border border-border bg-surface p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-medium text-foreground">Trial running</p>
+                    <p className="tabular text-2xl font-semibold text-accent">
+                      {repsCaptured} / {TARGET_REP_COUNT}
                     </p>
-                    {coachMsg && (
-                      <p className="rounded-md bg-background/40 px-3 py-2 text-sm text-foreground">
-                        {coachMsg}
-                      </p>
-                    )}
-                    <div className="flex gap-2">
-                      <Button onClick={startRecording}>
-                        <Play className="h-4 w-4" />
-                        Start trial
-                      </Button>
-                      <Button variant="ghost" onClick={() => setPhase("idle")}>Cancel</Button>
-                    </div>
                   </div>
-                ) : (
-                  <div className="space-y-3">
-                    <p className="text-sm font-medium text-foreground">Begin a new trial</p>
-                    <Button onClick={arm}>
-                      Start
-                    </Button>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
+                    <div
+                      className="h-full bg-accent transition-all"
+                      style={{ width: `${(repsCaptured / TARGET_REP_COUNT) * 100}%` }}
+                    />
                   </div>
-                )}
+                  {coachMsg && (
+                    <p className="rounded-md border border-accent/30 bg-background/60 px-3 py-2 text-sm font-medium text-foreground">
+                      {coachMsg}
+                    </p>
+                  )}
+                  {armsFlag ? (
+                    <p className="inline-flex items-center gap-1 rounded-full bg-warning/10 px-2.5 py-1 text-[11px] font-medium text-warning">
+                      <AlertTriangle className="h-3 w-3" />
+                      Arm uncrossed — will be flagged
+                    </p>
+                  ) : (
+                    <p className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2.5 py-1 text-[11px] font-medium text-emerald-600">
+                      <CheckCircle2 className="h-3 w-3" />
+                      Arms crossed — good
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <div className="rounded-card border border-border bg-surface p-3 text-xs text-muted">
+                <p className="font-semibold text-foreground">Session brief</p>
+                <ol className="mt-2 list-decimal space-y-1 pl-4">
+                  <li>Seated, side-on to the camera, arms crossed.</li>
+                  <li>Stand fully, sit back — {TARGET_REP_COUNT} cycles, as fast as safe.</li>
+                  <li>Auto-finishes on the final sit-down.</li>
+                </ol>
               </div>
-            )}
 
-            <p className="mt-4 text-xs text-muted">
-              Cutoffs (PDF Test C2): &lt; 12 s normal, 12–15 s borderline, &gt; 15 s
-              weakness / fall risk. Last-rep duration &gt; 60% of first-rep duration
-              flags significant fatigue. Arm-uncrossing during the trial is reported
-              as an integrity warning.
-            </p>
-          </div>
-        </div>
+              {error && (
+                <div className="rounded-card border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-foreground">
+                  <AlertTriangle className="mr-2 inline h-4 w-4 text-rose-500" />
+                  {error}
+                </div>
+              )}
 
-        {/* RIGHT — sticky camera */}
-        <div className="lg:sticky lg:top-28">
-          <SitToStandLiveCamera onFrame={handleFrame} onError={setError} />
-          <p className="mt-3 text-xs text-subtle">
-            Start the camera and have the patient seated in profile to the
-            lens. The on-screen skeleton tracks the knee and hip in real
-            time — keep the full body in side-view frame.
-          </p>
-        </div>
-      </div>
-
-      {error && (
-        <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
-          <p className="text-foreground">{error}</p>
-        </div>
-      )}
-      </>
+              <div className="mt-auto flex flex-wrap gap-2">
+                {phase === "recording" && (
+                  <Button variant="secondary" onClick={stopEarly}>Stop early</Button>
+                )}
+                <Button variant="ghost" size="sm" onClick={exitLive}>
+                  <RotateCcw className="h-4 w-4" />
+                  Reset
+                </Button>
+              </div>
+            </>
+          )}
+        />
       )}
     </div>
   );

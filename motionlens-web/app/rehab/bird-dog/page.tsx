@@ -60,7 +60,13 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { MatchPoseShell } from "@/components/rehab/mechanics/MatchPoseShell";
-import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
+import {
+  AutoFlowCompleteOverlay,
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+  AutoFlowFooter,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import {
   buildSkeletonPosePayload,
@@ -124,6 +130,31 @@ function Inner() {
   const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
   const lastKpRef = useRef<PoseSnapshot | null>(null);
   const bestMatchRef = useRef<number>(0);
+  // Mirror of currentAngles so per-frame math runs OUTSIDE the
+  // setState updater (updaters must stay pure — StrictMode runs
+  // them twice, which would double-count the hold timer below).
+  const anglesRef = useRef<Record<string, number>>({});
+  // Cumulative ms with matchPct >= achievedThresholdPct — drives
+  // the auto-complete against requiredHoldMs.
+  const achievedHoldMsRef = useRef<number>(0);
+  const lastMatchTickRef = useRef<number | null>(null);
+
+  // Auto-flow: combo pick → 3-2-1 countdown → live → complete →
+  // auto-save. Session-scoped refs reset at the live transition.
+  const {
+    phase: sessionPhase,
+    countdown,
+    skipCountdown,
+    markComplete,
+  } = useRehabAutoFlow(combo !== null, () => {
+    bestMatchRef.current = 0;
+    bestPoseRef.current = null;
+    achievedHoldMsRef.current = 0;
+    lastMatchTickRef.current = null;
+    anglesRef.current = {};
+    setCurrentAngles({});
+    sessionStartRef.current = performance.now();
+  });
 
   const handleFrame = useCallback(
     (kp: Keypoint[], video: HTMLVideoElement) => {
@@ -137,37 +168,53 @@ function Inner() {
 
       // Incremental update — skip per-key if math returned null so
       // transient occlusion of the far-side limb doesn't destroy
-      // the patient's match score. Engine treats stale value as
-      // last-known good.
-      setCurrentAngles((prev) => {
-        const next = { ...prev };
-        if (arm !== null) next.arm = arm;
-        if (hipFlex !== null) next.leg = 180 - hipFlex;
-        if (trunk !== null) next.trunk = trunk;
-        // Approximate match % from proximity to targets (180 arm/leg, 0 trunk).
-        // Higher score = closer to pose.
-        const legVal = next.leg ?? 0;
-        const armVal = next.arm ?? 0;
-        const trunkVal = Math.abs(next.trunk ?? 90);
-        const armScore = Math.max(0, 100 - Math.abs(180 - armVal) * 2);
-        const legScore = Math.max(0, 100 - Math.abs(180 - legVal) * 2);
-        const trunkScore = Math.max(0, 100 - trunkVal * 2);
-        const matchPct = (armScore + legScore + trunkScore * 1.5) / 3.5;
-        if (matchPct > bestMatchRef.current && lastKpRef.current) {
-          bestMatchRef.current = matchPct;
-          if (matchPct >= 60) {
-            bestPoseRef.current = {
-              landmarks: lastKpRef.current.landmarks,
-              source_frame: lastKpRef.current.source_frame,
-              angle: matchPct,
-              capturedAtMs: performance.now(),
-            };
+      // the patient's match score. Stale value = last-known good.
+      const next = { ...anglesRef.current };
+      if (arm !== null) next.arm = arm;
+      if (hipFlex !== null) next.leg = 180 - hipFlex;
+      if (trunk !== null) next.trunk = trunk;
+      anglesRef.current = next;
+      setCurrentAngles(next);
+
+      // Approximate match % from proximity to targets (180 arm/leg,
+      // 0 trunk). Higher score = closer to pose.
+      const legVal = next.leg ?? 0;
+      const armVal = next.arm ?? 0;
+      const trunkVal = Math.abs(next.trunk ?? 90);
+      const armScore = Math.max(0, 100 - Math.abs(180 - armVal) * 2);
+      const legScore = Math.max(0, 100 - Math.abs(180 - legVal) * 2);
+      const trunkScore = Math.max(0, 100 - trunkVal * 2);
+      const matchPct = (armScore + legScore + trunkScore * 1.5) / 3.5;
+      if (matchPct > bestMatchRef.current && lastKpRef.current) {
+        bestMatchRef.current = matchPct;
+        if (matchPct >= 60) {
+          bestPoseRef.current = {
+            landmarks: lastKpRef.current.landmarks,
+            source_frame: lastKpRef.current.source_frame,
+            angle: matchPct,
+            capturedAtMs: performance.now(),
+          };
+        }
+      }
+
+      // Auto-complete: cumulative hold at/above the achieved
+      // threshold while the session is live. Countdown frames
+      // never accumulate.
+      if (sessionPhase === "live") {
+        const now = performance.now();
+        if (lastMatchTickRef.current !== null
+            && matchPct >= BIRD_DOG_CONFIG.achievedThresholdPct) {
+          achievedHoldMsRef.current += now - lastMatchTickRef.current;
+          if (achievedHoldMsRef.current >= BIRD_DOG_CONFIG.requiredHoldMs) {
+            markComplete();
           }
         }
-        return next;
-      });
+        lastMatchTickRef.current = now;
+      } else {
+        lastMatchTickRef.current = null;
+      }
     },
-    [combo],
+    [combo, sessionPhase, markComplete],
   );
 
   const buildRehabPayload = useCallback(() => {
@@ -286,6 +333,10 @@ function Inner() {
                       <p>trunk <span className="font-semibold text-white">{(currentAngles.trunk ?? 0).toFixed(0)}°</span></p>
                     </div>
                   </div>
+                  {sessionPhase === "countdown" && countdown !== null && (
+                    <AutoFlowCountdownOverlay countdown={countdown} />
+                  )}
+                  {sessionPhase === "complete" && <AutoFlowCompleteOverlay />}
                 </RehabCameraShell>
               )}
               sidebar={(
@@ -301,10 +352,25 @@ function Inner() {
                       <p className="border-t border-border bg-surface px-2 py-1 text-center text-[10px] uppercase tracking-[0.12em] text-muted">Reference form</p>
                     </div>
                   )}
-                  <div className="flex min-h-0 flex-1 flex-col">
-                    <MatchPoseShell currentAngles={currentAngles} config={BIRD_DOG_CONFIG} compact />
+                  {sessionPhase === "countdown" && countdown !== null && (
+                    <AutoFlowCountdownCard
+                      countdown={countdown}
+                      onSkip={skipCountdown}
+                      hint="Patient on hands and knees, spine neutral."
+                    />
+                  )}
+                  {(sessionPhase === "live" || sessionPhase === "complete") && (
+                    <div className="flex min-h-0 flex-1 flex-col">
+                      <MatchPoseShell currentAngles={currentAngles} config={BIRD_DOG_CONFIG} compact />
+                    </div>
+                  )}
+                  <div className="no-pdf">
+                    <AutoFlowFooter
+                      complete={sessionPhase === "complete"}
+                      buildPayload={buildRehabPayload}
+                      completeHint="Hold target reached — saving to record automatically."
+                    />
                   </div>
-                  <div className="no-pdf"><RehabSessionFooter buildPayload={buildRehabPayload} label="Save session" compact /></div>
                 </>
               )}
             />

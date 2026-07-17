@@ -3,11 +3,16 @@
 //
 // Two entry modes, both hitting the same POST /api/analyze-tug endpoint:
 //
-//   1. RECORD — browser captures video via getUserMedia + MediaRecorder.
+//   1. RECORD — fullscreen less-click auto-flow. One click ("Start
+//      Assessment") opens the fullscreen LiveModeLayout, the camera
+//      auto-starts, a 3-2-1 countdown runs, and MediaRecorder starts
+//      by itself. The operator clicks Stop at seat contact; the blob
+//      uploads to the backend and the report auto-saves (doctor flow).
 //      Live preview only, no per-frame pose analysis on the client.
 //
 //   2. UPLOAD — operator selects a pre-recorded video file from disk.
 //      Same backend pipeline (MediaPipe BlazePose Full, 33 keypoints).
+//      Unchanged boxed form + manual save.
 //
 // In both modes the backend runs the heavy work; the frontend is only
 // responsible for getting a video Blob to the server, surfacing the
@@ -23,10 +28,8 @@ import {
   AlertCircle,
   AlertTriangle,
   Camera,
-  CameraOff,
   FileVideo,
   Loader2,
-  Play,
   RotateCcw,
   Square,
   Upload,
@@ -35,7 +38,13 @@ import {
 
 import { Button } from "@/components/ui/Button";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { AutoSaveToast } from "@/components/dashboard/AutoSaveToast";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
+import {
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import { TUGReport } from "@/components/orthopedic/TUGReport";
 import { analyzeTUG, type TUGResult } from "@/lib/orthopedic/tug";
@@ -63,6 +72,31 @@ function pickRecorderMime(): string {
   return "video/webm";
 }
 
+// Camera surface for the fullscreen shell. Accepts the `fill` prop
+// LiveModeLayout injects into its camera slot (plain DOM nodes would
+// receive it as an unknown attribute otherwise).
+function TUGCameraSurface({
+  videoRef,
+  fill: _fill,
+  children,
+}: {
+  videoRef: React.RefObject<HTMLVideoElement | null>;
+  fill?: boolean;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div className="relative min-h-0 w-full flex-1 overflow-hidden rounded-card border border-border bg-gradient-to-br from-[#0A0A0B] via-[#0d0d10] to-[#15151a]">
+      <video
+        ref={videoRef}
+        playsInline
+        muted
+        className="absolute inset-0 h-full w-full object-cover"
+      />
+      <div className="pointer-events-none absolute inset-0">{children}</div>
+    </div>
+  );
+}
+
 export function TUGCapture() {
   const { isDoctorFlow, patient } = usePatientContext();
 
@@ -74,6 +108,11 @@ export function TUGCapture() {
   // Record-mode state
   const [cameraActive, setCameraActive] = useState(false);
   const [recordingMs, setRecordingMs] = useState(0);
+
+  // Fullscreen auto-flow shell (record mode). One click opens the
+  // shell; the camera auto-starts; once frames flow a 3-2-1 countdown
+  // runs and MediaRecorder starts without another click.
+  const [liveFullscreen, setLiveFullscreen] = useState(false);
 
   // Upload-mode state
   const [uploadFile, setUploadFile] = useState<File | null>(null);
@@ -126,6 +165,20 @@ export function TUGCapture() {
       stopCamera();
     }
   }, [mode, cameraActive, stopCamera]);
+
+  // Auto-start the camera exactly once each time the fullscreen shell
+  // opens (StrictMode-safe; enterLive already ran inside a user
+  // gesture so getUserMedia succeeds).
+  const liveAutoStartRef = useRef(false);
+  useEffect(() => {
+    if (!liveFullscreen) {
+      liveAutoStartRef.current = false;
+      return;
+    }
+    if (liveAutoStartRef.current) return;
+    liveAutoStartRef.current = true;
+    void startCamera();
+  }, [liveFullscreen, startCamera]);
 
   // Cleanup the blob URL we generated for the upload preview.
   useEffect(() => {
@@ -188,6 +241,53 @@ export function TUGCapture() {
     setPhase("uploading");
   }
 
+  // ── Fullscreen auto-flow (record mode) ─────────────────────
+  // Countdown starts only once the camera stream is actually live —
+  // otherwise the 3-2-1 would eat the getUserMedia permission delay.
+  const {
+    phase: flowPhase,
+    countdown,
+    skipCountdown,
+  } = useRehabAutoFlow(
+    mode === "record" && liveFullscreen && cameraActive && phase === "idle",
+    () => {
+      startRecording();
+    },
+  );
+
+  // Enter the fullscreen shell — the single click of record mode.
+  function enterLive() {
+    setError(null);
+    setPhase("idle");
+    setLiveFullscreen(true);
+  }
+
+  // Exit the fullscreen shell. If a recording is in flight this is a
+  // deliberate abort — detach onstop so the partial blob is NOT
+  // uploaded to the backend.
+  function exitLive() {
+    if (recordingTickRef.current !== null) {
+      window.clearInterval(recordingTickRef.current);
+      recordingTickRef.current = null;
+    }
+    const rec = recorderRef.current;
+    if (rec && rec.state !== "inactive") {
+      rec.onstop = null;
+      try {
+        rec.stop();
+      } catch {
+        // ignore
+      }
+    }
+    recorderRef.current = null;
+    chunksRef.current = [];
+    stopCamera();
+    setRecordingMs(0);
+    setError(null);
+    setPhase("idle");
+    setLiveFullscreen(false);
+  }
+
   // ── Upload mode handlers ──────────────────────────────────
   function handleFilePick(file: File | null) {
     setError(null);
@@ -232,6 +332,10 @@ export function TUGCapture() {
       if (!res.success || !res.data) {
         setError(res.error ?? "Analysis failed");
         setPhase("error");
+        if (mode === "record") {
+          stopCamera();
+          setLiveFullscreen(false);
+        }
         return;
       }
       setResult(res.data);
@@ -239,9 +343,17 @@ export function TUGCapture() {
         setServerWarning([res.fps_warning, res.duration_warning].filter(Boolean).join(" "));
       }
       setPhase("done");
+      if (mode === "record") {
+        stopCamera();
+        setLiveFullscreen(false);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Upload failed");
       setPhase("error");
+      if (mode === "record") {
+        stopCamera();
+        setLiveFullscreen(false);
+      }
     }
   }
 
@@ -252,16 +364,31 @@ export function TUGCapture() {
     setRecordingMs(0);
     setMarkerConfirmed(false);
     setPhase("idle");
+    setLiveFullscreen(false);
     stopCamera();
     if (uploadPreviewUrl) URL.revokeObjectURL(uploadPreviewUrl);
     setUploadFile(null);
     setUploadPreviewUrl(null);
   }
 
+  const fmtTime = (ms: number) => {
+    const s = Math.floor(ms / 1000);
+    const cs = Math.floor((ms % 1000) / 10);
+    return `${s.toString().padStart(2, "0")}.${cs.toString().padStart(2, "0")}`;
+  };
+
   // ── Done view ─────────────────────────────────────────────
   if (phase === "done" && result) {
+    const buildPayload = () => ({
+      module: "tug" as const,
+      metrics: { result },
+      observations: { interpretation: result.interpretation },
+    });
     return (
       <div className="space-y-8">
+        {/* Results auto-save in the doctor flow (toast with a 10s
+            undo) for both record and upload runs. */}
+        <AutoSaveToast buildPayload={buildPayload} />
         {serverWarning && (
           <div className="flex items-start gap-3 rounded-card border border-warning/40 bg-warning/5 p-4 text-sm">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
@@ -273,13 +400,6 @@ export function TUGCapture() {
           patientName={patient?.name ?? null}
           result={result}
         />
-        <SaveToPatientButton
-          buildPayload={() => ({
-            module: "tug",
-            metrics: { result },
-            observations: { interpretation: result.interpretation },
-          })}
-        />
         <div className="flex justify-center border-t border-border pt-6">
           <Button variant="secondary" onClick={reset}>
             <RotateCcw className="h-4 w-4" />
@@ -290,13 +410,133 @@ export function TUGCapture() {
     );
   }
 
+  // ── Fullscreen auto-flow shell (record mode) ──────────────
+  if (mode === "record" && liveFullscreen && phase !== "error") {
+    const overSixty = recordingMs / 1000 > 60;
+    return (
+      <LiveModeLayout
+        title="Timed Up & Go (TUG)"
+        subtitle={
+          phase === "recording"
+            ? "Recording — stop as soon as the patient is fully seated again"
+            : phase === "uploading"
+              ? "Analysing on the server…"
+              : "Camera sideways to the 3 m walk path, patient seated"
+        }
+        onExit={exitLive}
+        camera={(
+          <TUGCameraSurface videoRef={videoRef}>
+            {!cameraActive && (
+              <div className="absolute inset-0 flex items-center justify-center">
+                <p className="rounded-full bg-black/60 px-4 py-2 text-sm text-white/80">
+                  Starting camera…
+                </p>
+              </div>
+            )}
+            {flowPhase === "countdown" && countdown !== null && (
+              <AutoFlowCountdownOverlay countdown={countdown} label="Recording starts in" />
+            )}
+            {phase === "recording" && (
+              <div className="absolute left-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+                <p className="text-[10px] uppercase tracking-[0.14em] text-rose-300">
+                  ● Recording
+                </p>
+                <p className="tabular text-2xl font-semibold text-white">
+                  {fmtTime(recordingMs)}s
+                </p>
+                <p className="text-[10px] text-white/70">
+                  Stop at seat contact after the walk
+                </p>
+              </div>
+            )}
+            {phase === "uploading" && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+                <div className="flex items-center gap-2 rounded-lg border border-white/15 bg-black/70 px-4 py-3 text-sm text-white">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Uploading and analysing — this can take 10-30 seconds.
+                </div>
+              </div>
+            )}
+          </TUGCameraSurface>
+        )}
+        sidebar={(
+          <>
+            {flowPhase === "countdown" && countdown !== null && (
+              <AutoFlowCountdownCard
+                countdown={countdown}
+                onSkip={skipCountdown}
+                hint="Patient seated, back against the backrest, full 3 m path in frame."
+              />
+            )}
+
+            {phase === "recording" && (
+              <div className="rounded-card border border-rose-500/30 bg-rose-500/10 p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <p className="inline-flex items-center gap-2 text-sm font-medium text-foreground">
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-error" />
+                    Recording
+                  </p>
+                  <p className="tabular text-2xl font-semibold text-accent">
+                    {fmtTime(recordingMs)}s
+                  </p>
+                </div>
+                <p className="text-xs text-muted">
+                  Tell the patient: stand up, walk to the marker, turn around,
+                  walk back, sit down. Click <em>Stop</em> as soon as the
+                  patient is fully seated again.
+                </p>
+                {overSixty && (
+                  <p className="text-xs text-warning">
+                    Recording has exceeded 60 seconds — the backend will reject
+                    clips longer than 60 s. Stop and try again.
+                  </p>
+                )}
+                <Button onClick={stopRecording}>
+                  <Square className="h-4 w-4" />
+                  Stop recording
+                </Button>
+              </div>
+            )}
+
+            {phase === "uploading" && (
+              <div className="rounded-card border border-blue-500/30 bg-blue-500/10 p-3 text-sm">
+                <p className="flex items-center gap-2 font-medium text-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Uploading and analysing — this can take 10-30 seconds.
+                </p>
+              </div>
+            )}
+
+            <div className="rounded-card border border-border bg-surface p-3 text-xs text-muted">
+              <p className="font-semibold text-foreground">Session brief</p>
+              <ol className="mt-2 list-decimal space-y-1 pl-4">
+                <li>Patient seated, side-on camera, full 3 m path in frame.</li>
+                <li>After the 3-2-1, cue: stand, walk, turn, walk back, sit.</li>
+                <li>Stop the recording at seat contact — analysis runs on the server.</li>
+              </ol>
+            </div>
+
+            {error && (
+              <div className="rounded-card border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-foreground">
+                <AlertTriangle className="mr-2 inline h-4 w-4 text-rose-500" />
+                {error}
+              </div>
+            )}
+
+            <div className="mt-auto flex flex-wrap gap-2">
+              <Button variant="ghost" size="sm" onClick={exitLive}>
+                <RotateCcw className="h-4 w-4" />
+                Reset
+              </Button>
+            </div>
+          </>
+        )}
+      />
+    );
+  }
+
   // ── Capture view ──────────────────────────────────────────
   const recordingDisabled = phase === "recording" || phase === "uploading";
-  const fmtTime = (ms: number) => {
-    const s = Math.floor(ms / 1000);
-    const cs = Math.floor((ms % 1000) / 10);
-    return `${s.toString().padStart(2, "0")}.${cs.toString().padStart(2, "0")}`;
-  };
 
   return (
     <div className="space-y-10">
@@ -346,7 +586,7 @@ export function TUGCapture() {
                 "Position the camera SIDEWAYS to the walk path — side view, so the entire 3 m is in the frame.",
                 "Patient sits on the chair, back against the backrest, feet flat, arms relaxed.",
                 mode === "record"
-                  ? "On 'Start', tell the patient: stand up, walk to the marker, turn around, walk back, sit down."
+                  ? "After the 3-2-1 countdown, tell the patient: stand up, walk to the marker, turn around, walk back, sit down."
                   : "Record the patient performing the TUG (sit→walk→turn→walk→sit). Trim to start with 'Go' cue and end at seat contact.",
               ].map((s, i) => (
                 <li key={i} className="flex gap-2.5">
@@ -380,68 +620,28 @@ export function TUGCapture() {
             </p>
           </div>
 
-          {/* RECORD MODE — recording controls */}
-          {mode === "record" && (
+          {/* RECORD MODE — one-click fullscreen auto-flow entry */}
+          {mode === "record" && phase !== "error" && (
             <div className="rounded-card border border-border bg-surface p-5">
               <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-                Recording controls
+                Start assessment
               </p>
-
-              {phase === "idle" && (
-                <div className="mt-3 space-y-3">
-                  <p className="text-sm text-muted">
-                    Step 1 — start the camera and frame the full 3 m path.
-                  </p>
-                  {!cameraActive ? (
-                    <Button onClick={startCamera}>
-                      <Camera className="h-4 w-4" />
-                      Start camera
-                    </Button>
-                  ) : (
-                    <div className="flex gap-2">
-                      <Button onClick={startRecording} disabled={!markerConfirmed}>
-                        <Play className="h-4 w-4" />
-                        Start recording
-                      </Button>
-                      <Button variant="secondary" onClick={stopCamera}>
-                        <CameraOff className="h-4 w-4" />
-                        Stop camera
-                      </Button>
-                    </div>
-                  )}
-                  {!markerConfirmed && cameraActive && (
-                    <p className="text-xs text-warning">
-                      Confirm the 3 m marker placement before recording.
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {phase === "recording" && (
-                <div className="mt-3 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <p className="inline-flex items-center gap-2 text-sm font-medium text-error">
-                      <span className="h-2 w-2 animate-pulse rounded-full bg-error" />
-                      Recording
-                    </p>
-                    <p className="tabular text-3xl font-semibold text-accent">
-                      {fmtTime(recordingMs)}s
-                    </p>
-                  </div>
-                  <p className="text-xs text-muted">
-                    Click <em>Stop</em> as soon as the patient is fully seated again.
-                  </p>
-                  <Button onClick={stopRecording}>
-                    <Square className="h-4 w-4" />
-                    Stop recording
-                  </Button>
-                  {recordingMs / 1000 > 60 && (
-                    <p className="text-xs text-warning">
-                      Recording has exceeded 60 seconds — the backend will reject
-                      clips longer than 60 s. Stop and try again.
-                    </p>
-                  )}
-                </div>
+              <p className="mt-3 text-sm text-muted">
+                One click — the camera opens fullscreen, a 3-2-1 countdown
+                runs, and recording starts by itself. Stop the recording as
+                soon as the patient is fully seated again; the analysis runs
+                on the server and the report saves to the patient record.
+              </p>
+              <div className="mt-4">
+                <Button onClick={enterLive} disabled={!markerConfirmed}>
+                  <Camera className="h-4 w-4" />
+                  Start Assessment
+                </Button>
+              </div>
+              {!markerConfirmed && (
+                <p className="mt-2 text-xs text-warning">
+                  Confirm the 3 m marker placement before starting.
+                </p>
               )}
             </div>
           )}
@@ -549,26 +749,12 @@ export function TUGCapture() {
         <div className="lg:sticky lg:top-28">
           <div className="relative aspect-video overflow-hidden rounded-card border border-border bg-gradient-to-br from-[#0A0A0B] via-[#0d0d10] to-[#15151a]">
             {mode === "record" ? (
-              <>
-                <video
-                  ref={videoRef}
-                  playsInline
-                  muted
-                  className="block h-full w-full object-cover"
-                />
-                {!cameraActive && (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
-                    <Camera className="mb-3 h-10 w-10 text-white/40" />
-                    <p className="text-sm text-white/60">Camera is off</p>
-                  </div>
-                )}
-                {phase === "recording" && (
-                  <div className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-black/65 px-3 py-1 text-xs font-medium text-white">
-                    <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
-                    REC · {fmtTime(recordingMs)}s
-                  </div>
-                )}
-              </>
+              <div className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center">
+                <Camera className="mb-3 h-10 w-10 text-white/40" />
+                <p className="text-sm text-white/60">
+                  The camera opens fullscreen when you click Start Assessment.
+                </p>
+              </div>
             ) : (
               <>
                 {uploadPreviewUrl ? (
@@ -590,7 +776,7 @@ export function TUGCapture() {
           </div>
           <p className="mt-3 text-xs text-subtle">
             {mode === "record"
-              ? "Live preview only — pose analysis runs on the backend after upload. Frame the full 3 m walking path end-to-end before starting."
+              ? "Live preview only — pose analysis runs on the backend after upload. Frame the full 3 m walking path end-to-end before the countdown ends."
               : "Preview your selected video. Pose analysis runs on the backend after you click Analyse."}
           </p>
         </div>

@@ -23,7 +23,6 @@ import {
   CheckCircle2,
   FileVideo,
   Loader2,
-  Play,
   RotateCcw,
   Upload,
   Video,
@@ -34,7 +33,13 @@ import { Button } from "@/components/ui/Button";
 import { ModifiedThomasLiveCamera } from "@/components/orthopedic/ModifiedThomasLiveCamera";
 import { ModifiedThomasReport } from "@/components/orthopedic/ModifiedThomasReport";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { AutoSaveToast } from "@/components/dashboard/AutoSaveToast";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
+import {
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import {
   SAMPLE_INTERVAL_MS,
@@ -109,6 +114,15 @@ export function ModifiedThomasCapture() {
   const resultRef = useRef(result);
   useEffect(() => { resultRef.current = result; }, [result]);
 
+  // ── Auto-flow (fullscreen less-click live mode) ────────────────
+  // One click on a side button opens the fullscreen shell; the camera
+  // auto-starts; once frames are flowing a 3-2-1 countdown runs and
+  // the trial starts by itself. Each side is its own fullscreen pass
+  // (the shell closes after a side captures), so the countdown runs
+  // before EVERY trial. The done view auto-saves (doctor flow).
+  const [liveFullscreen, setLiveFullscreen] = useState<boolean>(false);
+  const [camActive, setCamActive] = useState<boolean>(false);
+
   useEffect(() => {
     if (phase !== "recording") return;
     const id = window.setInterval(() => setNow(Date.now()), 250);
@@ -162,6 +176,10 @@ export function ModifiedThomasCapture() {
     setLiveHipDeg(null);
     setLiveKneeDeg(null);
     setLiveStable(false);
+    // Leave the fullscreen shell — back to the side picker (or the
+    // done view once both sides have landed).
+    setLiveFullscreen(false);
+    setCamActive(false);
 
     setPhase(() => {
       const r = resultRef.current;
@@ -169,6 +187,17 @@ export function ModifiedThomasCapture() {
       return otherDone ? "done" : "idle";
     });
   }, []);
+
+  // Countdown starts only once the camera stream is actually live —
+  // otherwise the trial timer would eat the getUserMedia permission
+  // delay. onLive fires startRecording (declared below; hoisted).
+  const {
+    phase: flowPhase,
+    countdown,
+    skipCountdown,
+  } = useRehabAutoFlow(liveFullscreen && camActive, () => {
+    startRecording();
+  });
 
   // Per-frame callback ------------------------------------------------
   const handleFrame = useCallback((kp: Keypoint[], _video: HTMLVideoElement) => {
@@ -348,31 +377,39 @@ export function ModifiedThomasCapture() {
     lastCoachRef.current = "";
     setPhase("idle");
     setError(null);
+    setLiveFullscreen(false);
+    setCamActive(false);
     resetUpload();
     setMode(next);
   }
 
-  // Arming + start ----------------------------------------------------
-  function arm(side: Side) {
+  // Enter the fullscreen auto-flow shell for one side (the single
+  // click of the live mode). Camera auto-starts inside; countdown →
+  // recording. The old pre-record trackability gate is advisory now —
+  // the camera only starts inside the shell, so the per-frame coach
+  // message covers visibility instead of blocking the start.
+  function enterLive(side: Side) {
     setError(null);
     setArmedSide(side);
     setPhase("armed");
-    setCoachMsg(
-      `Patient on the edge of the table, supine. The ${side === "left" ? "RIGHT" : "LEFT"} knee is ` +
-      `pulled to the chest, and the ${side.toUpperCase()} leg hangs naturally. Camera on the ${side} ` +
-      `side — start once the leg is fully visible.`,
-    );
+    setLiveFullscreen(true);
+  }
+
+  function exitLive() {
+    recordingRef.current = null;
+    setArmedSide(null);
+    setCoachMsg("");
+    lastCoachRef.current = "";
+    setLiveHipDeg(null);
+    setLiveKneeDeg(null);
+    setLiveStable(false);
+    setPhase("idle");
+    setLiveFullscreen(false);
+    setCamActive(false);
   }
 
   function startRecording() {
     if (!armedSide) return;
-    if (!legTrackable) {
-      setError(
-        "Test-side leg not yet trackable. Make sure the patient's shoulder, hip, " +
-        "knee, and ankle are clearly visible in frame before starting.",
-      );
-      return;
-    }
     setError(null);
     recordingRef.current = {
       side: armedSide,
@@ -420,8 +457,17 @@ export function ModifiedThomasCapture() {
   if (isLiveDone || isUploadDone) {
     const interpretation = buildInterpretation(result);
     const onRunAgain = isUploadDone ? () => { resetUpload(); } : reset;
+    const buildPayload = () => ({
+      module: "modified_thomas" as const,
+      metrics: { left: result.left, right: result.right },
+      observations: { interpretation },
+    });
     return (
       <div className="space-y-8">
+        {/* Results auto-save in the doctor flow (toast with a 10s
+            undo) for both live and upload runs. */}
+        <AutoSaveToast buildPayload={buildPayload} />
+
         {isUploadDone && (uploadErrors.left || uploadErrors.right) && (
           <div className="space-y-2">
             {uploadErrors.left && (
@@ -450,14 +496,6 @@ export function ModifiedThomasCapture() {
           patient={patient ?? null}
           result={result}
           interpretation={interpretation}
-        />
-
-        <SaveToPatientButton
-          buildPayload={() => ({
-            module: "modified_thomas",
-            metrics: { left: result.left, right: result.right },
-            observations: { interpretation },
-          })}
         />
 
         <div className="flex justify-center border-t border-border pt-6">
@@ -621,198 +659,232 @@ export function ModifiedThomasCapture() {
         </div>
       )}
 
-      {/* ─── LIVE MODE ────────────────────────────────────────── */}
-      {mode === "live" && (
-      <>
-      <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
-        {/* LEFT — instructions + controls */}
-        <div className="space-y-5">
-          <div className="rounded-card border border-border bg-surface p-5">
-            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-              Movement instructions
-            </p>
-            <ol className="mt-3 space-y-2.5 text-sm text-foreground">
-              {[
-                "Patient sits on the edge of a flat table, then lies back — upper body supported, both legs hanging off the edge.",
-                "Place the camera on the SIDE of the patient, framed TALL: shoulder at the top, hanging ankle at the bottom.",
-                "Choose which leg to test. The OPPOSITE knee is pulled up and held against the chest (this stabilises the pelvis — it is NOT measured).",
-                "The TEST leg is released and allowed to hang naturally off the edge.",
-                "Once the patient is settled, the trial auto-captures the moment hip and knee angles stop changing for 1.5 s.",
-                "Repeat on the other side after the first capture lands.",
-              ].map((s, i) => (
-                <li key={i} className="flex gap-2.5">
-                  <span className="tabular shrink-0 text-accent">{i + 1}.</span>
-                  <span className="leading-relaxed">{s}</span>
-                </li>
-              ))}
-            </ol>
-          </div>
-
-          {/* Pre-record gate */}
-          {phase !== "recording" && (
-            <div
-              className={`rounded-card border p-4 text-sm ${
-                legTrackable
-                  ? "border-emerald-500/30 bg-emerald-500/5"
-                  : "border-amber-500/40 bg-amber-500/5"
-              }`}
-            >
-              <div className="flex items-center gap-2">
-                {legTrackable ? (
-                  <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                ) : (
-                  <AlertTriangle className="h-4 w-4 text-amber-600" />
-                )}
-                <span className="font-medium text-foreground">
-                  {legTrackable
-                    ? "Leg fully trackable"
-                    : "Waiting for shoulder + hip + knee + ankle visibility…"}
-                </span>
-              </div>
-              {!legTrackable && (
-                <p className="mt-1 text-xs text-muted">
-                  Adjust the camera (tall portrait orientation works best) so the
-                  test-side shoulder, hip, knee, and ankle are all in the same frame.
+      {/* ─── LIVE MODE — pre-fullscreen: instructions + side pick ── */}
+      {mode === "live" && !liveFullscreen && (
+        <>
+          <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
+            <div className="space-y-5">
+              <div className="rounded-card border border-border bg-surface p-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+                  Movement instructions
                 </p>
-              )}
-            </div>
-          )}
-
-          <div className="rounded-card border border-border bg-surface p-5">
-            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-              Live status
-            </p>
-
-            {/* Recording panel */}
-            {phase === "recording" && recordingRef.current && (
-              <div className="mt-3 space-y-3">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-medium text-foreground">
-                    Recording — {liveSide === "left" ? "Left" : "Right"}-leg MTT
-                  </p>
-                  <span
-                    className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${
-                      liveStable
-                        ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                        : "bg-amber-500/10 text-amber-700 dark:text-amber-400"
-                    }`}
-                  >
-                    {liveStable ? "Settled ✓" : "Settling…"}
-                  </span>
-                </div>
-                <div className="grid grid-cols-2 gap-3 text-sm">
-                  <div className="rounded-md bg-elevated p-2.5">
-                    <p className="text-[10px] uppercase tracking-[0.12em] text-subtle">Hip</p>
-                    <p className="tabular text-xl font-semibold text-foreground">
-                      {liveHipDeg !== null ? `${liveHipDeg.toFixed(0)}°` : "—"}
-                    </p>
-                  </div>
-                  <div className="rounded-md bg-elevated p-2.5">
-                    <p className="text-[10px] uppercase tracking-[0.12em] text-subtle">Knee</p>
-                    <p className="tabular text-xl font-semibold text-foreground">
-                      {liveKneeDeg !== null ? `${liveKneeDeg.toFixed(0)}°` : "—"}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 text-xs text-muted">
-                  <span>{remainingSec.toFixed(0)} s remaining</span>
-                </div>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
-                  <div
-                    className="h-full bg-accent transition-all"
-                    style={{ width: `${(elapsedSec / TRIAL_DURATION_SEC) * 100}%` }}
-                  />
-                </div>
-                {coachMsg && (
-                  <p className="rounded-md border border-accent/30 bg-background/60 px-3 py-2 text-sm font-medium text-foreground">
-                    {coachMsg}
-                  </p>
-                )}
-                <div className="flex justify-end">
-                  <Button variant="ghost" size="sm" onClick={stopEarly}>
-                    Stop early
-                  </Button>
-                </div>
+                <ol className="mt-3 space-y-2.5 text-sm text-foreground">
+                  {[
+                    "Patient sits on the edge of a flat table, then lies back — upper body supported, both legs hanging off the edge.",
+                    "Place the camera on the SIDE of the patient, framed TALL: shoulder at the top, hanging ankle at the bottom.",
+                    "Choose which leg to test. The OPPOSITE knee is pulled up and held against the chest (this stabilises the pelvis — it is NOT measured).",
+                    "The TEST leg is released and allowed to hang naturally off the edge.",
+                    "Once the patient is settled, the trial auto-captures the moment hip and knee angles stop changing for 1.5 s.",
+                    "Repeat on the other side after the first capture lands.",
+                  ].map((s, i) => (
+                    <li key={i} className="flex gap-2.5">
+                      <span className="tabular shrink-0 text-accent">{i + 1}.</span>
+                      <span className="leading-relaxed">{s}</span>
+                    </li>
+                  ))}
+                </ol>
               </div>
-            )}
+              <p className="text-xs text-muted">
+                Hip cutoffs: ≥ 170° = normal · 155–170° = mild · &lt; 155° = significant tightness.
+                Knee cutoffs: ≤ 100° = relaxed · &gt; 100° = rectus femoris tightness.
+              </p>
+            </div>
 
-            {/* Side picker / start */}
-            {phase !== "recording" && (
-              <div className="mt-3">
+            <div className="space-y-4">
+              <div className="rounded-card border border-border bg-surface p-6 text-center">
                 {sidesRemaining.length === 0 ? (
-                  <p className="text-sm text-muted">Both sides recorded. Compiling the report…</p>
-                ) : armedSide ? (
-                  <div className="space-y-3">
-                    <p className="text-sm">
-                      Ready to record:{" "}
-                      <span className="font-medium text-foreground">
-                        {armedSide === "left" ? "Left" : "Right"}-leg MTT
-                      </span>
-                      .
-                    </p>
-                    <p className="text-xs text-muted">
-                      The {armedSide === "left" ? "RIGHT" : "LEFT"} knee should be pulled to the chest;
-                      the {armedSide} leg hangs naturally. Click <em>Start</em> once the patient
-                      is settled — auto-capture fires the moment angles stop moving.
-                    </p>
-                    {coachMsg && (
-                      <p className="rounded-md bg-background/40 px-3 py-2 text-sm text-foreground">
-                        {coachMsg}
-                      </p>
-                    )}
-                    <div className="flex gap-2">
-                      <Button onClick={startRecording} disabled={!legTrackable}>
-                        <Play className="h-4 w-4" />
-                        Start ({armedSide})
-                      </Button>
-                      <Button variant="ghost" onClick={() => setArmedSide(null)}>Cancel</Button>
-                    </div>
-                  </div>
+                  <p className="text-sm text-muted">
+                    Both sides recorded. Compiling the report…
+                  </p>
                 ) : (
-                  <div className="space-y-3">
-                    <p className="text-sm font-medium text-foreground">Choose which leg to record next:</p>
-                    <div className="flex flex-wrap gap-3">
+                  <>
+                    <p className="text-sm text-muted">
+                      One click per side — the camera opens fullscreen, a 3-2-1
+                      countdown runs, and the trial starts by itself. Each side
+                      auto-captures the moment the hanging leg settles; once both
+                      sides land the report saves to the patient record.
+                    </p>
+                    <div className="mt-4 flex flex-wrap justify-center gap-3">
                       {sidesRemaining.map((s) => (
-                        <Button key={s} onClick={() => arm(s)}>
+                        <Button key={s} onClick={() => enterLive(s)}>
+                          <Camera className="h-4 w-4" />
                           {s === "left" ? "Left" : "Right"}-leg MTT
                         </Button>
                       ))}
                     </div>
                     {completedSides.size > 0 && (
-                      <p className="inline-flex items-center gap-1 text-xs text-emerald-600">
+                      <p className="mt-3 inline-flex items-center gap-1 text-xs text-emerald-600">
                         <CheckCircle2 className="h-3.5 w-3.5" />
                         {completedSides.size === 1 ? "1 side recorded" : "Both sides recorded"}
                       </p>
                     )}
-                  </div>
+                  </>
                 )}
               </div>
-            )}
-
-            <p className="mt-4 text-xs text-muted">
-              Hip cutoffs: ≥ 170° = normal · 155–170° = mild · &lt; 155° = significant tightness.
-              Knee cutoffs: ≤ 100° = relaxed · &gt; 100° = rectus femoris tightness.
-            </p>
+            </div>
           </div>
-        </div>
 
-        {/* RIGHT — sticky camera */}
-        <div className="lg:sticky lg:top-28">
-          <ModifiedThomasLiveCamera onFrame={handleFrame} onError={setError} />
-          <p className="mt-3 text-xs text-subtle">
-            Start the camera and frame the patient tall from the side. The on-screen
-            skeleton tracks the shoulder, hip, knee, and ankle of the hanging leg.
-          </p>
-        </div>
-      </div>
-
-      {error && (
-        <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
-          <p className="text-foreground">{error}</p>
-        </div>
+          {error && (
+            <div className="flex items-start gap-3 rounded-card border border-error/40 bg-error/5 p-4 text-sm">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
+              <p className="text-foreground">{error}</p>
+            </div>
+          )}
+        </>
       )}
-      </>
+
+      {/* ─── LIVE MODE — fullscreen auto-flow shell ──────────────── */}
+      {mode === "live" && liveFullscreen && (
+        <LiveModeLayout
+          title="Modified Thomas Test"
+          subtitle={
+            phase === "recording"
+              ? `${liveSide === "left" ? "Left" : "Right"}-leg MTT · ${liveStable ? "Settled ✓" : "Settling…"}`
+              : `${liveSide === "left" ? "Left" : "Right"}-leg MTT — ${liveSide === "left" ? "RIGHT" : "LEFT"} knee to chest`
+          }
+          onExit={exitLive}
+          camera={(
+            <ModifiedThomasLiveCamera
+              onFrame={handleFrame}
+              onError={setError}
+              autoStart
+              hideControls
+              fill
+              onActiveChange={setCamActive}
+            >
+              {!camActive && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <p className="rounded-full bg-black/60 px-4 py-2 text-sm text-white/80">
+                    Starting camera…
+                  </p>
+                </div>
+              )}
+              {flowPhase === "countdown" && countdown !== null && (
+                <AutoFlowCountdownOverlay countdown={countdown} label="Trial starts in" />
+              )}
+              {phase === "recording" && (
+                <div className="absolute left-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+                  <p className="text-[10px] uppercase tracking-[0.14em] text-rose-300">
+                    ● Recording · {liveSide === "left" ? "Left" : "Right"} leg
+                  </p>
+                  <p className="tabular text-2xl font-semibold text-white">
+                    {liveHipDeg !== null ? `${liveHipDeg.toFixed(0)}°` : "—"} hip ·{" "}
+                    {liveKneeDeg !== null ? `${liveKneeDeg.toFixed(0)}°` : "—"} knee
+                  </p>
+                  <p className="text-[10px] text-white/70">
+                    {liveStable ? "Settled ✓" : "Settling…"} · timeout in {remainingSec.toFixed(0)}s
+                  </p>
+                </div>
+              )}
+            </ModifiedThomasLiveCamera>
+          )}
+          sidebar={(
+            <>
+              {flowPhase === "countdown" && countdown !== null && (
+                <AutoFlowCountdownCard
+                  countdown={countdown}
+                  onSkip={skipCountdown}
+                  hint={`Patient supine on the table edge, ${armedSide === "left" ? "RIGHT" : "LEFT"} knee to the chest, ${armedSide ?? "test"} leg hanging naturally.`}
+                />
+              )}
+
+              {/* Trackability status — advisory in the auto-flow. */}
+              <div
+                className={`rounded-card border p-3 text-sm ${
+                  legTrackable
+                    ? "border-emerald-500/30 bg-emerald-500/5"
+                    : "border-amber-500/40 bg-amber-500/5"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  {legTrackable ? (
+                    <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                  ) : (
+                    <AlertTriangle className="h-4 w-4 text-amber-600" />
+                  )}
+                  <span className="font-medium text-foreground">
+                    {legTrackable
+                      ? "Leg fully trackable"
+                      : "Waiting for shoulder + hip + knee + ankle visibility…"}
+                  </span>
+                </div>
+              </div>
+
+              {phase === "recording" && (
+                <div className="rounded-card border border-border bg-surface p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-medium text-foreground">
+                      {liveSide === "left" ? "Left" : "Right"}-leg MTT
+                    </p>
+                    <span
+                      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${
+                        liveStable
+                          ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                          : "bg-amber-500/10 text-amber-700 dark:text-amber-400"
+                      }`}
+                    >
+                      {liveStable ? "Settled ✓" : "Settling…"}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="rounded-md bg-elevated p-2.5">
+                      <p className="text-[10px] uppercase tracking-[0.12em] text-subtle">Hip</p>
+                      <p className="tabular text-xl font-semibold text-foreground">
+                        {liveHipDeg !== null ? `${liveHipDeg.toFixed(0)}°` : "—"}
+                      </p>
+                    </div>
+                    <div className="rounded-md bg-elevated p-2.5">
+                      <p className="text-[10px] uppercase tracking-[0.12em] text-subtle">Knee</p>
+                      <p className="tabular text-xl font-semibold text-foreground">
+                        {liveKneeDeg !== null ? `${liveKneeDeg.toFixed(0)}°` : "—"}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 text-xs text-muted">
+                    <span>{remainingSec.toFixed(0)} s remaining</span>
+                  </div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
+                    <div
+                      className="h-full bg-accent transition-all"
+                      style={{ width: `${(elapsedSec / TRIAL_DURATION_SEC) * 100}%` }}
+                    />
+                  </div>
+                  {coachMsg && (
+                    <p className="rounded-md border border-accent/30 bg-background/60 px-3 py-2 text-sm font-medium text-foreground">
+                      {coachMsg}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <div className="rounded-card border border-border bg-surface p-3 text-xs text-muted">
+                <p className="font-semibold text-foreground">Session brief</p>
+                <ol className="mt-2 list-decimal space-y-1 pl-4">
+                  <li>Supine on the table edge, camera side-on, framed tall.</li>
+                  <li>{(liveSide ?? "test") === "left" ? "RIGHT" : "LEFT"} knee to the chest; the {liveSide ?? "test"} leg hangs naturally.</li>
+                  <li>Auto-captures once hip + knee angles hold still for 1.5 s.</li>
+                </ol>
+              </div>
+
+              {error && (
+                <div className="rounded-card border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-foreground">
+                  <AlertTriangle className="mr-2 inline h-4 w-4 text-rose-500" />
+                  {error}
+                </div>
+              )}
+
+              <div className="mt-auto flex flex-wrap gap-2">
+                {phase === "recording" && (
+                  <Button variant="secondary" onClick={stopEarly}>Stop early</Button>
+                )}
+                <Button variant="ghost" size="sm" onClick={exitLive}>
+                  <RotateCcw className="h-4 w-4" />
+                  Reset
+                </Button>
+              </div>
+            </>
+          )}
+        />
       )}
     </div>
   );

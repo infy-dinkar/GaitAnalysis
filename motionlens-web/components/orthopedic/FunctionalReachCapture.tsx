@@ -42,7 +42,13 @@ import {
 import { FunctionalReachLiveCamera } from "@/components/orthopedic/FunctionalReachLiveCamera";
 import { FunctionalReachReport } from "@/components/orthopedic/FunctionalReachReport";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { AutoSaveToast } from "@/components/dashboard/AutoSaveToast";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
+import {
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import {
   RECORDING_DURATION_SEC,
@@ -120,6 +126,26 @@ export function FunctionalReachCapture() {
   const baselineWristXRef = useRef<number | null>(null);
   const baselineHoldCountRef = useRef<number>(0);
   const BASELINE_HOLD_FRAMES_LIVE = 10; // ~1 s at ~10 Hz sampling
+
+  // ── Auto-flow (fullscreen less-click live mode) ───────────────
+  // After calibration the armed/recording phases render inside a
+  // fullscreen LiveModeLayout. The camera auto-starts; once frames
+  // flow AND the test-side body is trackable, a 3-2-1 countdown
+  // runs and startRecording fires without a click. Gating on
+  // armTrackable means the countdown resets/re-arms whenever the
+  // patient drops out of frame during the wait.
+  const [camActive, setCamActive] = useState<boolean>(false);
+
+  const {
+    phase: flowPhase,
+    countdown,
+    skipCountdown,
+  } = useRehabAutoFlow(
+    mode === "live" && phase === "armed" && camActive && armTrackable,
+    () => {
+      startRecording();
+    },
+  );
 
   // Ticking clock for the recording-window countdown.
   useEffect(() => {
@@ -308,6 +334,8 @@ export function FunctionalReachCapture() {
     finishRecording("stopped");
   }
 
+  // Full reset back to the side picker. Also serves as the
+  // fullscreen shell's Exit handler.
   function reset() {
     recordingRef.current = null;
     baselineWristXRef.current = null;
@@ -320,6 +348,7 @@ export function FunctionalReachCapture() {
     setCoachMsg("");
     lastCoachRef.current = "";
     setError(null);
+    setCamActive(false);
     setPhase("side_picker");
   }
 
@@ -448,6 +477,7 @@ export function FunctionalReachCapture() {
     lastCoachRef.current = "";
     setPhase("side_picker");
     setError(null);
+    setCamActive(false);
     resetUpload();
     setMode(next);
   }
@@ -461,22 +491,23 @@ export function FunctionalReachCapture() {
       : (uploadResult as FunctionalReachResult);
     const interpretation = buildInterpretation(r);
     const onRunAgain = isUploadDone ? resetUpload : reset;
+    const buildPayload = () => ({
+      module: "functional_reach" as const,
+      side: r.side_tested,
+      metrics: { result: r },
+      observations: { interpretation },
+    });
     return (
       <div className="space-y-8">
+        {/* Results auto-save in the doctor flow (toast with a 10s
+            undo) for both live and upload runs. */}
+        <AutoSaveToast buildPayload={buildPayload} />
+
         <FunctionalReachReport
           patientName={patient?.name ?? null}
           patient={patient ?? null}
           result={r}
           interpretation={interpretation}
-        />
-
-        <SaveToPatientButton
-          buildPayload={() => ({
-            module: "functional_reach",
-            side: r.side_tested,
-            metrics: { result: r },
-            observations: { interpretation },
-          })}
         />
 
         <div className="flex justify-center border-t border-border pt-6">
@@ -801,59 +832,98 @@ export function FunctionalReachCapture() {
                 defaultHeightCm={patient?.height_cm ?? null}
                 onCalibrated={handleCalibrated}
                 allowSkip
+                autoConfirm
               />
             </div>
           )}
 
-          {/* ARMED + RECORDING */}
+          {/* ARMED + RECORDING — fullscreen auto-flow shell */}
           {(phase === "armed" || phase === "recording") && side && (
-            <div className="space-y-4">
-              <div className="rounded-card border border-emerald-500/30 bg-emerald-500/5 p-4 text-sm">
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                  <p className="font-medium text-foreground">
-                    Step 2 of 2 — record the reach trial
+            <LiveModeLayout
+              title="Functional Reach"
+              subtitle={
+                phase === "recording"
+                  ? `${side === "left" ? "Left" : "Right"} arm — recording, ${remainingSec.toFixed(0)}s remaining`
+                  : `${side === "left" ? "Left" : "Right"} arm — ${
+                      calibration
+                        ? `calibrated · ${calibration.pixels_per_cm.toFixed(2)} px/cm`
+                        : "uncalibrated (relative units only)"
+                    }`
+              }
+              onExit={reset}
+              camera={(
+                <FunctionalReachLiveCamera
+                  onFrame={handleFrame}
+                  onError={setError}
+                  autoStart
+                  hideControls
+                  fill
+                  onActiveChange={setCamActive}
+                >
+                  {!camActive && (
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <p className="rounded-full bg-black/60 px-4 py-2 text-sm text-white/80">
+                        Starting camera…
+                      </p>
+                    </div>
+                  )}
+                  {flowPhase === "countdown" && countdown !== null && (
+                    <AutoFlowCountdownOverlay countdown={countdown} label="Recording in" />
+                  )}
+                  {phase === "recording" && (
+                    <div className="absolute left-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+                      <p className="text-[10px] uppercase tracking-[0.14em] text-rose-300">
+                        ● Recording · {side} arm
+                      </p>
+                      <p className="tabular text-2xl font-semibold text-white">
+                        {remainingSec.toFixed(0)}s
+                      </p>
+                      <p className="text-[10px] text-white/70">
+                        Baseline {liveBaselineLocked ? "locked ✓" : "pending"}
+                      </p>
+                    </div>
+                  )}
+                </FunctionalReachLiveCamera>
+              )}
+              sidebar={(
+                <>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="rounded-full bg-elevated px-3 py-1 text-xs font-medium uppercase tracking-wide text-subtle">
+                      {side === "left" ? "Left arm" : "Right arm"}
+                    </span>
                     {calibration ? (
-                      <>
-                        {" "}· calibrated at{" "}
-                        <span className="tabular">{calibration.pixels_per_cm.toFixed(2)}</span>{" "}
-                        px/cm
-                      </>
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-3 py-1 text-xs font-semibold text-emerald-200 ring-1 ring-emerald-400/40">
+                        <CheckCircle2 className="h-3 w-3" />
+                        Calibrated · {calibration.pixels_per_cm.toFixed(2)} px/cm
+                      </span>
                     ) : (
-                      <> · uncalibrated (relative units only)</>
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/15 px-3 py-1 text-xs font-semibold text-amber-200 ring-1 ring-amber-400/40">
+                        <AlertTriangle className="h-3 w-3" />
+                        Uncalibrated
+                      </span>
                     )}
-                  </p>
-                </div>
-              </div>
+                  </div>
 
-              <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
-                {/* LEFT — instructions + controls */}
-                <div className="space-y-5">
-                  <div className="rounded-card border border-border bg-surface p-5">
-                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-                      Movement instructions
-                    </p>
-                    <ol className="mt-3 space-y-2.5 text-sm text-foreground">
-                      {[
-                        "Patient stands SIDE-ON to the camera, feet flat, shoulder-width apart.",
-                        `Raise the ${side === "left" ? "left" : "right"} arm to ~90° (shoulder height), fist closed.`,
-                        "Hold steady for ~1 s — the system locks the baseline (point A) automatically.",
-                        "Reach forward as far as comfortable, briefly hold the peak, then return.",
-                        "Repeat three times within the 30 s recording window.",
-                        "Do NOT step or lift the heels — those trials are voided.",
-                      ].map((s, i) => (
-                        <li key={i} className="flex gap-2.5">
-                          <span className="tabular shrink-0 text-accent">{i + 1}.</span>
-                          <span className="leading-relaxed">{s}</span>
-                        </li>
-                      ))}
+                  <div className="rounded-card border border-border bg-surface p-3 text-xs text-muted">
+                    <p className="font-semibold text-foreground">Session brief</p>
+                    <ol className="mt-2 list-decimal space-y-1 pl-4">
+                      <li>
+                        Side-on to the camera, {side} arm nearest, raised
+                        to ~90°, fist closed.
+                      </li>
+                      <li>Hold ~1 s — the baseline locks automatically.</li>
+                      <li>
+                        Reach forward, hold briefly, return — 3 times in{" "}
+                        {RECORDING_DURATION_SEC}s. No stepping / heel lift.
+                      </li>
                     </ol>
                   </div>
 
-                  {/* Pre-record gate */}
-                  {phase === "armed" && (
+                  {/* Pre-record gate — the countdown starts by itself
+                      once the test-side body is fully trackable. */}
+                  {phase === "armed" && flowPhase !== "countdown" && (
                     <div
-                      className={`rounded-card border p-4 text-sm ${
+                      className={`rounded-card border p-3 text-sm ${
                         armTrackable
                           ? "border-emerald-500/30 bg-emerald-500/5"
                           : "border-amber-500/40 bg-amber-500/5"
@@ -873,121 +943,106 @@ export function FunctionalReachCapture() {
                       </div>
                       {!armTrackable && (
                         <p className="mt-1 text-xs text-muted">
-                          Adjust the camera so the patient&apos;s shoulder, wrist, hip,
-                          ankle and heel are all in the same frame.
+                          Adjust the camera so the patient&apos;s shoulder,
+                          wrist, hip, ankle and heel are all in the same
+                          frame. The countdown starts automatically once
+                          trackable.
                         </p>
                       )}
                     </div>
                   )}
 
-                  <div className="rounded-card border border-border bg-surface p-5">
-                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-                      Live status
-                    </p>
+                  {flowPhase === "countdown" && countdown !== null && (
+                    <AutoFlowCountdownCard
+                      countdown={countdown}
+                      onSkip={skipCountdown}
+                      hint={`Patient side-on, ${side} arm raised to shoulder height, fist closed.`}
+                    />
+                  )}
 
-                    {phase === "recording" && recordingRef.current && (
-                      <div className="mt-3 space-y-3">
-                        <div className="flex items-center justify-between">
-                          <p className="text-sm font-medium text-foreground">
-                            Recording — {side === "left" ? "Left" : "Right"} arm reach
-                          </p>
-                          <p className="tabular text-2xl font-semibold text-accent">
-                            {remainingSec.toFixed(0)} s
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-2 text-xs">
-                          <span
-                            className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 ${
-                              armRaised
-                                ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                                : "bg-amber-500/10 text-amber-700 dark:text-amber-400"
-                            }`}
-                          >
-                            Arm {armRaised ? "at shoulder ✓" : "below shoulder"}
-                          </span>
-                          <span
-                            className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 ${
-                              liveBaselineLocked
-                                ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                                : "bg-elevated text-muted"
-                            }`}
-                          >
-                            Baseline {liveBaselineLocked ? "locked ✓" : "pending"}
-                          </span>
-                        </div>
-                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
-                          <div
-                            className="h-full bg-accent transition-all"
-                            style={{ width: `${(elapsedSec / RECORDING_DURATION_SEC) * 100}%` }}
-                          />
-                        </div>
-                        {liveBaselineLocked && (
-                          <p className="tabular text-xs text-muted">
-                            Live peak so far:{" "}
-                            <span className="font-medium text-foreground">
-                              {calibration
-                                ? `${(livePeakPx / calibration.pixels_per_cm).toFixed(1)} cm`
-                                : `${livePeakPx.toFixed(0)} px (relative)`}
-                            </span>
-                          </p>
-                        )}
-                        {coachMsg && (
-                          <p className="rounded-md border border-accent/30 bg-background/60 px-3 py-2 text-sm font-medium text-foreground">
-                            {coachMsg}
-                          </p>
-                        )}
-                        <div className="flex justify-end">
-                          <Button variant="ghost" size="sm" onClick={stopEarly}>
-                            Stop early
-                          </Button>
-                        </div>
-                      </div>
-                    )}
-
-                    {phase === "armed" && (
-                      <div className="mt-3 space-y-3">
-                        <p className="text-sm text-foreground">
-                          Ready to record the{" "}
-                          <span className="font-medium">{side === "left" ? "Left" : "Right"}</span>{" "}
-                          arm reach. The recording runs for up to{" "}
-                          {RECORDING_DURATION_SEC} s.
+                  {phase === "recording" && recordingRef.current && (
+                    <div className="space-y-2 rounded-card border border-rose-500/30 bg-rose-500/10 p-3 text-sm">
+                      <div className="flex items-center justify-between">
+                        <p className="font-medium text-foreground">
+                          ● Recording — {side === "left" ? "Left" : "Right"} arm reach
                         </p>
-                        {coachMsg && (
-                          <p className="rounded-md bg-background/40 px-3 py-2 text-sm text-foreground">
-                            {coachMsg}
-                          </p>
-                        )}
-                        <div className="flex gap-2">
-                          <Button onClick={startRecording} disabled={!armTrackable}>
-                            <Play className="h-4 w-4" />
-                            Start recording
-                          </Button>
-                          <Button variant="ghost" onClick={() => setPhase("side_picker")}>
-                            Cancel
-                          </Button>
-                        </div>
+                        <p className="tabular text-xl font-semibold text-accent">
+                          {remainingSec.toFixed(0)}s
+                        </p>
                       </div>
+                      <div className="flex items-center gap-2 text-xs">
+                        <span
+                          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 ${
+                            armRaised
+                              ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                              : "bg-amber-500/10 text-amber-700 dark:text-amber-400"
+                          }`}
+                        >
+                          Arm {armRaised ? "at shoulder ✓" : "below shoulder"}
+                        </span>
+                        <span
+                          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 ${
+                            liveBaselineLocked
+                              ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                              : "bg-elevated text-muted"
+                          }`}
+                        >
+                          Baseline {liveBaselineLocked ? "locked ✓" : "pending"}
+                        </span>
+                      </div>
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
+                        <div
+                          className="h-full bg-accent transition-all"
+                          style={{ width: `${(elapsedSec / RECORDING_DURATION_SEC) * 100}%` }}
+                        />
+                      </div>
+                      {liveBaselineLocked && (
+                        <p className="tabular text-xs text-muted">
+                          Live peak so far:{" "}
+                          <span className="font-medium text-foreground">
+                            {calibration
+                              ? `${(livePeakPx / calibration.pixels_per_cm).toFixed(1)} cm`
+                              : `${livePeakPx.toFixed(0)} px (relative)`}
+                          </span>
+                        </p>
+                      )}
+                      {coachMsg && (
+                        <p className="rounded-md border border-accent/30 bg-background/60 px-3 py-2 text-sm font-medium text-foreground">
+                          {coachMsg}
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {error && (
+                    <div className="rounded-card border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-foreground">
+                      <AlertTriangle className="mr-2 inline h-4 w-4 text-rose-500" />
+                      {error}
+                    </div>
+                  )}
+
+                  <div className="mt-auto flex flex-wrap gap-2">
+                    {/* Manual fallback — only reachable if the auto-
+                        start failed at countdown end. */}
+                    {phase === "armed" && flowPhase === "live" && (
+                      <Button onClick={startRecording} disabled={!armTrackable}>
+                        <Play className="h-4 w-4" />
+                        Start recording
+                      </Button>
                     )}
-
-                    <p className="mt-4 text-xs text-muted">
-                      {calibration
-                        ? "Cutoffs: ≥ 25 cm = low fall risk · 15–25 cm = moderate · 10–15 cm = high · < 10 cm = very high."
-                        : "Uncalibrated mode — distances reported in pixels only. No fall-risk classification."}
-                    </p>
+                    {phase === "recording" && (
+                      <Button variant="secondary" onClick={stopEarly}>
+                        Stop early
+                      </Button>
+                    )}
+                    <Button variant="ghost" size="sm" onClick={reset}>
+                      <RotateCcw className="h-4 w-4" />
+                      Reset
+                    </Button>
                   </div>
-                </div>
-
-                {/* RIGHT — sticky camera */}
-                <div className="lg:sticky lg:top-28">
-                  <FunctionalReachLiveCamera onFrame={handleFrame} onError={setError} />
-                  <p className="mt-3 text-xs text-subtle">
-                    Frame the patient side-on with the {side === "left" ? "left" : "right"} arm
-                    nearest the camera. The skeleton tracks the wrist, shoulder,
-                    hip, ankle, and heel of the test side.
-                  </p>
-                </div>
-              </div>
-            </div>
+                </>
+              )}
+            />
           )}
 
           {error && (

@@ -42,8 +42,13 @@ import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { TraceShell } from "@/components/rehab/mechanics/TraceShell";
 import type { TraceState, Score as MechanicScore } from "@/lib/rehab/gameState";
-import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
-import { RehabStartCard } from "@/components/rehab/RehabStartCard";
+import {
+  AutoFlowCompleteOverlay,
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+  AutoFlowFooter,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import { computeSpineFlexionProxyDeg } from "@/lib/rehab/poseMetrics";
 import { DEFAULT_LEVEL_INDEX } from "@/lib/rehab/progressionLadders";
@@ -91,7 +96,6 @@ export default function CatCowExercisePage() {
 
 function Inner() {
   const [phase, setPhase] = useState<"ready" | "active">("ready");
-  const [started, setStarted] = useState(false);
   const [cursor, setCursor] = useState<{ x: number; y: number }>({
     x: 0.5,
     y: 0.5,
@@ -108,6 +112,23 @@ function Inner() {
   const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
   const lastKpRef = useRef<PoseSnapshot | null>(null);
   const peakProxyRef = useRef<number>(0);
+
+  // Auto-flow: Begin → 3-2-1 countdown → live. Trace has no natural
+  // finite goal on this page (accuracy % over an endless pacer loop),
+  // so markComplete is never wired — the footer keeps the manual
+  // "Save session" button. Session-scoped refs reset at the live
+  // transition so countdown framing noise never leaks into the
+  // payload.
+  const {
+    phase: sessionPhase,
+    countdown,
+    skipCountdown,
+  } = useRehabAutoFlow(phase === "active", () => {
+    traceStateRef.current = null;
+    bestPoseRef.current = null;
+    peakProxyRef.current = 0;
+    sessionStartRef.current = performance.now();
+  });
 
   const handleFrame = useCallback(
     (kp: Keypoint[], video: HTMLVideoElement) => {
@@ -228,10 +249,12 @@ function Inner() {
             <LiveModeLayout
               title="Cat-Cow"
               subtitle={isDoctorFlow && patient ? `Connected to ${patient.name}'s record.` : `${(LOOP_DURATION_MS / 1000).toFixed(0)}s cycle`}
-              onExit={() => { setPhase("ready"); setStarted(false); }}
+              onExit={() => setPhase("ready")}
               camera={(
                 <RehabCameraShell
                   onFrame={handleFrame}
+                  autoStart
+                  hideControls
                   angleArc={{ vertex: LM_LIVE.LEFT_HIP, armA: LM_LIVE.LEFT_SHOULDER, armB: LM_LIVE.LEFT_KNEE, currentDeg: liveProxy }}
                 >
                   <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
@@ -239,6 +262,10 @@ function Inner() {
                     <p className="tabular text-2xl font-semibold text-white">{liveProxy > 0 ? "+" : ""}{liveProxy.toFixed(0)}</p>
                     <p className="mt-1 text-[10px] text-zinc-300">{phaseHint}</p>
                   </div>
+                  {sessionPhase === "countdown" && countdown !== null && (
+                    <AutoFlowCountdownOverlay countdown={countdown} />
+                  )}
+                  {sessionPhase === "complete" && <AutoFlowCompleteOverlay />}
                 </RehabCameraShell>
               )}
               sidebar={(
@@ -254,14 +281,24 @@ function Inner() {
                       <p className="border-t border-border bg-surface px-2 py-1 text-center text-[10px] uppercase tracking-[0.12em] text-muted">Reference form</p>
                     </div>
                   )}
-                  <div className="flex min-h-0 flex-1 flex-col">
-                    {started ? (
+                  {sessionPhase === "countdown" && countdown !== null && (
+                    <AutoFlowCountdownCard
+                      countdown={countdown}
+                      onSkip={skipCountdown}
+                      hint="Patient on hands and knees, side-on to the camera."
+                    />
+                  )}
+                  {(sessionPhase === "live" || sessionPhase === "complete") && (
+                    <div className="flex min-h-0 flex-1 flex-col">
                       <TraceShell cursor={cursor} pathFn={catCowPath} loopDurationMs={LOOP_DURATION_MS} config={TRACE_CONFIG} compact onSnapshot={handleTraceSnapshot} />
-                    ) : (
-                      <RehabStartCard onStart={() => setStarted(true)} />
-                    )}
+                    </div>
+                  )}
+                  <div className="no-pdf">
+                    <AutoFlowFooter
+                      complete={sessionPhase === "complete"}
+                      buildPayload={buildRehabPayload}
+                    />
                   </div>
-                  <div className="no-pdf"><RehabSessionFooter buildPayload={buildRehabPayload} label="Save session" compact /></div>
                 </>
               )}
             />

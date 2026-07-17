@@ -49,11 +49,39 @@ interface Props {
    *  the parent's metric math is unchanged. */
   onFrame: (keypoints: Keypoint[], video: HTMLVideoElement) => void;
   onError?: (msg: string) => void;
+  /** Auto-request the camera on mount (parent already gated behind a
+   *  user gesture, e.g. "Start Assessment"). Same pattern as
+   *  RehabCameraShell.autoStart. */
+  autoStart?: boolean;
+  /** Hide the Start/Stop/PiP button row — parent owns session control. */
+  hideControls?: boolean;
+  /** Fill the parent container (LiveModeLayout camera slot) instead of
+   *  the fixed 16:9 aspect card. */
+  fill?: boolean;
+  /** Notified when the camera stream turns on/off — lets the parent
+   *  hold its countdown until frames are actually flowing. */
+  onActiveChange?: (active: boolean) => void;
+  /** Overlay slot rendered above the skeleton canvas (countdown,
+   *  complete banner, HUD chips). */
+  children?: React.ReactNode;
 }
 
-export function TrendelenburgLiveCamera({ onFrame, onError }: Props) {
+export function TrendelenburgLiveCamera({
+  onFrame,
+  onError,
+  autoStart = false,
+  hideControls = false,
+  fill = false,
+  onActiveChange,
+  children,
+}: Props) {
   const { videoRef, active, error: camError, start, stop } = useCamera();
   const { ready: detectorReady, error: detectorError, detect } = usePoseDetection();
+
+  // Mirror stream state up to the parent.
+  const onActiveChangeRef = useRef(onActiveChange);
+  useEffect(() => { onActiveChangeRef.current = onActiveChange; });
+  useEffect(() => { onActiveChangeRef.current?.(active); }, [active]);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
@@ -67,6 +95,16 @@ export function TrendelenburgLiveCamera({ onFrame, onError }: Props) {
 
   const [busy, setBusy] = useState(false);
   const [showPip, setShowPip] = useState(true);
+
+  // Auto-start exactly once on mount when opted in (StrictMode-safe;
+  // parent already gated this behind a user gesture).
+  const autoStartFiredRef = useRef(false);
+  useEffect(() => {
+    if (!autoStart || autoStartFiredRef.current) return;
+    autoStartFiredRef.current = true;
+    setBusy(true);
+    start().catch(() => {}).finally(() => setBusy(false));
+  }, [autoStart, start]);
 
   useEffect(() => { onFrameRef.current = onFrame; }, [onFrame]);
   useEffect(() => {
@@ -281,16 +319,22 @@ export function TrendelenburgLiveCamera({ onFrame, onError }: Props) {
   }
 
   return (
-    <div>
+    <div className={fill ? "flex h-full w-full flex-col" : undefined}>
       <div
         ref={containerRef}
-        className="relative aspect-video overflow-hidden rounded-card border border-border bg-gradient-to-br from-[#0A0A0B] via-[#0d0d10] to-[#15151a]"
+        className={
+          fill
+            ? "relative min-h-0 w-full flex-1 overflow-hidden rounded-card border border-border bg-gradient-to-br from-[#0A0A0B] via-[#0d0d10] to-[#15151a]"
+            : "relative aspect-video overflow-hidden rounded-card border border-border bg-gradient-to-br from-[#0A0A0B] via-[#0d0d10] to-[#15151a]"
+        }
       >
         {/* Skeleton-only canvas — primary view on dark bg. */}
         <canvas
           ref={overlayRef}
           className="pointer-events-none absolute inset-0"
         />
+        {/* Parent overlay slot (countdown / complete banner / HUD). */}
+        <div className="pointer-events-none absolute inset-0">{children}</div>
 
         {/* PiP — small mirrored selfie preview. Video element is always
             in the DOM so the ref stays stable; visibility is toggled by
@@ -337,31 +381,33 @@ export function TrendelenburgLiveCamera({ onFrame, onError }: Props) {
         )}
       </div>
 
-      {camError && <p className="mt-3 text-xs text-error">{camError}</p>}
+      {camError && <p className={fill ? "mt-1 text-xs text-error" : "mt-3 text-xs text-error"}>{camError}</p>}
 
-      <div className="mt-4 flex flex-wrap gap-3">
-        {!active ? (
-          <Button onClick={handleStart} disabled={busy}>
-            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}
-            Start camera
-          </Button>
-        ) : (
-          <Button variant="secondary" onClick={stop}>
-            <CameraOff className="h-4 w-4" />
-            Stop
-          </Button>
-        )}
-        {active && (
-          <Button
-            variant="secondary"
-            onClick={() => setShowPip((v) => !v)}
-            aria-pressed={showPip}
-          >
-            {showPip ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-            {showPip ? "Hide preview" : "Show preview"}
-          </Button>
-        )}
-      </div>
+      {!hideControls && (
+        <div className="mt-4 flex flex-wrap gap-3">
+          {!active ? (
+            <Button onClick={handleStart} disabled={busy}>
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Camera className="h-4 w-4" />}
+              Start camera
+            </Button>
+          ) : (
+            <Button variant="secondary" onClick={stop}>
+              <CameraOff className="h-4 w-4" />
+              Stop
+            </Button>
+          )}
+          {active && (
+            <Button
+              variant="secondary"
+              onClick={() => setShowPip((v) => !v)}
+              aria-pressed={showPip}
+            >
+              {showPip ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              {showPip ? "Hide preview" : "Show preview"}
+            </Button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

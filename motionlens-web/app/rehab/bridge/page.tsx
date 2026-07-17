@@ -38,7 +38,13 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { RepCountShell } from "@/components/rehab/mechanics/RepCountShell";
-import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
+import {
+  AutoFlowCompleteOverlay,
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+  AutoFlowFooter,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import { computeHipAngle } from "@/lib/biomech/hip-live";
 import { BRIDGE_LADDER, DEFAULT_LEVEL_INDEX } from "@/lib/rehab/progressionLadders";
@@ -114,6 +120,23 @@ function Inner() {
   const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
   const lastKpRef = useRef<PoseSnapshot | null>(null);
 
+  // Auto-flow: side pick → 3-2-1 countdown → live → complete →
+  // auto-save. Session-scoped refs reset at the live transition so
+  // the countdown seconds never count into the payload's duration
+  // or trackers.
+  const {
+    phase: sessionPhase,
+    countdown,
+    skipCountdown,
+    markComplete,
+  } = useRehabAutoFlow(side !== null, () => {
+    peakBridgeRef.current = 0;
+    bestPoseRef.current = null;
+    snapshotRef.current = null;
+    handUseRef.current = createHandUseTracker({ sustainedFrames: 10 });
+    sessionStartRef.current = performance.now();
+  });
+
   const handleFrame = useCallback(
     (kp: Keypoint[], video: HTMLVideoElement) => {
       if (!side) return;
@@ -154,8 +177,9 @@ function Inner() {
   const handleSnapshot = useCallback(
     (state: RepCountState, score: Score) => {
       snapshotRef.current = { state, score };
+      if (state.reps >= (activeConfig.targetReps ?? TARGET_REPS)) markComplete();
     },
-    [],
+    [activeConfig, markComplete],
   );
 
   const buildRehabPayload = useCallback(() => {
@@ -255,6 +279,8 @@ function Inner() {
               camera={(
                 <RehabCameraShell
                   onFrame={handleFrame}
+                  autoStart
+                  hideControls
                   angleArc={{
                     vertex: side === "left" ? LM_LIVE.LEFT_HIP : LM_LIVE.RIGHT_HIP,
                     armA: side === "left" ? LM_LIVE.LEFT_SHOULDER : LM_LIVE.RIGHT_SHOULDER,
@@ -278,6 +304,10 @@ function Inner() {
                           : "transition"}
                     </p>
                   </div>
+                  {sessionPhase === "countdown" && countdown !== null && (
+                    <AutoFlowCountdownOverlay countdown={countdown} />
+                  )}
+                  {sessionPhase === "complete" && <AutoFlowCompleteOverlay />}
                 </RehabCameraShell>
               )}
               sidebar={(
@@ -312,22 +342,30 @@ function Inner() {
                     </div>
                   )}
 
-                  <div className="flex min-h-0 flex-1 flex-col">
-                    <RepCountShell
-                      signal={bridgeSignal}
-                      signalLabel={`${side === "left" ? "L" : "R"} hip (°)`}
-                      targetReps={activeConfig.targetReps ?? TARGET_REPS}
-                      config={activeConfig}
-                      onSnapshot={handleSnapshot}
-                      compact
+                  {sessionPhase === "countdown" && countdown !== null && (
+                    <AutoFlowCountdownCard
+                      countdown={countdown}
+                      onSkip={skipCountdown}
+                      hint="Patient supine, knees bent, test side facing the camera."
                     />
-                  </div>
+                  )}
+                  {(sessionPhase === "live" || sessionPhase === "complete") && (
+                    <div className="flex min-h-0 flex-1 flex-col">
+                      <RepCountShell
+                        signal={bridgeSignal}
+                        signalLabel={`${side === "left" ? "L" : "R"} hip (°)`}
+                        targetReps={activeConfig.targetReps ?? TARGET_REPS}
+                        config={activeConfig}
+                        onSnapshot={handleSnapshot}
+                        compact
+                      />
+                    </div>
+                  )}
 
                   <div className="no-pdf">
-                    <RehabSessionFooter
+                    <AutoFlowFooter
+                      complete={sessionPhase === "complete"}
                       buildPayload={buildRehabPayload}
-                      label="Save session"
-                      compact
                     />
                   </div>
                 </>

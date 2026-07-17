@@ -40,8 +40,13 @@ import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
 import { MetronomeShell } from "@/components/rehab/mechanics/MetronomeShell";
 import type { MetronomeState, Score as MechanicScore } from "@/lib/rehab/gameState";
-import { RehabSessionFooter } from "@/components/rehab/RehabSessionFooter";
-import { RehabStartCard } from "@/components/rehab/RehabStartCard";
+import {
+  AutoFlowCompleteOverlay,
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+  AutoFlowFooter,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import {
   buildSkeletonPosePayload,
@@ -90,7 +95,6 @@ export default function MarchingExercisePage() {
 
 function Inner() {
   const [side, setSide] = useState<Side | null>(null);
-  const [started, setStarted] = useState(false);
   const [eventTrigger, setEventTrigger] = useState<number>(0);
   const [liveFlexion, setLiveFlexion] = useState<number>(0);
   const [pelvisDrifted, setPelvisDrifted] = useState<boolean>(false);
@@ -117,6 +121,30 @@ function Inner() {
   );
 
   const { patient, isDoctorFlow } = usePatientContext();
+
+  // Auto-flow: side pick → 3-2-1 countdown → live. Metronome has no
+  // finite beat/lift target defined on this page, so markComplete is
+  // never wired — the footer keeps the manual "Save session" button.
+  // Music (started by the side-pick click, a user gesture, for
+  // autoplay-policy reasons) is re-aligned to t=0 at the live
+  // transition so the track's downbeats line up with MetronomeShell's
+  // beat clock, which starts when the shell mounts at "live".
+  // Session-scoped refs reset at the same transition so countdown
+  // framing lifts never count into the payload.
+  const {
+    phase: sessionPhase,
+    countdown,
+    skipCountdown,
+  } = useRehabAutoFlow(side !== null, () => {
+    inLiftedRef.current = false;
+    bestPoseRef.current = null;
+    peakFlexionRef.current = 0;
+    liftCountRef.current = 0;
+    metronomeStateRef.current = null;
+    setEventTrigger(0);
+    sessionStartRef.current = performance.now();
+    if (audioRef.current) audioRef.current.currentTime = 0;
+  });
 
   const handleFrame = useCallback(
     (kp: Keypoint[], video: HTMLVideoElement) => {
@@ -158,17 +186,12 @@ function Inner() {
 
   // Side picker callback — wraps setSide with audio start. The
   // play() call must happen INSIDE the user-gesture handler
-  // (button click) to satisfy browser autoplay policy.
-  //
-  // Music intentionally does NOT start on side pick — it waits until
-  // the patient explicitly clicks "Start exercise" (see handleStart)
-  // so the audio doesn't play against an empty camera preview.
+  // (button click) to satisfy browser autoplay policy. With the
+  // auto-flow the side pick IS the session-start click, so the
+  // music starts here and is re-aligned to t=0 at the countdown→
+  // live transition (see useRehabAutoFlow onLive above).
   const handleSidePick = useCallback((s: Side) => {
     setSide(s);
-  }, []);
-
-  const handleStart = useCallback(() => {
-    setStarted(true);
     if (musicOn && audioRef.current) {
       audioRef.current.currentTime = 0;
       void audioRef.current.play().catch(() => {});
@@ -184,7 +207,6 @@ function Inner() {
     }
     inLiftedRef.current = false;
     setSide(null);
-    setStarted(false);
     setEventTrigger(0);
   }, []);
 
@@ -338,6 +360,8 @@ function Inner() {
               camera={(
                 <RehabCameraShell
                   onFrame={handleFrame}
+                  autoStart
+                  hideControls
                   angleArc={{
                     vertex: side === "left" ? LM_LIVE.LEFT_HIP : LM_LIVE.RIGHT_HIP,
                     armA: side === "left" ? LM_LIVE.LEFT_SHOULDER : LM_LIVE.RIGHT_SHOULDER,
@@ -357,6 +381,10 @@ function Inner() {
                       {inLiftedRef.current ? "lifted" : "ready"}
                     </p>
                   </div>
+                  {sessionPhase === "countdown" && countdown !== null && (
+                    <AutoFlowCountdownOverlay countdown={countdown} />
+                  )}
+                  {sessionPhase === "complete" && <AutoFlowCompleteOverlay />}
                 </RehabCameraShell>
               )}
               sidebar={(
@@ -400,8 +428,15 @@ function Inner() {
                     </div>
                   )}
 
-                  <div className="flex min-h-0 flex-1 flex-col">
-                    {started ? (
+                  {sessionPhase === "countdown" && countdown !== null && (
+                    <AutoFlowCountdownCard
+                      countdown={countdown}
+                      onSkip={skipCountdown}
+                      hint="Patient faces the camera, full body in frame."
+                    />
+                  )}
+                  {(sessionPhase === "live" || sessionPhase === "complete") && (
+                    <div className="flex min-h-0 flex-1 flex-col">
                       <MetronomeShell
                         eventTrigger={eventTrigger}
                         audio={false}
@@ -409,19 +444,13 @@ function Inner() {
                         compact
                         onSnapshot={handleMetronomeSnapshot}
                       />
-                    ) : (
-                      <RehabStartCard
-                        onStart={handleStart}
-                        hint="Position yourself, then press Start. Music and metronome start only after Start."
-                      />
-                    )}
-                  </div>
+                    </div>
+                  )}
 
                   <div className="no-pdf">
-                    <RehabSessionFooter
+                    <AutoFlowFooter
+                      complete={sessionPhase === "complete"}
                       buildPayload={buildRehabPayload}
-                      label="Save session"
-                      compact
                     />
                   </div>
                 </>

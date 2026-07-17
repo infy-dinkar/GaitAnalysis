@@ -23,7 +23,7 @@ import {
 } from "@/lib/posture/analyzer";
 import { PostureReport } from "@/components/posture/PostureReport";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { AutoSaveToast } from "@/components/dashboard/AutoSaveToast";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import {
   buildFrontFindings,
@@ -207,8 +207,10 @@ export function PostureCapture() {
           rightSide={result.right_side ?? null}
         />
 
-        {/* Explicit save button — only renders in doctor flow */}
-        <SaveToPatientButton
+        {/* Auto-save — fires as soon as the report renders (doctor
+            flow only), big banner with a 10s Undo. Same payload the
+            manual button built. */}
+        <AutoSaveToast
           buildPayload={() => buildSavePayload(result, persistedRef.current)}
         />
 

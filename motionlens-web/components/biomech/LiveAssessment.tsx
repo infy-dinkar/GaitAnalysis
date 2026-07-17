@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   AlertTriangle,
+  Camera,
   CheckCircle2,
   Eye,
   Lock,
@@ -11,7 +12,13 @@ import {
 import { LiveBiomechCamera } from "@/components/biomech/LiveBiomechCamera";
 import { AssessmentReport } from "@/components/biomech/AssessmentReport";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
-import { SaveToPatientButton } from "@/components/dashboard/SaveToPatientButton";
+import { AutoSaveToast } from "@/components/dashboard/AutoSaveToast";
+import { LiveModeLayout } from "@/components/live/LiveModeLayout";
+import {
+  AutoFlowCountdownCard,
+  AutoFlowCountdownOverlay,
+} from "@/components/rehab/mechanics/AutoFlowChrome";
+import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { Button } from "@/components/ui/Button";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import { fmt } from "@/lib/utils";
@@ -422,6 +429,23 @@ export function LiveAssessment({
   const [, setVersion] = useState(0);
   const [showResult, setShowResult] = useState(false);
 
+  // ── Auto-flow (fullscreen less-click live mode) ────────────────
+  // One click ("Start Assessment") opens the fullscreen shell; the
+  // camera auto-starts; once frames are flowing a 3-2-1 countdown
+  // runs and capture arms by itself. For rotation tests the countdown
+  // leads into the existing calibration step (baseline lock first,
+  // then measurement) — the sequence is unchanged, only the entry is
+  // automatic. "Show Analysis" still ends the session in the report
+  // view, which auto-saves in the doctor flow.
+  const [liveFullscreen, setLiveFullscreen] = useState<boolean>(false);
+  const [camActive, setCamActive] = useState<boolean>(false);
+  // Capture is armed only after the countdown completes. Gates peak
+  // tracking, compensation-tracker feeds, screenshots, and the
+  // rotation-calibration auto-lock so countdown-phase frames never
+  // leak into the trial. A ref (not state) — read inside the
+  // per-frame callbacks without re-binding them.
+  const armedRef = useRef(false);
+
   // Single source of truth for "calibration done" — used by gating
   // logic so the same code path handles both neck and shoulder.
   const calibrationLocked = isNeckRotation
@@ -430,8 +454,8 @@ export function LiveAssessment({
       ? !!shoulderBaseline
       : true;
 
-  // Doctor-flow context (no-op when accessed publicly). Save happens
-  // explicitly via the SaveToPatientButton inside the report view.
+  // Doctor-flow context (no-op when accessed publicly). Live sessions
+  // auto-save via the AutoSaveToast inside the report view.
   const { isDoctorFlow, patient } = usePatientContext();
 
   // 10 Hz UI sync — pulls latest values from the ref.
@@ -482,6 +506,20 @@ export function LiveAssessment({
       // Lost the subject — clear delta tracking so when frames resume
       // we don't fire a spurious jump-rejection on the first one.
       s.current = null;
+      s.prevAngleForDelta = null;
+      s.prevAngleForDeltaB = null;
+      s.currentDirection = null;
+      return;
+    }
+
+    // ── Auto-flow arming gate ───────────────────────────────
+    // Until the fullscreen countdown finishes, frames drive the
+    // framing/status UI (and the live Current readout) only — no
+    // peak tracking, no compensation-tracker feeds, no screenshots.
+    // The measurement trail starts clean at the countdown→live
+    // transition (see the useRehabAutoFlow onLive callback).
+    if (!armedRef.current) {
+      s.current = data.current_angle;
       s.prevAngleForDelta = null;
       s.prevAngleForDeltaB = null;
       s.currentDirection = null;
@@ -953,6 +991,12 @@ export function LiveAssessment({
   const onSmoothedKeypoints = useCallback(
     (kp: Keypoint[]) => {
       if (!isCalibratedRotation) return;
+      // Auto-flow gate — the calibration step (stable-pose timer +
+      // auto-lock) starts at the countdown→live transition, keeping
+      // the existing sequence: countdown → lock baseline → measure.
+      // The operator's manual "Lock baseline now" button is not
+      // affected (it reads latestKpRef directly).
+      if (!armedRef.current) return;
       // Already calibrated — nothing to do.
       if (isNeckRotation && baseline) return;
       if (isShoulderRotation && shoulderBaseline) return;
@@ -1044,6 +1088,55 @@ export function LiveAssessment({
     setVersion((v) => v + 1);
   }
 
+  // ── Auto-flow countdown ────────────────────────────────────────
+  // Starts only once the fullscreen shell is open AND the camera
+  // stream is actually live — otherwise the 3-2-1 would eat the
+  // getUserMedia permission delay. There is no separate framing gate
+  // today (framing hints are advisory; capture is continuous), so
+  // camActive is the only readiness condition. onLive arms capture:
+  // peaks / screenshots / calibration all start from a clean slate
+  // at that instant.
+  const {
+    phase: flowPhase,
+    countdown,
+    skipCountdown,
+  } = useRehabAutoFlow(liveFullscreen && camActive, () => {
+    armedRef.current = true;
+    const s = stateRef.current;
+    resetPeakState(s);
+    s.calibStableSinceMs = null;
+    s.calibFacingForward = false;
+    keyFramesRef.current.neutralUrl = null;
+    keyFramesRef.current.peakUrl = null;
+    keyFramesRef.current.peakUrlB = null;
+  });
+
+  // Enter the fullscreen auto-flow shell (the single click of the
+  // live mode). Camera auto-starts inside; countdown → capture.
+  function enterLive() {
+    armedRef.current = false;
+    setShowResult(false);
+    setCamActive(false);
+    setLiveFullscreen(true);
+  }
+
+  function exitLive() {
+    armedRef.current = false;
+    resetPeak();
+    setLiveFullscreen(false);
+    setCamActive(false);
+  }
+
+  // "Show Analysis" — ends the live session exactly as before, just
+  // also leaving the fullscreen shell so the report renders in the
+  // normal page flow.
+  function showAnalysis() {
+    armedRef.current = false;
+    setShowResult(true);
+    setLiveFullscreen(false);
+    setCamActive(false);
+  }
+
   // ── derived render values ────────────────────────────────────
   const {
     current,
@@ -1121,7 +1214,18 @@ export function LiveAssessment({
         ? "text-warning"
         : "text-error";
 
-  const liveLayout = (
+  const inCalibrationUi = isCalibratedRotation && !calibrationLocked;
+
+  // Positioning cue under the sidebar countdown — for rotation tests
+  // it primes the patient for the baseline step that follows.
+  const countdownHint = isNeckRotation
+    ? "Patient: face the camera straight ahead, head still — the baseline step starts right after."
+    : isShoulderRotation
+      ? "Patient: tuck the elbow at your side, forearm pointing forward — the baseline step starts right after."
+      : "Stand ~2 m (6 ft) from the camera with the whole limb in frame.";
+
+  // ─── Pre-fullscreen intro — movement context + ONE click ───────
+  const introView = (
     <div className="space-y-10">
       {/* ─── CENTERED TITLE BLOCK ─────────────────────────────── */}
       <div className="text-center">
@@ -1137,7 +1241,7 @@ export function LiveAssessment({
         )}
       </div>
 
-      {/* ─── 2-column layout (instructions+status | camera) ──── */}
+      {/* ─── 2-column layout (instructions | one-click start) ──── */}
       <div className="grid items-start gap-8 lg:grid-cols-[2fr_3fr]">
         {/* ─── LEFT ────────────────────────────────────────────── */}
         <div className="space-y-5">
@@ -1169,6 +1273,43 @@ export function LiveAssessment({
             </ol>
           </div>
         )}
+        </div>
+
+        {/* ─── RIGHT: one-click start ──────────────────────────── */}
+        <div className="space-y-4">
+          <div className="rounded-card border border-border bg-surface p-6 text-center">
+            <p className="text-sm text-muted">
+              One click — the camera opens fullscreen, a 3-2-1 countdown
+              runs, and capture starts by itself.{" "}
+              {isCalibratedRotation
+                ? "The baseline step runs first (hold the neutral pose until it locks), then perform the movement and click Show Analysis at the peak."
+                : "Perform the movement, then click Show Analysis at the peak."}
+            </p>
+            <div className="mt-4 flex justify-center">
+              <Button onClick={enterLive}>
+                <Camera className="h-4 w-4" />
+                Start Assessment
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ─── Unified report disclaimer ──────────────────────────── */}
+      <ReportDisclaimer />
+    </div>
+  );
+
+  // ─── Fullscreen sidebar — countdown / live status / controls ────
+  const fullscreenSidebar = (
+    <>
+      {flowPhase === "countdown" && countdown !== null && (
+        <AutoFlowCountdownCard
+          countdown={countdown}
+          onSkip={skipCountdown}
+          hint={countdownHint}
+        />
+      )}
 
         <div className="rounded-card border border-border bg-surface p-5">
           <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
@@ -1389,7 +1530,7 @@ export function LiveAssessment({
 
           <div className="mt-5 flex gap-2">
             <Button
-              onClick={() => setShowResult(true)}
+              onClick={showAnalysis}
               disabled={!hasAnyPeak || (isCalibratedRotation && !calibrationLocked)}
               className="flex-1"
             >
@@ -1406,11 +1547,16 @@ export function LiveAssessment({
             </Button>
           </div>
         </div>
+    </>
+  );
 
-      </div>
-
-      {/* ─── RIGHT: camera + skeleton (sticky so it tracks the user as they scroll) ─── */}
-      <div className="lg:sticky lg:top-28">
+  // ─── Fullscreen live shell — camera left, status sidebar right ──
+  const fullscreenView = (
+    <LiveModeLayout
+      title={movementLabel}
+      subtitle={side ? `${description} · Side: ${side}` : description}
+      onExit={exitLive}
+      camera={(
         <LiveBiomechCamera
           bodyPart={bodyPart}
           movement={movementId}
@@ -1420,17 +1566,45 @@ export function LiveAssessment({
           neckRotationBaseline={isNeckRotation ? baseline : null}
           shoulderRotationBaseline={isShoulderRotation ? shoulderBaseline : null}
           onSmoothedKeypoints={isCalibratedRotation ? onSmoothedKeypointsTracked : undefined}
-        />
-        <p className="mt-3 text-xs text-subtle">
-          Start the camera and perform the movement. The on-screen skeleton tracks
-          your joints in real time — keep the relevant limbs inside the frame.
-        </p>
-        </div>
-      </div>
-
-      {/* ─── Unified report disclaimer ──────────────────────────── */}
-      <ReportDisclaimer />
-    </div>
+          autoStart
+          hideControls
+          fill
+          onActiveChange={setCamActive}
+        >
+          {!camActive && (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <p className="rounded-full bg-black/60 px-4 py-2 text-sm text-white/80">
+                Starting camera…
+              </p>
+            </div>
+          )}
+          {flowPhase === "countdown" && countdown !== null && (
+            <AutoFlowCountdownOverlay
+              countdown={countdown}
+              label={isCalibratedRotation ? "Baseline step in" : "Capture starts in"}
+            />
+          )}
+          {flowPhase === "live" && (
+            <div className="absolute left-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+              <p className="text-[10px] uppercase tracking-[0.14em] text-emerald-300">
+                {inCalibrationUi ? "Step 1 — lock baseline" : "● Capturing"}
+              </p>
+              <p className="tabular text-2xl font-semibold text-white">
+                {current !== null ? `${fmt(Math.abs(current), 1)}°` : "—"}
+              </p>
+              {!inCalibrationUi && (
+                <p className="tabular text-[10px] text-white/70">
+                  {isMergedMovement
+                    ? `${primaryLabel ?? "A"} ${hasPeak ? `${fmt(peakMag, 1)}°` : "—"} · ${secondaryLabel ?? "B"} ${hasPeakB ? `${fmt(peakMagB, 1)}°` : "—"}`
+                    : `Peak ${hasPeak ? `${fmt(peakMag, 1)}°` : "—"}`}
+                </p>
+              )}
+            </div>
+          )}
+        </LiveBiomechCamera>
+      )}
+      sidebar={fullscreenSidebar}
+    />
   );
 
   if (showResult && hasAnyPeak) {
@@ -1526,8 +1700,12 @@ export function LiveAssessment({
           }
         />
 
-        {/* Explicit save button — only renders in doctor flow */}
-        <SaveToPatientButton
+        {/* Live sessions auto-save in the doctor flow (toast with a
+            10s undo). Fires once on mount of the report view — i.e.
+            exactly when today's manual save became available. No-op
+            in the public flow. Payload identical to the previous
+            SaveToPatientButton. */}
+        <AutoSaveToast
           buildPayload={() => ({
             module: "biomech",
             body_part: bodyPart,
@@ -1609,7 +1787,10 @@ export function LiveAssessment({
     );
   }
 
-  // Pre-result view — gentle reminder banner if doctor flow
+  // Pre-result view — fullscreen capture shell once started; intro
+  // (instructions + one-click start, with the doctor-flow reminder
+  // banner) otherwise.
+  if (liveFullscreen) return fullscreenView;
   return (
     <>
       {isDoctorFlow && (
@@ -1617,7 +1798,7 @@ export function LiveAssessment({
           <SaveStatusBanner patient={patient} saveStatus={null} />
         </div>
       )}
-      {liveLayout}
+      {introView}
     </>
   );
 }
