@@ -28,6 +28,7 @@ import { GoalVsActualBar } from "@/components/rehab/report/GoalVsActualBar";
 import { PercentRing } from "@/components/rehab/report/PercentRing";
 import { TargetVsValue } from "@/components/rehab/report/TargetVsValue";
 import { DurationChip } from "@/components/rehab/report/DurationChip";
+import { toDisplayKneeAngle } from "@/lib/rehab/kneeAngleDisplay";
 
 interface Props {
   patientName: string | null;
@@ -40,7 +41,12 @@ interface Props {
 interface SignalBlock {
   name: string;
   unit: string;
-  value_at_peak: number;
+  // Nullable: knee_flexion sessions where the min-tracker gate never
+  // opened (patient never left the standing window, or every deep
+  // frame was clamped as a glitch) persist `null` instead of a fake
+  // 0° reading. Every downstream renderer branches on null → "Not
+  // captured" instead of "0 deg / Outside band".
+  value_at_peak: number | null;
   target_band?: { min: number; max: number };
 }
 interface ScoreBlock {
@@ -120,7 +126,11 @@ export function SavedRehabReport({
     ? {
         name: pickString(signalRaw, "name") ?? "Metric",
         unit: pickString(signalRaw, "unit") ?? "",
-        value_at_peak: pickNumber(signalRaw, "value_at_peak") ?? 0,
+        // Preserve null; do NOT coerce to 0 — 0 would collide with the
+        // legitimate 0° flexion (patient at full standing) and, more
+        // importantly, would render "Outside band" instead of
+        // "Not captured".
+        value_at_peak: pickNumber(signalRaw, "value_at_peak"),
         target_band: (() => {
           const b = pickObject(signalRaw, "target_band");
           const mn = pickNumber(b, "min");
@@ -198,12 +208,7 @@ export function SavedRehabReport({
       {/* Clinical metric card — target-band vs value visual for any
           mechanic that ships signal + target_band. */}
       {signal && (
-        <ClinicalMetricCard
-          signalName={signal.name}
-          unit={signal.unit}
-          valueAtPeak={signal.value_at_peak}
-          band={signal.target_band}
-        />
+        <ClinicalMetricCard signal={signal} />
       )}
 
       {/* Best-rep skeleton — redrawn from saved landmark coords onto
@@ -390,16 +395,19 @@ function RepCountSummary({
           subtext={`${goodReps} clean / ${reps} total`}
         />
       </div>
-      {signal && (
-        <div className="mt-4">
-          <TargetVsValue
-            label={humanizeSignal(signal.name)}
-            value={signal.value_at_peak}
-            unit={signal.unit}
-            band={signal.target_band}
-          />
-        </div>
-      )}
+      {signal && (() => {
+        const disp = resolveSignalDisplay(signal);
+        return (
+          <div className="mt-4">
+            <TargetVsValue
+              label={disp.label}
+              value={disp.value}
+              unit={signal.unit}
+              band={disp.band}
+            />
+          </div>
+        );
+      })()}
     </section>
   );
 }
@@ -451,16 +459,19 @@ function HoldInZoneSummary({
           tone="emerald"
         />
       </div>
-      {signal && (
-        <div className="mt-4">
-          <TargetVsValue
-            label={humanizeSignal(signal.name)}
-            value={signal.value_at_peak}
-            unit={signal.unit}
-            band={signal.target_band}
-          />
-        </div>
-      )}
+      {signal && (() => {
+        const disp = resolveSignalDisplay(signal);
+        return (
+          <div className="mt-4">
+            <TargetVsValue
+              label={disp.label}
+              value={disp.value}
+              unit={signal.unit}
+              band={disp.band}
+            />
+          </div>
+        );
+      })()}
     </section>
   );
 }
@@ -506,16 +517,19 @@ function TargetReachSummary({
           Hit / miss counts weren&apos;t recorded on this older session — see peak reach below.
         </div>
       )}
-      {signal && (
-        <div className="mt-4">
-          <TargetVsValue
-            label={humanizeSignal(signal.name)}
-            value={signal.value_at_peak}
-            unit={signal.unit}
-            band={signal.target_band}
-          />
-        </div>
-      )}
+      {signal && (() => {
+        const disp = resolveSignalDisplay(signal);
+        return (
+          <div className="mt-4">
+            <TargetVsValue
+              label={disp.label}
+              value={disp.value}
+              unit={signal.unit}
+              band={disp.band}
+            />
+          </div>
+        );
+      })()}
     </section>
   );
 }
@@ -773,6 +787,35 @@ function humanizeSignal(name: string): string {
   return name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+/**
+ * Resolve the label / value / band to render for a persisted signal.
+ * Knee signals (both the old "knee_interior" and the new
+ * "knee_flexion") are normalised to the flexion display convention
+ * via `toDisplayKneeAngle`. Any other signal passes through with its
+ * original values so unrelated mechanics stay untouched.
+ */
+function resolveSignalDisplay(signal: SignalBlock): {
+  label: string;
+  value: number | null;
+  band: { min: number; max: number } | undefined;
+} {
+  const knee = toDisplayKneeAngle(signal);
+  if (knee) {
+    return {
+      label: knee.label,
+      // Preserve null — do not coerce to 0. Renderers below branch
+      // on null to show "Not captured" instead of a fake reading.
+      value: knee.value,
+      band: knee.band ?? undefined,
+    };
+  }
+  return {
+    label: humanizeSignal(signal.name),
+    value: signal.value_at_peak,
+    band: signal.target_band,
+  };
+}
+
 interface SkeletonPoseCardProps {
   raw: Record<string, unknown> | null;
 }
@@ -858,22 +901,20 @@ function SkeletonPoseCard({ raw }: SkeletonPoseCardProps) {
 }
 
 interface ClinicalMetricCardProps {
-  signalName: string;
-  unit: string;
-  valueAtPeak: number;
-  band?: { min: number; max: number };
+  signal: SignalBlock;
 }
 
-function ClinicalMetricCard({
-  signalName,
-  unit,
-  valueAtPeak,
-  band,
-}: ClinicalMetricCardProps) {
-  const humanName = signalName.replace(/_/g, " ").replace(
-    /\b\w/g,
-    (c) => c.toUpperCase(),
-  );
+function ClinicalMetricCard({ signal }: ClinicalMetricCardProps) {
+  // Route through the shared knee-angle normaliser so both old
+  // (knee_interior) and new (knee_flexion) sessions render under
+  // the same "Knee angle (°)" label with the same flexion values.
+  // Non-knee signals fall through with humanised name + raw values.
+  const disp = resolveSignalDisplay(signal);
+  const humanName = disp.label;
+  const valueAtPeak = disp.value;
+  const band = disp.band;
+  const unit = signal.unit;
+  const hasValue = valueAtPeak !== null && Number.isFinite(valueAtPeak);
 
   return (
     <section>
@@ -889,10 +930,18 @@ function ClinicalMetricCard({
             Best value
           </p>
           <p className="mt-1 tabular text-4xl font-semibold text-foreground">
-            {valueAtPeak.toFixed(1)}
-            <span className="ml-1 text-lg font-normal text-muted">
-              {unit}
-            </span>
+            {hasValue ? (
+              <>
+                {valueAtPeak!.toFixed(1)}
+                <span className="ml-1 text-lg font-normal text-muted">
+                  {unit}
+                </span>
+              </>
+            ) : (
+              <span className="text-lg font-medium text-muted">
+                Not captured
+              </span>
+            )}
           </p>
           {band && (
             <div className="mt-3">

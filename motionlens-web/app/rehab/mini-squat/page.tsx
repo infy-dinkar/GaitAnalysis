@@ -19,7 +19,7 @@
 //
 // NO biomech file modified — computeKneeAngle imported as-is.
 
-import { Suspense, useCallback, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -79,6 +79,17 @@ function Inner() {
   const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
   const lastKpRef = useRef<PoseSnapshot | null>(null);
 
+  // Reset every session-scoped ref when the operator picks a side
+  // (session start) OR clears it (Change side / Exit). Prevents
+  // pre-session framing noise from carrying into the payload.
+  useEffect(() => {
+    peakInteriorRef.current = 180;
+    bestPoseRef.current = null;
+    lastKpRef.current = null;
+    snapshotRef.current = null;
+    if (side !== null) sessionStartRef.current = performance.now();
+  }, [side]);
+
   const handleFrame = useCallback(
     (kp: Keypoint[], video: HTMLVideoElement) => {
       if (!side) return;
@@ -92,12 +103,16 @@ function Inner() {
       if (flexion !== null) {
         const interiorAngle = 180 - flexion;
         setInterior(interiorAngle);
-        if (interiorAngle < peakInteriorRef.current) {
+        // Self-contained tracker gate — see squat/page.tsx for the
+        // full rationale (top-5° = "left the standing window", ≥40°
+        // = physical sanity clamp).
+        if (
+          interiorAngle < MINI_SQUAT_CONFIG.topThreshold - 5
+          && interiorAngle >= 40
+          && interiorAngle < peakInteriorRef.current
+        ) {
           peakInteriorRef.current = interiorAngle;
-          if (
-            interiorAngle <= MINI_SQUAT_CONFIG.topThreshold
-            && lastKpRef.current
-          ) {
+          if (lastKpRef.current) {
             bestPoseRef.current = {
               landmarks: lastKpRef.current.landmarks,
               source_frame: lastKpRef.current.source_frame,
@@ -125,18 +140,48 @@ function Inner() {
     const score = snap?.score ?? { points: 0, streak: 0, bestStreak: 0 };
     const reps = state?.reps ?? 0;
     const goodReps = state?.goodReps ?? 0;
-    const interpretation = reps > 0
-      ? `${reps} mini-squat rep${reps === 1 ? "" : "s"} completed`
-        + (goodReps !== reps ? `, ${goodReps} clean` : ", all clean")
-        + `. Deepest knee interior: ${peakInteriorRef.current.toFixed(0)}°.`
-      : "Session ended before any reps were counted.";
-    const skeletonPose = buildSkeletonPosePayload(
-      bestPoseRef.current,
-      lastKpRef.current,
-      peakInteriorRef.current,
-      side,
-      `Deepest mini-squat — ${peakInteriorRef.current.toFixed(0)}° knee interior`,
-    );
+    // Interpretation + payload use FLEXION display convention
+    // (0° standing, higher = deeper). Engine feed still runs on
+    // interior — see lib/rehab/kneeAngleDisplay.js.
+    const captured = peakInteriorRef.current < 180;
+    const deepestFlexionDeg = captured ? 180 - peakInteriorRef.current : null;
+    const interpretation = captured
+      ? (reps > 0
+          ? `${reps} mini-squat rep${reps === 1 ? "" : "s"} completed`
+            + (goodReps !== reps ? `, ${goodReps} clean` : ", all clean")
+            + `. Deepest knee angle: ${deepestFlexionDeg!.toFixed(0)}°.`
+          : `Deepest knee angle: ${deepestFlexionDeg!.toFixed(0)}°.`)
+      : (reps > 0
+          ? `${reps} mini-squat rep${reps === 1 ? "" : "s"} counted. Knee depth not captured.`
+          : "Knee depth not captured.");
+    // Skeleton pose: inline construction so we can persist the
+    // deepest-frame angle in FLEXION convention (the report reads
+    // it that way) and set angle: null on the standing-fallback
+    // path — a fallback frame must never be labelled with a depth
+    // number. Non-knee rehab pages still use the shared helper.
+    const best = captured ? bestPoseRef.current : null;
+    const fallback = lastKpRef.current;
+    const skeletonPose = best
+      ? {
+          landmarks: best.landmarks,
+          source_frame: best.source_frame,
+          angle: 180 - best.angle,
+          angle_convention: "flexion" as const,
+          captured_at_ms: best.capturedAtMs,
+          side,
+          label: `Deepest mini-squat — ${deepestFlexionDeg!.toFixed(0)}° knee angle`,
+        }
+      : fallback
+        ? {
+            landmarks: fallback.landmarks,
+            source_frame: fallback.source_frame,
+            angle: null,
+            angle_convention: "flexion" as const,
+            captured_at_ms: performance.now(),
+            side,
+            label: "Knee depth not captured",
+          }
+        : null;
     return {
       module: "rehab" as const,
       movement: "mini-squat",
@@ -149,12 +194,13 @@ function Inner() {
         score,
         mechanic_state: state,
         signal: {
-          name: "knee_interior",
+          name: "knee_flexion",
           unit: "deg",
-          value_at_peak: peakInteriorRef.current,
+          // null when the tracker gate never opened this session.
+          value_at_peak: captured ? deepestFlexionDeg : null,
           target_band: {
-            min: MINI_SQUAT_CONFIG.depthThreshold,
-            max: MINI_SQUAT_CONFIG.topThreshold,
+            min: 180 - MINI_SQUAT_CONFIG.topThreshold,
+            max: 180 - MINI_SQUAT_CONFIG.depthThreshold,
           },
         },
         target_reps: TARGET_REPS,
@@ -249,7 +295,8 @@ function Inner() {
                   <div className="flex min-h-0 flex-1 flex-col">
                     <RepCountShell
                       signal={interior}
-                      signalLabel={`${side === "left" ? "L" : "R"} knee (°)`}
+                      signalLabel="Knee angle (°)"
+                      signalDisplayName="knee_interior"
                       targetReps={TARGET_REPS}
                       config={MINI_SQUAT_CONFIG}
                       onSnapshot={handleSnapshot}

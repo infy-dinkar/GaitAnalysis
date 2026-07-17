@@ -42,6 +42,10 @@ import {
   computeCompletionByWeek,
 } from "@/lib/rehab/adherence";
 import {
+  toDisplayKneeAngle,
+  KNEE_ANGLE_DISPLAY_LABEL,
+} from "@/lib/rehab/kneeAngleDisplay";
+import {
   deleteReport,
   getReport,
   listPatientReports,
@@ -1047,17 +1051,38 @@ function CompletionOverTimeChart({ buckets }: { buckets: DailyBucket[] }) {
 
 function ProgressTrendChart({ sessions }: { sessions: MetricSession[] }) {
   // Group by date; average signal.value_at_peak per day.
+  //
+  // CRITICAL: normalise each session's signal through
+  // `toDisplayKneeAngle` BEFORE bucketing. Sessions written before
+  // this migration hold interior values (~110 for a deep squat);
+  // sessions written after hold flexion values (~70). Averaging the
+  // raw numbers would draw a spurious cliff in the trend on the day
+  // the migration shipped. Normalising both to the flexion display
+  // convention keeps the line smooth. Non-knee signals fall through
+  // with their original values so unrelated exercises stay
+  // untouched.
   const map = new Map<string, { sum: number; count: number; unit: string; name: string | null }>();
   for (const s of sessions) {
-    const v = s.metrics.signalValueAtPeak;
+    const rawV = s.metrics.signalValueAtPeak;
+    const rawName = s.metrics.signalName;
+    const rawUnit = s.metrics.signalUnit;
+    const knee = rawName
+      ? toDisplayKneeAngle({
+          name: rawName,
+          unit: rawUnit,
+          value_at_peak: rawV ?? undefined,
+        })
+      : null;
+    const v = knee ? knee.value : rawV;
     if (v === null) continue;
+    const displayName = knee ? KNEE_ANGLE_DISPLAY_LABEL : rawName;
     const bucket = map.get(s.createdDateLocal) ?? {
-      sum: 0, count: 0, unit: s.metrics.signalUnit, name: s.metrics.signalName,
+      sum: 0, count: 0, unit: rawUnit, name: displayName,
     };
     bucket.sum += v;
     bucket.count += 1;
-    bucket.unit = s.metrics.signalUnit || bucket.unit;
-    bucket.name = s.metrics.signalName || bucket.name;
+    bucket.unit = rawUnit || bucket.unit;
+    bucket.name = displayName || bucket.name;
     map.set(s.createdDateLocal, bucket);
   }
   const entries = Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b));
