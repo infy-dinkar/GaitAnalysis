@@ -1,13 +1,20 @@
 "use client";
 // Biomech Auto Mode — sequence runner.
 //
-// Reads the queue + duration from the URL and mounts LiveAssessment
-// for one step at a time, with a countdown timer that auto-advances
-// to the next step. Between steps a short "get ready" overlay
-// counts down 3-2-1 before mounting the next assessment so the
-// patient has time to re-position.
+// Reads the queue from the URL and mounts LiveAssessment for one
+// step at a time. COMPLETION-DRIVEN, no timer: each step runs until
+// the patient finishes the 5-rep cycle target (LiveAssessment's own
+// counter — merged tests need both directions), the report renders
+// + auto-saves, then a short "next test" countdown advances the
+// queue. The operator's Skip / Show Analysis remain the manual
+// exits for a stuck step. (The legacy ?d= duration param is
+// accepted but ignored.)
 //
-// Additive: LiveAssessment is used as-is; no engine changes.
+// Every step passes the FULL movement definition (merged, both
+// direction labels, secondary target) looked up from the same
+// per-joint catalogs the standalone /biomech/{joint}/live pages use
+// — so merged tests capture BOTH angles here exactly like normal
+// mode, not just a single peak.
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -23,9 +30,49 @@ import {
   decodeQueue,
   stepTitle,
   type AutoStep,
+  type Joint,
 } from "@/lib/biomech/autoModeCatalog";
+import { SHOULDER_MOVEMENTS } from "@/lib/biomech/shoulder";
+import { NECK_MOVEMENTS } from "@/lib/biomech/neck";
+import { KNEE_MOVEMENTS } from "@/lib/biomech/knee";
+import { HIP_MOVEMENTS } from "@/lib/biomech/hip";
+import { ANKLE_MOVEMENTS } from "@/lib/biomech/ankle-live";
+import { deleteReport } from "@/lib/reports";
 
 const READY_COUNTDOWN_SEC = 3;
+// Pause between a completed report and the next step — long enough
+// to glance at the result + the auto-save banner.
+const NEXT_COUNTDOWN_SEC = 8;
+
+// ── Full movement lookup ─────────────────────────────────────────
+// The auto-mode catalog stores only id/label/target (picker
+// metadata). The capture needs the movement's FULL definition —
+// merged flag, per-direction labels, secondary target — exactly as
+// the standalone live pages pass it. Same source catalogs.
+interface FullMovementDef {
+  id: string;
+  label: string;
+  description: string;
+  target: [number, number];
+  merged?: boolean;
+  primaryLabel?: string;
+  secondaryLabel?: string;
+  secondaryTarget?: [number, number];
+}
+
+const CATALOG_BY_JOINT: Record<Joint, ReadonlyArray<FullMovementDef>> = {
+  shoulder: SHOULDER_MOVEMENTS as ReadonlyArray<FullMovementDef>,
+  neck: NECK_MOVEMENTS as ReadonlyArray<FullMovementDef>,
+  knee: KNEE_MOVEMENTS as ReadonlyArray<FullMovementDef>,
+  hip: HIP_MOVEMENTS as ReadonlyArray<FullMovementDef>,
+  ankle: ANKLE_MOVEMENTS as unknown as ReadonlyArray<FullMovementDef>,
+};
+
+function fullMovement(step: AutoStep): FullMovementDef | null {
+  return (
+    CATALOG_BY_JOINT[step.joint]?.find((m) => m.id === step.movementId) ?? null
+  );
+}
 
 export default function BiomechAutoRunPage() {
   return (
@@ -47,23 +94,49 @@ function Inner() {
   const router = useRouter();
   const params = useSearchParams();
   const queueRaw = params.get("q") ?? "";
-  const durationRaw = params.get("d") ?? "60";
   const patientId = params.get("patientId");
   const qs = patientId ? `?patientId=${patientId}` : "";
 
   const queue = useMemo(() => decodeQueue(queueRaw), [queueRaw]);
-  const duration = useMemo(() => {
-    const n = parseInt(durationRaw, 10);
-    return Number.isFinite(n) && n > 0 ? n : 60;
-  }, [durationRaw]);
 
   const [stepIdx, setStepIdx] = useState(0);
-  const [phase, setPhase] = useState<"ready" | "running" | "done">("ready");
+  // Bumped on every retest — part of the LiveAssessment key so the
+  // step remounts completely fresh (camera auto-starts again).
+  const [attempt, setAttempt] = useState(0);
+  const [phase, setPhase] = useState<"ready" | "running" | "nexting" | "done">(
+    "ready",
+  );
   const [readyLeft, setReadyLeft] = useState(READY_COUNTDOWN_SEC);
-  const [runLeft, setRunLeft] = useState(duration);
+  const [nextLeft, setNextLeft] = useState(NEXT_COUNTDOWN_SEC);
   const [paused, setPaused] = useState(false);
 
+  // ── Retest bookkeeping ──────────────────────────────────────
+  // Each mounted attempt is identified by "stepIdx:attempt". A
+  // retest discards that attempt's auto-saved report: if the save
+  // already landed we delete it now; if it lands late (save is
+  // async) the instance is in `retestedRef` and handleSaved deletes
+  // it on arrival. Reports from ADVANCED (kept) steps are never
+  // touched.
+  const currentInstRef = useRef("0:0");
+  useEffect(() => {
+    currentInstRef.current = `${stepIdx}:${attempt}`;
+  }, [stepIdx, attempt]);
+  const retestedRef = useRef<Set<string>>(new Set());
+  const lastReportIdRef = useRef<string | null>(null);
+
+  const handleSaved = useCallback((reportId: string, inst: string) => {
+    if (retestedRef.current.has(inst)) {
+      // Save landed after the operator already discarded the attempt.
+      deleteReport(reportId).catch(() => { /* already gone — fine */ });
+      return;
+    }
+    if (inst === currentInstRef.current) {
+      lastReportIdRef.current = reportId;
+    }
+  }, []);
+
   const advance = useCallback(() => {
+    lastReportIdRef.current = null; // advanced step's report is KEPT
     setStepIdx((prev) => {
       const next = prev + 1;
       if (next >= queue.length) {
@@ -72,10 +145,33 @@ function Inner() {
       }
       setPhase("ready");
       setReadyLeft(READY_COUNTDOWN_SEC);
-      setRunLeft(duration);
+      setNextLeft(NEXT_COUNTDOWN_SEC);
       return next;
     });
-  }, [queue.length, duration]);
+  }, [queue.length]);
+
+  // Retest the CURRENT step: delete this attempt's auto-saved
+  // report, then remount the step fresh (get-ready → camera →
+  // countdown → capture).
+  const retest = useCallback(() => {
+    const inst = currentInstRef.current;
+    retestedRef.current.add(inst);
+    const id = lastReportIdRef.current;
+    lastReportIdRef.current = null;
+    if (id) deleteReport(id).catch(() => { /* already undone — fine */ });
+    setAttempt((a) => a + 1);
+    setPhase("ready");
+    setReadyLeft(READY_COUNTDOWN_SEC);
+    setNextLeft(NEXT_COUNTDOWN_SEC);
+  }, []);
+
+  // Step completed (rep target hit or manual Show Analysis) — the
+  // report + auto-save banner are on screen. Give the operator a
+  // beat to see them, then advance.
+  const handleStepCompleted = useCallback(() => {
+    setNextLeft(NEXT_COUNTDOWN_SEC);
+    setPhase((p) => (p === "running" ? "nexting" : p));
+  }, []);
 
   // ── Ready countdown ─────────────────────────────────────────
   useEffect(() => {
@@ -83,23 +179,22 @@ function Inner() {
     if (queue.length === 0) return;
     if (readyLeft <= 0) {
       setPhase("running");
-      setRunLeft(duration);
       return;
     }
     const id = window.setTimeout(() => setReadyLeft((n) => n - 1), 1000);
     return () => window.clearTimeout(id);
-  }, [phase, paused, readyLeft, duration, queue.length]);
+  }, [phase, paused, readyLeft, queue.length]);
 
-  // ── Run countdown ───────────────────────────────────────────
+  // ── Next-step countdown (report on screen) ──────────────────
   useEffect(() => {
-    if (phase !== "running" || paused) return;
-    if (runLeft <= 0) {
+    if (phase !== "nexting" || paused) return;
+    if (nextLeft <= 0) {
       advance();
       return;
     }
-    const id = window.setTimeout(() => setRunLeft((n) => n - 1), 1000);
+    const id = window.setTimeout(() => setNextLeft((n) => n - 1), 1000);
     return () => window.clearTimeout(id);
-  }, [phase, paused, runLeft, advance]);
+  }, [phase, paused, nextLeft, advance]);
 
   const currentStep: AutoStep | null =
     queue.length > 0 && stepIdx < queue.length ? queue[stepIdx] : null;
@@ -179,110 +274,88 @@ function Inner() {
           countdown={readyLeft}
         />
       )}
-      {phase === "running" && currentStep && (
-        <div
-          className="mt-8"
-          key={`${stepIdx}-${currentStep.joint}-${currentStep.movementId}-${currentStep.side ?? "x"}`}
-        >
-          <LiveAssessment
-            bodyPart={currentStep.joint}
-            movementId={currentStep.movementId}
-            movementLabel={stepTitle(currentStep)}
-            description={currentStep.description}
-            target={currentStep.target}
-            side={currentStep.side ?? undefined}
-          />
-        </div>
-      )}
+      {(phase === "running" || phase === "nexting") && currentStep && (() => {
+        // Full movement definition from the SAME catalog the
+        // standalone live page uses — merged tests get both
+        // directions (labels + secondary target), so both angles
+        // are captured, not just one peak.
+        const move = fullMovement(currentStep);
+        const inst = `${stepIdx}:${attempt}`;
+        return (
+          <div
+            className="mt-8"
+            key={`${inst}-${currentStep.joint}-${currentStep.movementId}-${currentStep.side ?? "x"}`}
+          >
+            <LiveAssessment
+              bodyPart={currentStep.joint}
+              movementId={currentStep.movementId}
+              movementLabel={stepTitle(currentStep)}
+              movementName={move?.label ?? currentStep.movementLabel}
+              description={move?.description ?? currentStep.description}
+              target={move?.target ?? currentStep.target}
+              side={currentStep.side ?? undefined}
+              merged={move?.merged}
+              primaryLabel={move?.primaryLabel}
+              secondaryLabel={move?.secondaryLabel}
+              secondaryTarget={move?.secondaryTarget}
+              autoEnter
+              onCompleted={handleStepCompleted}
+              onRetest={retest}
+              onSaved={(id) => handleSaved(id, inst)}
+            />
+          </div>
+        );
+      })()}
 
-      {/* Fixed circular countdown — pinned bottom-right so it stays
-          visible while the patient is doing the movement. Uses an
-          SVG ring that drains as the second-hand ticks. Only
-          rendered during the running phase — the "get ready"
-          countdown is rendered inline inside ReadyOverlay. */}
-      {phase === "running" && (
-        <FloatingCountdown
-          value={runLeft}
-          total={duration}
-          paused={paused}
-        />
+      {/* "Test complete → next" card — pinned bottom-right while the
+          finished report (+ auto-save banner) is on screen. */}
+      {phase === "nexting" && (
+        <div className="fixed bottom-6 right-6 z-40 w-72 rounded-card border border-emerald-500/40 bg-background/95 p-4 shadow-2xl backdrop-blur">
+          <p className="inline-flex items-center gap-1.5 text-sm font-semibold text-foreground">
+            <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+            Test complete
+          </p>
+          <p className="mt-1 text-xs text-muted">
+            {stepIdx + 1 < queue.length ? (
+              <>
+                Next: <span className="text-foreground">{stepTitle(queue[stepIdx + 1])}</span>{" "}
+                in <span className="tabular font-semibold text-accent">{nextLeft}s</span>
+              </>
+            ) : (
+              <>
+                Finishing in{" "}
+                <span className="tabular font-semibold text-accent">{nextLeft}s</span>
+              </>
+            )}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button size="sm" onClick={advance}>
+              <SkipForward className="h-4 w-4" />
+              {stepIdx + 1 < queue.length ? "Next now" : "Finish now"}
+            </Button>
+            <Button variant="secondary" size="sm" onClick={retest}>
+              <RotateCcw className="h-4 w-4" />
+              Retest
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setPaused((p) => !p)}
+            >
+              {paused ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
+              {paused ? "Resume" : "Hold"}
+            </Button>
+          </div>
+          <p className="mt-2 text-[10px] text-muted">
+            Retest discards this attempt&apos;s saved report and runs
+            the same test again.
+          </p>
+        </div>
       )}
     </>
   );
 }
 
-function FloatingCountdown({
-  value,
-  total,
-  paused,
-}: {
-  value: number;
-  total: number;
-  paused: boolean;
-}) {
-  const size = 84;
-  const stroke = 6;
-  const r = (size - stroke) / 2;
-  const c = 2 * Math.PI * r;
-  const pct = Math.max(0, Math.min(1, value / total));
-  const dashOffset = c * (1 - pct);
-  // Late-game colour ramp — green > 50%, amber 20-50%, red < 20%.
-  const ringColor =
-    pct > 0.5
-      ? "rgb(34, 197, 94)"
-      : pct > 0.2
-        ? "rgb(251, 191, 36)"
-        : "rgb(248, 113, 113)";
-  return (
-    <div className="pointer-events-none fixed bottom-6 right-6 z-40">
-      <div
-        className="pointer-events-auto flex items-center justify-center rounded-full border border-border bg-background/85 shadow-2xl backdrop-blur"
-        style={{ width: size + 8, height: size + 8 }}
-        aria-label="Countdown timer"
-      >
-        <svg
-          width={size}
-          height={size}
-          viewBox={`0 0 ${size} ${size}`}
-          className={paused ? "opacity-60" : ""}
-        >
-          <circle
-            cx={size / 2}
-            cy={size / 2}
-            r={r}
-            fill="none"
-            stroke="rgba(255,255,255,0.10)"
-            strokeWidth={stroke}
-          />
-          <circle
-            cx={size / 2}
-            cy={size / 2}
-            r={r}
-            fill="none"
-            stroke={ringColor}
-            strokeWidth={stroke}
-            strokeLinecap="round"
-            strokeDasharray={c}
-            strokeDashoffset={dashOffset}
-            transform={`rotate(-90 ${size / 2} ${size / 2})`}
-            style={{ transition: "stroke-dashoffset 900ms linear, stroke 300ms" }}
-          />
-          <text
-            x="50%"
-            y="50%"
-            dominantBaseline="central"
-            textAnchor="middle"
-            fill="currentColor"
-            className="tabular fill-foreground"
-            style={{ fontSize: 22, fontWeight: 700 }}
-          >
-            {value}
-          </text>
-        </svg>
-      </div>
-    </div>
-  );
-}
 
 function ReadyOverlay({
   step,
@@ -334,8 +407,9 @@ function DoneScreen({
         </h1>
         <p className="mt-2 text-sm text-muted">
           Ran {queue.length} test{queue.length === 1 ? "" : "s"} back to
-          back. Peak angles + any flagged compensations were tracked
-          per test — save each below or head back to run a new set.
+          back. Each completed test&apos;s angles (both directions on
+          merged tests) + flagged compensations were captured and
+          auto-saved to the patient record as it finished.
         </p>
 
         <ul className="mt-6 space-y-2 text-left">

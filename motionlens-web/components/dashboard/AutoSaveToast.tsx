@@ -34,6 +34,10 @@ interface Props {
    *  where a naive re-mount would file a duplicate report. Undo
    *  clears the key so the doctor can re-save deliberately. */
   dedupeKey?: string;
+  /** Notified with the created report id after a successful save —
+   *  lets flows that can discard an attempt (Auto Mode retest)
+   *  delete the superseded report. */
+  onSaved?: (reportId: string) => void;
 }
 
 const DEDUPE_PREFIX = "motionlens.autosaved:";
@@ -46,12 +50,14 @@ type State =
   | { kind: "error"; message: string }
   | { kind: "dismissed" };
 
-export function AutoSaveToast({ buildPayload, undoSeconds = 10, dedupeKey }: Props) {
+export function AutoSaveToast({ buildPayload, undoSeconds = 10, dedupeKey, onSaved }: Props) {
   const { isDoctorFlow, patient, patientId, saveReport } = usePatientContext();
   const [state, setState] = useState<State>({ kind: "saving" });
   const firedRef = useRef(false);
   const buildPayloadRef = useRef(buildPayload);
   buildPayloadRef.current = buildPayload;
+  const onSavedRef = useRef(onSaved);
+  onSavedRef.current = onSaved;
 
   // Fire the save exactly once on mount. `firedRef` guards against
   // React 18 dev-mode double invocation of effects.
@@ -85,6 +91,7 @@ export function AutoSaveToast({ buildPayload, undoSeconds = 10, dedupeKey }: Pro
             window.sessionStorage.setItem(DEDUPE_PREFIX + dedupeKey, out.reportId);
           } catch { /* non-fatal */ }
         }
+        onSavedRef.current?.(out.reportId);
         setState({ kind: "saved", reportId: out.reportId, secondsLeft: undoSeconds });
       } else {
         setState({ kind: "error", message: out.message || "Could not save report." });

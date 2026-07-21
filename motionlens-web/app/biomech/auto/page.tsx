@@ -26,8 +26,6 @@ import {
   type Side,
 } from "@/lib/biomech/autoModeCatalog";
 
-const DURATION_OPTIONS = [30, 60, 90, 120];
-
 export default function BiomechAutoPage() {
   return (
     <>
@@ -53,7 +51,6 @@ function Inner() {
   // picks: joint -> set of movement ids selected under it
   const [picks, setPicks] = useState<Map<Joint, Set<string>>>(new Map());
   const [sides, setSides] = useState<Set<Side>>(new Set(["left", "right"]));
-  const [duration, setDuration] = useState<number>(60);
 
   const totalSelected = useMemo(() => {
     let n = 0;
@@ -123,14 +120,9 @@ function Inner() {
     const encoded = encodeQueue(queue);
     const url = new URL("/biomech/auto/run", window.location.origin);
     url.searchParams.set("q", encoded);
-    url.searchParams.set("d", String(duration));
     if (patientId) url.searchParams.set("patientId", patientId);
     router.push(url.pathname + url.search);
   };
-
-  const totalTimeSec = queue.length * duration;
-  const mins = Math.floor(totalTimeSec / 60);
-  const secs = totalTimeSec - mins * 60;
 
   return (
     <>
@@ -141,9 +133,10 @@ function Inner() {
             Screen it all in one go<span className="text-accent">.</span>
           </h1>
           <p className="mt-5 text-lg text-muted">
-            Pick joints and movements — each runs for a set duration
-            and auto-switches to the next. Great for a full-body ROM
-            screening without hopping between pages.
+            Pick joints and movements — each test runs until the
+            patient completes 5 reps, auto-saves, and switches to the
+            next. Great for a full-body ROM screening without hopping
+            between pages.
           </p>
         </div>
         <Link href={`/biomech${qs}`}>
@@ -261,34 +254,6 @@ function Inner() {
           </div>
 
           <div className="rounded-card border border-border bg-surface p-5">
-            <h3 className="text-sm font-semibold tracking-tight">
-              Duration per test
-            </h3>
-            <p className="mt-1 text-xs text-muted">
-              Each test runs for this long before auto-advancing.
-            </p>
-            <div className="mt-3 grid grid-cols-4 gap-2">
-              {DURATION_OPTIONS.map((d) => {
-                const on = duration === d;
-                return (
-                  <button
-                    key={d}
-                    type="button"
-                    onClick={() => setDuration(d)}
-                    className={`rounded-md border px-2 py-2 text-sm font-medium transition ${
-                      on
-                        ? "border-accent bg-accent/10 text-accent"
-                        : "border-border bg-background text-muted hover:border-accent/40"
-                    }`}
-                  >
-                    {d}s
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="rounded-card border border-border bg-surface p-5">
             <div className="flex items-center gap-2 text-xs uppercase tracking-[0.14em] text-subtle">
               <Timer className="h-4 w-4" />
               Summary
@@ -301,10 +266,9 @@ function Inner() {
                 <span className="ml-1 text-muted">test{queue.length === 1 ? "" : "s"} queued</span>
               </p>
               <p className="text-muted">
-                Total time ≈{" "}
-                <span className="tabular text-foreground">
-                  {mins > 0 ? `${mins} min ${secs}s` : `${secs}s`}
-                </span>
+                Each test runs until the patient completes 5 reps,
+                then auto-saves and moves to the next — no fixed
+                timer.
               </p>
             </div>
             <Button
