@@ -101,6 +101,26 @@ const PEAK_MAX_JUMP_DEG = 25.0;
 const PEAK_HOLD_FRAMES = 5;
 const PEAK_HOLD_BAND_DEG = 3.0;
 
+// ── Rep-cycle auto-complete ────────────────────────────────────
+// The session ends itself ("Show Analysis" auto-fires) once the
+// patient has performed TARGET_REP_COUNT full movement cycles —
+// neutral → raised past the rep threshold → back near neutral. For
+// merged direction-routed tests both directions need the count.
+//
+// Thresholds are BASELINE-RELATIVE, not absolute: several movement
+// formulas don't read 0° at rest (ankle neutral sits well above 0,
+// signed formulas idle at an offset), so an absolute "return below
+// 8°" would never trigger. Instead the per-slot session minimum
+// |angle| is tracked as the neutral baseline and:
+//   rise    = max(12°, 40% of (target lower bound − baseline))
+//   raiseAt = baseline + rise
+//   returnAt= baseline + 35% of rise  (must come ~2/3 back down)
+// Small sways never span `rise`, so idle standing can't count.
+const TARGET_REP_COUNT = 5;
+const REP_RISE_FRAC = 0.4;
+const REP_RISE_MIN_DEG = 12;
+const REP_RETURN_FRAC = 0.35;
+
 // Joints whose visibility actually drives the angle formula for the
 // given (body part, movement) pair. We gate peak capture on the MIN
 // visibility across these — if even one is below threshold, the angle
@@ -234,6 +254,29 @@ interface LiveAssessmentProps {
   secondaryLabel?: string;
   /** Normal range for the secondary direction. Required when merged. */
   secondaryTarget?: [number, number];
+  /** Auto Mode: skip the "Start Assessment" intro and enter the
+   *  fullscreen capture shell immediately on mount (the sequence
+   *  runner already provided the user gesture + get-ready count). */
+  autoEnter?: boolean;
+  /** Auto Mode: called once when the session ends and the report
+   *  view mounts (auto rep-complete, manual Show Analysis, or a
+   *  forced completion) — lets the sequence runner schedule the
+   *  next step. */
+  onCompleted?: () => void;
+  /** Auto Mode safety timeout: bump this number to force the
+   *  session to complete NOW with whatever peaks were captured.
+   *  No-op when no peak has committed yet (nothing to report) or
+   *  when the report is already showing. */
+  forceCompleteSignal?: number;
+  /** Auto Mode: when set, the report view's "Try again" button
+   *  delegates to the sequence runner (which discards this
+   *  attempt's saved report + remounts the step fresh) instead of
+   *  the in-place resetPeak. */
+  onRetest?: () => void;
+  /** Auto Mode: forwarded to the report view's AutoSaveToast —
+   *  notified with the saved report id so a retest can delete the
+   *  superseded attempt. */
+  onSaved?: (reportId: string) => void;
 }
 
 /**
@@ -254,6 +297,11 @@ export function LiveAssessment({
   primaryLabel,
   secondaryLabel,
   secondaryTarget,
+  autoEnter = false,
+  onCompleted,
+  forceCompleteSignal,
+  onRetest,
+  onSaved,
 }: LiveAssessmentProps) {
   const reportName = movementName ?? movementLabel.split(" · ").pop() ?? movementLabel;
   // Calibration-phase movements: rotation tests where 2D pose
@@ -367,6 +415,20 @@ export function LiveAssessment({
     // narrower Compensation interface and neck's narrower one are
     // assignment-compatible here.
     currentCompensations: [] as BiomechCompensationDTO[],
+    // ── Rep-cycle counter (auto-complete) ──────────────────────
+    // One rep = neutral → past the raise threshold → back below the
+    // return threshold. Per-slot so merged direction-routed tests
+    // count each direction independently. Session auto-fires
+    // showAnalysis at TARGET_REP_COUNT (see the per-frame handler).
+    repsPrimary: 0,
+    repsSecondary: 0,
+    repPhasePrimary: "neutral" as "neutral" | "raised",
+    repPhaseSecondary: "neutral" as "neutral" | "raised",
+    // Session-minimum |angle| per slot — the movement formula's
+    // actual neutral reading (ankle etc. don't rest at 0°). Rep
+    // thresholds are computed relative to this.
+    repBaselineMag: null as number | null,
+    repBaselineMagB: null as number | null,
   });
 
   // Compensatory-movement tracker — scoped to shoulder flexion+
@@ -445,6 +507,9 @@ export function LiveAssessment({
   // leak into the trial. A ref (not state) — read inside the
   // per-frame callbacks without re-binding them.
   const armedRef = useRef(false);
+  // Rep-count auto-complete fires showAnalysis exactly once per
+  // session; reset wherever a fresh attempt starts.
+  const autoCompleteFiredRef = useRef(false);
 
   // Single source of truth for "calibration done" — used by gating
   // logic so the same code path handles both neck and shoulder.
@@ -543,6 +608,51 @@ export function LiveAssessment({
 
     const angle = data.current_angle;
     s.current = angle;
+
+    // ── Rep-cycle helpers (auto-complete) ───────────────────
+    // Baseline-relative cycle detection — see the constants block
+    // for the threshold rationale. `stepRep` advances one slot's
+    // neutral↔raised machine; `maybeAutoComplete` fires
+    // showAnalysis once the rep target(s) are met AND the peaks
+    // the report needs have committed. Runs BEFORE the peak
+    // visibility/delta gates on purpose: counting a rep needs a
+    // "good" status frame, not peak-grade landmark confidence.
+    const stepRep = (sl: "primary" | "secondary") => {
+      const mag = Math.abs(angle);
+      const baseKey = sl === "primary" ? "repBaselineMag" : "repBaselineMagB";
+      const phaseKey =
+        sl === "primary" ? "repPhasePrimary" : "repPhaseSecondary";
+      const repsKey = sl === "primary" ? "repsPrimary" : "repsSecondary";
+      const base =
+        s[baseKey] === null ? mag : Math.min(s[baseKey] as number, mag);
+      s[baseKey] = base;
+      const lo =
+        sl === "primary" ? target[0] : (secondaryTarget?.[0] ?? target[0]);
+      const rise = Math.max(
+        REP_RISE_MIN_DEG,
+        Math.max(0, lo - base) * REP_RISE_FRAC,
+      );
+      const raiseAt = base + rise;
+      const returnAt = base + rise * REP_RETURN_FRAC;
+      if (s[phaseKey] === "neutral" && mag >= raiseAt) {
+        s[phaseKey] = "raised";
+      } else if (s[phaseKey] === "raised" && mag <= returnAt) {
+        s[phaseKey] = "neutral";
+        s[repsKey] += 1;
+      }
+    };
+    const maybeAutoComplete = () => {
+      const needBoth = isMergedMovement && !isMergedKneeFE;
+      const repsDone =
+        s.repsPrimary >= TARGET_REP_COUNT
+        && (!needBoth || s.repsSecondary >= TARGET_REP_COUNT);
+      const peaksReady =
+        s.peakSigned !== null && (!needBoth || s.peakSignedB !== null);
+      if (repsDone && peaksReady && !autoCompleteFiredRef.current) {
+        autoCompleteFiredRef.current = true;
+        showAnalysis();
+      }
+    };
 
     // ── Direction routing (merged movements only) ──────────
     // Shoulder merged tests route per-frame by spatial direction. Knee
@@ -644,7 +754,20 @@ export function LiveAssessment({
         s.currentCompensations = compHipRotationTrackerRef.current.currentFlags();
       }
       s.currentDirection = dir;
-      if (!dir) return; // deadband — show Current but don't update peaks
+      if (!dir) {
+        // ── Rep-cycle RETURN handling on deadband frames ──────
+        // For routed merged tests the "back at neutral" half of a
+        // rep lands exactly in this deadband — these frames return
+        // early and never reach the main rep step below, so both
+        // slots' machines (and the completion check) run here. A
+        // swing straight from one direction to the other still
+        // passes through the deadband, closing the first
+        // direction's rep on the way.
+        stepRep("primary");
+        stepRep("secondary");
+        maybeAutoComplete();
+        return; // deadband — show Current but don't update peaks
+      }
       slot = dir;
     } else if (isMergedKneeFE) {
       // Temporal direction tag only — doesn't gate peak updates,
@@ -671,6 +794,16 @@ export function LiveAssessment({
     } else {
       s.currentDirection = null;
     }
+
+    // ── Rep-cycle counter step (active slot) ────────────────
+    // Runs BEFORE the peak visibility/delta gates below: counting a
+    // rep only needs a "good"-status frame — requiring peak-grade
+    // landmark confidence made the return half of many cycles
+    // (where visibility often dips) uncountable. Routed-merged
+    // deadband frames were already stepped inside the routing block
+    // above (they return early and never reach here).
+    stepRep(slot);
+    maybeAutoComplete();
 
     // Single-direction compensation feeds (hip flex/ext, ankle
     // flex/ext). These movements don't go through the merged
@@ -980,6 +1113,12 @@ export function LiveAssessment({
     s.validFrames = 0;
     s.totalFrames = 0;
     s.current = null;
+    s.repsPrimary = 0;
+    s.repsSecondary = 0;
+    s.repPhasePrimary = "neutral";
+    s.repPhaseSecondary = "neutral";
+    s.repBaselineMag = null;
+    s.repBaselineMagB = null;
   };
 
   // Per-frame smoothed keypoints — used by calibration phases for
@@ -1073,6 +1212,7 @@ export function LiveAssessment({
   function resetPeak() {
     const s = stateRef.current;
     resetPeakState(s);
+    autoCompleteFiredRef.current = false;
     s.calibStableSinceMs = null;
     s.calibFacingForward = false;
     s.postureHint = null;
@@ -1102,6 +1242,7 @@ export function LiveAssessment({
     skipCountdown,
   } = useRehabAutoFlow(liveFullscreen && camActive, () => {
     armedRef.current = true;
+    autoCompleteFiredRef.current = false;
     const s = stateRef.current;
     resetPeakState(s);
     s.calibStableSinceMs = null;
@@ -1115,6 +1256,7 @@ export function LiveAssessment({
   // live mode). Camera auto-starts inside; countdown → capture.
   function enterLive() {
     armedRef.current = false;
+    autoCompleteFiredRef.current = false;
     setShowResult(false);
     setCamActive(false);
     setLiveFullscreen(true);
@@ -1129,13 +1271,45 @@ export function LiveAssessment({
 
   // "Show Analysis" — ends the live session exactly as before, just
   // also leaving the fullscreen shell so the report renders in the
-  // normal page flow.
+  // normal page flow. Auto Mode's onCompleted fires here too (every
+  // completion path — rep auto-complete, manual click, forced —
+  // funnels through this function).
+  const onCompletedRef = useRef(onCompleted);
+  onCompletedRef.current = onCompleted;
   function showAnalysis() {
     armedRef.current = false;
     setShowResult(true);
     setLiveFullscreen(false);
     setCamActive(false);
+    onCompletedRef.current?.();
   }
+
+  // Auto Mode: enter the fullscreen shell immediately on mount —
+  // the sequence runner already counted the patient in. Fired once
+  // (StrictMode-safe).
+  const autoEnteredRef = useRef(false);
+  useEffect(() => {
+    if (!autoEnter || autoEnteredRef.current) return;
+    autoEnteredRef.current = true;
+    enterLive();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoEnter]);
+
+  // Auto Mode safety timeout: when the runner bumps the signal,
+  // complete with whatever has been captured. Nothing captured →
+  // no-op (the runner skips the step itself after a grace period).
+  const prevForceSignalRef = useRef(forceCompleteSignal);
+  useEffect(() => {
+    if (forceCompleteSignal === undefined) return;
+    if (prevForceSignalRef.current === forceCompleteSignal) return;
+    prevForceSignalRef.current = forceCompleteSignal;
+    if (showResult) return;
+    const s = stateRef.current;
+    const anyPeak =
+      s.peakSigned !== null || (isMergedMovement && s.peakSignedB !== null);
+    if (anyPeak) showAnalysis();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [forceCompleteSignal, showResult]);
 
   // ── derived render values ────────────────────────────────────
   const {
@@ -1148,7 +1322,13 @@ export function LiveAssessment({
     apiError,
     postureHint,
     currentDirection,
+    repsPrimary,
+    repsSecondary,
   } = stateRef.current;
+  // Merged direction-routed tests need the rep target in BOTH
+  // directions; knee FE counts bend/straighten cycles on the primary
+  // slot only (extension is captured passively at each return).
+  const repsNeedBoth = !!isMergedMovement && !isMergedKneeFE;
   // For knee merged, the secondary peak is the MIN angle reached
   // (residual flexion at full extension). A value of 0° is a
   // legitimate measurement — it means the knee straightened
@@ -1282,8 +1462,8 @@ export function LiveAssessment({
               One click — the camera opens fullscreen, a 3-2-1 countdown
               runs, and capture starts by itself.{" "}
               {isCalibratedRotation
-                ? "The baseline step runs first (hold the neutral pose until it locks), then perform the movement and click Show Analysis at the peak."
-                : "Perform the movement, then click Show Analysis at the peak."}
+                ? `The baseline step runs first (hold the neutral pose until it locks), then perform the movement ${TARGET_REP_COUNT} times — the analysis opens and saves by itself.`
+                : `Perform the movement ${TARGET_REP_COUNT} times — the analysis opens and saves by itself after the final rep.`}
             </p>
             <div className="mt-4 flex justify-center">
               <Button onClick={enterLive}>
@@ -1395,6 +1575,34 @@ export function LiveAssessment({
             )}
           </div>
 
+          {/* Rep-cycle progress — the session ends itself once the
+              patient completes TARGET_REP_COUNT full cycles (both
+              directions for routed merged tests). */}
+          <div className="mt-4 rounded-md border border-accent/25 bg-accent/5 px-3 py-2">
+            <p className="text-[10px] uppercase tracking-[0.12em] text-subtle">
+              Reps · auto-completes at {TARGET_REP_COUNT}
+            </p>
+            <p className="mt-1 tabular text-sm font-semibold text-foreground">
+              {repsNeedBoth ? (
+                <>
+                  {primaryLabel ?? "A"}{" "}
+                  <span className="text-accent">
+                    {Math.min(repsPrimary, TARGET_REP_COUNT)}/{TARGET_REP_COUNT}
+                  </span>
+                  <span className="mx-2 text-subtle">·</span>
+                  {secondaryLabel ?? "B"}{" "}
+                  <span className="text-accent">
+                    {Math.min(repsSecondary, TARGET_REP_COUNT)}/{TARGET_REP_COUNT}
+                  </span>
+                </>
+              ) : (
+                <span className="text-accent">
+                  {Math.min(repsPrimary, TARGET_REP_COUNT)}/{TARGET_REP_COUNT}
+                </span>
+              )}
+            </p>
+          </div>
+
           {/* Real-time compensation warning banner. Renders for any
               movement that runs a compensation tracker. Disappears
               as soon as the patient corrects form. */}
@@ -1446,8 +1654,10 @@ export function LiveAssessment({
                     </span>
                   </>
                 )}
-                . Perform both directions in one go, then click{" "}
-                <span className="text-foreground">Show Analysis</span>.
+                . Perform {TARGET_REP_COUNT} reps in each direction — the
+                analysis opens by itself after the final rep ({" "}
+                <span className="text-foreground">Show Analysis</span>{" "}
+                ends it early).
               </>
             ) : (
               <>
@@ -1455,8 +1665,10 @@ export function LiveAssessment({
                 <span className="tabular text-foreground">
                   {target[0]}°–{target[1]}°
                 </span>
-                . Capture is continuous — perform the movement, then click{" "}
-                <span className="text-foreground">Show Analysis</span> at the peak.
+                . Capture is continuous — perform the movement{" "}
+                {TARGET_REP_COUNT} times and the analysis opens by itself ({" "}
+                <span className="text-foreground">Show Analysis</span>{" "}
+                ends it early).
               </>
             )}
           </p>
@@ -1599,6 +1811,13 @@ export function LiveAssessment({
                     : `Peak ${hasPeak ? `${fmt(peakMag, 1)}°` : "—"}`}
                 </p>
               )}
+              {!inCalibrationUi && (
+                <p className="tabular text-[10px] font-semibold text-emerald-300">
+                  {repsNeedBoth
+                    ? `Reps ${Math.min(repsPrimary, TARGET_REP_COUNT)}/${TARGET_REP_COUNT} · ${Math.min(repsSecondary, TARGET_REP_COUNT)}/${TARGET_REP_COUNT}`
+                    : `Rep ${Math.min(repsPrimary, TARGET_REP_COUNT)}/${TARGET_REP_COUNT}`}
+                </p>
+              )}
             </div>
           )}
         </LiveBiomechCamera>
@@ -1706,6 +1925,7 @@ export function LiveAssessment({
             in the public flow. Payload identical to the previous
             SaveToPatientButton. */}
         <AutoSaveToast
+          onSaved={onSaved}
           buildPayload={() => ({
             module: "biomech",
             body_part: bodyPart,
@@ -1778,9 +1998,16 @@ export function LiveAssessment({
         />
 
         <div className="flex justify-center gap-3 border-t border-border pt-6">
-          <Button variant="secondary" onClick={resetPeak}>
+          {/* Auto Mode delegates the retest to the sequence runner —
+              it deletes this attempt's auto-saved report and remounts
+              the step fresh (camera auto-starts again). Standalone
+              mode keeps the in-place reset. */}
+          <Button
+            variant="secondary"
+            onClick={() => (onRetest ? onRetest() : resetPeak())}
+          >
             <RotateCcw className="h-4 w-4" />
-            Try again
+            {onRetest ? "Retest (discard this attempt)" : "Try again"}
           </Button>
         </div>
       </div>
