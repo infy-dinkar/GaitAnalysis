@@ -87,6 +87,25 @@ VISIBILITY_THRESHOLD = 0.4
 DEFAULT_HEIGHT_CM    = 170
 LEG_HEIGHT_RATIO     = 0.53
 
+# ── Gait-cycle stance detection (real, not assumed 60 %) ──────────
+# Stance vs swing is read from FOOT SPEED, the robust discriminator
+# for a side-view walk: during stance the foot is planted on the
+# ground and barely moves (speed ≈ 0 while the body passes over it);
+# during swing it translates forward quickly. A position-band on
+# foot-Y fails here because the toe's vertical excursion is small and
+# noisy in the sagittal plane — the foot mostly moves horizontally.
+#
+# Per stride the foot speed is normalised to its own peak, and a
+# frame is stance when speed ≤ _STANCE_SPEED_FRAC × peak. A normal
+# walk lands ~60 %; a dragged / shuffling foot moves slowly the whole
+# stride → high stance %, so an abnormal or asymmetric gait shows
+# honestly. No crisp toe-off crossing is needed, so pose jitter never
+# blanks the result.
+_STANCE_SPEED_FRAC = 0.40
+# A stride whose peak foot speed is below this (px/frame) is the
+# subject standing still, not walking — skip it (can't score stance).
+_STANCE_MIN_PEAK_SPEED_PX = 1.5
+
 
 # ──────────────────────────────────────────────
 # PORTRAIT-VIDEO ROTATION HANDLING
@@ -596,6 +615,75 @@ def _event_guided_stance_mask(
         if not np.isfinite(cutoff):
             continue
         mask[a:b] = window >= cutoff
+    return mask
+
+
+def _stance_mask_by_foot_speed(
+    foot_x_px: np.ndarray,
+    foot_y_px: np.ndarray,
+    ankle_x_px: np.ndarray,
+    ankle_y_px: np.ndarray,
+    foot_vis: np.ndarray,
+    hs: np.ndarray,
+    n_total: int,
+) -> np.ndarray:
+    """Full-length boolean stance mask that MEASURES real stance per
+    stride from FOOT SPEED instead of forcing ~60 % the way
+    `_event_guided_stance_mask` does.
+
+    During stance the foot is planted and barely moves; during swing
+    it translates forward quickly. Per stride (heel-strike hs[i] →
+    hs[i+1]) the frame-to-frame foot speed is normalised to its own
+    peak, and a frame is stance when speed ≤ `_STANCE_SPEED_FRAC` ×
+    peak. The toe (foot_index) drives it when visible; ankle is the
+    fallback. A dragged / shuffling foot moves slowly throughout →
+    high stance %, so an abnormal or asymmetric gait shows honestly.
+    A near-stationary stride (subject standing still) is skipped so we
+    never score noise.
+
+    Returns a bool mask of length n_total. Only usable strides are
+    marked; skipped ones stay False and the caller's per-stride
+    aggregator ignores them (never fabricates a value).
+    """
+    mask = np.zeros(n_total, dtype=bool)
+    if hs is None or len(hs) < 2:
+        return mask
+    hs_arr = np.asarray(hs, dtype=int)
+    fx = np.asarray(foot_x_px, dtype=float)
+    fy = np.asarray(foot_y_px, dtype=float)
+    ax = np.asarray(ankle_x_px, dtype=float)
+    ay = np.asarray(ankle_y_px, dtype=float)
+    n_sig = int(min(len(fx), len(fy), len(ax), len(ay)))
+    for i in range(len(hs_arr) - 1):
+        a = int(hs_arr[i])
+        b = int(hs_arr[i + 1])
+        if a < 0 or b <= a or b > n_sig or b > n_total or (b - a) < 4:
+            continue
+        # Prefer the toe when it's confidently visible; else the ankle.
+        use_toe = (
+            foot_vis is not None
+            and a < len(foot_vis) and b <= len(foot_vis)
+            and float(np.mean(np.asarray(foot_vis[a:b]) >= VISIBILITY_THRESHOLD)) >= 0.5
+        )
+        xs = (fx if use_toe else ax)[a:b]
+        ys = (fy if use_toe else ay)[a:b]
+        if (xs.size < 4 or not np.all(np.isfinite(xs))
+                or not np.all(np.isfinite(ys))):
+            xs = (ax if use_toe else fx)[a:b]
+            ys = (ay if use_toe else fy)[a:b]
+            if (xs.size < 4 or not np.all(np.isfinite(xs))
+                    or not np.all(np.isfinite(ys))):
+                continue
+        # Frame-to-frame 2D foot speed (px/frame).
+        speed = np.hypot(np.gradient(np.asarray(xs, float)),
+                         np.gradient(np.asarray(ys, float)))
+        peak = float(np.nanpercentile(speed, 90.0))
+        if peak < _STANCE_MIN_PEAK_SPEED_PX:
+            # Foot essentially stationary the whole stride — subject
+            # standing, not a walking stride. Skip (don't fabricate).
+            continue
+        thresh = _STANCE_SPEED_FRAC * peak
+        mask[a:b] = speed <= thresh
     return mask
 
 
@@ -1305,25 +1393,51 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
     }
 
     # --- gait-cycle % (stance / swing per side + double support) ---
-    # Uses the event-guided per-stride ankle-Y mask (see docstring on
-    # `_event_guided_stance_mask`) rather than the 30-th-percentile
-    # velocity mask from `_stance_mask_per_leg`. The velocity mask
-    # is a calibration anchor and structurally can't reach the ~60 %
-    # stance fraction gait actually has; the event-guided mask does.
-    # `_stance_mask_per_leg` itself is untouched and still owned by
-    # compute_meters_per_pixel.
+    # PRIMARY: `_stance_mask_by_foot_speed` measures real stance per
+    # stride from foot SPEED (planted = slow, swing = fast), so the
+    # number reflects the actual gait (~60 % normal, higher/asymmetric
+    # for a drag or impaired side) instead of the fixed ~60 % the
+    # percentile-based `_event_guided_stance_mask` always produces.
+    #
+    # SAFETY NET: if the real-stance path can't yield a value on a
+    # given clip (returns null — too few usable strides, or the
+    # physiological-plausibility guard trips), fall back to the old
+    # percentile mask so the block still renders a number and the
+    # chart never blanks out. Worst case = today's behaviour, best
+    # case = an honest measurement.
+    #
+    # `_stance_mask_per_leg` (30-th-pct velocity anchor) is untouched
+    # and still owned by compute_meters_per_pixel.
     _n_total = int(len(ts["left_hip"]["y"]))
     _cycle_pct = _gait_cycle_percentages(
-        mask_L=_event_guided_stance_mask(
-            ts["left_ankle"]["y_px"], L_idx, _n_total,
+        mask_L=_stance_mask_by_foot_speed(
+            ts["left_foot_index"]["x_px"], ts["left_foot_index"]["y_px"],
+            ts["left_ankle"]["x_px"], ts["left_ankle"]["y_px"],
+            ts["left_foot_index"]["vis"], L_idx, _n_total,
         ),
-        mask_R=_event_guided_stance_mask(
-            ts["right_ankle"]["y_px"], R_idx, _n_total,
+        mask_R=_stance_mask_by_foot_speed(
+            ts["right_foot_index"]["x_px"], ts["right_foot_index"]["y_px"],
+            ts["right_ankle"]["x_px"], ts["right_ankle"]["y_px"],
+            ts["right_foot_index"]["vis"], R_idx, _n_total,
         ),
         hs_L=L_idx,
         hs_R=R_idx,
         fps=fps,
     )
+    if _cycle_pct.get("stance_pct_left") is None:
+        # Fallback — keep the block populated (never "not computed"
+        # when we have enough strikes for the legacy estimate).
+        _cycle_pct = _gait_cycle_percentages(
+            mask_L=_event_guided_stance_mask(
+                ts["left_ankle"]["y_px"], L_idx, _n_total,
+            ),
+            mask_R=_event_guided_stance_mask(
+                ts["right_ankle"]["y_px"], R_idx, _n_total,
+            ),
+            hs_L=L_idx,
+            hs_R=R_idx,
+            fps=fps,
+        )
 
     return {
         "step_data":        step_data,

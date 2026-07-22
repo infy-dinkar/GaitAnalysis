@@ -510,13 +510,19 @@ async def analyze_gait(
             video.filename, size_mb, height_cm, recording_duration_ms,
         )
 
-        # ── 1.5) Repair MediaRecorder WebMs with broken duration
-        # headers BEFORE the cv2 FPS probe — otherwise the probe
-        # returns 0 and we'd reject otherwise-valid live recordings.
-        # For normal uploads (recording_duration_ms=None) this is a
-        # no-op and returns (tmp_path, None).
+        # ── 1.5) Normalise MediaRecorder recordings BEFORE the cv2
+        # FPS probe. Record-mode uploads (recording_duration_ms set)
+        # are ALWAYS re-encoded to a clean constant-FPS MP4 with
+        # FPS = decoded_frames / client wall-clock duration — WebM
+        # metadata from MediaRecorder is never trusted, because a
+        # "plausible but wrong" FPS (real ~22, claimed 30) passes the
+        # old mismatch gate yet skews every temporal gait metric
+        # (timings, step length, heel-strike events → gait cycle %).
+        # Normal file uploads (recording_duration_ms=None) are a
+        # no-op and return (tmp_path, None).
         processed_path, fixed_path_cleanup = _ensure_decodable_video(
             tmp_path, recording_duration_ms,
+            force_rewrite=bool(recording_duration_ms and recording_duration_ms > 0),
         )
 
         # ── 2) FPS + DURATION GATE — peek at the container before the
