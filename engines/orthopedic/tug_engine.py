@@ -543,6 +543,7 @@ def _grab_key_frame(
 def _ensure_decodable_video(
     video_path: str,
     recording_duration_ms: Optional[int],
+    force_rewrite: bool = False,
 ) -> tuple[str, Optional[str]]:
     """Some MediaRecorder-produced WebM containers have broken or
     missing duration metadata. There are TWO failure modes we need
@@ -583,7 +584,17 @@ def _ensure_decodable_video(
     needs_rewrite = False
     rewrite_reason = ""
 
-    if fps <= 0:
+    if force_rewrite and recording_duration_ms and recording_duration_ms > 0:
+        # Caller opted into unconditional normalisation (gait record
+        # mode): MediaRecorder WebM metadata is never trusted, every
+        # recorded clip is re-encoded to a clean constant-FPS MP4
+        # whose FPS = decoded_frames / client wall-clock duration.
+        # The 0.7 mismatch gate below misses the "metadata plausibly
+        # wrong" band (e.g. real ~22 fps, claimed 30) which silently
+        # skews every temporal gait metric downstream.
+        needs_rewrite = True
+        rewrite_reason = "forced normalisation (record-mode upload)"
+    elif fps <= 0:
         needs_rewrite = True
         rewrite_reason = "cv2 reported FPS = 0"
     elif recording_duration_ms and recording_duration_ms > 0 and total_frames_meta > 0:
