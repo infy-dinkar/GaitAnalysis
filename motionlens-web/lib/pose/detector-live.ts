@@ -91,7 +91,10 @@ export async function getDetectorLive(): Promise<Pose> {
     }) as unknown as Pose;
     pose.setOptions({
       modelComplexity: 1,           // "Full" — matches backend model
-      smoothLandmarks: true,        // built-in temporal smoother
+      // Built-in temporal smoother ON: keeps the skeleton steady
+      // (no shake). It adds a small trailing lag, which is the
+      // accepted trade for a stable overlay.
+      smoothLandmarks: true,
       enableSegmentation: false,    // expensive; clinical tests don't use it
       minDetectionConfidence: 0.5,
       minTrackingConfidence: 0.5,
