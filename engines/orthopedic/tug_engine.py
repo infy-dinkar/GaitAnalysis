@@ -622,29 +622,38 @@ def _ensure_decodable_video(
 
     log.info("video repair triggered: %s", rewrite_reason)
 
-    # Re-open for streaming read.
+    duration_sec = recording_duration_ms / 1000.0
+    if duration_sec <= 0:
+        return video_path, None
+
+    # ── Pass 1: COUNT decodable frames (read + discard). ──────────
+    # Streaming, O(1) memory — previously the whole video was loaded
+    # into a Python list (a 30 s 720p clip ≈ 2 GB), which OOM-killed
+    # the worker on memory-limited hosts and surfaced as an HTTP 502.
+    # We only need the frame count (for the true FPS) and the frame
+    # dimensions here; the pixels are re-read in pass 2.
     cap = cv2.VideoCapture(video_path)
+    width = 0
+    height = 0
+    frame_count = 0
     try:
         ok, first_frame = cap.read()
         if not ok or first_frame is None:
             return video_path, None
         height, width = first_frame.shape[:2]
-        frames: list = [first_frame]
+        frame_count = 1
         while True:
-            ok, f = cap.read()
+            ok, _f = cap.read()
             if not ok:
                 break
-            frames.append(f)
+            frame_count += 1
     finally:
         cap.release()
 
-    if len(frames) < 5:
+    if frame_count < 5:
         return video_path, None
 
-    duration_sec = recording_duration_ms / 1000.0
-    if duration_sec <= 0:
-        return video_path, None
-    computed_fps = len(frames) / duration_sec
+    computed_fps = frame_count / duration_sec
     if computed_fps <= 0 or computed_fps > 240:
         # Sanity-bound — if the client-reported duration is nonsense,
         # don't write a fake FPS into the file.
@@ -655,15 +664,34 @@ def _ensure_decodable_video(
     writer = cv2.VideoWriter(fixed_path, fourcc, computed_fps, (width, height))
     if not writer.isOpened():
         return video_path, None
+
+    # ── Pass 2: re-read + write ONE frame at a time. ──────────────
+    cap = cv2.VideoCapture(video_path)
+    written = 0
     try:
-        for f in frames:
+        while True:
+            ok, f = cap.read()
+            if not ok:
+                break
             writer.write(f)
+            written += 1
     finally:
+        cap.release()
         writer.release()
+
+    if written < 5:
+        # Rewrite produced nothing usable — fall back to the original
+        # so extract_poses can surface a real error instead of us
+        # handing it an empty file.
+        try:
+            os.remove(fixed_path)
+        except OSError:
+            pass
+        return video_path, None
 
     log.info(
         "tug: rewrote video with computed fps=%.2f (frames=%d, duration=%.2fs) → %s",
-        computed_fps, len(frames), duration_sec, fixed_path,
+        computed_fps, written, duration_sec, fixed_path,
     )
     return fixed_path, fixed_path
 
