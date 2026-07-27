@@ -170,26 +170,38 @@ export interface AutoStep {
   side: Side | null;
 }
 
+/** Stable key for one movement pick: `joint:movementId`. */
+export function pickKey(joint: Joint, movementId: string): string {
+  return `${joint}:${movementId}`;
+}
+
 /**
- * Build the queue from the user's picks.
- *
- * @param picks     — Map of joint → set of selected movement ids
- * @param sides     — Set of selected sides. Ignored for bilateral joints.
+ * A movement is "picked" when its key is present in the selection
+ * map. The value is the set of sides chosen FOR THAT movement:
+ *   • unilateral joints (shoulder/hip/knee/ankle) → {left}, {right},
+ *     or {left,right}; a movement with an empty set is skipped (the
+ *     operator turned both sides off).
+ *   • bilateral joints (neck) → the set is ignored; one run is
+ *     emitted with side = null.
  */
-export function buildAutoQueue(
-  picks: Map<Joint, Set<string>>,
-  sides: Set<Side>,
-): AutoStep[] {
+export type AutoSelection = Map<string, Set<Side>>;
+
+/**
+ * Build the queue from the user's per-movement selection.
+ *
+ * @param selection — Map of `pickKey(joint, movementId)` → set of
+ *                    sides selected for that specific movement.
+ */
+export function buildAutoQueue(selection: AutoSelection): AutoStep[] {
   const queue: AutoStep[] = [];
-  // Iterate in the JOINT_META order so the queue always runs
-  // top-to-bottom of the standard joint order rather than in map
-  // insertion order.
+  // Iterate in JOINT_META order so the queue always runs top-to-
+  // bottom of the standard joint order, and within a joint in the
+  // catalog's movement order — independent of map insertion order.
   for (const meta of JOINT_META) {
-    const chosenMoves = picks.get(meta.id);
-    if (!chosenMoves || chosenMoves.size === 0) continue;
-    const availableMoves = MOVEMENTS_BY_JOINT[meta.id];
-    for (const move of availableMoves) {
-      if (!chosenMoves.has(move.id)) continue;
+    for (const move of MOVEMENTS_BY_JOINT[meta.id]) {
+      const key = pickKey(meta.id, move.id);
+      const picked = selection.get(key);
+      if (!picked) continue; // not selected
       if (!meta.hasSide) {
         queue.push({
           joint: meta.id,
@@ -201,13 +213,11 @@ export function buildAutoQueue(
         });
         continue;
       }
-      // Unilateral: expand to selected sides. If somehow no side is
-      // set, default to a single "left" run so the queue is never
-      // silently empty for a picked movement.
-      const sideList: Side[] =
-        sides.size > 0
-          ? (Array.from(sides) as Side[]).sort()
-          : ["left"];
+      // Unilateral: one step per side chosen FOR THIS movement.
+      // Empty set = operator turned both sides off → skip it.
+      const sideList = (["left", "right"] as Side[]).filter((s) =>
+        picked.has(s),
+      );
       for (const s of sideList) {
         queue.push({
           joint: meta.id,

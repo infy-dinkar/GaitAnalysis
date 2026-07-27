@@ -22,9 +22,13 @@ import {
   MOVEMENTS_BY_JOINT,
   buildAutoQueue,
   encodeQueue,
+  pickKey,
+  type AutoSelection,
   type Joint,
   type Side,
 } from "@/lib/biomech/autoModeCatalog";
+
+const BOTH_SIDES = (): Set<Side> => new Set<Side>(["left", "right"]);
 
 export default function BiomechAutoPage() {
   return (
@@ -48,71 +52,75 @@ function Inner() {
   const patientId = params.get("patientId");
   const qs = patientId ? `?patientId=${patientId}` : "";
 
-  // picks: joint -> set of movement ids selected under it
-  const [picks, setPicks] = useState<Map<Joint, Set<string>>>(new Map());
-  const [sides, setSides] = useState<Set<Side>>(new Set(["left", "right"]));
+  // selection: pickKey(joint, movementId) -> set of sides chosen for
+  // THAT movement. Presence of the key = movement picked. For
+  // bilateral joints (neck) the side set is unused.
+  const [selection, setSelection] = useState<AutoSelection>(new Map());
 
-  const totalSelected = useMemo(() => {
-    let n = 0;
-    for (const s of picks.values()) n += s.size;
-    return n;
-  }, [picks]);
+  const totalSelected = selection.size;
 
-  const queue = useMemo(
-    () => buildAutoQueue(picks, sides),
-    [picks, sides],
-  );
+  const queue = useMemo(() => buildAutoQueue(selection), [selection]);
 
-  const toggleMovement = (joint: Joint, moveId: string) => {
-    setPicks((prev) => {
+  // Toggle a movement on/off. Turning ON a side-requiring movement
+  // seeds it with BOTH sides; the per-movement chips below refine it.
+  const toggleMovement = (joint: Joint, moveId: string, hasSide: boolean) => {
+    const key = pickKey(joint, moveId);
+    setSelection((prev) => {
       const next = new Map(prev);
-      const cur = new Set(next.get(joint) ?? []);
-      if (cur.has(moveId)) cur.delete(moveId);
-      else cur.add(moveId);
-      if (cur.size === 0) next.delete(joint);
-      else next.set(joint, cur);
+      if (next.has(key)) next.delete(key);
+      else next.set(key, hasSide ? BOTH_SIDES() : new Set<Side>());
       return next;
     });
   };
 
-  const selectAllForJoint = (joint: Joint) => {
-    setPicks((prev) => {
+  // Toggle one side for an already-picked movement. If both sides end
+  // up off, the movement stays picked but contributes no queue steps
+  // (the row shows a "pick a side" hint) — the operator can flip a
+  // side back on without re-checking the box.
+  const toggleMovementSide = (joint: Joint, moveId: string, s: Side) => {
+    const key = pickKey(joint, moveId);
+    setSelection((prev) => {
+      const cur = prev.get(key);
+      if (!cur) return prev; // not picked — ignore
       const next = new Map(prev);
-      const all = MOVEMENTS_BY_JOINT[joint].map((m) => m.id);
-      const cur = next.get(joint);
-      // Toggle: if all already selected, clear; else select all.
-      if (cur && cur.size === all.length) {
-        next.delete(joint);
+      const sides = new Set(cur);
+      if (sides.has(s)) sides.delete(s);
+      else sides.add(s);
+      next.set(key, sides);
+      return next;
+    });
+  };
+
+  const selectAllForJoint = (joint: Joint, hasSide: boolean) => {
+    setSelection((prev) => {
+      const next = new Map(prev);
+      const moves = MOVEMENTS_BY_JOINT[joint];
+      const allPicked = moves.every((m) => next.has(pickKey(joint, m.id)));
+      if (allPicked) {
+        for (const m of moves) next.delete(pickKey(joint, m.id));
       } else {
-        next.set(joint, new Set(all));
+        for (const m of moves) {
+          if (!next.has(pickKey(joint, m.id))) {
+            next.set(pickKey(joint, m.id), hasSide ? BOTH_SIDES() : new Set<Side>());
+          }
+        }
       }
       return next;
     });
   };
 
   const selectEverything = () => {
-    const next = new Map<Joint, Set<string>>();
+    const next: AutoSelection = new Map();
     for (const meta of JOINT_META) {
-      next.set(
-        meta.id,
-        new Set(MOVEMENTS_BY_JOINT[meta.id].map((m) => m.id)),
-      );
+      for (const m of MOVEMENTS_BY_JOINT[meta.id]) {
+        next.set(pickKey(meta.id, m.id), meta.hasSide ? BOTH_SIDES() : new Set<Side>());
+      }
     }
-    setPicks(next);
-    setSides(new Set(["left", "right"]));
+    setSelection(next);
   };
 
   const clearAll = () => {
-    setPicks(new Map());
-  };
-
-  const toggleSide = (s: Side) => {
-    setSides((prev) => {
-      const next = new Set(prev);
-      if (next.has(s)) next.delete(s);
-      else next.add(s);
-      return next;
-    });
+    setSelection(new Map());
   };
 
   const start = () => {
@@ -161,9 +169,10 @@ function Inner() {
           </div>
 
           {JOINT_META.map((meta) => {
-            const chosen = picks.get(meta.id) ?? new Set<string>();
-            const allCount = MOVEMENTS_BY_JOINT[meta.id].length;
-            const allPicked = chosen.size === allCount;
+            const moves = MOVEMENTS_BY_JOINT[meta.id];
+            const allPicked = moves.every((m) =>
+              selection.has(pickKey(meta.id, m.id)),
+            );
             return (
               <section
                 key={meta.id}
@@ -176,45 +185,81 @@ function Inner() {
                     </h2>
                     <p className="mt-0.5 text-xs text-muted">
                       {meta.hasSide
-                        ? "Per-side test — will run once per selected side."
+                        ? "Per-side test — pick Left / Right for each movement."
                         : "Bilateral test — one run per movement."}
                     </p>
                   </div>
                   <button
                     type="button"
-                    onClick={() => selectAllForJoint(meta.id)}
+                    onClick={() => selectAllForJoint(meta.id, meta.hasSide)}
                     className="rounded-full border border-border px-3 py-1 text-xs font-medium text-muted transition hover:border-accent hover:text-foreground"
                   >
                     {allPicked ? "Deselect all" : "Select all"}
                   </button>
                 </div>
                 <div className="mt-4 grid gap-2 sm:grid-cols-2">
-                  {MOVEMENTS_BY_JOINT[meta.id].map((m) => {
-                    const picked = chosen.has(m.id);
+                  {moves.map((m) => {
+                    const key = pickKey(meta.id, m.id);
+                    const sel = selection.get(key);
+                    const picked = sel !== undefined;
+                    const noSide = meta.hasSide && picked && sel!.size === 0;
                     return (
-                      <label
+                      <div
                         key={m.id}
-                        className={`flex cursor-pointer items-start gap-3 rounded-md border p-3 transition ${
+                        className={`rounded-md border p-3 transition ${
                           picked
-                            ? "border-accent bg-accent/5"
+                            ? noSide
+                              ? "border-warning/50 bg-warning/5"
+                              : "border-accent bg-accent/5"
                             : "border-border bg-background hover:border-accent/40"
                         }`}
                       >
-                        <input
-                          type="checkbox"
-                          checked={picked}
-                          onChange={() => toggleMovement(meta.id, m.id)}
-                          className="mt-0.5 h-4 w-4 shrink-0 rounded border-border accent-orange-500"
-                        />
-                        <span className="min-w-0">
-                          <span className="block text-sm font-medium text-foreground">
-                            {m.label}
+                        <label className="flex cursor-pointer items-start gap-3">
+                          <input
+                            type="checkbox"
+                            checked={picked}
+                            onChange={() => toggleMovement(meta.id, m.id, meta.hasSide)}
+                            className="mt-0.5 h-4 w-4 shrink-0 rounded border-border accent-orange-500"
+                          />
+                          <span className="min-w-0">
+                            <span className="block text-sm font-medium text-foreground">
+                              {m.label}
+                            </span>
+                            <span className="mt-0.5 block text-xs text-muted">
+                              {m.description}
+                            </span>
                           </span>
-                          <span className="mt-0.5 block text-xs text-muted">
-                            {m.description}
-                          </span>
-                        </span>
-                      </label>
+                        </label>
+
+                        {/* Per-movement Left / Right — only for
+                            side-requiring joints, only once picked. */}
+                        {meta.hasSide && picked && (
+                          <div className="mt-3 flex items-center gap-2 pl-7">
+                            {(["left", "right"] as Side[]).map((s) => {
+                              const on = sel!.has(s);
+                              return (
+                                <button
+                                  key={s}
+                                  type="button"
+                                  onClick={() => toggleMovementSide(meta.id, m.id, s)}
+                                  className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                                    on
+                                      ? "border-accent bg-accent/15 text-accent"
+                                      : "border-border bg-background text-muted hover:border-accent/40"
+                                  }`}
+                                >
+                                  {s === "left" ? "Left" : "Right"}
+                                </button>
+                              );
+                            })}
+                            {noSide && (
+                              <span className="text-[11px] text-warning">
+                                pick a side
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
                     );
                   })}
                 </div>
@@ -223,36 +268,8 @@ function Inner() {
           })}
         </div>
 
-        {/* ── Right column — sides + duration + start ──────────── */}
+        {/* ── Right column — summary + start ───────────────────── */}
         <div className="space-y-4 lg:sticky lg:top-24 lg:self-start">
-          <div className="rounded-card border border-border bg-surface p-5">
-            <h3 className="text-sm font-semibold tracking-tight">
-              Sides to test
-            </h3>
-            <p className="mt-1 text-xs text-muted">
-              Ignored for bilateral tests (neck).
-            </p>
-            <div className="mt-3 flex gap-2">
-              {(["left", "right"] as Side[]).map((s) => {
-                const on = sides.has(s);
-                return (
-                  <button
-                    key={s}
-                    type="button"
-                    onClick={() => toggleSide(s)}
-                    className={`flex-1 rounded-md border px-3 py-2 text-sm font-medium transition ${
-                      on
-                        ? "border-accent bg-accent/10 text-accent"
-                        : "border-border bg-background text-muted hover:border-accent/40"
-                    }`}
-                  >
-                    {s === "left" ? "Left" : "Right"}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
           <div className="rounded-card border border-border bg-surface p-5">
             <div className="flex items-center gap-2 text-xs uppercase tracking-[0.14em] text-subtle">
               <Timer className="h-4 w-4" />
@@ -266,9 +283,9 @@ function Inner() {
                 <span className="ml-1 text-muted">test{queue.length === 1 ? "" : "s"} queued</span>
               </p>
               <p className="text-muted">
-                Each test runs until the patient completes 5 reps,
-                then auto-saves and moves to the next — no fixed
-                timer.
+                Each movement picks its own Left / Right. Every test
+                runs until the patient completes 5 reps, then
+                auto-saves and moves to the next — no fixed timer.
               </p>
             </div>
             <Button

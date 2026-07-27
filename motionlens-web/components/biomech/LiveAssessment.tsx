@@ -1759,6 +1759,29 @@ export function LiveAssessment({
             </Button>
           </div>
         </div>
+
+        {/* Reference illustration — fills the lower sidebar with the
+            movement's form image so the patient can mirror the pose
+            while capturing. Shown for any movement that carries an
+            asset (no-op otherwise). */}
+        {movementImageUrl && (
+          <div className="rounded-card border border-border bg-surface p-4">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+              Reference pose
+            </p>
+            <div className="mt-3 overflow-hidden rounded-md border border-border bg-white">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={movementImageUrl}
+                alt=""
+                aria-hidden="true"
+                loading="lazy"
+                className="block w-full object-contain"
+                style={{ maxHeight: 260 }}
+              />
+            </div>
+          </div>
+        )}
     </>
   );
 
