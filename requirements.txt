@@ -38,6 +38,12 @@ pydantic[email]>=2.6
 # Database
 motor>=3.5
 pymongo>=4.6
+# PostgreSQL — Mongo→Postgres switch. DORMANT: only imported/used when
+# DB_BACKEND=postgres. Mongo (motor) remains the default and live data
+# path. Additive; does not affect the Mongo path. psycopg_pool provides
+# the async connection pool (auto-reconnect on stale/dropped connections).
+psycopg[binary]>=3.1
+psycopg_pool>=3.2
 
 # Auth
 # bcrypt pinned <5.0 because passlib 1.7.4 reads bcrypt.__about__

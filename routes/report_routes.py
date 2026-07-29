@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from utils.auth_utils import get_current_doctor
 from utils.db import get_db
+from utils import repositories as repo
 from models.report_models import (
     Report,
     ReportCreate,
@@ -84,10 +85,7 @@ def _to_report_summary(doc: dict) -> ReportSummary:
 
 async def _verify_patient_owned(db, patient_id: ObjectId, doctor_id: ObjectId) -> None:
     """Raise 404 if the patient doesn't exist OR isn't owned by this doctor."""
-    exists = await db.patients.count_documents(
-        {"_id": patient_id, "doctor_id": doctor_id},
-        limit=1,
-    )
+    exists = await repo.patients_exists(db, patient_id, doctor_id)
     if not exists:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -129,8 +127,7 @@ async def create_report(
         "keypoints": payload.keypoints,
         "created_at": now,
     }
-    result = await db.reports.insert_one(doc)
-    doc["_id"] = result.inserted_id
+    doc["_id"] = await repo.reports_insert(db, doc)
     return _to_report(doc)
 
 
@@ -149,15 +146,7 @@ async def list_patient_reports(
     pid = _parse_oid(patient_id, "patient id")
     await _verify_patient_owned(db, pid, current_doctor["_id"])
 
-    cursor = (
-        db.reports
-        .find(
-            {"patient_id": pid},
-            {"figures": 0, "metrics": 0, "observations": 0},  # exclude heavy fields
-        )
-        .sort("created_at", -1)
-    )
-    docs = await cursor.to_list(length=500)
+    docs = await repo.reports_list_by_patient(db, pid)
     return ReportListResponse(
         data=[_to_report_summary(d) for d in docs],
         total=len(docs),
@@ -176,9 +165,7 @@ async def get_report(
     """Fetch a single report including all figures + metrics."""
     db = get_db()
     rid = _parse_oid(report_id, "report id")
-    doc = await db.reports.find_one(
-        {"_id": rid, "doctor_id": current_doctor["_id"]}
-    )
+    doc = await repo.reports_find_one(db, rid, current_doctor["_id"])
     if doc is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -199,10 +186,8 @@ async def delete_report(
     """Hard-delete a single report. Patient record stays intact."""
     db = get_db()
     rid = _parse_oid(report_id, "report id")
-    result = await db.reports.delete_one(
-        {"_id": rid, "doctor_id": current_doctor["_id"]}
-    )
-    if result.deleted_count == 0:
+    deleted = await repo.reports_delete_one(db, rid, current_doctor["_id"])
+    if deleted == 0:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Report not found",

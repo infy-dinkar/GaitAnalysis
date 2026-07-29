@@ -227,6 +227,27 @@ async def _on_shutdown() -> None:
     await db_module.disconnect()
 
 
+# ─── PostgreSQL dormant health check (Phase 1 of DB switch) ─────────
+# ADDITIVE: separate startup/shutdown hooks so the Mongo lifecycle
+# above stays 100% untouched. Both are pure no-ops while
+# DB_BACKEND=mongo (the default). When DB_BACKEND=postgres they verify
+# the PG connection (SELECT 1) without converting any query or routing
+# any repository — Mongo remains the live data path.
+@app.on_event("startup")
+async def _on_startup_postgres_healthcheck() -> None:
+    try:
+        await db_module.postgres_healthcheck()
+    except Exception as e:
+        # Never take the app down for the dormant PG path — log clearly
+        # and continue (mirrors the Mongo warn-and-continue above).
+        log.warning("PostgreSQL health check failed (DB_BACKEND=postgres): %s", e)
+
+
+@app.on_event("shutdown")
+async def _on_shutdown_postgres() -> None:
+    await db_module.postgres_disconnect()
+
+
 # ─── Routers ───────────────────────────────────────────────────────
 app.include_router(auth_router)
 app.include_router(patient_router)
