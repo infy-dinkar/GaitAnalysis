@@ -32,6 +32,7 @@ from utils.auth_utils import (
     verify_password,
 )
 from utils.db import get_db
+from utils import repositories as repo
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -74,7 +75,7 @@ async def signup(payload: DoctorSignupRequest):
     # Reject duplicate emails early — also enforced by the unique index
     # in db._ensure_indexes(), but a friendlier error is nicer than a
     # raw DuplicateKeyError surfacing as a 500.
-    existing = await db.doctors.find_one({"email": email})
+    existing = await repo.doctors_find_one_by_email(db, email)
     if existing is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -91,10 +92,10 @@ async def signup(payload: DoctorSignupRequest):
         "created_at": now,
         "updated_at": now,
     }
-    result = await db.doctors.insert_one(doc)
-    doc["_id"] = result.inserted_id
+    new_id = await repo.doctors_insert(db, doc)
+    doc["_id"] = new_id
 
-    token = create_access_token(str(result.inserted_id))
+    token = create_access_token(str(new_id))
     return AuthTokenResponse(
         token=token,
         expires_in=_expiry_seconds(),
@@ -112,7 +113,7 @@ async def login(payload: DoctorLoginRequest):
     db = get_db()
     email = payload.email.lower().strip()
 
-    doc = await db.doctors.find_one({"email": email})
+    doc = await repo.doctors_find_one_by_email(db, email)
     # Use the same generic error for both "no such email" and "wrong
     # password" so attackers can't enumerate registered emails.
     if doc is None or not verify_password(payload.password, doc["password_hash"]):

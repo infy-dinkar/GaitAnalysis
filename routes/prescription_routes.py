@@ -25,6 +25,7 @@ from models.prescription_models import (
 )
 from utils.auth_utils import get_current_doctor
 from utils.db import get_db
+from utils import repositories as repo
 
 router = APIRouter(prefix="/api/patients", tags=["prescriptions"])
 
@@ -43,10 +44,7 @@ async def _ensure_patient_owned(
     db, patient_id: ObjectId, doctor_oid: ObjectId
 ) -> None:
     """Reject requests for patients not owned by the current doctor."""
-    patient = await db.patients.find_one(
-        {"_id": patient_id, "doctor_id": doctor_oid},
-        {"_id": 1},
-    )
+    patient = await repo.patients_find_one_min(db, patient_id, doctor_oid)
     if patient is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -87,9 +85,7 @@ async def get_prescription(
     doctor_oid = current_doctor["_id"]
     await _ensure_patient_owned(db, patient_oid, doctor_oid)
 
-    doc = await db.prescriptions.find_one(
-        {"patient_id": patient_oid, "doctor_id": doctor_oid}
-    )
+    doc = await repo.prescriptions_find(db, patient_oid, doctor_oid)
     if doc is None:
         return PrescriptionResponse(success=True, data=None)
     return PrescriptionResponse(success=True, data=_to_prescription(doc))
@@ -127,27 +123,8 @@ async def upsert_prescription(
         seen.add(s)
         slugs.append(s)
 
-    now = datetime.now(timezone.utc)
-    update = {
-        "$set": {
-            "slugs": slugs,
-            "notes": payload.notes,
-            "updated_at": now,
-        },
-        "$setOnInsert": {
-            "patient_id": patient_oid,
-            "doctor_id": doctor_oid,
-            "created_at": now,
-        },
-    }
-    await db.prescriptions.update_one(
-        {"patient_id": patient_oid, "doctor_id": doctor_oid},
-        update,
-        upsert=True,
-    )
-    doc = await db.prescriptions.find_one(
-        {"patient_id": patient_oid, "doctor_id": doctor_oid}
-    )
+    await repo.prescriptions_upsert(db, patient_oid, doctor_oid, slugs, payload.notes)
+    doc = await repo.prescriptions_find(db, patient_oid, doctor_oid)
     if doc is None:
         # Should never happen after a successful upsert, but a
         # defensive branch keeps mypy happy and surfaces the surprise.
@@ -173,7 +150,5 @@ async def delete_prescription(
     doctor_oid = current_doctor["_id"]
     await _ensure_patient_owned(db, patient_oid, doctor_oid)
 
-    await db.prescriptions.delete_one(
-        {"patient_id": patient_oid, "doctor_id": doctor_oid}
-    )
+    await repo.prescriptions_delete(db, patient_oid, doctor_oid)
     return PrescriptionResponse(success=True, data=None)

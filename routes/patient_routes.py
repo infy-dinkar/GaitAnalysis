@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from utils.auth_utils import get_current_doctor
 from utils.db import get_db
+from utils import repositories as repo
 from models.patient_models import (
     Patient,
     PatientCreate,
@@ -93,8 +94,7 @@ async def create_patient(
         "created_at": now,
         "updated_at": now,
     }
-    res = await db.patients.insert_one(doc)
-    doc["_id"] = res.inserted_id
+    doc["_id"] = await repo.patients_insert(db, doc)
     return _to_patient(doc, report_count=0)
 
 
@@ -108,22 +108,12 @@ async def list_patients(
 ):
     """List all patients owned by the current doctor (newest first)."""
     db = get_db()
-    cursor = (
-        db.patients
-        .find({"doctor_id": current_doctor["_id"]})
-        .sort("created_at", -1)
-    )
-    docs = await cursor.to_list(length=1000)
+    docs = await repo.patients_list_by_doctor(db, current_doctor["_id"])
 
     # Aggregate report counts per patient in one query
     if docs:
         patient_ids = [d["_id"] for d in docs]
-        pipeline = [
-            {"$match": {"patient_id": {"$in": patient_ids}}},
-            {"$group": {"_id": "$patient_id", "count": {"$sum": 1}}},
-        ]
-        counts_cursor = db.reports.aggregate(pipeline)
-        counts = {c["_id"]: c["count"] async for c in counts_cursor}
+        counts = await repo.reports_count_per_patient(db, patient_ids)
     else:
         counts = {}
 
@@ -143,15 +133,13 @@ async def get_patient(
     """Single patient by ID. 404 if not owned by current doctor."""
     db = get_db()
     pid = _parse_object_id(patient_id, "patient id")
-    doc = await db.patients.find_one(
-        {"_id": pid, "doctor_id": current_doctor["_id"]}
-    )
+    doc = await repo.patients_find_one(db, pid, current_doctor["_id"])
     if doc is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Patient not found",
         )
-    report_count = await db.reports.count_documents({"patient_id": pid})
+    report_count = await repo.reports_count_by_patient(db, pid)
     return _to_patient(doc, report_count)
 
 
@@ -180,17 +168,15 @@ async def update_patient(
         )
     update_fields["updated_at"] = datetime.now(timezone.utc)
 
-    result = await db.patients.find_one_and_update(
-        {"_id": pid, "doctor_id": current_doctor["_id"]},
-        {"$set": update_fields},
-        return_document=True,
+    result = await repo.patients_update(
+        db, pid, current_doctor["_id"], update_fields
     )
     if result is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Patient not found",
         )
-    report_count = await db.reports.count_documents({"patient_id": pid})
+    report_count = await repo.reports_count_by_patient(db, pid)
     return _to_patient(result, report_count)
 
 
@@ -213,20 +199,21 @@ async def delete_patient(
     pid = _parse_object_id(patient_id, "patient id")
 
     # Verify ownership before deleting
-    existing = await db.patients.find_one(
-        {"_id": pid, "doctor_id": current_doctor["_id"]}
-    )
+    existing = await repo.patients_find_one(db, pid, current_doctor["_id"])
     if existing is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Patient not found",
         )
 
-    # Cascade-delete reports first
-    reports_result = await db.reports.delete_many({"patient_id": pid})
-    await db.patients.delete_one({"_id": pid})
+    # Cascade-delete the patient + its reports. On Mongo this runs the
+    # manual delete_many(reports) + delete_one(patient); on Postgres it
+    # deletes only the patient row and relies on FK ON DELETE CASCADE for
+    # the children (no double-cascade). deleted_reports_count is accurate
+    # on both (delete_many count on Mongo, COUNT(*) before delete on PG).
+    deleted_reports = await repo.patients_delete_cascade(db, pid)
 
     return PatientDeleteResponse(
         deleted_patient_id=patient_id,
-        deleted_reports_count=reports_result.deleted_count,
+        deleted_reports_count=deleted_reports,
     )

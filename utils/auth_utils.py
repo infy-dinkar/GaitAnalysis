@@ -133,7 +133,14 @@ async def get_current_doctor(
         )
 
     db = get_db()
-    doctor = await db.doctors.find_one({"_id": doctor_id}, {"password_hash": 0})
+    # Routed through the repo so the doctor lookup follows DB_BACKEND.
+    # The Mongo branch runs the identical find_one({"_id": ...},
+    # {"password_hash": 0}); the Postgres branch str()s the ObjectId to
+    # the hex TEXT id. Import here (not at module top) to avoid a circular
+    # import — repositories imports utils.db, which is fine, but auth_utils
+    # is imported very early, so keep this local.
+    from utils import repositories as repo
+    doctor = await repo.doctors_find_one_by_id(db, doctor_id, include_password=False)
     if doctor is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
