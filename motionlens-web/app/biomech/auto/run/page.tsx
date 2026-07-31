@@ -19,7 +19,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { CheckCircle2, ChevronRight, Pause, Play, RotateCcw, SkipForward, XCircle } from "lucide-react";
+import { CheckCircle2, ChevronRight, Loader2, Pause, Play, RotateCcw, SkipForward, Undo2, X, XCircle } from "lucide-react";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
 import { Section } from "@/components/ui/Section";
@@ -37,7 +37,7 @@ import { NECK_MOVEMENTS } from "@/lib/biomech/neck";
 import { KNEE_MOVEMENTS } from "@/lib/biomech/knee";
 import { HIP_MOVEMENTS } from "@/lib/biomech/hip";
 import { ANKLE_MOVEMENTS } from "@/lib/biomech/ankle-live";
-import { deleteReport } from "@/lib/reports";
+import { createReport, deleteReport } from "@/lib/reports";
 
 const READY_COUNTDOWN_SEC = 3;
 // Pause between a completed report and the next step — long enough
@@ -110,33 +110,21 @@ function Inner() {
   const [nextLeft, setNextLeft] = useState(NEXT_COUNTDOWN_SEC);
   const [paused, setPaused] = useState(false);
 
-  // ── Retest bookkeeping ──────────────────────────────────────
-  // Each mounted attempt is identified by "stepIdx:attempt". A
-  // retest discards that attempt's auto-saved report: if the save
-  // already landed we delete it now; if it lands late (save is
-  // async) the instance is in `retestedRef` and handleSaved deletes
-  // it on arrival. Reports from ADVANCED (kept) steps are never
-  // touched.
-  const currentInstRef = useRef("0:0");
+  // ── Cumulative-save bookkeeping ─────────────────────────────
+  // NOTHING is saved per step. Each completed test's result is
+  // collected here (keyed by step index) and the whole set is saved as
+  // ONE combined is_batch report when the sequence finishes — same
+  // report shape BatchSession produces, so the saved-report viewer
+  // renders it stacked. A retest just overwrites that step's collected
+  // entry (the fresh attempt re-emits via onResult); there is no
+  // per-step report to delete.
+  const stepIdxRef = useRef(0);
   useEffect(() => {
-    currentInstRef.current = `${stepIdx}:${attempt}`;
-  }, [stepIdx, attempt]);
-  const retestedRef = useRef<Set<string>>(new Set());
-  const lastReportIdRef = useRef<string | null>(null);
-
-  const handleSaved = useCallback((reportId: string, inst: string) => {
-    if (retestedRef.current.has(inst)) {
-      // Save landed after the operator already discarded the attempt.
-      deleteReport(reportId).catch(() => { /* already gone — fine */ });
-      return;
-    }
-    if (inst === currentInstRef.current) {
-      lastReportIdRef.current = reportId;
-    }
-  }, []);
+    stepIdxRef.current = stepIdx;
+  }, [stepIdx]);
+  const collectedRef = useRef<Record<number, Record<string, unknown>>>({});
 
   const advance = useCallback(() => {
-    lastReportIdRef.current = null; // advanced step's report is KEPT
     setStepIdx((prev) => {
       const next = prev + 1;
       if (next >= queue.length) {
@@ -150,15 +138,11 @@ function Inner() {
     });
   }, [queue.length]);
 
-  // Retest the CURRENT step: delete this attempt's auto-saved
-  // report, then remount the step fresh (get-ready → camera →
-  // countdown → capture).
+  // Retest the CURRENT step: discard its collected result, then remount
+  // the step fresh (get-ready → camera → countdown → capture). The new
+  // attempt re-emits its entry via onResult, overwriting the slot.
   const retest = useCallback(() => {
-    const inst = currentInstRef.current;
-    retestedRef.current.add(inst);
-    const id = lastReportIdRef.current;
-    lastReportIdRef.current = null;
-    if (id) deleteReport(id).catch(() => { /* already undone — fine */ });
+    delete collectedRef.current[stepIdxRef.current];
     setAttempt((a) => a + 1);
     setPhase("ready");
     setReadyLeft(READY_COUNTDOWN_SEC);
@@ -166,12 +150,83 @@ function Inner() {
   }, []);
 
   // Step completed (rep target hit or manual Show Analysis) — the
-  // report + auto-save banner are on screen. Give the operator a
-  // beat to see them, then advance.
+  // per-test report is on screen. Give the operator a beat to see it,
+  // then advance. (No save happens here — see the cumulative save.)
   const handleStepCompleted = useCallback(() => {
     setNextLeft(NEXT_COUNTDOWN_SEC);
     setPhase((p) => (p === "running" ? "nexting" : p));
   }, []);
+
+  // ── Cumulative auto-save — ONE is_batch report at the very end ───
+  const [autoBanner, setAutoBanner] = useState<
+    | { kind: "saved"; reportId: string; secondsLeft: number }
+    | { kind: "undoing" }
+    | { kind: "undone" }
+    | { kind: "error"; message: string }
+    | null
+  >(null);
+  const cumulativeFiredRef = useRef(false);
+  const [savedCount, setSavedCount] = useState(0);
+
+  useEffect(() => {
+    if (phase !== "done" || cumulativeFiredRef.current) return;
+    cumulativeFiredRef.current = true;
+    if (!patientId) return; // public flow — nothing to persist
+    const items = Object.keys(collectedRef.current)
+      .map(Number)
+      .sort((a, b) => a - b)
+      .map((k) => collectedRef.current[k]);
+    if (items.length === 0) return;
+    setSavedCount(items.length);
+    void (async () => {
+      try {
+        const created = await createReport(patientId, {
+          module: "biomech",
+          movement: "batch",
+          metrics: { is_batch: true, items },
+        });
+        setAutoBanner({ kind: "saved", reportId: created.id, secondsLeft: 10 });
+      } catch (e) {
+        setAutoBanner({
+          kind: "error",
+          message: e instanceof Error ? e.message : "Auto-save failed.",
+        });
+      }
+    })();
+  }, [phase, patientId]);
+
+  // Countdown tick for the auto-saved banner (mirrors AutoSaveToast).
+  useEffect(() => {
+    if (!autoBanner || autoBanner.kind !== "saved") return;
+    if (autoBanner.secondsLeft <= 0) {
+      setAutoBanner(null);
+      return;
+    }
+    const id = window.setTimeout(() => {
+      setAutoBanner((prev) =>
+        prev && prev.kind === "saved"
+          ? { ...prev, secondsLeft: prev.secondsLeft - 1 }
+          : prev,
+      );
+    }, 1000);
+    return () => window.clearTimeout(id);
+  }, [autoBanner]);
+
+  async function undoAutoSave() {
+    if (!autoBanner || autoBanner.kind !== "saved") return;
+    const id = autoBanner.reportId;
+    setAutoBanner({ kind: "undoing" });
+    try {
+      await deleteReport(id);
+      setAutoBanner({ kind: "undone" });
+      window.setTimeout(() => setAutoBanner(null), 3000);
+    } catch (e) {
+      setAutoBanner({
+        kind: "error",
+        message: e instanceof Error ? e.message : "Undo failed.",
+      });
+    }
+  }
 
   // ── Ready countdown ─────────────────────────────────────────
   useEffect(() => {
@@ -214,7 +269,86 @@ function Inner() {
   }
 
   if (phase === "done") {
-    return <DoneScreen queue={queue} patientQs={qs} />;
+    return (
+      <>
+        {/* Big "records auto-saved" banner with a 10s Undo — fires once
+            when the whole sequence finishes and the single combined
+            report has been saved. Mirrors BatchSession's banner. */}
+        {autoBanner?.kind === "saved" && (
+          <div className="fixed inset-x-0 top-4 z-[60] mx-auto flex w-full max-w-2xl justify-center px-4">
+            <div className="pointer-events-auto w-full rounded-card border-2 border-emerald-500/60 bg-emerald-600 px-6 py-4 shadow-2xl">
+              <div className="flex items-center gap-4">
+                <CheckCircle2 className="h-10 w-10 shrink-0 text-white" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-xl font-bold leading-tight text-white">
+                    Records auto-saved ✓
+                  </p>
+                  <p className="mt-0.5 truncate text-sm text-emerald-50">
+                    {savedCount} test{savedCount === 1 ? "" : "s"} saved as one
+                    combined report
+                    <span className="ml-2 tabular text-emerald-200">
+                      · undo closes in {autoBanner.secondsLeft}s
+                    </span>
+                  </p>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={undoAutoSave}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-white/15 px-3 py-2 text-sm font-semibold text-white transition hover:bg-white/25"
+                  >
+                    <Undo2 className="h-4 w-4" /> Undo
+                  </button>
+                  {patientId && (
+                    <Link
+                      href={`/dashboard/patients/${patientId}`}
+                      className="rounded-md bg-white px-3 py-2 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-50"
+                    >
+                      View
+                    </Link>
+                  )}
+                  <button
+                    type="button"
+                    aria-label="Dismiss"
+                    onClick={() => setAutoBanner(null)}
+                    className="rounded-md p-2 text-emerald-100 transition hover:bg-white/15 hover:text-white"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        {autoBanner && autoBanner.kind !== "saved" && (
+          <div className="fixed inset-x-0 top-4 z-[60] mx-auto flex w-full max-w-md justify-center px-4">
+            <div className="pointer-events-auto flex w-full items-center gap-3 rounded-full border border-border bg-background/95 px-4 py-2.5 text-sm shadow-lg backdrop-blur">
+              {autoBanner.kind === "undoing" && (
+                <>
+                  <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted" />
+                  <span className="flex-1 text-foreground">Undoing save…</span>
+                </>
+              )}
+              {autoBanner.kind === "undone" && (
+                <>
+                  <Undo2 className="h-4 w-4 shrink-0 text-muted" />
+                  <span className="flex-1 text-foreground">
+                    Save undone — nothing was kept.
+                  </span>
+                </>
+              )}
+              {autoBanner.kind === "error" && (
+                <>
+                  <XCircle className="h-4 w-4 shrink-0 text-error" />
+                  <span className="flex-1 text-error">{autoBanner.message}</span>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+        <DoneScreen queue={queue} patientQs={qs} savedCount={savedCount} />
+      </>
+    );
   }
 
   return (
@@ -299,9 +433,15 @@ function Inner() {
               secondaryLabel={move?.secondaryLabel}
               secondaryTarget={move?.secondaryTarget}
               autoEnter
+              // Cumulative mode: don't save this test individually —
+              // collect its result (keyed by step index) so the whole
+              // sequence saves as ONE combined report at the end.
+              deferSave
+              onTestResult={(item) => {
+                collectedRef.current[stepIdx] = item;
+              }}
               onCompleted={handleStepCompleted}
               onRetest={retest}
-              onSaved={(id) => handleSaved(id, inst)}
             />
           </div>
         );
@@ -347,8 +487,8 @@ function Inner() {
             </Button>
           </div>
           <p className="mt-2 text-[10px] text-muted">
-            Retest discards this attempt&apos;s saved report and runs
-            the same test again.
+            Retest discards this test&apos;s result and runs it again.
+            Nothing is saved until the whole sequence finishes.
           </p>
         </div>
       )}
@@ -392,9 +532,11 @@ function ReadyOverlay({
 function DoneScreen({
   queue,
   patientQs,
+  savedCount,
 }: {
   queue: AutoStep[];
   patientQs: string;
+  savedCount: number;
 }) {
   return (
     <div className="mx-auto max-w-2xl">
@@ -407,9 +549,13 @@ function DoneScreen({
         </h1>
         <p className="mt-2 text-sm text-muted">
           Ran {queue.length} test{queue.length === 1 ? "" : "s"} back to
-          back. Each completed test&apos;s angles (both directions on
-          merged tests) + flagged compensations were captured and
-          auto-saved to the patient record as it finished.
+          back. All {savedCount > 0 ? savedCount : ""} completed test
+          {savedCount === 1 ? "" : "s"}&apos; angles (both directions on
+          merged tests) + flagged compensations were saved together as{" "}
+          <span className="font-medium text-foreground">
+            one combined report
+          </span>{" "}
+          in the patient record.
         </p>
 
         <ul className="mt-6 space-y-2 text-left">

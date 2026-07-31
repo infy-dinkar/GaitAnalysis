@@ -231,6 +231,28 @@ const LIMB_FRAMING_TEXT: Record<
 // 0.25 cleanly separates "actually visible" from "not in shot".
 const FRAMING_VIS_FLOOR = 0.25;
 
+/** Cumulative Auto Mode helper. On mount it builds this completed
+ *  test's batch-item entry once and hands it to the sequence runner via
+ *  onResult — mirroring AutoSaveToast's fire-once-on-mount timing but
+ *  performing NO network save (the runner saves ONE combined report at
+ *  the end). Rendered only when deferSave is set. */
+function ReportResultEmitter({
+  build,
+  onResult,
+}: {
+  build: () => Record<string, unknown>;
+  onResult?: (item: Record<string, unknown>) => void;
+}) {
+  const firedRef = useRef(false);
+  useEffect(() => {
+    if (firedRef.current) return;
+    firedRef.current = true;
+    onResult?.(build());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return null;
+}
+
 interface LiveAssessmentProps {
   bodyPart: "shoulder" | "neck" | "knee" | "hip" | "ankle";
   movementId: string;
@@ -277,6 +299,18 @@ interface LiveAssessmentProps {
    *  notified with the saved report id so a retest can delete the
    *  superseded attempt. */
   onSaved?: (reportId: string) => void;
+  /** Auto Mode (cumulative): when true the report view does NOT
+   *  auto-save an individual report. Instead it emits this test's
+   *  result as a batch-item entry via onResult, so the sequence runner
+   *  can save ONE cumulative (is_batch) report at the very end. The
+   *  per-test report still renders on screen exactly as before. */
+  deferSave?: boolean;
+  /** Auto Mode (cumulative): receives this completed test as a
+   *  batch-item entry (same key shape buildBatchItemEntry produces:
+   *  body_part / movement / side + the metrics fields) when the report
+   *  view mounts. Paired with deferSave. (Named onTestResult to avoid
+   *  colliding with the per-frame onResult data callback.) */
+  onTestResult?: (item: Record<string, unknown>) => void;
 }
 
 /**
@@ -302,6 +336,8 @@ export function LiveAssessment({
   forceCompleteSignal,
   onRetest,
   onSaved,
+  deferSave = false,
+  onTestResult,
 }: LiveAssessmentProps) {
   const reportName = movementName ?? movementLabel.split(" · ").pop() ?? movementLabel;
   // Calibration-phase movements: rotation tests where 2D pose
@@ -1884,6 +1920,68 @@ export function LiveAssessment({
       });
     }
 
+    // Single source of truth for the saved-report payload. Used either
+    // by AutoSaveToast (standalone + normal auto = individual save) or,
+    // in cumulative Auto Mode (deferSave), flattened into a batch-item
+    // entry and handed to the runner via onResult. Defined once here so
+    // the compensation trackers' finish() runs a single time regardless
+    // of which branch renders.
+    const buildReportPayload = () => ({
+      module: "biomech" as const,
+      body_part: bodyPart,
+      movement: movementId,
+      side,
+      metrics: {
+        peak_magnitude: peakMag,
+        peak_signed: peakSigned,
+        target,
+        ...(isMergedMovement
+          ? {
+              primary_label: primaryLabel,
+              secondary_label: secondaryLabel,
+              secondary_target: secondaryTarget,
+              ...(hasPeakB
+                ? {
+                    secondary_peak_magnitude: peakMagB,
+                    secondary_peak_signed: peakSignedB,
+                  }
+                : {}),
+            }
+          : {}),
+        valid_frames: validFrames,
+        total_frames: totalFrames,
+        key_frames: liveKeyFrames,
+        ...(() => {
+          const c = isMergedShoulderFlexExt
+            ? compTrackerRef.current?.finish()
+            : isMergedShoulderAbAd
+              ? compAbAdTrackerRef.current?.finish()
+              : isMergedShoulderRotation
+                ? compRotationTrackerRef.current?.finish()
+                : isMergedNeckFE
+                  ? compNeckFlexExtTrackerRef.current?.finish()
+                  : isMergedNeckLateral
+                    ? compNeckLateralTrackerRef.current?.finish()
+                    : isNeckRotation
+                      ? compNeckRotationTrackerRef.current?.finish()
+                      : isMergedKneeFE
+                        ? compKneeFETrackerRef.current?.finish()
+                        : isMergedHipRotation
+                          ? compHipRotationTrackerRef.current?.finish()
+                          : isHipFlexion
+                            ? compHipFlexionTrackerRef.current?.finish()
+                            : isHipExtension
+                              ? compHipExtensionTrackerRef.current?.finish()
+                              : isAnkleFlexion
+                                ? compAnkleFlexionTrackerRef.current?.finish()
+                                : isAnkleExtension
+                                  ? compAnkleExtensionTrackerRef.current?.finish()
+                                  : null;
+          return c && c.length > 0 ? { compensations: c } : {};
+        })(),
+      },
+    });
+
     return (
       <div className="space-y-8">
         <AssessmentReport
@@ -1943,82 +2041,29 @@ export function LiveAssessment({
         />
 
         {/* Live sessions auto-save in the doctor flow (toast with a
-            10s undo). Fires once on mount of the report view — i.e.
-            exactly when today's manual save became available. No-op
-            in the public flow. Payload identical to the previous
-            SaveToPatientButton. */}
-        <AutoSaveToast
-          onSaved={onSaved}
-          buildPayload={() => ({
-            module: "biomech",
-            body_part: bodyPart,
-            movement: movementId,
-            side,
-            metrics: {
-              peak_magnitude: peakMag,
-              peak_signed: peakSigned,
-              target,
-              // Persist merged-test metadata for the saved-report
-              // viewer. Labels + secondary target are saved whenever
-              // the test is merged, so the viewer can render the
-              // dual-row layout (with "Not detected" placeholder for
-              // a missing direction) even when only one direction
-              // was actually captured. The numeric secondary peak is
-              // saved only when it was actually measured.
-              ...(isMergedMovement
-                ? {
-                    primary_label: primaryLabel,
-                    secondary_label: secondaryLabel,
-                    secondary_target: secondaryTarget,
-                    ...(hasPeakB
-                      ? {
-                          secondary_peak_magnitude: peakMagB,
-                          secondary_peak_signed: peakSignedB,
-                        }
-                      : {}),
-                  }
-                : {}),
-              valid_frames: validFrames,
-              total_frames: totalFrames,
-              // Persist annotated screenshots so the saved-report
-              // viewer can show the same key-frame strip later.
-              key_frames: liveKeyFrames,
-              // Persist compensatory-movement findings from whichever
-              // tracker ran during the trial. Only one is non-null
-              // per recording (only one merged movement active at a
-              // time across shoulder + neck). Resolution chain
-              // mirrors the AssessmentReport prop above.
-              ...(() => {
-                const c = isMergedShoulderFlexExt
-                  ? compTrackerRef.current?.finish()
-                  : isMergedShoulderAbAd
-                    ? compAbAdTrackerRef.current?.finish()
-                    : isMergedShoulderRotation
-                      ? compRotationTrackerRef.current?.finish()
-                      : isMergedNeckFE
-                        ? compNeckFlexExtTrackerRef.current?.finish()
-                        : isMergedNeckLateral
-                          ? compNeckLateralTrackerRef.current?.finish()
-                          : isNeckRotation
-                            ? compNeckRotationTrackerRef.current?.finish()
-                            : isMergedKneeFE
-                              ? compKneeFETrackerRef.current?.finish()
-                              : isMergedHipRotation
-                                ? compHipRotationTrackerRef.current?.finish()
-                                : isHipFlexion
-                                  ? compHipFlexionTrackerRef.current?.finish()
-                                  : isHipExtension
-                                    ? compHipExtensionTrackerRef.current?.finish()
-                                    : isAnkleFlexion
-                                      ? compAnkleFlexionTrackerRef.current?.finish()
-                                      : isAnkleExtension
-                                        ? compAnkleExtensionTrackerRef.current?.finish()
-                                        : null;
-                return c && c.length > 0 ? { compensations: c } : {};
-              })(),
-            },
-          })}
-        />
+            10s undo). Fires once on mount of the report view.
+            EXCEPTION — cumulative Auto Mode (deferSave): do NOT save an
+            individual report here; instead emit this test's result as a
+            batch-item entry (body_part / movement / side + the metrics
+            fields) so the sequence runner collects them and saves ONE
+            combined is_batch report at the end. The per-test report
+            above still renders exactly as before. */}
+        {deferSave ? (
+          <ReportResultEmitter
+            build={() => {
+              const p = buildReportPayload();
+              return {
+                body_part: p.body_part,
+                movement: p.movement,
+                side: p.side ?? null,
+                ...p.metrics,
+              };
+            }}
+            onResult={onTestResult}
+          />
+        ) : (
+          <AutoSaveToast onSaved={onSaved} buildPayload={buildReportPayload} />
+        )}
 
         <div className="flex justify-center gap-3 border-t border-border pt-6">
           {/* Auto Mode delegates the retest to the sequence runner —
