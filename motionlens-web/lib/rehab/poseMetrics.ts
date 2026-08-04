@@ -69,6 +69,21 @@ export function computeShoulderWidth(keypoints: Keypoint[]): number | null {
   return Math.abs(rSh.x - lSh.x);
 }
 
+/** Pixel-space horizontal distance between LEFT_HIP and RIGHT_HIP.
+ *  Mirrors computeShoulderWidth. Used by the scapular-set turn
+ *  compensation: a whole-body turn foreshortens the hips by ~the same
+ *  fraction as the shoulders, so the hip width is the reference for
+ *  separating a real upper-body movement from a body rotation. Returns
+ *  null if either hip fails visibility. */
+export function computeHipWidth(keypoints: Keypoint[]): number | null {
+  const lHip = keypoints[LM.LEFT_HIP];
+  const rHip = keypoints[LM.RIGHT_HIP];
+  if (!lHip || !rHip) return null;
+  if ((lHip.score ?? 0) < VIS_THRESHOLD) return null;
+  if ((rHip.score ?? 0) < VIS_THRESHOLD) return null;
+  return Math.abs(rHip.x - lHip.x);
+}
+
 /** Trunk angle from HORIZONTAL in degrees — angle between the
  *  trunk segment (shoulder-mid → hip-mid) and the horizontal x-axis.
  *  Used by B4 Bird-Dog where the target is a HORIZONTAL trunk
@@ -345,14 +360,29 @@ export function computeLateralTrunkFlexionDeg(
 export function computeScapularRetractionProxy(
   keypoints: Keypoint[],
   baselineShoulderWidth: number,
+  baselineHipWidth?: number,
 ): number | null {
   if (baselineShoulderWidth <= 0) return null;
   const current = computeShoulderWidth(keypoints);
   if (current === null) return null;
-  // Clamp to zero floor — width WIDER than baseline (patient
-  // protracted further or moved closer to the camera) is not
-  // retraction; treat as "neutral".
-  return Math.max(0, (1 - current / baselineShoulderWidth) * 100);
+  const shoulderNarrow = 1 - current / baselineShoulderWidth;
+
+  // Turn compensation. A whole-body rotation foreshortens the shoulders
+  // AND the hips by ~the same fraction — that was producing false reps
+  // when the patient turned instead of squeezing. A genuine scapular
+  // movement narrows the shoulders while the (forward-facing) hips stay
+  // put, so subtract the hip-narrowing: a pure turn cancels to ~0, while
+  // the shoulder-only residual survives as the real retraction signal.
+  // Requires baselineHipWidth (hips in frame); omitted → legacy behaviour.
+  let hipNarrow = 0;
+  if (baselineHipWidth && baselineHipWidth > 0) {
+    const curHip = computeHipWidth(keypoints);
+    if (curHip !== null) hipNarrow = 1 - curHip / baselineHipWidth;
+  }
+
+  // Clamp to zero floor — width WIDER than baseline (protraction / moving
+  // closer) or a pure turn (shoulderNarrow ≈ hipNarrow) is not retraction.
+  return Math.max(0, (shoulderNarrow - hipNarrow) * 100);
 }
 
 /** LOW-CONFIDENCE proxy for shoulder external rotation in degrees,

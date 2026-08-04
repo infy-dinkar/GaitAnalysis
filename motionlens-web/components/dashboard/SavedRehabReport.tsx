@@ -585,6 +585,12 @@ function WeightShiftSummary({
   durationSec: number;
   config: Record<string, unknown> | null;
 }) {
+  // Current mechanic is rep-based (full left↔right cycles); older saved
+  // sessions used zone-capture. Prefer reps when present, fall back to
+  // zones so legacy reports still render correctly.
+  const reps = pickNumber(state, "reps");
+  const repTarget = pickNumber(state, "repTarget");
+  const useReps = reps !== null && repTarget !== null && repTarget > 0;
   const captured = pickNumber(state, "zonesCaptured");
   const totalFromState = pickNumber(state, "totalZones");
   const totalFromConfig = Array.isArray(config?.zones)
@@ -593,21 +599,32 @@ function WeightShiftSummary({
   const total = totalFromState ?? totalFromConfig ?? 0;
   const maxExcursion = pickNumber(state, "maxExcursion") ?? 0;
   const stepCount = pickNumber(state, "stepCount") ?? 0;
+  const hasBreakdown = useReps || (captured !== null && total > 0);
   return (
     <section>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="text-base font-semibold tracking-tight">Weight-shift summary</h3>
         <DurationChip seconds={durationSec} />
       </div>
-      {captured !== null && total > 0 ? (
+      {hasBreakdown ? (
         <div className="mt-3 grid gap-4 md:grid-cols-2">
-          <GoalVsActualBar
-            label="Zones captured"
-            actual={captured}
-            goal={total}
-            unit="zones"
-            tone="emerald"
-          />
+          {useReps ? (
+            <GoalVsActualBar
+              label="Reps completed"
+              actual={reps}
+              goal={repTarget}
+              unit="reps"
+              tone="emerald"
+            />
+          ) : (
+            <GoalVsActualBar
+              label="Zones captured"
+              actual={captured ?? 0}
+              goal={total}
+              unit="zones"
+              tone="emerald"
+            />
+          )}
           <div className="grid gap-3">
             <div className="rounded-card border border-border bg-surface p-4">
               <p className="text-[10px] uppercase tracking-[0.14em] text-subtle">
@@ -630,7 +647,7 @@ function WeightShiftSummary({
         </div>
       ) : (
         <div className="mt-3 rounded-card border border-border bg-surface p-5 text-sm text-muted">
-          Zone-capture breakdown not available for this session.
+          Session breakdown not available for this session.
         </div>
       )}
     </section>

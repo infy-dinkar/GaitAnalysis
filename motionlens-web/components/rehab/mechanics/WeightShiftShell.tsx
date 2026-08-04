@@ -27,6 +27,11 @@ interface Props {
   /** True if the patient has lifted a foot — game pauses dwell. */
   stepDetected: boolean;
   config: WeightShiftConfig;
+  /** Full left↔right cycle rep count (owned by the page) — the primary
+   *  progress indicator + completion metric. */
+  reps: number;
+  /** Target reps that completes the session (auto-save fires there). */
+  repTarget: number;
   /** Optional session-state harvester — same additive pattern as
    *  RepCountShell.onSnapshot. Fires when captured zones change so
    *  pages can persist mechanic_state without peeking. */
@@ -39,6 +44,8 @@ export function WeightShiftShell({
   shift,
   stepDetected,
   config,
+  reps,
+  repTarget,
   onSnapshot,
   compact = false,
 }: Props) {
@@ -47,19 +54,36 @@ export function WeightShiftShell({
   const [feedback, setFeedback] = useState<string | null>(null);
   const [feedbackTone, setFeedbackTone] =
     useState<"good" | "bad" | "neutral">("neutral");
+  // Brief highlight pulse on the rep counter each time a rep lands —
+  // immediate visual feedback. Driven by the `reps` prop increment.
+  const [flash, setFlash] = useState(false);
+  const flashTimeoutRef = useRef<number | null>(null);
+  const prevRepsRef = useRef(reps);
+  useEffect(() => {
+    if (reps > prevRepsRef.current) {
+      setFlash(true);
+      if (flashTimeoutRef.current) window.clearTimeout(flashTimeoutRef.current);
+      flashTimeoutRef.current = window.setTimeout(() => setFlash(false), 700);
+    }
+    prevRepsRef.current = reps;
+  }, [reps]);
   const [, setTick] = useState(0);
   const onSnapshotRef = useRef(onSnapshot);
   useEffect(() => {
     onSnapshotRef.current = onSnapshot;
   }, [onSnapshot]);
   const lastEmitRef = useRef<{ captured: number; points: number } | null>(null);
+  // Elapsed session timer — starts on the first live frame and freezes
+  // once the rep target is reached. Surfaced in the ScoreHUD "Time" slot.
+  const startAtRef = useRef<number | null>(null);
+  const elapsedMsRef = useRef(0);
 
   // Mirror live props in a ref so the rAF loop reads the latest
   // values. No setState here — safe at 60 Hz prop updates.
-  const propsRef = useRef({ shift, stepDetected, config });
+  const propsRef = useRef({ shift, stepDetected, config, reps, repTarget });
   useEffect(() => {
-    propsRef.current = { shift, stepDetected, config };
-  }, [shift, stepDetected, config]);
+    propsRef.current = { shift, stepDetected, config, reps, repTarget };
+  }, [shift, stepDetected, config, reps, repTarget]);
 
   // Single rAF loop, started once on mount. See HoldInZoneShell
   // for the rationale.
@@ -69,11 +93,16 @@ export function WeightShiftShell({
     const loop = () => {
       if (cancelled) return;
       const now = performance.now();
-      const { shift: sh, stepDetected: sd, config: c } = propsRef.current;
+      const { shift: sh, stepDetected: sd, config: c, reps: rp, repTarget: rt } = propsRef.current;
       const r = weightShiftStep(stateRef.current, scoreRef.current, sh, sd, c, now);
       stateRef.current = r.state;
       scoreRef.current = r.score;
       const capturedNow = r.state.capturedZoneIds.length;
+      // Tick the elapsed timer until the rep target is reached.
+      if (startAtRef.current === null) startAtRef.current = now;
+      if (rp < rt) {
+        elapsedMsRef.current = now - startAtRef.current;
+      }
       const last = lastEmitRef.current;
       if (
         !last
@@ -86,6 +115,7 @@ export function WeightShiftShell({
       if (r.event?.kind === "zone_captured") {
         setFeedback("Zone captured");
         setFeedbackTone("good");
+        // (Rep-counter pulse is driven by the `reps` prop, not zones.)
       } else if (r.event?.kind === "step_paused") {
         setFeedback("Step detected — pausing");
         setFeedbackTone("bad");
@@ -100,14 +130,16 @@ export function WeightShiftShell({
     return () => {
       cancelled = true;
       if (raf) cancelAnimationFrame(raf);
+      if (flashTimeoutRef.current) window.clearTimeout(flashTimeoutRef.current);
     };
   }, []);
 
   const s = stateRef.current;
   const score = scoreRef.current;
-  const captured = s.capturedZoneIds.length;
-  const total = config.zones.length;
-  const timer = `${captured} / ${total} captured`;
+  // Elapsed session time as M:SS for the ScoreHUD "Time" slot. (The rep
+  // count has its own prominent indicator below.)
+  const elapsedSec = Math.floor(elapsedMsRef.current / 1000);
+  const timer = `${Math.floor(elapsedSec / 60)}:${String(elapsedSec % 60).padStart(2, "0")}`;
 
   // Cursor position 0..100% across the track. shift -1 maps to 0%,
   // +1 maps to 100%.
@@ -123,6 +155,36 @@ export function WeightShiftShell({
           feedbackTone={feedbackTone}
           compact
         />
+        {/* Prominent REP counter — one full left↔right cycle = 1 rep.
+            Big number updates the instant a rep lands; a green pulse +
+            "+1 rep" badge gives immediate feedback. Session auto-saves
+            at repTarget. Mirrors RepCountShell's Reps block. */}
+        <div
+          className={`flex items-center justify-between rounded-lg border px-3 py-2 transition-all duration-200 ${
+            flash
+              ? "border-emerald-400 bg-emerald-500/20 ring-2 ring-emerald-400/60"
+              : "border-zinc-700 bg-zinc-900/80"
+          }`}
+        >
+          <div>
+            <p className="text-[9px] uppercase tracking-[0.14em] text-zinc-500">
+              Reps
+            </p>
+            <p className="tabular text-3xl font-bold leading-none text-white">
+              {Math.min(reps, repTarget)}
+              <span className="text-lg font-semibold text-zinc-500"> / {repTarget}</span>
+            </p>
+          </div>
+          {flash ? (
+            <span className="rounded-full bg-emerald-500/30 px-2 py-0.5 text-[10px] font-semibold text-emerald-100 ring-1 ring-emerald-400/50">
+              +1 rep
+            </span>
+          ) : reps >= repTarget ? (
+            <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[9px] font-semibold text-emerald-200">
+              Complete
+            </span>
+          ) : null}
+        </div>
         <div className="relative flex min-h-0 flex-1 flex-col rounded-lg border border-zinc-700 bg-zinc-900/80 p-3">
           {stepDetected && (
             <div className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-rose-500/20 px-2 py-0.5 text-[10px] font-semibold text-rose-200 ring-1 ring-rose-400/50">

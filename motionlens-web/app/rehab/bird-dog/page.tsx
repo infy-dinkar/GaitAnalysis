@@ -317,6 +317,8 @@ function Inner() {
               camera={(
                 <RehabCameraShell
                   onFrame={handleFrame}
+                  autoStart
+                  hideControls
                   angleArc={{
                     vertex: combo.legSide === "left" ? LM_LIVE.LEFT_HIP : LM_LIVE.RIGHT_HIP,
                     armA: combo.legSide === "left" ? LM_LIVE.LEFT_SHOULDER : LM_LIVE.RIGHT_SHOULDER,

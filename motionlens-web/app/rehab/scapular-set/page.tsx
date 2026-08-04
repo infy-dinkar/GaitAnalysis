@@ -52,6 +52,7 @@ import {
 import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { LiveModeLayout } from "@/components/live/LiveModeLayout";
 import {
+  computeHipWidth,
   computeScapularRetractionProxy,
   computeShoulderWidth,
 } from "@/lib/rehab/poseMetrics";
@@ -78,14 +79,17 @@ const SHOULDER_VIS_THRESHOLD = 0.3;
 const SHRUG_RISE_FRACTION = 0.07;
 
 const SCAPULAR_CONFIG = {
-  // Proxy range under typical clinic geometry is ~0-10. 5 = 5 %
-  // width narrowing required for the rep to clear "top".
-  topThreshold: 5,
-  // Back near baseline = relaxed. 2 = ≤2 % residual narrowing OK.
-  depthThreshold: 2,
-  // 3-point swing — distinguishes a real retract→release from
-  // single-frame BlazePose noise (which is typically <1 % width).
-  minAmplitude: 3,
+  // Proxy is now turn-COMPENSATED (shoulder-narrowing minus hip-
+  // narrowing), so a body turn no longer inflates it — the remaining
+  // signal is the genuine, smaller upper-body retraction. Thresholds
+  // lowered accordingly: 3 = 3 % net (turn-free) shoulder narrowing
+  // clears "top".
+  topThreshold: 3,
+  // Back near baseline = relaxed.
+  depthThreshold: 1.5,
+  // Swing amplitude — distinguishes a real retract→release from
+  // single-frame BlazePose noise (typically <1 % width).
+  minAmplitude: 2,
   maxJerk: null as number | null,
   pointsPerRep: 10,
 };
@@ -94,6 +98,9 @@ const TARGET_REPS = 10;
 interface Baseline {
   shoulderWidth: number;
   shoulderY: number;
+  /** Baseline hip width (0 when hips weren't visible during calibration
+   *  — turn compensation then falls back to shoulder-only). */
+  hipWidth: number;
 }
 
 export default function ScapularSetExercisePage() {
@@ -125,6 +132,13 @@ function Inner() {
   const lastKpRef = useRef<PoseSnapshot | null>(null);
 
   const { patient, isDoctorFlow } = usePatientContext();
+  // Setup-landing gate: the exercise is entered from a setup page with a
+  // reference image + camera-setup help + Start button (matches every
+  // other rehab exercise, e.g. Hip Abduction). The fullscreen live view
+  // renders only once started; the Exit (X) collapses back to this
+  // landing. The Start click is also the user gesture that lets the
+  // camera autoplay policy pass.
+  const [started, setStarted] = useState(false);
 
   const resetSession = useCallback(() => {
     calibSamplesRef.current = [];
@@ -134,6 +148,15 @@ function Inner() {
     setShrugDetected(false);
     setPhase("calibrating");
   }, []);
+
+  // Fullscreen Exit (X): collapse back to the setup landing + reset so
+  // the next start is fresh. LiveModeLayout unmounts → RehabCameraShell's
+  // useCamera cleanup stops all tracks, releasing the camera (nothing
+  // orphans). resetSession also stays wired to the Recalibrate button.
+  const handleExit = useCallback(() => {
+    resetSession();
+    setStarted(false);
+  }, [resetSession]);
 
   // Auto-flow: baseline lock → 3-2-1 countdown → live → complete →
   // auto-save. The calibration phase acts as this page's start gate
@@ -171,9 +194,11 @@ function Inner() {
       const width = computeShoulderWidth(liveKp);
       if (width === null || width < 1) return;
       const shoulderY = (lSh.y + rSh.y) / 2;
+      // Hip width for turn compensation — 0 when hips aren't visible.
+      const hipWidth = computeHipWidth(liveKp) ?? 0;
 
       if (phase === "calibrating") {
-        calibSamplesRef.current.push({ shoulderWidth: width, shoulderY });
+        calibSamplesRef.current.push({ shoulderWidth: width, shoulderY, hipWidth });
         setCalibProgress(calibSamplesRef.current.length / CALIB_FRAMES);
         if (calibSamplesRef.current.length >= CALIB_FRAMES) {
           const samples = calibSamplesRef.current;
@@ -181,7 +206,14 @@ function Inner() {
             samples.reduce((s, x) => s + x.shoulderWidth, 0) / samples.length;
           const avgY =
             samples.reduce((s, x) => s + x.shoulderY, 0) / samples.length;
-          baselineRef.current = { shoulderWidth: avgWidth, shoulderY: avgY };
+          // Average only the frames where hips were actually visible; if
+          // none were, baseline hip width stays 0 (compensation off).
+          const hipSamples = samples.filter((x) => x.hipWidth > 0);
+          const avgHip =
+            hipSamples.length > 0
+              ? hipSamples.reduce((s, x) => s + x.hipWidth, 0) / hipSamples.length
+              : 0;
+          baselineRef.current = { shoulderWidth: avgWidth, shoulderY: avgY, hipWidth: avgHip };
           setPhase("playing");
         }
         return;
@@ -194,6 +226,7 @@ function Inner() {
       const proxy = computeScapularRetractionProxy(
         liveKp,
         baseline.shoulderWidth,
+        baseline.hipWidth,
       );
       if (proxy !== null) {
         setRetractionProxy(proxy);
@@ -324,6 +357,45 @@ function Inner() {
             </Link>
           </div>
 
+          {/* Setup landing — reference form + Start gate. The fullscreen
+              live view (below) only mounts after Start, so the camera
+              never opens until the patient is ready. */}
+          {!started && (
+            <div className="mt-10 max-w-md">
+              {REHAB_EXERCISE_IMAGES["scapular-set"] && (
+                <div className="overflow-hidden rounded-card border border-border bg-white">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={REHAB_EXERCISE_IMAGES["scapular-set"]}
+                    alt="Scapular Set reference"
+                    loading="lazy"
+                    className="block w-full object-contain"
+                    style={{ maxHeight: 260 }}
+                  />
+                  <p className="border-t border-border bg-surface px-2 py-1 text-center text-[10px] uppercase tracking-[0.12em] text-muted">
+                    Reference form
+                  </p>
+                </div>
+              )}
+              <h2 className="mt-8 text-xl font-semibold tracking-tight">
+                Get set up
+              </h2>
+              <p className="mt-1 text-sm text-muted">
+                Stand tall facing the camera with your body from{" "}
+                <span className="font-semibold text-foreground">shoulders to hips</span>{" "}
+                in frame (the hips let the system tell a real squeeze
+                apart from turning). When you start, a 3-2-1 countdown
+                runs and the baseline locks — then squeeze your shoulder
+                blades back and down (without shrugging or twisting) to
+                count each rep.
+              </p>
+              <Button className="mt-4" onClick={() => setStarted(true)}>
+                Start exercise
+              </Button>
+            </div>
+          )}
+
+          {started && (
           <LiveModeLayout
             title="Scapular Set"
             subtitle={
@@ -333,7 +405,7 @@ function Inner() {
                   ? `Connected to ${patient.name}'s record.`
                   : `Goal ${TARGET_REPS} reps`
             }
-            onExit={resetSession}
+            onExit={handleExit}
             camera={(
               <RehabCameraShell onFrame={handleFrame} autoStart hideControls>
                 <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
@@ -387,6 +459,7 @@ function Inner() {
               </>
             )}
           />
+          )}
 
           {/* Setup help */}
           <div className="mt-16 rounded-card border border-border bg-surface p-5 text-sm text-muted">
@@ -394,9 +467,14 @@ function Inner() {
             <ul className="mt-3 list-disc space-y-1.5 pl-5">
               <li>
                 Camera at chest height, ~2 m away, perpendicular to
-                the patient — <strong>frontal view</strong>. Both
-                shoulders must stay clearly in frame throughout the
-                session.
+                the patient — <strong>frontal view</strong>. Keep both
+                shoulders <strong>and both hips</strong> in frame — the
+                hips are used to cancel out body turning, so a genuine
+                squeeze counts but rotating your torso does not.
+              </li>
+              <li>
+                Keep your torso <strong>square to the camera</strong> —
+                squeeze the shoulder blades without twisting or turning.
               </li>
               <li>
                 Stand relaxed, neutral posture, arms at sides for

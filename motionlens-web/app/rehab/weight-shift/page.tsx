@@ -92,6 +92,14 @@ const WEIGHT_SHIFT_CONFIG = {
   stepPausePenaltyPerMs: 0,
 };
 
+// ── Rep counting (full left↔right cycle) ─────────────────────────────
+// One rep = the patient has reached BOTH a left and a right extreme
+// since the last rep (order-independent). The session auto-completes
+// (→ auto-save) after REP_TARGET full cycles. Independent of the
+// zone-dwell visual: reaching a side counts even without holding.
+const REP_TARGET = 5;
+const REP_REACH = 0.4; // |lateral shift| that counts as "reached a side"
+
 interface Baseline {
   hipMidNormX: number;
   shoulderWidthNorm: number;
@@ -132,6 +140,9 @@ function Inner() {
   const [calibProgress, setCalibProgress] = useState(0);
   const [shift, setShift] = useState(0);
   const [stepDetected, setStepDetected] = useState(false);
+  // Full left↔right cycle rep count (0..REP_TARGET). Drives the rep
+  // indicator + the 5-rep auto-complete → auto-save.
+  const [reps, setReps] = useState(0);
 
   const calibSamplesRef = useRef<CalibSample[]>([]);
   const baselineRef = useRef<Baseline | null>(null);
@@ -144,6 +155,11 @@ function Inner() {
   const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
   const lastKpRef = useRef<PoseSnapshot | null>(null);
   const peakShiftRef = useRef<number>(0);
+  // Which extremes the patient has reached since the last counted rep.
+  const repVisitedRef = useRef<{ left: boolean; right: boolean }>({ left: false, right: false });
+  // Authoritative rep count (ref) so the frame loop can read/advance it
+  // without a stale closure; `reps` state mirrors it for display.
+  const repsCountRef = useRef(0);
 
   // Auto-flow: baseline lock → 3-2-1 countdown → live → complete →
   // auto-save. Session-scoped refs reset at the live transition so
@@ -162,19 +178,30 @@ function Inner() {
     bestPoseRef.current = null;
     peakShiftRef.current = 0;
     sessionStartRef.current = performance.now();
+    // Reset the rep counter at the countdown→live edge so nothing
+    // done during the countdown carries over.
+    repVisitedRef.current = { left: false, right: false };
+    repsCountRef.current = 0;
+    setReps(0);
   });
 
   const handleWSShapshot = useCallback((state: WeightShiftState, _score: MechanicScore) => {
+    // Harvest mechanic state for the saved payload. Completion is now
+    // rep-based (see the frame handler), so no zone-count auto-complete
+    // here — the zone track stays purely as the movement visual.
     weightShiftStateRef.current = state;
     const abs = Math.abs(state.cursor);
     if (abs > maxAbsShiftRef.current) maxAbsShiftRef.current = abs;
-    // Auto-complete once every configured zone has been captured.
-    if (state.capturedZoneIds.length >= WEIGHT_SHIFT_CONFIG.zones.length) {
-      markComplete();
-    }
-  }, [markComplete]);
+  }, []);
 
   const { patient, isDoctorFlow } = usePatientContext();
+  // Setup-landing gate: the exercise is entered from a setup page with a
+  // reference image + camera-setup help + Start button (matches every
+  // other rehab exercise, e.g. Hip Abduction). The fullscreen live view
+  // renders only once started; the Exit (X) collapses back to this
+  // landing. The Start click is also the user gesture that lets the
+  // camera autoplay policy pass.
+  const [started, setStarted] = useState(false);
 
   const resetSession = useCallback(() => {
     calibSamplesRef.current = [];
@@ -184,6 +211,15 @@ function Inner() {
     setStepDetected(false);
     setPhase("calibrating");
   }, []);
+
+  // Fullscreen Exit (X): collapse back to the setup landing + reset so
+  // the next start is fresh. LiveModeLayout unmounts → RehabCameraShell's
+  // useCamera cleanup stops all tracks, releasing the camera (nothing
+  // orphans). resetSession also stays wired to the Recalibrate button.
+  const handleExit = useCallback(() => {
+    resetSession();
+    setStarted(false);
+  }, [resetSession]);
 
   const buildRehabPayload = useCallback(() => {
     const peak = peakShiftRef.current;
@@ -207,6 +243,8 @@ function Inner() {
         score: { points: 0, streak: 0, bestStreak: 0 },
         mechanic_state: weightShiftStateRef.current
           ? {
+              reps,
+              repTarget: REP_TARGET,
               zonesCaptured: weightShiftStateRef.current.capturedZoneIds.length,
               totalZones: WEIGHT_SHIFT_CONFIG.zones.length,
               capturedZoneIds: weightShiftStateRef.current.capturedZoneIds,
@@ -226,7 +264,7 @@ function Inner() {
       },
       observations: { interpretation },
     };
-  }, []);
+  }, [reps]);
 
   const handleFrame = useCallback(
     (kp: Keypoint[], video: HTMLVideoElement) => {
@@ -301,6 +339,26 @@ function Inner() {
       // its zone-membership test internally.
       const clampedShift = Math.max(-1.2, Math.min(1.2, rawShift));
       setShift(clampedShift);
+
+      // ── Full left↔right cycle rep counter ───────────────────────
+      // Mark which extreme the patient has reached; once BOTH sides
+      // have been touched, that's one full cycle → +1 rep. Reaching
+      // REP_TARGET auto-completes the session (→ auto-save). Only
+      // meaningful in live (the reset zeroes it at the live edge; five
+      // full cycles can't fit in the 3 s countdown).
+      if (clampedShift <= -REP_REACH) repVisitedRef.current.left = true;
+      if (clampedShift >= REP_REACH) repVisitedRef.current.right = true;
+      if (
+        repVisitedRef.current.left
+        && repVisitedRef.current.right
+        && repsCountRef.current < REP_TARGET
+      ) {
+        repVisitedRef.current = { left: false, right: false };
+        repsCountRef.current += 1;
+        setReps(repsCountRef.current);
+        if (repsCountRef.current >= REP_TARGET) markComplete();
+      }
+
       const absShift = Math.abs(clampedShift);
       if (absShift > peakShiftRef.current) {
         peakShiftRef.current = absShift;
@@ -333,7 +391,7 @@ function Inner() {
       }
       prevStepDetectedRef.current = stepped;
     },
-    [phase],
+    [phase, markComplete],
   );
 
   const calibratingPct = Math.round(calibProgress * 100);
@@ -372,6 +430,44 @@ function Inner() {
             </Link>
           </div>
 
+          {/* Setup landing — reference form + Start gate. The fullscreen
+              live view (below) only mounts after Start, so the camera
+              never opens until the patient is ready. */}
+          {!started && (
+            <div className="mt-10 max-w-md">
+              {REHAB_EXERCISE_IMAGES["weight-shift"] && (
+                <div className="overflow-hidden rounded-card border border-border bg-white">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={REHAB_EXERCISE_IMAGES["weight-shift"]}
+                    alt="Weight Shift reference"
+                    loading="lazy"
+                    className="block w-full object-contain"
+                    style={{ maxHeight: 260 }}
+                  />
+                  <p className="border-t border-border bg-surface px-2 py-1 text-center text-[10px] uppercase tracking-[0.12em] text-muted">
+                    Reference form
+                  </p>
+                </div>
+              )}
+              <h2 className="mt-8 text-xl font-semibold tracking-tight">
+                Get set up
+              </h2>
+              <p className="mt-1 text-sm text-muted">
+                Stand centred and face the camera, feet flat and
+                shoulder-width apart (use light support if you need it).
+                When you start, a 3-2-1 countdown runs and the baseline
+                locks — then shift your weight fully left, then fully
+                right (one full swing = 1 rep). Do {REP_TARGET} reps and
+                it saves automatically.
+              </p>
+              <Button className="mt-4" onClick={() => setStarted(true)}>
+                Start exercise
+              </Button>
+            </div>
+          )}
+
+          {started && (
           <LiveModeLayout
             title="Weight Shift"
             subtitle={
@@ -381,7 +477,7 @@ function Inner() {
                   ? `Connected to ${patient.name}'s record.`
                   : "Baseline locked · play on"
             }
-            onExit={resetSession}
+            onExit={handleExit}
             camera={(
               <RehabCameraShell onFrame={handleFrame} autoStart hideControls>
                 <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
@@ -418,24 +514,37 @@ function Inner() {
                   <AutoFlowCountdownCard
                     countdown={countdown}
                     onSkip={skipCountdown}
-                    hint="Stand still and centred, feet fixed, full body in frame."
+                    hint="Stand centred and face the camera, feet flat and shoulder-width apart. When it starts, slowly shift your weight from one foot to the other — side to side — without lifting either foot."
                   />
+                )}
+                {(sessionPhase === "countdown" || sessionPhase === "live") && (
+                  <div className="rounded-md border border-border bg-surface p-3 text-xs text-muted">
+                    <p className="font-semibold text-foreground">How to do it</p>
+                    <p className="mt-1 leading-relaxed">
+                      Keep both feet flat on the floor. Slowly shift your
+                      body weight all the way onto your left foot, then all
+                      the way onto your right — a full left-to-right swing
+                      is <span className="font-semibold text-foreground">1 rep</span>.
+                      Do {REP_TARGET} reps and it saves automatically.
+                    </p>
+                  </div>
                 )}
                 {(sessionPhase === "live" || sessionPhase === "complete") && (
                   <div className="flex min-h-0 flex-1 flex-col">
-                    <WeightShiftShell shift={shift} stepDetected={stepDetected} config={WEIGHT_SHIFT_CONFIG} compact onSnapshot={handleWSShapshot} />
+                    <WeightShiftShell shift={shift} stepDetected={stepDetected} config={WEIGHT_SHIFT_CONFIG} reps={reps} repTarget={REP_TARGET} compact onSnapshot={handleWSShapshot} />
                   </div>
                 )}
                 <div className="no-pdf">
                   <AutoFlowFooter
                     complete={sessionPhase === "complete"}
                     buildPayload={buildRehabPayload}
-                    completeHint="All zones captured — saving to record automatically."
+                    completeHint={`${REP_TARGET} reps done — saving to record automatically.`}
                   />
                 </div>
               </>
             )}
           />
+          )}
 
           {/* Setup help */}
           <div className="mt-16 rounded-card border border-border bg-surface p-5 text-sm text-muted">
