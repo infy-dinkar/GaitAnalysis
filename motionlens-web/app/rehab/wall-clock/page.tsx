@@ -37,7 +37,7 @@
 // NO biomech file imported or touched — wrist + shoulder landmarks
 // are read directly.
 
-import { Suspense, useCallback, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -45,8 +45,6 @@ import { Section } from "@/components/ui/Section";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
-import { TargetReachShell } from "@/components/rehab/mechanics/TargetReachShell";
-import type { TargetReachState, Score as MechanicScore } from "@/lib/rehab/gameState";
 import {
   AutoFlowCompleteOverlay,
   AutoFlowCountdownCard,
@@ -55,12 +53,10 @@ import {
 } from "@/components/rehab/mechanics/AutoFlowChrome";
 import { useRehabAutoFlow } from "@/lib/rehab/useAutoFlow";
 import { LiveModeLayout } from "@/components/live/LiveModeLayout";
-import { computeShoulderWidth } from "@/lib/rehab/poseMetrics";
 import { DEFAULT_LEVEL_INDEX } from "@/lib/rehab/progressionLadders";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 import { usePatientContext } from "@/hooks/usePatientContext";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
-import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
 import {
   buildSkeletonPosePayload,
   elapsedSecondsSince,
@@ -72,20 +68,24 @@ import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 type Side = "left" | "right";
 
-const LANDMARK_VIS_THRESHOLD = 0.3;
-// 2.5 × shoulder-width as the reach scale means a comfortable
-// extended-arm reach (~1 arm length ≈ 1.2 × shoulder-width) shifts
-// the cursor about 0.34 of the play area — close to the
-// target-spawn edge at 0.85. Patients with restricted ROM still
-// move the cursor a useful distance; full-ROM patients reach all
-// quadrant edges.
-const REACH_SCALE_FACTOR = 2.5;
+const WRIST_VIS_THRESHOLD = 0.3;
 
-const REACH_CONFIG = {
-  hitRadiusMultiplier: 1.25,
-  pointsPerHit: 10,
-  pointsPerMiss: -2,
-};
+// Circle counter — the patient traces the clock face with the working
+// hand (12 → 3 → 6 → 9 → back to 12). We track the wrist's angle around
+// a slowly-adapting centre and add 2π of unwrapped rotation = 1 full
+// circle. Direction-agnostic (CW/CCW). Auto-saves at TARGET_CIRCLES. No
+// precise tracing / target-hitting, so cursor lag is irrelevant.
+const TARGET_CIRCLES = 10;
+// Only accumulate rotation when the wrist is a meaningful distance from
+// the centre — stops jitter near the centre from spinning the angle.
+const MIN_CIRCLE_RADIUS = 0.05;
+
+/** Wrap an angle delta into (-π, π]. */
+function normAngle(a: number): number {
+  while (a > Math.PI) a -= 2 * Math.PI;
+  while (a < -Math.PI) a += 2 * Math.PI;
+  return a;
+}
 
 export default function WallClockExercisePage() {
   return (
@@ -97,101 +97,133 @@ export default function WallClockExercisePage() {
 
 function Inner() {
   const [side, setSide] = useState<Side | null>(null);
-  // Default centre — patient starts at neutral stance, cursor sits
-  // at the play-area centre.
-  const [cursor, setCursor] = useState<{ x: number; y: number }>({
-    x: 0.5,
-    y: 0.5,
-  });
-  // For the on-camera overlay readout.
-  const [reachMagnitude, setReachMagnitude] = useState<number>(0);
+  const [tracking, setTracking] = useState(false);
+  const [circles, setCircles] = useState(0);
+  const [elapsedSec, setElapsedSec] = useState(0);
+  // Brief pulse on the circle counter each time one lands.
+  const [flash, setFlash] = useState(false);
+  const flashTimeoutRef = useRef<number | null>(null);
 
   const { patient, isDoctorFlow } = usePatientContext();
 
   const sessionStartRef = useRef<number>(performance.now());
-  const reachStateRef = useRef<TargetReachState | null>(null);
-  const handleReachSnapshot = useCallback((state: TargetReachState, _score: MechanicScore) => {
-    reachStateRef.current = state;
-  }, []);
   const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
   const lastKpRef = useRef<PoseSnapshot | null>(null);
-  const peakReachRef = useRef<number>(0);
+  const wristSeenRef = useRef(false);
+  // Circle-detection state.
+  const centerRef = useRef<{ x: number; y: number } | null>(null);
+  const prevAngleRef = useRef<number | null>(null);
+  const accumAngleRef = useRef<number>(0);
+  const circlesCountRef = useRef<number>(0);
+  const peakRadiusRef = useRef<number>(0);
 
-  // Auto-flow: side pick → 3-2-1 countdown → live. No auto-complete
-  // — the Target-Reach spawner is open-ended (no finite target
-  // count on this page), so the manual Save stays available.
-  // Session-scoped refs reset at the live transition so countdown
-  // framing noise never leaks into the payload.
   const {
     phase: sessionPhase,
     countdown,
     skipCountdown,
+    markComplete,
   } = useRehabAutoFlow(side !== null, () => {
-    peakReachRef.current = 0;
     bestPoseRef.current = null;
-    reachStateRef.current = null;
+    wristSeenRef.current = false;
+    centerRef.current = null;
+    prevAngleRef.current = null;
+    accumAngleRef.current = 0;
+    circlesCountRef.current = 0;
+    peakRadiusRef.current = 0;
+    setTracking(false);
+    setCircles(0);
+    setElapsedSec(0);
     sessionStartRef.current = performance.now();
   });
+
+  useEffect(() => {
+    if (sessionPhase !== "live") return;
+    const id = window.setInterval(() => setElapsedSec((s) => s + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [sessionPhase]);
 
   const handleFrame = useCallback(
     (kp: Keypoint[], video: HTMLVideoElement) => {
       if (!side) return;
       const snap = kpToPoseSnapshot(kp, video.videoWidth, video.videoHeight);
       if (snap) lastKpRef.current = snap;
-      const liveKp = kp as unknown as LiveKeypoint[];
-      const wrist =
-        liveKp[side === "right" ? LM.RIGHT_WRIST : LM.LEFT_WRIST];
-      const shoulder =
-        liveKp[side === "right" ? LM.RIGHT_SHOULDER : LM.LEFT_SHOULDER];
+      const wristIdx = side === "right" ? LM.RIGHT_WRIST : LM.LEFT_WRIST;
+      const wrist = kp[wristIdx];
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
       if (
         !wrist
-        || !shoulder
-        || (wrist.score ?? 0) < LANDMARK_VIS_THRESHOLD
-        || (shoulder.score ?? 0) < LANDMARK_VIS_THRESHOLD
+        || (wrist.score ?? 0) < WRIST_VIS_THRESHOLD
+        || vw <= 0
+        || vh <= 0
       ) {
-        // Sticky last position on dropouts — no cursor snap.
-        return;
+        return; // dropout — hold state
       }
-      const sw = computeShoulderWidth(liveKp);
-      if (sw === null || sw < 1) return;
+      const cx = Math.max(0, Math.min(1, 1 - wrist.x / vw));
+      const cy = Math.max(0, Math.min(1, wrist.y / vh));
 
-      // Mirror x so patient-reaches-right ⇒ cursor-goes-right
-      // (matches the selfie-skeleton overlay convention).
-      const reachXMirrored = shoulder.x - wrist.x;
-      const reachY = wrist.y - shoulder.y;
-      const scale = sw * REACH_SCALE_FACTOR;
-      const cursorX = Math.max(0, Math.min(1, 0.5 + reachXMirrored / scale));
-      const cursorY = Math.max(0, Math.min(1, 0.5 + reachY / scale));
-      setCursor({ x: cursorX, y: cursorY });
-      // Reach magnitude normalised — quick readout for the patient.
-      const magnitude = Math.hypot(reachXMirrored, reachY) / scale;
-      setReachMagnitude(magnitude);
-      if (magnitude > peakReachRef.current) {
-        peakReachRef.current = magnitude;
-        if (magnitude >= 0.2 && lastKpRef.current) {
-          bestPoseRef.current = {
-            landmarks: lastKpRef.current.landmarks,
-            source_frame: lastKpRef.current.source_frame,
-            angle: magnitude,
-            capturedAtMs: performance.now(),
-          };
+      // Slowly-adapting centre = the point the wrist circles around.
+      const c = centerRef.current;
+      if (c === null) {
+        centerRef.current = { x: cx, y: cy };
+      } else {
+        centerRef.current = { x: c.x * 0.98 + cx * 0.02, y: c.y * 0.98 + cy * 0.02 };
+      }
+      const ctr = centerRef.current;
+      const dx = cx - ctr.x;
+      const dy = cy - ctr.y;
+      const radius = Math.hypot(dx, dy);
+      if (radius > peakRadiusRef.current) peakRadiusRef.current = radius;
+
+      if (radius >= MIN_CIRCLE_RADIUS) {
+        const angle = Math.atan2(dy, dx);
+        const prev = prevAngleRef.current;
+        if (prev !== null) {
+          accumAngleRef.current += normAngle(angle - prev);
+          if (Math.abs(accumAngleRef.current) >= 2 * Math.PI) {
+            accumAngleRef.current -= Math.sign(accumAngleRef.current) * 2 * Math.PI;
+            const next = circlesCountRef.current + 1;
+            circlesCountRef.current = next;
+            setCircles(next);
+            setFlash(true);
+            if (flashTimeoutRef.current) window.clearTimeout(flashTimeoutRef.current);
+            flashTimeoutRef.current = window.setTimeout(() => setFlash(false), 700);
+            if (next >= TARGET_CIRCLES) markComplete();
+          }
         }
+        prevAngleRef.current = angle;
+      } else {
+        prevAngleRef.current = null;
+      }
+
+      if (lastKpRef.current) {
+        bestPoseRef.current = {
+          landmarks: lastKpRef.current.landmarks,
+          source_frame: lastKpRef.current.source_frame,
+          angle: 0,
+          capturedAtMs: performance.now(),
+        };
+      }
+      if (!wristSeenRef.current) {
+        wristSeenRef.current = true;
+        setTracking(true);
       }
     },
-    [side],
+    [side, markComplete],
   );
 
   const buildRehabPayload = useCallback(() => {
     if (!side) return null;
-    const peak = peakReachRef.current;
+    const durationSec = elapsedSecondsSince(sessionStartRef.current);
+    const peakRadius = peakRadiusRef.current;
     const interpretation =
-      `Peak reach magnitude: ${peak.toFixed(2)} (of shoulder-width baseline).`;
+      `Wall-clock — ${circles} circle${circles === 1 ? "" : "s"} in ${durationSec.toFixed(0)}s on the ${side} arm (peak radius ${(peakRadius * 100).toFixed(0)}%).`;
     const skeletonPose = buildSkeletonPosePayload(
       bestPoseRef.current,
       lastKpRef.current,
-      peak,
+      0,
       side,
-      `Peak wall-clock reach — ${peak.toFixed(2)}× baseline`,
+      "Wall-clock session",
     );
     return {
       module: "rehab" as const,
@@ -199,44 +231,28 @@ function Inner() {
       side,
       metrics: {
         exercise_slug: "wall-clock",
-        mechanic_id: "target_reach",
+        mechanic_id: "swing_count",
         started_at_ms: sessionStartRef.current,
-        duration_sec: elapsedSecondsSince(sessionStartRef.current),
+        duration_sec: durationSec,
+        reps: circles,
+        target_reps: TARGET_CIRCLES,
         score: { points: 0, streak: 0, bestStreak: 0 },
-        mechanic_state: reachStateRef.current,
-        signal: {
-          name: "reach_magnitude",
-          unit: "shoulder-widths",
-          value_at_peak: peak,
+        mechanic_state: {
+          swings: circles,
+          targetSwings: TARGET_CIRCLES,
+          peakAmplitude: peakRadius,
         },
-        config: REACH_CONFIG,
+        signal: {
+          name: "circle_amplitude",
+          unit: "play-widths",
+          value_at_peak: peakRadius,
+        },
         level_index: DEFAULT_LEVEL_INDEX,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },
     };
-  }, [side]);
-
-  // Direction hint for the overlay — helps when the patient first
-  // starts moving and isn't sure if the cursor mapping feels right.
-  const dirHint =
-    cursor.y < 0.4
-      ? cursor.x > 0.6
-        ? "reaching up-right"
-        : cursor.x < 0.4
-        ? "reaching up-left"
-        : "reaching up"
-      : cursor.y > 0.6
-      ? cursor.x > 0.6
-        ? "reaching down-right"
-        : cursor.x < 0.4
-        ? "reaching down-left"
-        : "reaching down"
-      : cursor.x > 0.6
-      ? "reaching right"
-      : cursor.x < 0.4
-      ? "reaching left"
-      : "centre";
+  }, [side, circles]);
 
   return (
     <>
@@ -250,13 +266,14 @@ function Inner() {
                 Wall-Clock Reach<span className="text-accent">.</span>
               </h1>
               <p className="mt-5 text-lg text-muted">
-                Multidirectional shoulder reach — patient stands
-                frontal, the chosen hand IS the cursor. Targets
-                spawn around the play area (12, 3, 6, 9 o&apos;clock
-                and in-between positions), forcing reach in every
+                Multidirectional shoulder circles — patient stands
+                frontal and moves the working hand in a full circle
+                around a clock face (12 → 3 → 6 → 9 → back to 12). Each
+                full circle is one <strong>circle</strong>; the session
+                auto-saves after {TARGET_CIRCLES} circles. No precise
+                tracing — just circle the arm smoothly in either
                 direction. Trains shoulder ROM across the full
-                hemisphere + reach-coordination. Powered by the
-                Target-Reach mechanic.
+                hemisphere + coordination.
               </p>
               {isDoctorFlow && patient && (
                 <p className="mt-3 text-xs text-muted">
@@ -278,13 +295,14 @@ function Inner() {
           {side && (
             <LiveModeLayout
               title={`Wall Clock · ${side === "left" ? "Left" : "Right"} arm`}
-              subtitle={isDoctorFlow && patient ? `Connected to ${patient.name}'s record.` : "Reach in different directions"}
+              subtitle={isDoctorFlow && patient ? `Connected to ${patient.name}'s record.` : `Goal ${TARGET_CIRCLES} circles`}
               onExit={() => setSide(null)}
               camera={(
                 <RehabCameraShell onFrame={handleFrame} autoStart hideControls>
                   <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
-                    <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">{side === "left" ? "L" : "R"} reach</p>
-                    <p className="tabular text-xs text-zinc-300">{dirHint}</p>
+                    <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">{side === "left" ? "L" : "R"} circles</p>
+                    <p className="tabular text-2xl font-semibold text-white">{circles}<span className="text-sm text-zinc-400"> / {TARGET_CIRCLES}</span></p>
+                    <p className="mt-1 text-[10px] text-zinc-300">{tracking ? "circle the clock" : "waiting…"}</p>
                   </div>
                   {sessionPhase === "countdown" && countdown !== null && (
                     <AutoFlowCountdownOverlay countdown={countdown} />
@@ -309,18 +327,51 @@ function Inner() {
                     <AutoFlowCountdownCard
                       countdown={countdown}
                       onSkip={skipCountdown}
-                      hint="Patient facing the camera, working hand free to reach."
+                      hint="Patient facing the camera, working hand free to circle."
                     />
                   )}
                   {(sessionPhase === "live" || sessionPhase === "complete") && (
-                    <div className="flex min-h-0 flex-1 flex-col">
-                      <TargetReachShell cursor={cursor} config={REACH_CONFIG} compact onSnapshot={handleReachSnapshot} />
-                    </div>
+                    <>
+                      <div className="flex items-center justify-between rounded-lg border border-zinc-700 bg-zinc-900/80 px-3 py-2">
+                        <div>
+                          <p className="text-[9px] uppercase tracking-[0.14em] text-zinc-500">Time</p>
+                          <p className="tabular text-2xl font-semibold leading-none text-white">
+                            {Math.floor(elapsedSec / 60)}:{String(elapsedSec % 60).padStart(2, "0")}
+                          </p>
+                        </div>
+                        <p className="text-[10px] text-zinc-400">Circles auto-save at {TARGET_CIRCLES}</p>
+                      </div>
+                      <div
+                        className={`flex items-center justify-between rounded-lg border px-3 py-2 transition-all duration-200 ${
+                          flash
+                            ? "border-emerald-400 bg-emerald-500/20 ring-2 ring-emerald-400/60"
+                            : "border-zinc-700 bg-zinc-900/80"
+                        }`}
+                      >
+                        <div>
+                          <p className="text-[9px] uppercase tracking-[0.14em] text-zinc-500">Circles</p>
+                          <p className="tabular text-3xl font-bold leading-none text-white">
+                            {Math.min(circles, TARGET_CIRCLES)}
+                            <span className="text-lg font-semibold text-zinc-500"> / {TARGET_CIRCLES}</span>
+                          </p>
+                        </div>
+                        {flash ? (
+                          <span className="rounded-full bg-emerald-500/30 px-2 py-0.5 text-[10px] font-semibold text-emerald-100 ring-1 ring-emerald-400/50">+1 circle</span>
+                        ) : circles >= TARGET_CIRCLES ? (
+                          <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[9px] font-semibold text-emerald-200">Complete</span>
+                        ) : null}
+                      </div>
+                      <p className="text-[11px] leading-relaxed text-muted">
+                        Move the hand in a full circle around the clock
+                        (12 → 3 → 6 → 9 → back to 12). Each full circle = 1.
+                      </p>
+                    </>
                   )}
                   <div className="no-pdf">
                     <AutoFlowFooter
                       complete={sessionPhase === "complete"}
                       buildPayload={buildRehabPayload}
+                      completeHint={`${TARGET_CIRCLES} circles done — saving to record automatically.`}
                     />
                   </div>
                 </>
@@ -339,23 +390,17 @@ function Inner() {
                 throughout.
               </li>
               <li>
-                Patient stands neutral, feet shoulder-width, arms at
-                sides. The hand on the working side IS the cursor —
-                lift the arm out of the way of the body and reach
-                in different directions.
+                Move the working hand in a <strong>full circle</strong>
+                around a clock face: up (12) → right (3) → down (6) →
+                left (9) → back up to 12. Either direction is fine.
               </li>
               <li>
-                Try the cardinal directions first: 12 o&apos;clock
-                (straight up), 3 (right), 6 (down — across the
-                body), 9 (left), then the diagonals. Each direction
-                lands the cursor in a different quadrant of the
-                play area.
+                Keep the circles smooth and reasonably big — a full
+                loop back to the start counts as one circle.
               </li>
               <li>
-                Each successful hit awards points; misses (target
-                TTL expires before the cursor arrives) cost points.
-                Hold near a target to glue the cursor onto it as it
-                spawns nearby.
+                The circle counter climbs with each full loop; after
+                {" "}{TARGET_CIRCLES} circles the session auto-saves.
               </li>
               <li>
                 Stable shoulder + wrist visibility is required —
@@ -392,9 +437,8 @@ function SidePicker({ onPick }: { onPick: (s: Side) => void }) {
         Choose the reaching arm
       </h2>
       <p className="mt-2 text-sm text-muted">
-        Pick the arm the patient will use to reach. The cursor
-        tracks that wrist&apos;s position relative to the shoulder
-        every frame.
+        Pick the arm the patient will circle. We track that hand and
+        count each full circle around the clock as one.
       </p>
       <div className="mt-6 grid gap-3 sm:grid-cols-2">
         <Button onClick={() => onPick("left")}>Left arm</Button>
