@@ -26,7 +26,7 @@
 //   • LM_LIVE ankle indices
 //   • usePoseDetectionLive, useCamera, usePatientContext
 
-import { Suspense, useCallback, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -34,8 +34,8 @@ import { Section } from "@/components/ui/Section";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { RehabCameraShell } from "@/components/rehab/mechanics/RehabCameraShell";
-import { TargetReachShell } from "@/components/rehab/mechanics/TargetReachShell";
-import type { TargetReachState, Score as MechanicScore } from "@/lib/rehab/gameState";
+import { RepCountShell } from "@/components/rehab/mechanics/RepCountShell";
+import type { RepCountState, Score as MechanicScore } from "@/lib/rehab/gameState";
 import {
   AutoFlowCompleteOverlay,
   AutoFlowCountdownCard,
@@ -61,17 +61,19 @@ import { REHAB_EXERCISE_IMAGES } from "@/lib/rehab/exerciseImages";
 
 type Side = "left" | "right";
 
-// Cap the cursor at 45° abduction. Top targets reachable at ~38°
-// (cursor.y ≈ 0.15); patients with restricted ROM still score on
-// mid-band targets. Going higher than 45° rarely happens actively
-// and would just pin the cursor against the top edge.
-const MAX_ABDUCTION_DEG = 45;
-
-const REACH_CONFIG = {
-  hitRadiusMultiplier: 1.25,
-  pointsPerHit: 10,
-  pointsPerMiss: -2,
+// Rep-Count on the abduction angle (° — high when the leg is lifted to
+// the side). One rep = lift to target → lower back down. topThreshold =
+// "reached" (lifted), depthThreshold = "relaxed" (leg near vertical).
+// First lift primes; every lift-after-lower counts. Tune on camera if
+// reps under/over count (active abduction ROM ~30-45°).
+const REP_CONFIG = {
+  topThreshold: 28,
+  depthThreshold: 10,
+  minAmplitude: 15,
+  maxJerk: null as number | null,
+  pointsPerRep: 10,
 };
+const TARGET_REPS = 10;
 
 export default function HipAbductionExercisePage() {
   return (
@@ -83,40 +85,53 @@ export default function HipAbductionExercisePage() {
 
 function Inner() {
   const [side, setSide] = useState<Side | null>(null);
-  // Default cursor at bottom-centre — patient starts with the leg
-  // hanging straight down (0° abduction).
-  const [cursor, setCursor] = useState<{ x: number; y: number }>({
-    x: 0.5,
-    y: 1.0,
-  });
   const [liveAngle, setLiveAngle] = useState<number>(0);
+  const [reps, setReps] = useState(0);
+  const [elapsedSec, setElapsedSec] = useState(0);
 
   const { patient, isDoctorFlow } = usePatientContext();
 
   const sessionStartRef = useRef<number>(performance.now());
-  const reachStateRef = useRef<TargetReachState | null>(null);
-  const handleReachSnapshot = useCallback((state: TargetReachState, _score: MechanicScore) => {
-    reachStateRef.current = state;
-  }, []);
+  const repStateRef = useRef<RepCountState | null>(null);
   const bestPoseRef = useRef<BestPoseSnapshot | null>(null);
   const lastKpRef = useRef<PoseSnapshot | null>(null);
   const peakAngleRef = useRef<number>(0);
+  // EMA-smoothed abduction — kills per-frame pose jitter that would
+  // otherwise spike phantom reps.
+  const smoothAngleRef = useRef<number | null>(null);
 
-  // Auto-flow: side pick → 3-2-1 countdown → live. No auto-complete
-  // — the Target-Reach spawner is open-ended (no finite target
-  // count on this page), so the manual Save stays available.
-  // Session-scoped refs reset at the live transition so countdown
-  // framing noise never leaks into the payload.
+  // Auto-flow: side pick → 3-2-1 countdown → live → complete (at
+  // TARGET_REPS) → auto-save. Session-scoped refs reset at the live
+  // transition so countdown framing noise never leaks into the payload.
   const {
     phase: sessionPhase,
     countdown,
     skipCountdown,
+    markComplete,
   } = useRehabAutoFlow(side !== null, () => {
     peakAngleRef.current = 0;
     bestPoseRef.current = null;
-    reachStateRef.current = null;
+    repStateRef.current = null;
+    smoothAngleRef.current = null;
+    setReps(0);
+    setElapsedSec(0);
     sessionStartRef.current = performance.now();
   });
+
+  const handleSnapshot = useCallback(
+    (state: RepCountState, _score: MechanicScore) => {
+      repStateRef.current = state;
+      setReps(state.reps);
+      if (state.reps >= TARGET_REPS) markComplete();
+    },
+    [markComplete],
+  );
+
+  useEffect(() => {
+    if (sessionPhase !== "live") return;
+    const id = window.setInterval(() => setElapsedSec((s) => s + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [sessionPhase]);
 
   const handleFrame = useCallback(
     (kp: Keypoint[], video: HTMLVideoElement) => {
@@ -124,11 +139,12 @@ function Inner() {
       const snap = kpToPoseSnapshot(kp, video.videoWidth, video.videoHeight);
       if (snap) lastKpRef.current = snap;
       const liveKp = kp as unknown as LiveKeypoint[];
-      const angle = computeHipAbductionDeg(liveKp, side);
-      const ankle =
-        liveKp[side === "right" ? LM.RIGHT_ANKLE : LM.LEFT_ANKLE];
-      if (angle === null) return;
+      const raw = computeHipAbductionDeg(liveKp, side);
+      if (raw === null) return;
 
+      const prev = smoothAngleRef.current;
+      const angle = prev === null ? raw : prev * 0.65 + raw * 0.35;
+      smoothAngleRef.current = angle;
       setLiveAngle(angle);
       if (angle > peakAngleRef.current) {
         peakAngleRef.current = angle;
@@ -141,14 +157,6 @@ function Inner() {
           };
         }
       }
-      const yPct = Math.max(0, Math.min(1, angle / MAX_ABDUCTION_DEG));
-      const cursorY = 1 - yPct;
-      const vw = video.videoWidth;
-      const cursorX =
-        ankle && vw > 0
-          ? Math.max(0, Math.min(1, 1 - ankle.x / vw))
-          : 0.5;
-      setCursor({ x: cursorX, y: cursorY });
     },
     [side],
   );
@@ -171,24 +179,26 @@ function Inner() {
       side,
       metrics: {
         exercise_slug: "hip-abduction",
-        mechanic_id: "target_reach",
+        mechanic_id: "rep_count",
         started_at_ms: sessionStartRef.current,
         duration_sec: elapsedSecondsSince(sessionStartRef.current),
+        reps,
+        target_reps: TARGET_REPS,
         score: { points: 0, streak: 0, bestStreak: 0 },
-        mechanic_state: reachStateRef.current,
+        mechanic_state: repStateRef.current,
         signal: {
           name: "hip_abduction",
           unit: "deg",
           value_at_peak: peak,
           target_band: { min: 15, max: 40 },
         },
-        config: REACH_CONFIG,
+        config: REP_CONFIG,
         level_index: DEFAULT_LEVEL_INDEX,
         skeleton_pose: skeletonPose,
       },
       observations: { interpretation },
     };
-  }, [side]);
+  }, [side, reps]);
 
   return (
     <>
@@ -202,15 +212,13 @@ function Inner() {
                 Hip Abduction<span className="text-accent">.</span>
               </h1>
               <p className="mt-5 text-lg text-muted">
-                Standing hip abduction to target — patient stands
-                with light support (hand on chair / wall) and lifts
-                the working leg out to the side. The cursor height
-                IS the shared{" "}
-                <strong>hip abduction angle</strong>: more lift ⇒
-                higher cursor ⇒ higher targets. Max-cursor at{" "}
-                {MAX_ABDUCTION_DEG}° — patients with restricted ROM
-                still score on mid-band targets. Powered by the
-                Target-Reach mechanic.
+                Standing hip abduction — patient stands with light
+                support (hand on chair / wall) and repeatedly lifts the
+                working leg out to the side, then lowers it. Each
+                lift-and-lower is one <strong>rep</strong>; the session
+                auto-saves after {TARGET_REPS} reps. The shared clinical
+                metric — <strong>hip abduction angle</strong> (thigh vs
+                vertical) — is the control.
               </p>
               {isDoctorFlow && patient && (
                 <p className="mt-3 text-xs text-muted">
@@ -232,7 +240,7 @@ function Inner() {
           {side && (
             <LiveModeLayout
               title={`Hip Abduction · ${side === "left" ? "Left" : "Right"} leg`}
-              subtitle={isDoctorFlow && patient ? `Connected to ${patient.name}'s record.` : "Drive cursor onto targets"}
+              subtitle={isDoctorFlow && patient ? `Connected to ${patient.name}'s record.` : `Goal ${TARGET_REPS} reps`}
               onExit={() => setSide(null)}
               camera={(
                 <RehabCameraShell
@@ -278,14 +286,33 @@ function Inner() {
                     />
                   )}
                   {(sessionPhase === "live" || sessionPhase === "complete") && (
-                    <div className="flex min-h-0 flex-1 flex-col">
-                      <TargetReachShell cursor={cursor} config={REACH_CONFIG} compact onSnapshot={handleReachSnapshot} />
-                    </div>
+                    <>
+                      <div className="flex items-center justify-between rounded-lg border border-zinc-700 bg-zinc-900/80 px-3 py-2">
+                        <div>
+                          <p className="text-[9px] uppercase tracking-[0.14em] text-zinc-500">Time</p>
+                          <p className="tabular text-2xl font-semibold leading-none text-white">
+                            {Math.floor(elapsedSec / 60)}:{String(elapsedSec % 60).padStart(2, "0")}
+                          </p>
+                        </div>
+                        <p className="text-[10px] text-zinc-400">Reps auto-save at {TARGET_REPS}</p>
+                      </div>
+                      <div className="flex min-h-0 flex-1 flex-col">
+                        <RepCountShell
+                          signal={liveAngle}
+                          signalLabel="Hip abduction (°)"
+                          targetReps={TARGET_REPS}
+                          config={REP_CONFIG}
+                          onSnapshot={handleSnapshot}
+                          compact
+                        />
+                      </div>
+                    </>
                   )}
                   <div className="no-pdf">
                     <AutoFlowFooter
                       complete={sessionPhase === "complete"}
                       buildPayload={buildRehabPayload}
+                      completeHint={`${TARGET_REPS} reps done — saving to record automatically.`}
                     />
                   </div>
                 </>
@@ -316,17 +343,14 @@ function Inner() {
                 abduction.
               </li>
               <li>
-                Cursor height tracks the abduction angle. Top
-                targets sit around{" "}
-                <strong>≥ {Math.round(MAX_ABDUCTION_DEG * 0.85)}°</strong>
-                {" "}of abduction (the upper end of typical clinical
-                active ROM).
+                Lift the leg to <strong>≥ {REP_CONFIG.topThreshold}°</strong>
+                {" "}abduction, then lower it back near vertical — that&apos;s
+                one rep. The rep counter climbs with each clean
+                lift-and-lower.
               </li>
               <li>
-                Each successful hit awards points; misses (target TTL
-                expires before the cursor reaches it) cost points.
-                Hold steady at target height to glue the cursor onto
-                each spawn.
+                After {TARGET_REPS} reps the session auto-saves. A full,
+                controlled lift (not a quick swing) counts best.
               </li>
             </ul>
           </div>

@@ -313,6 +313,8 @@ function MechanicSummary({
       );
     case "trace":
       return <TraceSummary state={state} durationSec={durationSec} />;
+    case "swing_count":
+      return <SwingCountSummary state={state} durationSec={durationSec} />;
     case "weight_shift":
       return (
         <WeightShiftSummary
@@ -572,6 +574,44 @@ function TraceSummary({
           No trace samples recorded for this session.
         </div>
       )}
+    </section>
+  );
+}
+
+function SwingCountSummary({
+  state,
+  durationSec,
+}: {
+  state: Record<string, unknown> | null;
+  durationSec: number;
+}) {
+  const swings = pickNumber(state, "swings") ?? 0;
+  const target = pickNumber(state, "targetSwings") ?? 0;
+  const peakAmp = pickNumber(state, "peakAmplitude") ?? 0;
+  return (
+    <section>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="text-base font-semibold tracking-tight">Circle count</h3>
+        <DurationChip seconds={durationSec} />
+      </div>
+      <div className="mt-3 grid gap-4 md:grid-cols-2">
+        <GoalVsActualBar
+          label="Full circles completed"
+          actual={swings}
+          goal={target > 0 ? target : Math.max(swings, 1)}
+          unit="circles"
+          tone="emerald"
+        />
+        <div className="rounded-card border border-border bg-surface p-4">
+          <p className="text-[10px] uppercase tracking-[0.14em] text-subtle">
+            Peak amplitude
+          </p>
+          <p className="mt-1 tabular text-2xl font-semibold text-foreground">
+            {(peakAmp * 100).toFixed(0)}
+            <span className="ml-1 text-sm text-muted">% of range</span>
+          </p>
+        </div>
+      </div>
     </section>
   );
 }
