@@ -2,14 +2,16 @@
 // H1 — Pelvic-Level Hold (Trendelenburg retraining).
 //
 // Mechanic: Hold-in-Zone (lib/rehab/mechanics.ts holdInZoneStep).
-// Signal: signed pelvic tilt (line from LEFT_HIP to RIGHT_HIP vs
-// horizontal). The band is centred on 0° — symmetric around level
-// — so the engine's pure min ≤ value ≤ max test works directly
-// with negative bounds.
+// Signal: pelvic tilt (line from LEFT_HIP to RIGHT_HIP vs horizontal)
+// measured as DEVIATION from the patient's standing-neutral pelvis —
+// captured during the 3-2-1 countdown while they stand on both feet.
+// Zeroing their natural level means lifting the leg and holding steady
+// keeps them in-zone (timer runs); only a real pelvic drop after the
+// lift pushes them out. The band is centred on 0° deviation.
 //
-//   • Pelvis level   → tilt ≈ 0°    (inside band [−5°, +5°], timer runs)
-//   • Right hip drop → tilt ≈ +10°  (above band, timer pauses)
-//   • Left hip drop  → tilt ≈ −10°  (below band, timer pauses)
+//   • Hold neutral   → dev ≈ 0°    (inside band [−5°, +5°], timer runs)
+//   • Right hip drop → dev ≈ +10°  (above band, timer pauses)
+//   • Left hip drop  → dev ≈ −10°  (below band, timer pauses)
 //
 // Frontal view test — patient stands on one leg, faces camera.
 // Optional stance-leg picker is for the on-screen label only; the
@@ -73,6 +75,15 @@ const PELVIC_HOLD_CONFIG = {
 const AXIS_MIN = -25;
 const AXIS_MAX = 25;
 
+// Median of a sample list — robust to the odd jittery frame while the
+// patient settles during the countdown.
+function median(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
 export default function PelvicHoldExercisePage() {
   // Next.js 16 static prerender requires Suspense around
   // usePatientContext (which uses useSearchParams). Same pattern
@@ -101,6 +112,12 @@ function Inner() {
   const bestDwellMsRef = useRef<number>(0);
   const lastTickRef = useRef<number | null>(null);
   const wasInZoneRef = useRef<boolean>(false);
+  // Neutral-pelvis baseline captured from the countdown frames (patient
+  // standing normally on both feet). The hold band is measured as
+  // deviation from this, so lifting the leg and holding steady counts
+  // even if the patient's natural standing pelvis isn't a perfect 0°.
+  const calibSamplesRef = useRef<number[]>([]);
+  const baselineRef = useRef<number | null>(null);
 
   // Auto-flow: stance pick → 3-2-1 countdown → live → complete →
   // auto-save. Dwell refs reset at the live transition so time
@@ -112,6 +129,14 @@ function Inner() {
     skipCountdown,
     markComplete,
   } = useRehabAutoFlow(stance !== null, () => {
+    // Lock the neutral pelvis from the frames gathered during the
+    // countdown (patient standing on both feet). Everything after the
+    // live transition is measured relative to this baseline.
+    baselineRef.current =
+      calibSamplesRef.current.length >= 5
+        ? median(calibSamplesRef.current)
+        : 0;
+    calibSamplesRef.current = [];
     totalInZoneMsRef.current = 0;
     currentDwellMsRef.current = 0;
     bestDwellMsRef.current = 0;
@@ -126,17 +151,27 @@ function Inner() {
     (kp: Keypoint[], video: HTMLVideoElement) => {
       const snap = kpToPoseSnapshot(kp, video.videoWidth, video.videoHeight);
       if (snap) lastKpRef.current = snap;
-      const tilt = computePelvicTiltDeg(
+      const rawTilt = computePelvicTiltDeg(
         kp as unknown as LiveKeypoint[],
       );
-      if (tilt !== null) {
-        setPelvicTilt(tilt);
-        // Dwell only accumulates while the session is live — frames
-        // during the countdown update the display but not the timer.
+      if (rawTilt !== null) {
+        // Before the hold starts, gather the standing-neutral tilt so
+        // the live band can be centred on the patient's own level. The
+        // display sits at 0 (centred) while calibrating; the timer does
+        // not accumulate during the countdown.
         if (sessionPhase !== "live" && sessionPhase !== "complete") {
+          calibSamplesRef.current.push(rawTilt);
+          if (calibSamplesRef.current.length > 90) {
+            calibSamplesRef.current.shift();
+          }
+          setPelvicTilt(0);
           lastTickRef.current = null;
           return;
         }
+        // Deviation from the patient's neutral pelvis — this is what the
+        // ±5° band, the on-screen line and the best-pose capture use.
+        const tilt = rawTilt - (baselineRef.current ?? 0);
+        setPelvicTilt(tilt);
         const inBand =
           tilt >= PELVIC_HOLD_CONFIG.min && tilt <= PELVIC_HOLD_CONFIG.max;
         const now = performance.now();
