@@ -125,10 +125,12 @@ function Inner() {
   // Auto-flow: side pick → 3-2-1 countdown → live. Metronome has no
   // finite beat/lift target defined on this page, so markComplete is
   // never wired — the footer keeps the manual "Save session" button.
-  // Music (started by the side-pick click, a user gesture, for
-  // autoplay-policy reasons) is re-aligned to t=0 at the live
-  // transition so the track's downbeats line up with MetronomeShell's
-  // beat clock, which starts when the shell mounts at "live".
+  // Music does NOT play during the countdown: the side-pick click only
+  // UNLOCKS the audio element (muted play→pause, for autoplay policy);
+  // the audible play() fires HERE at the countdown→live transition so
+  // the patient hears the track only once the 3-2-1 counting finishes,
+  // and its downbeats line up with MetronomeShell's beat clock (which
+  // starts when the shell mounts at "live").
   // Session-scoped refs reset at the same transition so countdown
   // framing lifts never count into the payload.
   const {
@@ -143,7 +145,11 @@ function Inner() {
     metronomeStateRef.current = null;
     setEventTrigger(0);
     sessionStartRef.current = performance.now();
-    if (audioRef.current) audioRef.current.currentTime = 0;
+    // Start the music now — counting is done, live has begun.
+    if (musicOn && audioRef.current) {
+      audioRef.current.currentTime = 0;
+      void audioRef.current.play().catch(() => {});
+    }
   });
 
   const handleFrame = useCallback(
@@ -184,17 +190,27 @@ function Inner() {
     [side],
   );
 
-  // Side picker callback — wraps setSide with audio start. The
-  // play() call must happen INSIDE the user-gesture handler
-  // (button click) to satisfy browser autoplay policy. With the
-  // auto-flow the side pick IS the session-start click, so the
-  // music starts here and is re-aligned to t=0 at the countdown→
-  // live transition (see useRehabAutoFlow onLive above).
+  // Side picker callback — wraps setSide and UNLOCKS the audio for
+  // autoplay. The browser only permits play() from inside a user
+  // gesture (this click), so we start the element MUTED and pause it
+  // immediately — this "blesses" the element so the real, audible
+  // play() fired at the countdown→live transition is allowed. The
+  // music therefore stays silent through the 3-2-1 countdown and
+  // only begins once counting finishes (see useRehabAutoFlow onLive).
   const handleSidePick = useCallback((s: Side) => {
     setSide(s);
     if (musicOn && audioRef.current) {
-      audioRef.current.currentTime = 0;
-      void audioRef.current.play().catch(() => {});
+      const a = audioRef.current;
+      a.muted = true;
+      a.currentTime = 0;
+      void a
+        .play()
+        .then(() => {
+          a.pause();
+          a.currentTime = 0;
+          a.muted = false;
+        })
+        .catch(() => {});
     }
   }, [musicOn]);
 

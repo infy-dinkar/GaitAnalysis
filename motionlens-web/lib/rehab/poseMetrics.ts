@@ -33,7 +33,18 @@ export function computePelvicTiltDeg(
   const dx = rHip.x - lHip.x;
   const dy = rHip.y - lHip.y;
   if (Math.hypot(dx, dy) < 1e-4) return null;
-  return (Math.atan2(dy, dx) * 180) / Math.PI;
+  // The hip line is UNDIRECTED. For a forward-facing subject the
+  // anatomical LEFT_HIP lands on the viewer's RIGHT (higher x), so
+  // (rHip − lHip) points in the −x direction and atan2 returns ~±180°
+  // for a LEVEL pelvis — not ~0°. Fold the result to (−90°, 90°] so a
+  // level pelvis reads ≈ 0° while the sign still encodes which hip is
+  // lower (the small deviation from horizontal). Without this the
+  // ±5° "in-zone" check in pelvic-hold never passes (hold timer dead)
+  // and marching's pelvis-drift warning is stuck permanently on.
+  let deg = (Math.atan2(dy, dx) * 180) / Math.PI;
+  if (deg > 90) deg -= 180;
+  else if (deg <= -90) deg += 180;
+  return deg;
 }
 
 /** Pixel-space midpoint x of LEFT_HIP and RIGHT_HIP — a cheap
