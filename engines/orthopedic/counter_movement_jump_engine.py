@@ -37,10 +37,14 @@ BOTH legs must leave the ground together):
   6. Landing = BOTH ankles' Y values return to within
      LANDED_BAND_FRAC_OF_LEG of their baseline AND have been
      airborne for >= MIN_AIRBORNE_FRAMES.
-  7. Per-trial jump_height_px = baseline_hip_y − min_hip_y_during_
-     airborne (apex). Image y is downward, so the apex has the
-     SMALLEST hip_y value; the difference (baseline − apex) is
-     positive when the patient jumped up.
+  7. Per-trial jump_height_px = takeoff_hip_y − min_hip_y_during_
+     airborne (apex) — the FLIGHT rise of the hip, measured from its
+     height at the takeoff instant (feet leaving, legs extended), NOT
+     from the standing baseline. Using the standing baseline would add
+     the standing→takeoff leg-extension rise and inflate the height so
+     it no longer matches the flight-time physics cross-check
+     (h = g·t²/8, which is the flight rise only). Image y is downward,
+     so the apex has the SMALLEST hip_y; (takeoff − apex) is positive.
   8. Per-trial flight_time_sec = landing_t − takeoff_t.
   9. Per-trial validity: requires BOTH ankles airborne for the
      full window (inverted vs D3's single-leg gate). Trial below
@@ -133,18 +137,24 @@ def _visible(ts: dict, key: str, i: int) -> bool:
 
 
 def _hip_mid_y(ts: dict, i: int) -> Optional[float]:
-    """Hip-midpoint Y in pixel space — averages left + right hips
-    when both visible. Returns None when either is below the
-    visibility threshold; we'd rather skip the frame than carry a
-    noisy single-hip reading."""
-    if not _visible(ts, "left_hip", i):
-        return None
-    if not _visible(ts, "right_hip", i):
-        return None
-    return (
-        float(ts["left_hip"]["y_px"][i])
-        + float(ts["right_hip"]["y_px"][i])
-    ) / 2.0
+    """Hip Y in pixel space. Averages left + right hips when both are
+    visible; falls back to whichever single hip is visible. In a
+    lateral (side-on) view — the recommended CMJ setup — the far hip is
+    often occluded, but both hips sit at essentially the same height
+    during a vertical jump, so the near hip alone is a faithful
+    vertical signal. Returns None only when NEITHER hip is visible."""
+    lv = _visible(ts, "left_hip", i)
+    rv = _visible(ts, "right_hip", i)
+    if lv and rv:
+        return (
+            float(ts["left_hip"]["y_px"][i])
+            + float(ts["right_hip"]["y_px"][i])
+        ) / 2.0
+    if lv:
+        return float(ts["left_hip"]["y_px"][i])
+    if rv:
+        return float(ts["right_hip"]["y_px"][i])
+    return None
 
 
 # ─── Apex-frame screenshot (clones D3's helper) ─────────────────
@@ -254,6 +264,7 @@ def _detect_jumps_from_hip_motion(
 
     cur_takeoff_idx: Optional[int] = None
     cur_takeoff_frame: Optional[int] = None
+    cur_takeoff_hip_y: Optional[float] = None
     cur_apex_hip_y: Optional[float] = None
     cur_apex_frame: Optional[int] = None
 
@@ -277,6 +288,15 @@ def _detect_jumps_from_hip_motion(
                 cur_takeoff_idx = i
                 last_grounded = samples[i - 1] if i > 0 else s
                 cur_takeoff_frame = int(last_grounded["frame_index"])
+                # Hip at takeoff = the flight-height reference (see the
+                # ankle-path notes). In the hip-only fallback this sits
+                # close to baseline, so the fallback stays a degraded
+                # estimate — but it never inflates the number.
+                cur_takeoff_hip_y = (
+                    float(last_grounded["hip_y_px"])
+                    if last_grounded["hip_y_px"] is not None
+                    else baseline_hip_y
+                )
                 cur_apex_hip_y = float(hip_y)
                 cur_apex_frame = int(s["frame_index"])
                 last_state_change_idx = i
@@ -301,9 +321,14 @@ def _detect_jumps_from_hip_motion(
                     0.0, (landing_t_ms - takeoff_t_ms) / 1000.0,
                 )
                 jump_height_px = 0.0
+                takeoff_ref_hip_y = (
+                    cur_takeoff_hip_y
+                    if cur_takeoff_hip_y is not None
+                    else baseline_hip_y
+                )
                 if cur_apex_hip_y is not None:
                     jump_height_px = max(
-                        0.0, baseline_hip_y - float(cur_apex_hip_y),
+                        0.0, float(takeoff_ref_hip_y) - float(cur_apex_hip_y),
                     )
                 jump_height_cm = (
                     jump_height_px / ppc if ppc is not None else None
@@ -356,6 +381,7 @@ def _detect_jumps_from_hip_motion(
                 state = "grounded"
                 cur_takeoff_idx = None
                 cur_takeoff_frame = None
+                cur_takeoff_hip_y = None
                 cur_apex_hip_y = None
                 cur_apex_frame = None
                 last_state_change_idx = i
@@ -415,11 +441,17 @@ def analyze_counter_movement_jump(
     if n == 0 or fps <= 0:
         raise ValueError("poor_visibility")
 
-    required_keys = ("left_hip", "right_hip", "left_ankle", "right_ankle")
+    # Visibility gate keyed on the HIP signal (the primary jump-height
+    # measurement AND the hip-motion fallback driver), NOT on all four
+    # landmarks. A lateral / side-on view — the recommended CMJ setup —
+    # routinely occludes the far ankle (and sometimes the far hip)
+    # behind the near leg, so requiring both ankles here rejected clean
+    # side-view clips outright ("poor_visibility"). _hip_mid_y already
+    # falls back to the visible near hip, so this passes for any usable
+    # recording; ankle-dependent steps downstream degrade to the hip-
+    # motion fallback when the far ankle is missing.
     visible_frames = sum(
-        1
-        for i in range(n)
-        if all(_visible(ts, k, i) for k in required_keys)
+        1 for i in range(n) if _hip_mid_y(ts, i) is not None
     )
     if visible_frames < max(3, int(n * 0.30)):
         raise ValueError("poor_visibility")
@@ -498,7 +530,9 @@ def analyze_counter_movement_jump(
     baseline_left_ankle_y: Optional[float] = None
     baseline_right_ankle_y: Optional[float] = None
     baseline_lock_idx: Optional[int] = None
-    best_fallback: Optional[tuple[float, float, float, float, int]] = None
+    best_fallback: Optional[
+        tuple[float, float, Optional[float], Optional[float], int]
+    ] = None
 
     for end_i in range(_STANDING_HOLD_SAMPLES - 1, len(samples)):
         window = samples[end_i - _STANDING_HOLD_SAMPLES + 1: end_i + 1]
@@ -513,32 +547,46 @@ def analyze_counter_movement_jump(
             for s in window
             if s["right_ankle_y_px"] is not None
         ]
-        if (
-            len(hys) < _STANDING_HOLD_SAMPLES // 2
-            or len(lays) < _STANDING_HOLD_SAMPLES // 2
-            or len(rays) < _STANDING_HOLD_SAMPLES // 2
-        ):
+        # Hip is MANDATORY for the baseline (primary signal). Ankles are
+        # OPTIONAL — a lateral view occludes the far ankle, so we lock on
+        # the hip and take whichever ankle medians are available. A
+        # missing ankle baseline is None and the ankle state machine
+        # self-disables (hip-motion fallback takes over).
+        if len(hys) < _STANDING_HOLD_SAMPLES // 2:
             continue
         med_hy = _stdlib_median(hys)
-        med_lay = _stdlib_median(lays)
-        med_ray = _stdlib_median(rays)
-        max_dev = max(
-            max(abs(y - med_hy) for y in hys),
-            max(abs(y - med_lay) for y in lays),
-            max(abs(y - med_ray) for y in rays),
+        med_lay = (
+            _stdlib_median(lays)
+            if len(lays) >= _STANDING_HOLD_SAMPLES // 2
+            else None
         )
+        med_ray = (
+            _stdlib_median(rays)
+            if len(rays) >= _STANDING_HOLD_SAMPLES // 2
+            else None
+        )
+        devs = [max(abs(y - med_hy) for y in hys)]
+        if med_lay is not None:
+            devs.append(max(abs(y - med_lay) for y in lays))
+        if med_ray is not None:
+            devs.append(max(abs(y - med_ray) for y in rays))
+        max_dev = max(devs)
         if max_dev <= standing_tol_px:
             baseline_hip_y = float(med_hy)
-            baseline_left_ankle_y = float(med_lay)
-            baseline_right_ankle_y = float(med_ray)
+            baseline_left_ankle_y = (
+                float(med_lay) if med_lay is not None else None
+            )
+            baseline_right_ankle_y = (
+                float(med_ray) if med_ray is not None else None
+            )
             baseline_lock_idx = end_i
             break
         if best_fallback is None or max_dev < best_fallback[0]:
             best_fallback = (
                 max_dev,
                 float(med_hy),
-                float(med_lay),
-                float(med_ray),
+                float(med_lay) if med_lay is not None else None,
+                float(med_ray) if med_ray is not None else None,
                 end_i,
             )
 
@@ -555,12 +603,10 @@ def analyze_counter_movement_jump(
             baseline_right_ankle_y = best_fallback[3]
             baseline_lock_idx = best_fallback[4]
 
-    if (
-        baseline_hip_y is None
-        or baseline_left_ankle_y is None
-        or baseline_right_ankle_y is None
-        or baseline_lock_idx is None
-    ):
+    # Only the HIP baseline is required — the hip drives jump height and
+    # the hip-motion fallback. Ankle baselines are optional (lateral
+    # view). If they're absent the ankle state machine is skipped below.
+    if baseline_hip_y is None or baseline_lock_idx is None:
         raise ValueError(
             "no_baseline: the patient did not stand still before jumping. "
             "Re-record with a ~1 s static standing pose before the first "
@@ -569,6 +615,13 @@ def analyze_counter_movement_jump(
 
     airborne_lift_thresh_px = _AIRBORNE_LIFT_FRAC_OF_LEG * leg_length_px
     landed_band_px = _LANDED_BAND_FRAC_OF_LEG * leg_length_px
+    # The two-ankle state machine only runs when BOTH ankle baselines
+    # locked — otherwise (lateral view, far ankle occluded) we go
+    # straight to the hip-motion fallback.
+    ankle_path_ok = (
+        baseline_left_ankle_y is not None
+        and baseline_right_ankle_y is not None
+    )
 
     # ── 5) Takeoff / landing state machine ────────────────────
     # State: "grounded" → "airborne" → "grounded" repeats. BOTH
@@ -596,11 +649,12 @@ def analyze_counter_movement_jump(
     trials: list[dict] = []
     cur_takeoff_idx: Optional[int] = None
     cur_takeoff_frame: Optional[int] = None
+    cur_takeoff_hip_y: Optional[float] = None
     cur_apex_hip_y: Optional[float] = None
     cur_apex_frame: Optional[int] = None
     cur_invalidation: Optional[str] = None
 
-    for i in range(len(samples)):
+    for i in range(len(samples)) if ankle_path_ok else []:
         s = samples[i]
         lay = s["left_ankle_y_px"]
         ray = s["right_ankle_y_px"]
@@ -626,6 +680,17 @@ def analyze_counter_movement_jump(
                 # Last-grounded frame is i-1.
                 last_grounded = samples[i - 1] if i > 0 else s
                 cur_takeoff_frame = int(last_grounded["frame_index"])
+                # Hip height AT TAKEOFF (feet about to leave, legs near
+                # full extension). Jump height is measured relative to
+                # THIS, not the standing baseline — otherwise the
+                # standing→takeoff leg-extension rise inflates the height
+                # and it no longer matches the flight-time physics
+                # cross-check (h = g·t²/8, which is the flight rise only).
+                cur_takeoff_hip_y = (
+                    float(last_grounded["hip_y_px"])
+                    if last_grounded["hip_y_px"] is not None
+                    else baseline_hip_y
+                )
                 cur_apex_hip_y = (
                     last_grounded["hip_y_px"] if last_grounded["hip_y_px"] is not None else baseline_hip_y
                 )
@@ -656,9 +721,14 @@ def analyze_counter_movement_jump(
                 )
 
                 jump_height_px = 0.0
-                if cur_apex_hip_y is not None and baseline_hip_y is not None:
+                takeoff_ref_hip_y = (
+                    cur_takeoff_hip_y
+                    if cur_takeoff_hip_y is not None
+                    else baseline_hip_y
+                )
+                if cur_apex_hip_y is not None and takeoff_ref_hip_y is not None:
                     jump_height_px = max(
-                        0.0, baseline_hip_y - float(cur_apex_hip_y),
+                        0.0, float(takeoff_ref_hip_y) - float(cur_apex_hip_y),
                     )
 
                 jump_height_cm = (
@@ -717,6 +787,7 @@ def analyze_counter_movement_jump(
                 state = "grounded"
                 cur_takeoff_idx = None
                 cur_takeoff_frame = None
+                cur_takeoff_hip_y = None
                 cur_apex_hip_y = None
                 cur_apex_frame = None
                 cur_invalidation = None

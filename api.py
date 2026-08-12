@@ -3007,10 +3007,23 @@ async def analyze_counter_movement_jump_endpoint(
     video: UploadFile = File(...),
     calibration: Optional[str] = Form(None),
     patient_height_cm: Optional[float] = Form(None),
+    recording_duration_ms: Optional[int] = Form(None),
 ) -> CMJResponse:
     """Run the D4 CMJ pipeline on an uploaded clip. Both legs
     together — single recording, no side parameter.
+
+    `recording_duration_ms` is supplied by the live-record path on the
+    frontend — wall-clock time between MediaRecorder.start() and stop().
+    MediaRecorder WebMs ship with broken/missing duration headers, so
+    cv2's CAP_PROP_FPS probe returns 0 and the FPS gate below would
+    reject every live recording. We re-mux the clip with a clean,
+    accurate constant FPS (decoded frames / client wall-clock) via
+    tug_engine._ensure_decodable_video BEFORE the probe — this also
+    fixes the flight-time (and therefore the physics cross-check),
+    which depends on a correct FPS. Normal file uploads pass
+    recording_duration_ms=None and the helper is a safe no-op.
     """
+    from engines.orthopedic.tug_engine import _ensure_decodable_video
     parsed_calibration: Optional[Dict[str, Any]] = None
     if calibration:
         import json as _json
@@ -3026,6 +3039,7 @@ async def analyze_counter_movement_jump_endpoint(
             parsed_calibration = None
 
     tmp_path: Optional[str] = None
+    fixed_path_cleanup: Optional[str] = None
     try:
         contents = await video.read()
         if not contents:
@@ -3045,12 +3059,24 @@ async def analyze_counter_movement_jump_endpoint(
             contents, video.filename or "counter_movement_jump.mp4",
         )
         log.info(
-            "cmj: file=%s size=%.2f MB calibration=%s",
+            "cmj: file=%s size=%.2f MB calibration=%s recording_ms=%s",
             video.filename, size_mb,
             "client" if parsed_calibration else "server-auto",
+            recording_duration_ms,
         )
 
-        probe = cv2.VideoCapture(tmp_path)
+        # Repair MediaRecorder WebMs with broken duration headers BEFORE
+        # the cv2 FPS probe. Record-mode uploads (recording_duration_ms
+        # set) are re-encoded to a clean constant-FPS MP4 with
+        # FPS = decoded_frames / client wall-clock — WebM metadata is
+        # never trusted. Normal file uploads (recording_duration_ms=None)
+        # are a no-op and return (tmp_path, None).
+        processed_path, fixed_path_cleanup = _ensure_decodable_video(
+            tmp_path, recording_duration_ms,
+            force_rewrite=bool(recording_duration_ms and recording_duration_ms > 0),
+        )
+
+        probe = cv2.VideoCapture(processed_path)
         try:
             probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
             probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
@@ -3107,7 +3133,7 @@ async def analyze_counter_movement_jump_endpoint(
 
         pose_options = _build_gait_pose_options()
         result: Dict[str, Any] = analyze_counter_movement_jump(
-            video_path=tmp_path,
+            video_path=processed_path,
             pose_options=pose_options,
             calibration=parsed_calibration,
             patient_height_cm=patient_height_cm,
@@ -3133,6 +3159,10 @@ async def analyze_counter_movement_jump_endpoint(
         )
     finally:
         cleanup_temp_file(tmp_path)
+        # _ensure_decodable_video returns a second path only when it
+        # actually wrote a repaired file — clean that up too.
+        if fixed_path_cleanup and fixed_path_cleanup != tmp_path:
+            cleanup_temp_file(fixed_path_cleanup)
 
 
 # ══════════════════════════════════════════════════════════════════════

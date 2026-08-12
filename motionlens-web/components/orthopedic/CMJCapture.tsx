@@ -143,10 +143,16 @@ export function CMJCapture() {
       if (ev.data && ev.data.size > 0) chunks.push(ev.data);
     };
     rec.onstop = () => {
+      // Wall-clock recording duration — the backend uses this to re-mux
+      // the MediaRecorder WebM with a correct FPS (its duration header
+      // is broken, so cv2 otherwise reads 0 fps and rejects the clip).
+      const recordingDurationMs = Math.max(
+        0, Date.now() - recordingStartedAtRef.current,
+      );
       const blob = new Blob(chunks, { type: rec.mimeType || "video/webm" });
       mediaRecorderRef.current = null;
       recordingChunksRef.current = [];
-      void uploadAndAnalyze(blob);
+      void uploadAndAnalyze(blob, recordingDurationMs);
     };
     recordingChunksRef.current = chunks;
     mediaRecorderRef.current = rec;
@@ -156,7 +162,7 @@ export function CMJCapture() {
     rec.start();
   }
 
-  async function uploadAndAnalyze(blob: Blob) {
+  async function uploadAndAnalyze(blob: Blob, recordingDurationMs: number) {
     const file = new File([blob], "counter_movement_jump.webm", {
       type: blob.type,
     });
@@ -167,6 +173,8 @@ export function CMJCapture() {
         file,
         calibration,
         patient?.height_cm ?? null,
+        undefined,
+        recordingDurationMs,
       );
       setResult(data);
       setPhase("done");
