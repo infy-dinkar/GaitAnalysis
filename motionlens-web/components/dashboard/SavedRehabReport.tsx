@@ -751,13 +751,41 @@ function MetronomeSummary({
     ?? (total > 0 ? ((perfect + good) / total) * 100 : 0);
   const lifts = pickNumber(state, "liftCount") ?? 0;
   const bpm = pickNumber(config, "bpm");
+  // Per-side peak-flexion averages (bilateral marching). Present only
+  // on sessions saved after the bilateral rewrite.
+  const avgHipLeft = pickNumber(state, "avgHipLeft");
+  const avgHipRight = pickNumber(state, "avgHipRight");
+  const avgKneeLeft = pickNumber(state, "avgKneeLeft");
+  const avgKneeRight = pickNumber(state, "avgKneeRight");
+  const liftsLeft = pickNumber(state, "liftsLeft");
+  const liftsRight = pickNumber(state, "liftsRight");
+  const hasRom =
+    avgHipLeft !== null || avgHipRight !== null
+    || avgKneeLeft !== null || avgKneeRight !== null;
+  // Overall average peak per joint = lift-count-weighted mean of the
+  // two sides. Robust to the occasional occlusion-noisy lift, unlike a
+  // single global-max "best value" (which read implausibly high).
+  const wmean = (
+    vL: number | null, nL: number | null,
+    vR: number | null, nR: number | null,
+  ): number | null => {
+    const cl = nL ?? 0;
+    const cr = nR ?? 0;
+    const tot = cl + cr;
+    if (tot === 0) return null;
+    return ((vL ?? 0) * cl + (vR ?? 0) * cr) / tot;
+  };
+  const avgHipAll = wmean(avgHipLeft, liftsLeft, avgHipRight, liftsRight);
+  const avgKneeAll = wmean(avgKneeLeft, liftsLeft, avgKneeRight, liftsRight);
   const perfectPct = total > 0 ? (perfect / total) * 100 : 0;
   const goodPct = total > 0 ? (good / total) * 100 : 0;
   const missPct = total > 0 ? (miss / total) * 100 : 0;
   return (
     <section>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className="text-base font-semibold tracking-tight">Metronome summary</h3>
+        <h3 className="text-base font-semibold tracking-tight">
+          {hasRom ? "Marching summary" : "Metronome summary"}
+        </h3>
         <DurationChip seconds={durationSec} />
       </div>
       {total > 0 ? (
@@ -831,12 +859,80 @@ function MetronomeSummary({
               {lifts}
             </p>
             <p className="mt-1 text-[11px] text-muted">
-              Beat-timing data not recorded on this older session.
+              {hasRom
+                ? `${liftsLeft ?? 0} left · ${liftsRight ?? 0} right`
+                : "Beat-timing data not recorded on this older session."}
             </p>
           </div>
         </div>
       )}
+      {hasRom && (
+        <div className="mt-4">
+          <p className="text-[10px] uppercase tracking-[0.14em] text-subtle">
+            Avg peak flexion per side
+          </p>
+          <div className="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <RomStat label="Left hip" value={avgHipLeft} lifts={liftsLeft} />
+            <RomStat label="Right hip" value={avgHipRight} lifts={liftsRight} />
+            <RomStat label="Left knee" value={avgKneeLeft} lifts={liftsLeft} />
+            <RomStat label="Right knee" value={avgKneeRight} lifts={liftsRight} />
+          </div>
+        </div>
+      )}
+      {hasRom && (
+        <div className="mt-6 space-y-4">
+          <ClinicalMetricCard
+            valueLabel="Average peak"
+            signal={{
+              name: "hip_flexion",
+              unit: "deg",
+              value_at_peak: avgHipAll,
+              // Minimum-target band: reach ≥ ~60° (hip near horizontal),
+              // up to the physiological ceiling. Values in range read
+              // "in band" instead of flagging a good high march.
+              target_band: { min: 60, max: 130 },
+            }}
+          />
+          <ClinicalMetricCard
+            valueLabel="Average peak"
+            signal={{
+              name: "knee_flexion",
+              unit: "deg",
+              value_at_peak: avgKneeAll,
+              // max > 70 keeps the knee-display poison-rescue heuristic
+              // (value>90 && band.max<=70) from firing on real values.
+              target_band: { min: 50, max: 150 },
+            }}
+          />
+        </div>
+      )}
     </section>
+  );
+}
+
+function RomStat({
+  label,
+  value,
+  lifts,
+}: {
+  label: string;
+  value: number | null;
+  lifts: number | null;
+}) {
+  return (
+    <div className="rounded-card border border-border bg-surface p-3">
+      <p className="text-[10px] uppercase tracking-[0.12em] text-subtle">
+        {label}
+      </p>
+      <p className="mt-1 tabular text-2xl font-semibold text-foreground">
+        {value !== null ? `${value.toFixed(0)}°` : "—"}
+      </p>
+      {lifts !== null && lifts > 0 && (
+        <p className="mt-0.5 text-[10px] text-muted">
+          {lifts} lift{lifts === 1 ? "" : "s"}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -959,9 +1055,12 @@ function SkeletonPoseCard({ raw }: SkeletonPoseCardProps) {
 
 interface ClinicalMetricCardProps {
   signal: SignalBlock;
+  /** Overrides the "Best value" heading — e.g. "Average peak" when the
+   *  card shows a session mean rather than a single peak frame. */
+  valueLabel?: string;
 }
 
-function ClinicalMetricCard({ signal }: ClinicalMetricCardProps) {
+function ClinicalMetricCard({ signal, valueLabel = "Best value" }: ClinicalMetricCardProps) {
   // Route through the shared knee-angle normaliser so both old
   // (knee_interior) and new (knee_flexion) sessions render under
   // the same "Knee angle (°)" label with the same flexion values.
@@ -984,7 +1083,7 @@ function ClinicalMetricCard({ signal }: ClinicalMetricCardProps) {
             quantitative reference. */}
         <div className="rounded-card border border-border bg-surface p-5">
           <p className="text-[10px] uppercase tracking-[0.14em] text-subtle">
-            Best value
+            {valueLabel}
           </p>
           <p className="mt-1 tabular text-4xl font-semibold text-foreground">
             {hasValue ? (
