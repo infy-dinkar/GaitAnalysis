@@ -135,12 +135,20 @@ function humanizeUploadError(raw: string | null | undefined): string {
   return raw || "CMJ analysis failed.";
 }
 
-/** Upload a CMJ clip. Both legs in one recording — no side param. */
+/** Upload a CMJ clip. Both legs in one recording — no side param.
+ *
+ * `recordingDurationMs` is the live-record path's wall-clock time
+ * between MediaRecorder.start() and stop(). MediaRecorder WebMs have
+ * broken duration headers, so the backend needs this to re-mux the
+ * clip with a correct FPS (fixes both the "could not determine frame
+ * rate" rejection AND the flight-time / physics accuracy). File
+ * uploads pass null. */
 export async function analyzeCounterMovementJumpUpload(
   file: File,
   calibration: CalibrationResult | null,
   patientHeightCm: number | null,
   onProgress?: (pct: number) => void,
+  recordingDurationMs?: number | null,
 ): Promise<CMJResult> {
   const form = new FormData();
   form.append("video", file, file.name || "counter_movement_jump.mp4");
@@ -153,6 +161,13 @@ export async function analyzeCounterMovementJumpUpload(
     patientHeightCm > 0
   ) {
     form.append("patient_height_cm", String(patientHeightCm));
+  }
+  if (
+    recordingDurationMs != null &&
+    Number.isFinite(recordingDurationMs) &&
+    recordingDurationMs > 0
+  ) {
+    form.append("recording_duration_ms", String(Math.round(recordingDurationMs)));
   }
 
   onProgress?.(5);
