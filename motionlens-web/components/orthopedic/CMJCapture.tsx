@@ -559,7 +559,7 @@ function LiveSection(props: LiveSectionProps) {
             <p className="font-semibold text-foreground">Session brief</p>
             <ol className="mt-2 list-decimal space-y-1 pl-4">
               <li>Stand still ~1 s, full body in frame.</li>
-              <li>Perform up to 3 counter-movement jumps.</li>
+              <li>Perform the counter-movement jump.</li>
               <li>
                 Land on both feet each time — auto-stops at{" "}
                 {RECORDING_DURATION_SEC}s.
@@ -581,8 +581,8 @@ function LiveSection(props: LiveSectionProps) {
                 ● Recording — {remainingSec.toFixed(1)}s remaining
               </p>
               <p className="mt-1 text-[11px] text-muted">
-                Stand still for ~1 s, then perform up to 3 counter-
-                movement jumps.
+                Stand still for ~1 s, then perform the counter-movement
+                jump.
               </p>
             </div>
           )}
@@ -666,7 +666,7 @@ function UploadSection(props: UploadSectionProps) {
           Upload CMJ video
         </h2>
         <p className="mt-2 text-sm text-muted">
-          Single clip containing 1–3 counter-movement jumps. The backend
+          Single clip containing the counter-movement jump. The backend
           derives scale calibration from the patient&apos;s height + the
           standing window of the clip.
         </p>

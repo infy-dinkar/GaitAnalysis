@@ -31,7 +31,7 @@ function Inner() {
               <p className="mt-5 text-lg text-muted">
                 Lateral-view vertical jump for power. Patient dips into a
                 brief squat then jumps straight up as high as possible and
-                lands on both feet — up to 3 trials per recording. Primary
+                lands on both feet. Primary
                 outcome is jump height (cm) from the hip-midpoint apex;
                 secondary is flight time (s) plus a gravity-based physics
                 cross-check (h = g · t² / 8) that stays useful even when
