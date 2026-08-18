@@ -60,7 +60,14 @@ _SHOULDER_HEIGHT_TOLERANCE_PX = 40.0
 _NUM_TRIALS = 3
 
 _HEEL_RISE_THRESHOLD_CM = 3.5  # was 2.0 — true heel-off is >=3cm; old threshold sat in jitter band
-_STEP_THRESHOLD_CM = 8.0       # was 5.0 — natural body translation during reach moves ankle 3-5cm
+# was 8.0 (was 5.0). A forward reach makes MediaPipe drift the planted-
+# foot ankle x by up to ~10-12 cm in image space (the body model re-
+# fits as the trunk leans — the SAME lean bias the local heel-rise
+# signal was introduced to cancel). At 8 cm that artefact false-flagged
+# normal reaches as "stepping". A real balance-recovery step relocates
+# the foot ≥15 cm, so this threshold zeroes the false positives while
+# still catching genuine steps. Tune down only if real steps are missed.
+_STEP_THRESHOLD_CM = 15.0
 _MIN_REACH_FOR_VALID_CM = 3.0
 
 _LOW_FALL_RISK_MIN_CM = 25.0
@@ -73,7 +80,7 @@ _VERY_HIGH_FALL_RISK_MAX_CM = 10.0
 # length keeps the thresholds proportional both to body anatomy AND
 # to camera distance.
 _HEEL_RISE_FALLBACK_FRACTION_OF_LEG = 0.04
-_STEP_FALLBACK_FRACTION_OF_LEG = 0.10
+_STEP_FALLBACK_FRACTION_OF_LEG = 0.17  # was 0.10 — matches the 15 cm calibrated step threshold
 _MIN_REACH_FALLBACK_FRACTION_OF_LEG = 0.06
 
 # Validity event must persist for this many consecutive smoothed

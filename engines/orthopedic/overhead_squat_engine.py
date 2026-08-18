@@ -90,6 +90,12 @@ _FOOT_SHOULDERWIDTH_MAX_RATIO = 1.6
 # Arm overhead — wrist should be above shoulder by at least this
 # fraction of the shoulder-hip trunk length. Drop below this = fail.
 _ARM_OVERHEAD_MIN_FRAC_OF_TRUNK = 0.30
+# Arms must be overhead at the DESCENT START for the rep to count as an
+# OVERHEAD squat (vs a plain squat). Lower than the item-4 threshold so
+# an arms-up rep that then drops still counts and gets flagged; only a
+# clearly not-overhead setup (arms at/below shoulder) is rejected. A
+# null wrist reading never blocks — arms overhead often clip the frame.
+_ARM_UP_GATE_FRAC_OF_TRUNK = 0.10
 # Depth proxy — hip descent should reach at least this frac of leg
 # length below standing to be considered "adequate depth".
 _DEPTH_TARGET_FRAC_OF_LEG = 0.20
@@ -370,6 +376,19 @@ def analyze_overhead_squat(
 
         if state == "standing":
             if drop >= descent_min_px:
+                # Gate: arms must be overhead at the top for this to be
+                # an OVERHEAD squat. Arms clearly at/below the shoulders
+                # → a plain squat → ignore the descent. Null wrist
+                # reading (arms clipping the frame top) never blocks.
+                sh_y_top = (s["lsh_y_px"] + s["rsh_y_px"]) / 2
+                top_arms: list[float] = []
+                if s["lwr_y_px"] is not None:
+                    top_arms.append((sh_y_top - s["lwr_y_px"]) / trunk_length_px)
+                if s["rwr_y_px"] is not None:
+                    top_arms.append((sh_y_top - s["rwr_y_px"]) / trunk_length_px)
+                worst_top = min(top_arms) if top_arms else None
+                if worst_top is not None and worst_top < _ARM_UP_GATE_FRAC_OF_TRUNK:
+                    continue
                 descent_start_idx = i
                 bottom_frame_idx = i
                 bottom_hip_y = s["hip_y_px"]
