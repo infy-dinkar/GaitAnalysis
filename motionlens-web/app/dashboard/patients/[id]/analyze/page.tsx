@@ -218,15 +218,13 @@ const MODULES = [
     tone: "from-violet-500/15 to-violet-500/5",
     iconTone: "text-violet-600",
   },
-  {
-    href: "orthopedic/tuck-jump",
-    eyebrow: "Injury-risk screen · frontal",
-    title: "Tuck Jump Assessment",
-    body: "Myer's TJA — continuous ~10 s tuck-jump session (frontal). Scored against Myer's 10-item checklist and classified good / moderate / poor. 8 items measurable single-camera; items 5 (foot yaw) and 7 (contact noise) honestly marked not assessed.",
-    icon: MoveRight,
-    tone: "from-fuchsia-500/15 to-fuchsia-500/5",
-    iconTone: "text-fuchsia-600",
-  },
+  // Tuck Jump Assessment (TJA) hub card removed on request — the
+  // assessment is hidden from the analyze menu. All downstream surfaces
+  // are left intact so already-saved tuck-jump reports still render and
+  // the direct route `/orthopedic/tuck-jump` still works (module,
+  // ReportCard meta, reports/[id] dispatch, backend endpoint, engine,
+  // TS client, capture, report tsx). Re-add the hub card here to
+  // re-enable discovery from the assessments menu.
   {
     href: "orthopedic/overhead-squat",
     eyebrow: "Movement screen · frontal",

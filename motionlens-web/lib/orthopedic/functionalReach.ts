@@ -77,11 +77,14 @@ export const NUM_TRIALS = 3;
 export const HEEL_RISE_THRESHOLD_CM = 3.5;
 
 /** Smoothed ankle-x deviation from baseline must exceed this to be
- *  flagged as a step. Raised from 5 cm to 8 cm: forward body
- *  translation during reach moves the planted-foot ankle 3-5 cm in
- *  image space — that's not a step. A real foot repositioning is
- *  ≥ 8 cm. */
-export const STEP_THRESHOLD_CM = 8.0;
+ *  flagged as a step. Was 8 cm (was 5 cm): a forward reach makes
+ *  MediaPipe drift the planted-foot ankle x by up to ~10-12 cm in
+ *  image space as the trunk leans (the body model re-fits — the SAME
+ *  lean bias the local heel-rise signal cancels). At 8 cm that
+ *  artefact false-flagged normal reaches as "stepping". A real
+ *  balance-recovery step relocates the foot ≥15 cm, so this threshold
+ *  zeroes the false positives while still catching genuine steps. */
+export const STEP_THRESHOLD_CM = 15.0;
 
 /** Reaches below this magnitude are noise / not a true reach attempt. */
 export const MIN_REACH_FOR_VALID_CM = 3.0;
@@ -100,7 +103,7 @@ export const VERY_HIGH_FALL_RISK_MAX_CM = 10.0;
  *  fallback resolves to ~13 px and the step fallback to ~32 px — much
  *  more realistic than the previous 4 px / 11 px torso-based values. */
 export const HEEL_RISE_FALLBACK_FRACTION_OF_LEG = 0.04;
-export const STEP_FALLBACK_FRACTION_OF_LEG = 0.10;
+export const STEP_FALLBACK_FRACTION_OF_LEG = 0.17; // was 0.10 — matches the 15 cm calibrated step threshold
 export const MIN_REACH_FALLBACK_FRACTION_OF_LEG = 0.06;
 
 /** Validity event must persist for at least this many consecutive

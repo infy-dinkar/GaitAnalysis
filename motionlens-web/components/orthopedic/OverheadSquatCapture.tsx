@@ -66,6 +66,11 @@ import {
   type CalibrationResult,
   type OverheadSquatResult,
 } from "@/lib/orthopedic/overheadSquat";
+import {
+  OverheadSquatLiveAnalyzer,
+  type OHSLiveFrame,
+} from "@/lib/orthopedic/overheadSquatLive";
+import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
 
 type Mode = "live" | "upload";
 type LivePhase = "calibration" | "armed" | "recording" | "uploading" | "done";
@@ -115,95 +120,67 @@ export function OverheadSquatCapture() {
     }
   }, [patient?.height_cm]);
 
-  // ── Recording ────────────────────────────────────────────────
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const recordingChunksRef = useRef<Blob[]>([]);
+  // ── Live in-browser session (biomech-style — no video upload) ──
+  // The overhead-squat analysis runs entirely in the browser on the
+  // BlazePose-tfjs keypoint stream. Depth + the 5 measurable
+  // compensations are scored live and the final OverheadSquatResult is
+  // built client-side (see lib/orthopedic/overheadSquatLive).
+  const analyzerRef = useRef<OverheadSquatLiveAnalyzer | null>(null);
   const recordingStartedAtRef = useRef<number>(0);
+  const [hud, setHud] = useState<OHSLiveFrame | null>(null);
+  // Mirror phase into a ref so the per-frame handler stays stable and
+  // never reads a stale phase.
+  const phaseRef = useRef<LivePhase>(phase);
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
 
   useEffect(() => {
     if (phase !== "recording") return;
-    const id = window.setInterval(() => setNow(Date.now()), 250);
+    const id = window.setInterval(() => setNow(Date.now()), 200);
     return () => window.clearInterval(id);
   }, [phase]);
 
-  function getLiveVideoStream(): MediaStream | null {
-    const vid = document.querySelector(
-      "video[playsinline]",
-    ) as HTMLVideoElement | null;
-    if (!vid) return null;
-    const stream = vid.srcObject;
-    return stream instanceof MediaStream ? stream : null;
-  }
-
-  function startRecording() {
-    const stream = getLiveVideoStream();
-    if (!stream) {
-      setError(
-        "Camera stream is not available. Click Start camera before recording.",
-      );
-      return;
+  function startSession() {
+    if (!analyzerRef.current) {
+      analyzerRef.current = new OverheadSquatLiveAnalyzer();
     }
-    const chunks: Blob[] = [];
-    let rec: MediaRecorder;
-    try {
-      rec = new MediaRecorder(stream, { mimeType: "video/webm" });
-    } catch {
-      try {
-        rec = new MediaRecorder(stream);
-      } catch (e) {
-        setError(
-          `Could not start recording: ${errorMessage(e) ?? "MediaRecorder unavailable"}`,
-        );
-        return;
-      }
-    }
-    rec.ondataavailable = (ev) => {
-      if (ev.data && ev.data.size > 0) chunks.push(ev.data);
-    };
-    rec.onstop = () => {
-      const blob = new Blob(chunks, { type: rec.mimeType || "video/webm" });
-      mediaRecorderRef.current = null;
-      recordingChunksRef.current = [];
-      void uploadAndAnalyze(blob);
-    };
-    recordingChunksRef.current = chunks;
-    mediaRecorderRef.current = rec;
+    analyzerRef.current.reset();
+    setHud(null);
     recordingStartedAtRef.current = Date.now();
     setError(null);
     setPhase("recording");
-    rec.start();
   }
 
-  async function uploadAndAnalyze(blob: Blob) {
-    const file = new File([blob], "overhead_squat.webm", {
-      type: blob.type,
-    });
-    setPhase("uploading");
-    setError(null);
-    try {
-      const data = await analyzeOverheadSquatUpload(file, calibration, null);
-      setResult(data);
-      setPhase("done");
-    } catch (e) {
-      setError(errorMessage(e) ?? "Analysis failed");
+  function finishSession() {
+    const analyzer = analyzerRef.current;
+    if (!analyzer) {
       setPhase("armed");
+      return;
     }
-  }
-
-  function stopRecording() {
-    const rec = mediaRecorderRef.current;
-    if (rec && rec.state === "recording") {
-      rec.stop();
-    } else {
+    const elapsed = Math.max(
+      0, (Date.now() - recordingStartedAtRef.current) / 1000,
+    );
+    const r = analyzer.finalize(calibration, patient?.height_cm ?? null, elapsed);
+    if (!r) {
+      setError(
+        analyzer.hasBaseline()
+          ? "No squat reps detected. Stand still with arms overhead for ~1 s, "
+            + "then perform 3-5 slow overhead squats to about parallel depth, "
+            + "returning fully to standing between reps."
+          : "Could not lock a standing baseline — stand still, full body in "
+            + "frame with arms overhead for ~1 s before the first squat.",
+      );
       setPhase("armed");
+      return;
     }
+    setResult(r);
+    setPhase("done");
   }
 
   useEffect(() => {
     if (phase !== "recording") return;
     const elapsedMs = now - recordingStartedAtRef.current;
     if (elapsedMs >= RECORDING_DURATION_SEC * 1000) {
-      stopRecording();
+      finishSession();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [now, phase]);
@@ -214,11 +191,8 @@ export function OverheadSquatCapture() {
   }, []);
 
   function reset() {
-    if (mediaRecorderRef.current) {
-      try { mediaRecorderRef.current.stop(); } catch { /* ignore */ }
-    }
-    mediaRecorderRef.current = null;
-    recordingChunksRef.current = [];
+    analyzerRef.current?.reset();
+    setHud(null);
     setResult(null);
     setCalibration(null);
     setError(null);
@@ -231,8 +205,12 @@ export function OverheadSquatCapture() {
   }
 
   const handleFrame = useCallback(
-    (_kp: Keypoint[], _video: HTMLVideoElement) => {
-      // No live coaching — the backend processes the uploaded clip.
+    (kp: Keypoint[], _video: HTMLVideoElement) => {
+      if (phaseRef.current !== "recording") return;
+      const analyzer = analyzerRef.current;
+      if (!analyzer) return;
+      const tMs = Date.now() - recordingStartedAtRef.current;
+      setHud(analyzer.pushFrame(kp as unknown as LiveKeypoint[], tMs));
     },
     [],
   );
@@ -382,13 +360,14 @@ export function OverheadSquatCapture() {
           onStartCamera={() => setCameraStarted(true)}
           onCalibrated={handleCalibrated}
           handleFrame={handleFrame}
-          startRecording={startRecording}
-          stopRecording={stopRecording}
+          startRecording={startSession}
+          stopRecording={finishSession}
           now={now}
           recordingStartedAt={recordingStartedAtRef.current}
           onResetSession={reset}
           onExitLive={exitLive}
           error={error}
+          hud={hud}
         />
       ) : (
         <UploadSection
@@ -428,6 +407,7 @@ interface LiveSectionProps {
   onResetSession: () => void;
   onExitLive: () => void;
   error: string | null;
+  hud: OHSLiveFrame | null;
 }
 
 function LiveSection(props: LiveSectionProps) {
@@ -448,6 +428,7 @@ function LiveSection(props: LiveSectionProps) {
     onResetSession,
     onExitLive,
     error,
+    hud,
   } = props;
 
   const heightCm = Number.parseFloat(heightInput);
@@ -541,6 +522,7 @@ function LiveSection(props: LiveSectionProps) {
       onResetSession={onResetSession}
       onExitLive={onExitLive}
       error={error}
+      hud={hud}
     />
   );
 }
@@ -563,6 +545,7 @@ interface FullscreenLiveShellProps {
   onResetSession: () => void;
   onExitLive: () => void;
   error: string | null;
+  hud: OHSLiveFrame | null;
 }
 
 function FullscreenLiveShell(props: FullscreenLiveShellProps) {
@@ -583,6 +566,7 @@ function FullscreenLiveShell(props: FullscreenLiveShellProps) {
     onResetSession,
     onExitLive,
     error,
+    hud,
   } = props;
 
   const [frameReason, setFrameReason] = useState<string>("torso_missing");
@@ -769,16 +753,84 @@ function FullscreenLiveShell(props: FullscreenLiveShellProps) {
             </div>
           )}
           {isRecording && (
-            <div className="absolute left-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
-              <p className="text-[10px] uppercase tracking-[0.14em] text-rose-300">
-                ● Recording
-              </p>
-              <p className="tabular text-2xl font-semibold text-white">
-                {remainingSec.toFixed(1)}s
-              </p>
-              <p className="text-[10px] text-white/70">
-                {targetProgress}% of {TARGET_SESSION_SEC}s target
-              </p>
+            <div className="absolute left-3 top-3 w-56 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] uppercase tracking-[0.14em] text-rose-300">
+                  ● Live
+                </p>
+                <p className="tabular text-sm font-semibold text-white">
+                  {remainingSec.toFixed(0)}s
+                </p>
+              </div>
+              {!hud?.baselineLocked ? (
+                <div className="mt-2">
+                  <p className="text-[10px] text-amber-300">
+                    {hud?.tracking === false
+                      ? "Step fully into frame…"
+                      : "Hold still, arms overhead — locking baseline…"}
+                  </p>
+                  <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-white/15">
+                    <div
+                      className="h-full bg-amber-400 transition-all"
+                      style={{ width: `${(hud?.baselineProgress ?? 0) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="mt-2 flex items-baseline gap-2">
+                    <span className="tabular text-3xl font-semibold text-white">
+                      {hud.repCount}
+                    </span>
+                    <span className="text-[11px] text-white/70">reps</span>
+                    {hud.descending && (
+                      <span className="ml-auto rounded-full bg-sky-500/25 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-sky-200">
+                        squatting
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-1">
+                    <div className="flex items-center justify-between text-[9px] uppercase tracking-[0.12em] text-white/60">
+                      <span>Depth</span>
+                      <span>{Math.round((hud.depthFrac ?? 0) * 100)}% leg</span>
+                    </div>
+                    <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-white/15">
+                      <div
+                        className={`h-full transition-all ${
+                          (hud.depthFrac ?? 0) >= hud.depthTargetFrac
+                            ? "bg-emerald-400"
+                            : "bg-sky-400"
+                        }`}
+                        style={{
+                          width: `${Math.min(100, ((hud.depthFrac ?? 0) / hud.depthTargetFrac) * 100)}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    <LiveChip
+                      label="Valgus"
+                      bad={(hud.valgusWorse ?? 0) > 12}
+                      value={hud.valgusWorse !== null ? `${hud.valgusWorse.toFixed(0)}°` : "—"}
+                    />
+                    <LiveChip
+                      label="Pelvis"
+                      bad={(hud.pelvicFrac ?? 0) > 0.1}
+                      value={hud.pelvicFrac !== null ? `${Math.round(hud.pelvicFrac * 100)}%` : "—"}
+                    />
+                    <LiveChip
+                      label="Arms"
+                      bad={hud.armWorstFrac !== null && hud.armWorstFrac < 0.3}
+                      value={hud.armWorstFrac !== null ? `${Math.round(hud.armWorstFrac * 100)}%` : "—"}
+                    />
+                  </div>
+                  {hud.armsDown && (
+                    <p className="mt-1.5 text-[10px] font-semibold text-amber-300">
+                      ↑ Raise arms overhead — reps only count as overhead squats
+                    </p>
+                  )}
+                </>
+              )}
             </div>
           )}
           {isUploading && (
@@ -1174,6 +1226,30 @@ function FilePickerCard({
         <p className="text-xs text-muted">Drop or click to choose a video</p>
       )}
     </label>
+  );
+}
+
+// Small live compensation chip — green when in range, red when the
+// current-frame value breaches its threshold.
+function LiveChip({
+  label,
+  value,
+  bad,
+}: {
+  label: string;
+  value: string;
+  bad: boolean;
+}) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-semibold ring-1 ${
+        bad
+          ? "bg-rose-500/25 text-rose-100 ring-rose-400/50"
+          : "bg-emerald-500/20 text-emerald-100 ring-emerald-400/40"
+      }`}
+    >
+      {label} {value}
+    </span>
   );
 }
 

@@ -151,6 +151,7 @@ export async function analyzeOverheadSquatUpload(
   calibration: CalibrationResult | null,
   patientHeightCm: number | null,
   onProgress?: (pct: number) => void,
+  recordingDurationMs?: number | null,
 ): Promise<OverheadSquatResult> {
   const form = new FormData();
   form.append("video", file, file.name || "overhead_squat.mp4");
@@ -163,6 +164,16 @@ export async function analyzeOverheadSquatUpload(
     patientHeightCm > 0
   ) {
     form.append("patient_height_cm", String(patientHeightCm));
+  }
+  // Live-record path wall-clock duration — the backend uses it to
+  // re-mux the MediaRecorder WebM with a correct FPS (its duration
+  // header is broken, so cv2 otherwise reads 0 fps and rejects it).
+  if (
+    recordingDurationMs != null &&
+    Number.isFinite(recordingDurationMs) &&
+    recordingDurationMs > 0
+  ) {
+    form.append("recording_duration_ms", String(Math.round(recordingDurationMs)));
   }
 
   onProgress?.(5);
