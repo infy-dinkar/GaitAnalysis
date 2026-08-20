@@ -311,7 +311,15 @@ def analyze_single_leg_hop(
         raise ValueError("poor_visibility")
 
     idx = _SIDE_INDICES[side]
-    required_keys = (idx["ankle"], idx["heel"], idx["foot"], idx["hip"])
+    # Gate on the ESSENTIAL, reliable landmarks only — the test-side
+    # ankle (drives takeoff/landing) and hip (stable reference + leg
+    # length). The heel + foot_index are the LEAST reliable landmarks:
+    # they blur during the hop and occlude in a near-frontal view, and
+    # the hop-distance step already falls back heel → foot_index → ankle
+    # when one is missing. Requiring all four visible in 30% of frames
+    # rejected otherwise-usable clips ("could not see the test leg
+    # clearly") even when the ankle + hip were tracked cleanly.
+    required_keys = (idx["ankle"], idx["hip"])
     visible_frames = sum(
         1 for i in range(n) if _all_visible(ts, required_keys, i)
     )
@@ -347,6 +355,11 @@ def analyze_single_leg_hop(
             if _visible(ts, idx["ankle"], i)
             else None
         )
+        ankle_x = (
+            float(ts[idx["ankle"]]["x_px"][i])
+            if _visible(ts, idx["ankle"], i)
+            else None
+        )
         heel_x = (
             float(ts[idx["heel"]]["x_px"][i])
             if _visible(ts, idx["heel"], i)
@@ -376,6 +389,7 @@ def analyze_single_leg_hop(
             "frame_index": int(i),
             "t_ms": float(t_ms),
             "ankle_y_px": ankle_y,
+            "ankle_x_px": ankle_x,
             "heel_x_px": heel_x,
             "heel_y_px": heel_y,
             "foot_x_px": foot_x,
@@ -481,11 +495,16 @@ def analyze_single_leg_hop(
     cur_invalidation: Optional[str] = None
 
     def _heel_or_foot_x(s: dict) -> Optional[float]:
-        # Heel preferred; foot_index fallback when heel visibility
-        # was poor at takeoff/landing.
+        # Heel preferred; foot_index then ankle fallback when heel /
+        # foot visibility was poor at takeoff/landing. All three sit at
+        # essentially the same x during ground contact, so the ankle is
+        # a safe last resort that keeps a hop measurable instead of
+        # dropping it when the forefoot landmarks blur.
         if s["heel_x_px"] is not None:
             return s["heel_x_px"]
-        return s["foot_x_px"]
+        if s["foot_x_px"] is not None:
+            return s["foot_x_px"]
+        return s["ankle_x_px"]
 
     for i in range(baseline_lock_idx + 1, len(samples)):
         s = samples[i]
@@ -541,24 +560,12 @@ def analyze_single_leg_hop(
                     hop_px = abs(landing_heel_x - cur_takeoff_heel_x)
                     hop_cm = hop_px / ppc if ppc else None
 
-                    # Minimum-hop-for-valid gate.
+                    # Minimum-hop-distance gate removed on request — a
+                    # trial is invalid ONLY when the contralateral foot
+                    # touched down (a real single-leg violation, carried
+                    # in cur_invalidation). The distance is still
+                    # recorded + shown for every detected hop.
                     invalidation = cur_invalidation
-                    if invalidation is None:
-                        if ppc is not None:
-                            if hop_px < _MIN_HOP_FOR_VALID_CM * ppc:
-                                invalidation = (
-                                    f"hop distance {hop_cm:.1f} cm below "
-                                    f"the {_MIN_HOP_FOR_VALID_CM:.0f} cm minimum"
-                                )
-                        else:
-                            min_px_fallback = (
-                                _MIN_HOP_FALLBACK_FRACTION_OF_LEG * leg_length_px
-                            )
-                            if hop_px < min_px_fallback:
-                                invalidation = (
-                                    f"hop distance {hop_px:.0f} px below "
-                                    f"minimum-hop validity threshold"
-                                )
 
                     trials.append({
                         "trial_index": len(trials) + 1,

@@ -710,8 +710,20 @@ def analyze_tug(
     duration in record-mode; the engine uses it to repair WebM files
     whose header metadata is broken (see _ensure_decodable_video).
     """
+    # Record-mode (recording_duration_ms set) ALWAYS re-encodes the
+    # MediaRecorder WebM to a clean constant-FPS MP4 (fps = decoded
+    # frames / client wall-clock) — same as the gait record path. The
+    # WebM's cv2-reported FPS is often plausible-but-wrong (e.g. header
+    # 30, real ~22) and the 0.7 mismatch gate misses that band, leaving
+    # every temporal gait metric skewed: phase segmentation + strike
+    # detection use FPS for their frame/velocity windows, so a wrong FPS
+    # silently drops the walk-phase strikes → cadence + step length come
+    # back BLANK (while the wall-clock total TUG time still works). File
+    # uploads pass recording_duration_ms=None → no rewrite (their MP4
+    # FPS is trusted). This makes live match upload for the same trial.
     processed_path, fixed_path_cleanup = _ensure_decodable_video(
         video_path, recording_duration_ms,
+        force_rewrite=bool(recording_duration_ms and recording_duration_ms > 0),
     )
 
     try:

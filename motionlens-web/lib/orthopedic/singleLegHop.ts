@@ -244,6 +244,7 @@ export async function analyzeSingleLegHopUpload(
   calibration: CalibrationResult | null,
   patientHeightCm: number | null,
   onProgress?: (pct: number) => void,
+  recordingDurationMs?: number | null,
 ): Promise<SingleLegHopResult> {
   const form = new FormData();
   form.append("video", file, file.name || "single_leg_hop.mp4");
@@ -257,6 +258,17 @@ export async function analyzeSingleLegHopUpload(
     patientHeightCm > 0
   ) {
     form.append("patient_height_cm", String(patientHeightCm));
+  }
+  // Live-record path wall-clock duration — the backend uses it to
+  // re-mux the MediaRecorder WebM with a correct FPS (its duration
+  // header is broken, so cv2 otherwise reads 0 fps and rejects the
+  // clip). File uploads pass null / omit it.
+  if (
+    recordingDurationMs != null &&
+    Number.isFinite(recordingDurationMs) &&
+    recordingDurationMs > 0
+  ) {
+    form.append("recording_duration_ms", String(Math.round(recordingDurationMs)));
   }
 
   onProgress?.(5);

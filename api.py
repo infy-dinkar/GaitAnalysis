@@ -2796,8 +2796,20 @@ async def analyze_single_leg_hop_endpoint(
     side: str = Form(...),
     calibration: Optional[str] = Form(None),
     patient_height_cm: Optional[float] = Form(None),
+    recording_duration_ms: Optional[int] = Form(None),
 ) -> SingleLegHopResponse:
     """Run the D3 Single-Leg Hop pipeline on an uploaded clip.
+
+    `recording_duration_ms` is supplied by the live-record path on the
+    frontend — wall-clock time between MediaRecorder.start() and stop().
+    MediaRecorder WebMs ship with broken/missing duration headers, so
+    cv2's CAP_PROP_FPS probe returns 0 and the FPS gate below would
+    reject every live recording. We re-mux the clip with a clean,
+    accurate constant FPS (decoded frames / client wall-clock) via
+    tug_engine._ensure_decodable_video BEFORE the probe — this also
+    fixes hop-event timing (distance/height/landing) which depends on a
+    correct FPS. Normal file uploads pass recording_duration_ms=None and
+    the helper is a safe no-op.
 
     `side` is the test (hopping) leg. The endpoint is per-leg —
     the caller invokes it once per side, then computes the Limb
@@ -2832,7 +2844,10 @@ async def analyze_single_leg_hop_endpoint(
         except (ValueError, TypeError):
             parsed_calibration = None
 
+    from engines.orthopedic.tug_engine import _ensure_decodable_video
+
     tmp_path: Optional[str] = None
+    fixed_path_cleanup: Optional[str] = None
     try:
         contents = await video.read()
         if not contents:
@@ -2852,12 +2867,23 @@ async def analyze_single_leg_hop_endpoint(
             contents, video.filename or "single_leg_hop.mp4",
         )
         log.info(
-            "single_leg_hop: file=%s side=%s size=%.2f MB calibration=%s",
+            "single_leg_hop: file=%s side=%s size=%.2f MB calibration=%s recording_ms=%s",
             video.filename, side, size_mb,
             "client" if parsed_calibration else "server-auto",
+            recording_duration_ms,
         )
 
-        probe = cv2.VideoCapture(tmp_path)
+        # Repair MediaRecorder WebMs with broken duration headers BEFORE
+        # the cv2 FPS probe. Record-mode uploads (recording_duration_ms
+        # set) are re-encoded to a clean constant-FPS MP4 with
+        # FPS = decoded_frames / client wall-clock. Normal file uploads
+        # (recording_duration_ms=None) are a no-op → (tmp_path, None).
+        processed_path, fixed_path_cleanup = _ensure_decodable_video(
+            tmp_path, recording_duration_ms,
+            force_rewrite=bool(recording_duration_ms and recording_duration_ms > 0),
+        )
+
+        probe = cv2.VideoCapture(processed_path)
         try:
             probe_fps = float(probe.get(cv2.CAP_PROP_FPS) or 0.0)
             probe_total_frames = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
@@ -2914,7 +2940,7 @@ async def analyze_single_leg_hop_endpoint(
 
         pose_options = _build_gait_pose_options()
         result: Dict[str, Any] = analyze_single_leg_hop(
-            video_path=tmp_path,
+            video_path=processed_path,
             pose_options=pose_options,
             side=side,
             calibration=parsed_calibration,
@@ -2941,6 +2967,10 @@ async def analyze_single_leg_hop_endpoint(
         )
     finally:
         cleanup_temp_file(tmp_path)
+        # _ensure_decodable_video returns a second path only when it
+        # actually wrote a repaired file — clean that up too.
+        if fixed_path_cleanup and fixed_path_cleanup != tmp_path:
+            cleanup_temp_file(fixed_path_cleanup)
 
 
 # ══════════════════════════════════════════════════════════════════════

@@ -200,15 +200,13 @@ const MODULES = [
     tone: "from-red-500/15 to-red-500/5",
     iconTone: "text-red-600",
   },
-  {
-    href: "orthopedic/single-leg-hop",
-    eyebrow: "Functional hop test",
-    title: "Single-Leg Hop",
-    body: "Forward hop for distance. Patient stands on the test leg, hops forward, and lands on the same leg — three trials per leg. Scale is calibrated from the patient's standing height; the Limb Symmetry Index (≥ 90 % = cleared, standard ACL convention) flags side-to-side asymmetry.",
-    icon: MoveRight,
-    tone: "from-orange-500/15 to-orange-500/5",
-    iconTone: "text-orange-600",
-  },
+  // Single-Leg Hop hub card removed on request — the assessment is
+  // hidden from the analyze menu. All downstream surfaces are left
+  // intact so already-saved single-leg-hop reports still render and
+  // the direct route `/orthopedic/single-leg-hop` still works (module,
+  // ReportCard meta, reports/[id] dispatch, backend endpoint, engine,
+  // TS client, live analyzer, capture, report tsx). Re-add the hub card
+  // here to re-enable discovery from the assessments menu.
   {
     href: "orthopedic/counter-movement-jump",
     eyebrow: "Vertical jump · power",
