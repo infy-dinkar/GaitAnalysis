@@ -51,12 +51,18 @@ import { usePatientContext } from "@/hooks/usePatientContext";
 import {
   analyzeSingleLegHopUpload,
   buildCombinedResult,
+  MAX_TRIALS,
   RECORDING_DURATION_SEC,
   type CalibrationResult,
   type Side,
   type SingleLegHopCombinedResult,
   type SingleLegHopResult,
 } from "@/lib/orthopedic/singleLegHop";
+import {
+  SingleLegHopLiveAnalyzer,
+  type SLHLiveFrame,
+} from "@/lib/orthopedic/singleLegHopLive";
+import type { LiveKeypoint } from "@/hooks/usePoseDetectionLive";
 
 type Mode = "live" | "upload";
 type LivePhase =
@@ -132,127 +138,79 @@ export function SingleLegHopCapture() {
     },
   );
 
-  // ── Recording (per leg) ──────────────────────────────────────
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const recordingChunksRef = useRef<Blob[]>([]);
+  // ── Live in-browser session (biomech-style — no video upload) ──
+  // Each leg's hops are detected in the browser on the BlazePose-tfjs
+  // keypoint stream; the per-leg SingleLegHopResult is built client-
+  // side (see lib/orthopedic/singleLegHopLive). LSI is then computed
+  // from both legs via buildCombinedResult().
+  const analyzerRef = useRef<SingleLegHopLiveAnalyzer | null>(null);
   const recordingStartedAtRef = useRef<number>(0);
   const currentRecordingSideRef = useRef<Side | null>(null);
+  const [hud, setHud] = useState<SLHLiveFrame | null>(null);
+  const phaseRef = useRef<LivePhase>(phase);
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
 
   useEffect(() => {
     if (phase !== "recording_left" && phase !== "recording_right") return;
-    const id = window.setInterval(() => setNow(Date.now()), 250);
+    const id = window.setInterval(() => setNow(Date.now()), 200);
     return () => window.clearInterval(id);
   }, [phase]);
 
-  /** Pull the live camera's <video> element via the global capture
-   *  hook the LiveCamera component installs. Used to wire up the
-   *  MediaRecorder against the same stream. */
-  function getLiveVideoStream(): MediaStream | null {
-    const vid = document.querySelector(
-      "video[playsinline]",
-    ) as HTMLVideoElement | null;
-    if (!vid) return null;
-    const stream = vid.srcObject;
-    return stream instanceof MediaStream ? stream : null;
-  }
-
   function startRecording(side: Side) {
-    const stream = getLiveVideoStream();
-    if (!stream) {
-      setError(
-        "Camera stream is not available. Click Start camera before recording.",
-      );
-      return;
-    }
-    const chunks: Blob[] = [];
-    let rec: MediaRecorder;
-    try {
-      rec = new MediaRecorder(stream, { mimeType: "video/webm" });
-    } catch {
-      try {
-        rec = new MediaRecorder(stream);
-      } catch (e) {
-        setError(
-          `Could not start recording: ${errorMessage(e) ?? "MediaRecorder unavailable"}`,
-        );
-        return;
-      }
-    }
-    rec.ondataavailable = (ev) => {
-      if (ev.data && ev.data.size > 0) chunks.push(ev.data);
-    };
-    rec.onstop = () => {
-      const blob = new Blob(chunks, { type: rec.mimeType || "video/webm" });
-      const recordedSide = currentRecordingSideRef.current;
-      currentRecordingSideRef.current = null;
-      mediaRecorderRef.current = null;
-      recordingChunksRef.current = [];
-      void uploadAndAnalyze(blob, recordedSide);
-    };
-    recordingChunksRef.current = chunks;
-    mediaRecorderRef.current = rec;
+    const analyzer = new SingleLegHopLiveAnalyzer(side);
+    analyzer.reset(calibration);
+    analyzerRef.current = analyzer;
     currentRecordingSideRef.current = side;
+    setHud(null);
     recordingStartedAtRef.current = Date.now();
     setError(null);
     setPhase(side === "left" ? "recording_left" : "recording_right");
-    rec.start();
   }
 
-  async function uploadAndAnalyze(blob: Blob, side: Side | null) {
-    if (!side) return;
-    const filename =
-      side === "left" ? "single_leg_hop_left.webm" : "single_leg_hop_right.webm";
-    const file = new File([blob], filename, { type: blob.type });
-    setPhase(side === "left" ? "uploading_left" : "uploading_right");
-    setError(null);
-    try {
-      const result = await analyzeSingleLegHopUpload(
-        file,
-        side,
-        calibration,
-        patient?.height_cm ?? null,
-      );
-      if (side === "left") setLeftResult(result);
-      else setRightResult(result);
-      // Advance to the other side, or finish if both done.
-      const otherSide: Side = side === "left" ? "right" : "left";
-      const otherDone =
-        otherSide === "left" ? leftResult !== null : rightResult !== null;
-      if (otherDone) {
-        setPhase("done");
-      } else {
-        setPhase(otherSide === "left" ? "armed_left" : "armed_right");
-      }
-    } catch (e) {
+  // End the current leg's live session, build its result, and advance
+  // to the other leg (or the done view). Fired by the auto-stop timer,
+  // after MAX_TRIALS valid hops, or the manual "Stop early" button.
+  function finishLegSession() {
+    const analyzer = analyzerRef.current;
+    const side = currentRecordingSideRef.current;
+    if (!analyzer || !side) return;
+    const elapsed = Math.max(
+      0, (Date.now() - recordingStartedAtRef.current) / 1000,
+    );
+    const result = analyzer.finalize(patient?.height_cm ?? null, elapsed);
+    analyzerRef.current = null;
+    currentRecordingSideRef.current = null;
+    if (!result) {
       setError(
-        errorMessage(e) ??
-          `${side === "left" ? "Left" : "Right"} leg analysis failed`,
+        analyzer.hasBaseline()
+          ? `No hops detected on the ${side} leg. Stand still on the ${side} leg ~1 s, then hop forward and land on the same leg.`
+          : `Could not lock a standing baseline — stand still on the ${side} leg, full body in frame, for ~1 s before hopping.`,
       );
-      // Park the operator at the armed phase for the failed side so
-      // they can retry without resetting calibration.
       setPhase(side === "left" ? "armed_left" : "armed_right");
+      return;
     }
+    if (side === "left") setLeftResult(result);
+    else setRightResult(result);
+    const otherSide: Side = side === "left" ? "right" : "left";
+    const otherDone =
+      otherSide === "left" ? leftResult !== null : rightResult !== null;
+    setPhase(
+      otherDone ? "done" : otherSide === "left" ? "armed_left" : "armed_right",
+    );
   }
 
-  function stopRecording() {
-    const rec = mediaRecorderRef.current;
-    if (rec && rec.state === "recording") {
-      rec.stop();
-    } else {
-      // Safety net — if recorder isn't running, drop straight back
-      // to armed state.
-      const side = currentRecordingSideRef.current;
-      setPhase(side === "left" ? "armed_left" : "armed_right");
-      currentRecordingSideRef.current = null;
-    }
-  }
-
-  // Auto-stop after RECORDING_DURATION_SEC
+  // Auto-stop when the session length elapses OR MAX_TRIALS valid hops
+  // have been recorded.
   useEffect(() => {
     if (phase !== "recording_left" && phase !== "recording_right") return;
     const elapsedMs = now - recordingStartedAtRef.current;
+    const analyzer = analyzerRef.current;
+    if (analyzer && analyzer.validTrialCount() >= MAX_TRIALS) {
+      finishLegSession();
+      return;
+    }
     if (elapsedMs >= RECORDING_DURATION_SEC * 1000) {
-      stopRecording();
+      finishLegSession();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [now, phase]);
@@ -272,20 +230,12 @@ export function SingleLegHopCapture() {
     [firstSide],
   );
 
-  // Full reset back to the side picker. Also serves as the
-  // fullscreen shell's Exit handler — detach the recorder handlers
-  // first so a stop() during exit can't fire a ghost upload for a
-  // session the operator just abandoned.
+  // Full reset back to the side picker. Also the fullscreen shell's
+  // Exit handler.
   function reset() {
-    const rec = mediaRecorderRef.current;
-    if (rec) {
-      rec.ondataavailable = null;
-      rec.onstop = null;
-      try { rec.stop(); } catch { /* ignore */ }
-    }
-    mediaRecorderRef.current = null;
-    recordingChunksRef.current = [];
+    analyzerRef.current = null;
     currentRecordingSideRef.current = null;
+    setHud(null);
     setLeftResult(null);
     setRightResult(null);
     setCalibration(null);
@@ -295,14 +245,16 @@ export function SingleLegHopCapture() {
     setPhase("side_picker");
   }
 
-  // Frame handler — kept minimal in the new D3 flow. The backend
-  // detects takeoff/landing from the uploaded clip; live preview
-  // just needs to draw the skeleton (handled inside LiveCamera).
+  // Frame handler — feeds the in-browser per-leg analyzer during a
+  // live recording and mirrors its HUD state up for the overlay.
   const handleFrame = useCallback(
-    (_kp: Keypoint[], _video: HTMLVideoElement) => {
-      // No live coaching state yet — could be wired later (live
-      // takeoff/landing detection mirrors the backend math; out of
-      // scope for the initial ship).
+    (kp: Keypoint[], _video: HTMLVideoElement) => {
+      const ph = phaseRef.current;
+      if (ph !== "recording_left" && ph !== "recording_right") return;
+      const analyzer = analyzerRef.current;
+      if (!analyzer) return;
+      const tMs = Date.now() - recordingStartedAtRef.current;
+      setHud(analyzer.pushFrame(kp as unknown as LiveKeypoint[], tMs));
     },
     [],
   );
@@ -478,13 +430,14 @@ export function SingleLegHopCapture() {
           patientHeightCm={patient?.height_cm ?? null}
           handleFrame={handleFrame}
           startRecording={startRecording}
-          stopRecording={stopRecording}
+          stopRecording={finishLegSession}
           now={now}
           recordingStartedAt={recordingStartedAtRef.current}
           leftDone={leftResult !== null}
           rightDone={rightResult !== null}
           onResetSession={reset}
           error={error}
+          hud={hud}
           camActive={camActive}
           onCamActiveChange={setCamActive}
           flowPhase={flowPhase}
@@ -536,6 +489,7 @@ interface LiveSectionProps {
   flowPhase: RehabAutoFlowPhase | null;
   countdown: number | null;
   skipCountdown: () => void;
+  hud: SLHLiveFrame | null;
 }
 
 function LiveSection(props: LiveSectionProps) {
@@ -559,6 +513,7 @@ function LiveSection(props: LiveSectionProps) {
     flowPhase,
     countdown,
     skipCountdown,
+    hud,
   } = props;
 
   if (phase === "side_picker") {
@@ -652,21 +607,71 @@ function LiveSection(props: LiveSectionProps) {
             />
           )}
           {isRecording && (
-            <div className="absolute left-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
-              <p className="text-[10px] uppercase tracking-[0.14em] text-rose-300">
-                ● Recording · {currentSide} leg
-              </p>
-              <p className="tabular text-2xl font-semibold text-white">
-                {remainingSec.toFixed(1)}s
-              </p>
-            </div>
-          )}
-          {isUploading && (
-            <div className="absolute inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-              <div className="flex items-center gap-2 rounded-lg border border-white/15 bg-black/70 px-4 py-3 text-sm text-white">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Analysing {currentSide} leg recording…
+            <div className="absolute left-3 top-3 w-56 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] uppercase tracking-[0.14em] text-rose-300">
+                  ● Live · {currentSide} leg
+                </p>
+                <p className="tabular text-sm font-semibold text-white">
+                  {remainingSec.toFixed(0)}s
+                </p>
               </div>
+              {!hud?.baselineLocked ? (
+                <div className="mt-2">
+                  <p className="text-[10px] text-amber-300">
+                    {hud?.tracking === false
+                      ? "Step fully into frame…"
+                      : `Hold still on the ${currentSide} leg — locking baseline…`}
+                  </p>
+                  <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-white/15">
+                    <div
+                      className="h-full bg-amber-400 transition-all"
+                      style={{ width: `${(hud?.baselineProgress ?? 0) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="mt-2 flex items-baseline gap-2">
+                    <span className="tabular text-3xl font-semibold text-white">
+                      {hud.validTrials}
+                    </span>
+                    <span className="text-[11px] text-white/70">
+                      / {hud.maxTrials} hops
+                    </span>
+                    {hud.airborne && (
+                      <span className="ml-auto rounded-full bg-sky-500/25 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-sky-200">
+                        airborne
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-1.5 grid grid-cols-2 gap-2 text-[10px]">
+                    <div className="rounded bg-white/5 px-2 py-1">
+                      <p className="uppercase tracking-[0.12em] text-white/50">Last</p>
+                      <p className="tabular text-sm font-semibold text-white">
+                        {hud.lastHopCm !== null
+                          ? `${hud.lastHopCm.toFixed(0)} cm`
+                          : hud.lastHopPx !== null
+                            ? `${hud.lastHopPx.toFixed(0)} px`
+                            : "—"}
+                        {hud.lastValid === false && (
+                          <span className="ml-1 text-[9px] text-rose-300">✗</span>
+                        )}
+                      </p>
+                    </div>
+                    <div className="rounded bg-white/5 px-2 py-1">
+                      <p className="uppercase tracking-[0.12em] text-white/50">Best</p>
+                      <p className="tabular text-sm font-semibold text-emerald-300">
+                        {hud.bestValidCm !== null
+                          ? `${hud.bestValidCm.toFixed(0)} cm`
+                          : hud.bestValidPx !== null
+                            ? `${hud.bestValidPx.toFixed(0)} px`
+                            : "—"}
+                      </p>
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           )}
         </SingleLegHopLiveCamera>
@@ -694,11 +699,17 @@ function LiveSection(props: LiveSectionProps) {
             <p className="font-semibold text-foreground">Session brief</p>
             <ol className="mt-2 list-decimal space-y-1 pl-4">
               <li>
-                Stand still on the {currentSide} leg ~1 s, then hop
-                forward.
+                Stand still on the {currentSide} leg ~1 s to lock the
+                baseline.
               </li>
-              <li>Up to 3 trials — auto-stops at {RECORDING_DURATION_SEC}s.</li>
-              <li>The other leg runs next with its own countdown.</li>
+              <li>
+                Hop forward as far as you can and land on the SAME leg —
+                the hops are detected live ({MAX_TRIALS} needed).
+              </li>
+              <li>
+                Auto-saves after {MAX_TRIALS} valid hops or{" "}
+                {RECORDING_DURATION_SEC}s; the other leg runs next.
+              </li>
             </ol>
           </div>
 
@@ -713,12 +724,15 @@ function LiveSection(props: LiveSectionProps) {
           {isRecording && (
             <div className="rounded-card border border-rose-500/30 bg-rose-500/10 p-3 text-sm">
               <p className="font-medium text-foreground">
-                ● Recording {currentSide} leg —{" "}
-                {remainingSec.toFixed(1)}s remaining
+                ● Live · {currentSide} leg —{" "}
+                {hud?.baselineLocked
+                  ? `${hud.validTrials}/${hud.maxTrials} hops`
+                  : "locking baseline…"}
               </p>
               <p className="mt-1 text-[11px] text-muted">
-                Stand still on the {currentSide} leg for ~1 s, then hop
-                forward. Up to 3 trials.
+                {hud?.baselineLocked
+                  ? `Hop forward and land on the ${currentSide} leg. ${remainingSec.toFixed(0)}s left.`
+                  : `Stand still on the ${currentSide} leg, full body in frame.`}
               </p>
             </div>
           )}
