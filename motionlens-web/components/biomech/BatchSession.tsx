@@ -124,6 +124,7 @@ function getCatalogue(): MovementOption[] {
     });
   }
   for (const m of ANKLE_MOVEMENTS) {
+    if (m.hidden) continue;
     out.push({
       bodyPart: "ankle",
       id: m.id,

@@ -7,24 +7,51 @@
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 import { LM } from "@/lib/pose/landmarks";
 
-export type AnkleMovementId = "flexion" | "extension";
+export type AnkleMovementId = "flexion" | "extension" | "flexion_extension";
 
 export interface AnkleMovement {
   id: AnkleMovementId;
   label: string;
   description: string;
   target: [number, number];
+  /** Merged two-direction entries carry a secondary direction with its
+   *  own target (mirrors knee flexion_extension / hip rotation). */
+  merged?: boolean;
+  primaryLabel?: string;
+  secondaryLabel?: string;
+  secondaryTarget?: [number, number];
+  /** Hidden from the movement chooser — legacy entries kept for saved
+   *  reports only. */
+  hidden?: boolean;
   /** Optional reference illustration. See MovementGrid's
    *  MovementOption.imageUrl for the path convention. */
   imageUrl?: string;
 }
 
 export const ANKLE_MOVEMENTS: AnkleMovement[] = [
+  // Combined Dorsiflexion + Plantarflexion — one recording captures
+  // both peaks. Measured as the angle between the foot sole line
+  // (heel → toe) and the shin line (knee–ankle); 90° = neutral.
+  {
+    id: "flexion_extension",
+    label: "Dorsiflexion + Plantarflexion",
+    description:
+      "Seated, leg extended. Pull the foot up toward the shin (dorsiflexion), then point the toes down like a gas pedal (plantarflexion). One session captures both ends of the ROM.",
+    target: [15, 25],
+    merged: true,
+    primaryLabel: "Dorsiflexion",
+    secondaryLabel: "Plantarflexion",
+    secondaryTarget: [40, 55],
+    imageUrl: "/images/biomech/ankle/ankle_dorsi_plantar.png",
+  },
+  // Legacy single-direction entries — hidden from the chooser, kept so
+  // saved reports referencing them still resolve labels/targets.
   {
     id: "flexion",
     label: "Dorsiflexion",
     description: "Pull the foot upward (toes toward shin) — knee-to-wall lean",
     target: [15, 25],
+    hidden: true,
     imageUrl: "/images/biomech/ankle/ankle_dorsiflexion.png",
   },
   {
@@ -32,6 +59,7 @@ export const ANKLE_MOVEMENTS: AnkleMovement[] = [
     label: "Plantarflexion",
     description: "Point the foot down, like pressing a gas pedal",
     target: [40, 55],
+    hidden: true,
     imageUrl: "/images/biomech/ankle/ankle_plantarflexion.png",
   },
 ];

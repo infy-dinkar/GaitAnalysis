@@ -55,7 +55,7 @@ function AnkleSetupInner() {
               </h2>
               <div className="mt-4">
                 <MovementGrid
-                  options={ANKLE_MOVEMENTS}
+                  options={ANKLE_MOVEMENTS.filter((m) => !m.hidden)}
                   selected={movement}
                   onSelect={setMovement}
                 />

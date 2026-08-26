@@ -104,8 +104,8 @@ function AnkleCameraSurface({
 }
 
 interface Props {
-  movementId: "flexion" | "extension";
-  movementLabel: string;        // e.g. "Ankle · Dorsiflexion"
+  movementId: "flexion" | "extension" | "flexion_extension";
+  movementLabel: string;        // e.g. "Ankle · Dorsiflexion + Plantarflexion"
   description: string;
   target: [number, number];
   side: "left" | "right";
@@ -379,6 +379,14 @@ export function AnkleCapture({
 
   // ── Done view ───────────────────────────────────────────────
   if (phase === "done" && result) {
+    // Merged (dorsi + plantar) result — the backend sets
+    // secondary_label / secondary_reference_range on the merged
+    // movement; render the dual-row report and persist both
+    // directions (mirrors ApiUploadAssessment's merged handling).
+    const isMerged =
+      !!result.secondary_label && !!result.secondary_reference_range;
+    const hasSecondaryValue =
+      isMerged && typeof result.secondary_peak_magnitude === "number";
     const buildPayload = () => ({
       module: "biomech" as const,
       body_part: "ankle" as const,
@@ -398,6 +406,17 @@ export function AnkleCapture({
         // viewer can render them later (mirrors how TUG saves
         // its annotated screenshots).
         key_frames: result.key_frames ?? [],
+        // For merged tests, persist the secondary direction so the
+        // saved-report viewer renders both rows.
+        ...(isMerged
+          ? {
+              secondary_peak_angle: result.secondary_peak_angle,
+              secondary_peak_magnitude: result.secondary_peak_magnitude,
+              secondary_reference_range: result.secondary_reference_range,
+              primary_label: result.primary_label,
+              secondary_label: result.secondary_label,
+            }
+          : {}),
         // Persist compensations so saved reports re-render
         // them (parseSavedCompensations in reports/[id]/page
         // re-hydrates them on open). Conditional to keep the
@@ -415,13 +434,27 @@ export function AnkleCapture({
         <AutoSaveToast buildPayload={buildPayload} />
         <AssessmentReport
           bodyPart="ankle"
-          movementName={reportName}
+          movementName={
+            isMerged ? (result.primary_label ?? reportName) : reportName
+          }
           movementId={movementId}
           measured={result.peak_magnitude}
           target={[result.reference_range[0], result.reference_range[1]]}
           side={side}
           keyFrames={result.key_frames}
           compensations={result.compensations}
+          secondaryMovementName={isMerged ? result.secondary_label : undefined}
+          secondaryMeasured={
+            hasSecondaryValue ? result.secondary_peak_magnitude ?? undefined : undefined
+          }
+          secondaryTarget={
+            isMerged && result.secondary_reference_range
+              ? [
+                  result.secondary_reference_range[0],
+                  result.secondary_reference_range[1],
+                ]
+              : undefined
+          }
         />
 
         <div className="flex flex-wrap items-center justify-center gap-3 border-t border-border pt-6 text-xs text-muted">
@@ -457,9 +490,11 @@ export function AnkleCapture({
   };
 
   const movementCue =
-    movementId === "extension"
-      ? "point the toes DOWN (gas-pedal motion), hold ~1 s, return to neutral"
-      : "pull the toes UP toward the shin, hold ~1 s, return to neutral";
+    movementId === "flexion_extension"
+      ? "pull the toes UP toward the shin (hold ~1 s), then point them DOWN like a gas pedal (hold ~1 s) — one recording captures both"
+      : movementId === "extension"
+        ? "point the toes DOWN (gas-pedal motion), hold ~1 s, return to neutral"
+        : "pull the toes UP toward the shin, hold ~1 s, return to neutral";
 
   // ── Fullscreen auto-flow shell (record mode) ────────────────
   if (mode === "record" && liveFullscreen && phase !== "error") {
@@ -663,9 +698,11 @@ export function AnkleCapture({
                 "Patient sits comfortably with the test leg fully extended forward.",
                 "Camera SIDEWAYS to the test leg — entire shin + foot visible.",
                 "Remove socks/shoes so the foot landmarks are clearly visible.",
-                movementId === "extension"
-                  ? "On 'Start', tell the patient to point the toes DOWN (gas-pedal motion), hold for ~1 s, return to neutral."
-                  : "On 'Start', tell the patient to pull the toes UP toward the shin, hold for ~1 s, return to neutral.",
+                movementId === "flexion_extension"
+                  ? "On 'Start', tell the patient to pull the toes UP toward the shin (hold ~1 s), then point them DOWN like a gas pedal (hold ~1 s) — one recording captures both directions."
+                  : movementId === "extension"
+                    ? "On 'Start', tell the patient to point the toes DOWN (gas-pedal motion), hold for ~1 s, return to neutral."
+                    : "On 'Start', tell the patient to pull the toes UP toward the shin, hold for ~1 s, return to neutral.",
                 mode === "record"
                   ? "After the 3-2-1 countdown recording starts by itself — stop it once the patient returns to the neutral position."
                   : "Trim to 3-15 seconds, starting at neutral and ending after the patient returns to neutral.",
