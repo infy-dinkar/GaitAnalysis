@@ -383,6 +383,12 @@ export function LiveAssessment({
     !!merged && bodyPart === "neck" && movementId === "lateral_flexion";
   const isMergedHipRotation =
     !!merged && bodyPart === "hip" && movementId === "rotation";
+  // Ankle merged (dorsi + plantar): the signed angle from
+  // computeAnkleAngle("flexion_extension") routes the slot directly —
+  // positive (foot toward shin, θ<90) = primary/dorsiflexion, negative
+  // (foot pointed away, θ>90) = secondary/plantarflexion.
+  const isMergedAnkleFE =
+    !!merged && bodyPart === "ankle" && movementId === "flexion_extension";
   const isMergedMovement =
     isMergedShoulderRotation ||
     isMergedShoulderAbAd ||
@@ -390,7 +396,8 @@ export function LiveAssessment({
     isMergedKneeFE ||
     isMergedNeckFE ||
     isMergedNeckLateral ||
-    isMergedHipRotation;
+    isMergedHipRotation ||
+    isMergedAnkleFE;
 
   // Single-direction movements that ALSO run compensation tracking
   // (hip flex/ext, ankle flex/ext). These don't share the merged
@@ -704,7 +711,8 @@ export function LiveAssessment({
       isMergedShoulderFlexExt ||
       isMergedNeckFE ||
       isMergedNeckLateral ||
-      isMergedHipRotation
+      isMergedHipRotation ||
+      isMergedAnkleFE
     ) {
       const kpsForDir: Keypoint[] = data.landmarks.map((l) => ({
         x: l.x,
@@ -788,6 +796,22 @@ export function LiveAssessment({
         }
         compHipRotationTrackerRef.current.feed(kpsForDir);
         s.currentCompensations = compHipRotationTrackerRef.current.currentFlags();
+      } else if (isMergedAnkleFE) {
+        // Sign-routed: signed = 90 − θ(sole vs shin). Positive = foot
+        // toward the shin (dorsiflexion, primary); negative = foot
+        // pointed away (plantarflexion, secondary). A small deadband
+        // around neutral keeps jitter from flapping the slots.
+        const ANKLE_DIR_DEADBAND_DEG = 3;
+        if (angle > ANKLE_DIR_DEADBAND_DEG) dir = "primary";
+        else if (angle < -ANKLE_DIR_DEADBAND_DEG) dir = "secondary";
+        // Ankle compensation tracker — the dorsi (looser, 40°) knee-
+        // movement threshold since the merged trial spans both
+        // directions.
+        if (!compAnkleFlexionTrackerRef.current) {
+          compAnkleFlexionTrackerRef.current = new AnkleFlexionCompensationTracker(sideOrRight);
+        }
+        compAnkleFlexionTrackerRef.current.feed(kpsForDir);
+        s.currentCompensations = compAnkleFlexionTrackerRef.current.currentFlags();
       }
       s.currentDirection = dir;
       if (!dir) {
@@ -1083,6 +1107,7 @@ export function LiveAssessment({
         else if (isMergedNeckLateral) compNeckLateralTrackerRef.current?.markPrimaryPeak();
         else if (isMergedKneeFE) compKneeFETrackerRef.current?.markPrimaryPeak();
         else if (isMergedHipRotation) compHipRotationTrackerRef.current?.markPrimaryPeak();
+        else if (isMergedAnkleFE) compAnkleFlexionTrackerRef.current?.markPrimaryPeak();
       }
       s.peakCandidateSigned = candSigned;
       s.peakCandidateHeld = candHeld;
@@ -1098,6 +1123,7 @@ export function LiveAssessment({
         else if (isMergedNeckLateral) compNeckLateralTrackerRef.current?.markSecondaryPeak();
         else if (isMergedKneeFE) compKneeFETrackerRef.current?.markSecondaryPeak();
         else if (isMergedHipRotation) compHipRotationTrackerRef.current?.markSecondaryPeak();
+        else if (isMergedAnkleFE) compAnkleFlexionTrackerRef.current?.markSecondaryPeak();
       }
       s.peakCandidateSignedB = candSigned;
       s.peakCandidateHeldB = candHeld;
@@ -1120,6 +1146,7 @@ export function LiveAssessment({
     isMergedNeckFE,
     isMergedNeckLateral,
     isMergedHipRotation,
+    isMergedAnkleFE,
     isNeckRotation,
     isHipFlexion,
     isHipExtension,
@@ -1651,6 +1678,7 @@ export function LiveAssessment({
             isNeckRotation ||
             isMergedKneeFE ||
             isMergedHipRotation ||
+            isMergedAnkleFE ||
             isHipFlexion ||
             isHipExtension ||
             isAnkleFlexion ||
@@ -1968,15 +1996,17 @@ export function LiveAssessment({
                         ? compKneeFETrackerRef.current?.finish()
                         : isMergedHipRotation
                           ? compHipRotationTrackerRef.current?.finish()
-                          : isHipFlexion
-                            ? compHipFlexionTrackerRef.current?.finish()
-                            : isHipExtension
-                              ? compHipExtensionTrackerRef.current?.finish()
-                              : isAnkleFlexion
-                                ? compAnkleFlexionTrackerRef.current?.finish()
-                                : isAnkleExtension
-                                  ? compAnkleExtensionTrackerRef.current?.finish()
-                                  : null;
+                          : isMergedAnkleFE
+                            ? compAnkleFlexionTrackerRef.current?.finish()
+                            : isHipFlexion
+                              ? compHipFlexionTrackerRef.current?.finish()
+                              : isHipExtension
+                                ? compHipExtensionTrackerRef.current?.finish()
+                                : isAnkleFlexion
+                                  ? compAnkleFlexionTrackerRef.current?.finish()
+                                  : isAnkleExtension
+                                    ? compAnkleExtensionTrackerRef.current?.finish()
+                                    : null;
           return c && c.length > 0 ? { compensations: c } : {};
         })(),
       },
@@ -2028,15 +2058,17 @@ export function LiveAssessment({
                           ? compKneeFETrackerRef.current?.finish()
                           : isMergedHipRotation
                             ? compHipRotationTrackerRef.current?.finish()
-                            : isHipFlexion
-                              ? compHipFlexionTrackerRef.current?.finish()
-                              : isHipExtension
-                                ? compHipExtensionTrackerRef.current?.finish()
-                                : isAnkleFlexion
-                                  ? compAnkleFlexionTrackerRef.current?.finish()
-                                  : isAnkleExtension
-                                    ? compAnkleExtensionTrackerRef.current?.finish()
-                                    : undefined
+                            : isMergedAnkleFE
+                              ? compAnkleFlexionTrackerRef.current?.finish()
+                              : isHipFlexion
+                                ? compHipFlexionTrackerRef.current?.finish()
+                                : isHipExtension
+                                  ? compHipExtensionTrackerRef.current?.finish()
+                                  : isAnkleFlexion
+                                    ? compAnkleFlexionTrackerRef.current?.finish()
+                                    : isAnkleExtension
+                                      ? compAnkleExtensionTrackerRef.current?.finish()
+                                      : undefined
           }
         />
 

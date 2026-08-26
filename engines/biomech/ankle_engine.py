@@ -574,7 +574,7 @@ def analyze_ankle(
       - extract_poses → BlazePose Full landmarks per frame
       - build_time_series → smoothing + interpolation
     """
-    if movement not in ("flexion", "extension"):
+    if movement not in ("flexion", "extension", "flexion_extension"):
         raise ValueError(f"Unsupported ankle movement: {movement!r}")
     if side not in ("left", "right"):
         raise ValueError(f"Unsupported side: {side!r}")
@@ -682,6 +682,207 @@ def analyze_ankle(
     # silently operates on coherent-side frames only.
     use_frame = [base_use[i] and lr_consistent[i] for i in range(n)]
     _ = lr_dropped  # reserved for future telemetry surfacing
+
+    # ── MERGED dorsi + plantar (flexion_extension) ──────────────────
+    # New-method measurement (replaces the legacy single-direction
+    # sweep math for the merged test):
+    #   • Sole line  = HEEL → FOOT_INDEX (the goniometer's 5th-
+    #     metatarsal arm, NOT the ankle→toe vector that inflated
+    #     plantar readings with toe-point).
+    #   • Shin line  = ANKLE → KNEE.
+    #   • θ = angle between them. Neutral (foot ⟂ shin) is the
+    #     GEOMETRIC 90° — no timed neutral capture, so the recording
+    #     can start anywhere.
+    #   • Dorsiflexion  ROM = max(90 − θ)  (foot pulled toward shin)
+    #   • Plantarflexion ROM = max(θ − 90) (foot pointed away)
+    # The two one-sided excursions are measured SEPARATELY — never
+    # summed — which is what made the old sweep math overshoot
+    # plantar by ~+28° and hard-fail dorsi against its cap. No 2D→3D
+    # calibration multiplier: raw geometry, to be validated against
+    # 90°-zeroed goniometer readings.
+    if movement == "flexion_extension":
+        heel_x_arr = ts[f"{side}_heel"]["x_px"]
+        heel_y_arr = ts[f"{side}_heel"]["y_px"]
+        heel_v_arr = ts[f"{side}_heel"]["vis"]
+
+        theta_list: list[float] = []
+        theta_frames: list[int] = []
+        for i in range(n):
+            if not use_frame[i]:
+                continue
+            if float(heel_v_arr[i]) < FOOT_VIS_THRESHOLD:
+                continue
+            sx = float(kx[i]) - float(ax[i])   # shin: ankle → knee
+            sy = float(ky[i]) - float(ay[i])
+            fx_v = float(fx[i]) - float(heel_x_arr[i])  # sole: heel → toe
+            fy_v = float(fy[i]) - float(heel_y_arr[i])
+            if math.hypot(sx, sy) < 1e-6 or math.hypot(fx_v, fy_v) < 1e-6:
+                continue
+            dot = sx * fx_v + sy * fy_v
+            cross = sx * fy_v - sy * fx_v
+            theta = math.degrees(math.atan2(abs(cross), dot))  # 0..180
+            theta_list.append(theta)
+            theta_frames.append(i)
+
+        if len(theta_list) < 3:
+            raise ValueError(
+                "Too few usable frames — the heel, toe, ankle and knee "
+                "must all be visible. Re-record with the camera sideways "
+                "to the test leg, bare foot, full shin + foot in frame."
+            )
+
+        th = np.asarray(theta_list, dtype=float)
+        # 3-frame median filter — rejects single-frame keypoint spikes
+        # while preserving a held peak.
+        th_s = np.array([
+            np.median(th[max(0, i - 1):min(len(th), i + 2)])
+            for i in range(len(th))
+        ])
+
+        # Movement sanity: the sole-vs-shin angle must actually change.
+        if float(np.max(th_s) - np.min(th_s)) < 3.0:
+            raise ValueError(
+                "No detectable ankle movement in this clip. Re-record "
+                "showing the foot pulling UP toward the shin, then "
+                "pointing DOWN — the sole angle barely changed."
+            )
+
+        dorsi_dev = np.maximum(0.0, 90.0 - th_s)     # θ < 90 side
+        plantar_dev = np.maximum(0.0, th_s - 90.0)   # θ > 90 side
+        peak_dorsi = float(np.max(dorsi_dev))
+        peak_plantar = float(np.max(plantar_dev))
+        dorsi_idx_in_th = int(np.argmax(dorsi_dev))
+        plantar_idx_in_th = int(np.argmax(plantar_dev))
+
+        # Anatomical sanity caps (raw geometry — no multiplier).
+        if peak_dorsi > 40.0:
+            raise ValueError(
+                f"Dorsiflexion measurement is not reliable for this clip: "
+                f"{peak_dorsi:.1f}° exceeds the anatomical maximum (~40°). "
+                f"Almost always a tracking breakdown — re-record with a "
+                f"bare foot, camera sideways to the leg, whole body in "
+                f"frame."
+            )
+        if peak_plantar > 80.0:
+            raise ValueError(
+                f"Plantarflexion measurement is not reliable for this clip: "
+                f"{peak_plantar:.1f}° exceeds the anatomical maximum (~80°). "
+                f"Almost always a tracking breakdown — re-record with a "
+                f"bare foot, camera sideways to the leg, whole body in "
+                f"frame."
+            )
+
+        # Resting droop (D) — the foot's natural plantar hang at rest.
+        # Informational only: lets a relaxed-zero goniometer reading be
+        # converted to this report's 90°-neutral convention. Found as
+        # the ~1 s window with the smallest θ spread; None when the
+        # patient never holds still.
+        droop_deg: Optional[float] = None
+        w = max(5, int(round(fps)))
+        if len(th_s) >= w:
+            best_spread = float("inf")
+            best_med = None
+            for j in range(0, len(th_s) - w + 1):
+                win = th_s[j:j + w]
+                spread = float(np.max(win) - np.min(win))
+                if spread < best_spread:
+                    best_spread = spread
+                    best_med = float(np.median(win))
+            if best_med is not None and best_spread <= 3.0:
+                droop_deg = max(0.0, best_med - 90.0)
+
+        # Per-direction reference ranges + status.
+        d_lo, d_hi = ANKLE_TARGETS["flexion"]      # dorsi 15–25
+        p_lo, p_hi = ANKLE_TARGETS["extension"]    # plantar 40–55
+
+        def _status_for(mag: float, hi: float) -> tuple[float, str]:
+            pct = (mag / hi) * 100.0 if hi > 0 else 0.0
+            if pct >= 90:
+                return pct, "good"
+            if pct >= 75:
+                return pct, "fair"
+            return pct, "poor"
+
+        d_pct, d_status = _status_for(peak_dorsi, d_hi)
+        p_pct, p_status = _status_for(peak_plantar, p_hi)
+
+        side_label = side.capitalize()
+        interp_d = (
+            f"Dorsiflexion ({side_label}) peaked at {peak_dorsi:.1f}° "
+            f"({d_pct:.0f}% of the {d_lo:.0f}–{d_hi:.0f}° normal range — "
+            f"{d_status})."
+        )
+        interp_p = (
+            f"Plantarflexion ({side_label}) peaked at {peak_plantar:.1f}° "
+            f"({p_pct:.0f}% of the {p_lo:.0f}–{p_hi:.0f}° normal range — "
+            f"{p_status})."
+        )
+        interp_droop = (
+            f" Resting foot droop ≈ {droop_deg:.0f}° plantar of neutral."
+            if droop_deg is not None
+            else ""
+        )
+        interpretation = f"{interp_d} {interp_p}{interp_droop}"
+
+        # Key frames — the two peaks.
+        key_frames: list[dict] = []
+        d_frame = (
+            theta_frames[dorsi_idx_in_th]
+            if 0 <= dorsi_idx_in_th < len(theta_frames)
+            else -1
+        )
+        p_frame = (
+            theta_frames[plantar_idx_in_th]
+            if 0 <= plantar_idx_in_th < len(theta_frames)
+            else -1
+        )
+        if d_frame >= 0 and peak_dorsi > 0:
+            kf = _grab_ankle_key_frame(
+                video_path, d_frame, raw,
+                f"Peak dorsiflexion ({peak_dorsi:.1f}°)", side,
+            )
+            if kf:
+                key_frames.append(kf)
+        if p_frame >= 0 and peak_plantar > 0:
+            kf = _grab_ankle_key_frame(
+                video_path, p_frame, raw,
+                f"Peak plantarflexion ({peak_plantar:.1f}°)", side,
+            )
+            if kf:
+                key_frames.append(kf)
+
+        return {
+            "body_part": "ankle",
+            "movement": "flexion_extension",
+            "side": side,
+            # Primary = Dorsiflexion.
+            "peak_angle": peak_dorsi,
+            "peak_magnitude": peak_dorsi,
+            "reference_range": [float(d_lo), float(d_hi)],
+            "target": float(d_hi),
+            "percentage": d_pct,
+            "status": d_status,
+            "valid_frames": len(theta_list),
+            "total_frames": n,
+            "fps": float(fps),
+            "interpretation": interpretation,
+            "key_frames": key_frames,
+            # Secondary = Plantarflexion.
+            "secondary_peak_angle": peak_plantar,
+            "secondary_peak_magnitude": peak_plantar,
+            "secondary_reference_range": [float(p_lo), float(p_hi)],
+            "primary_label": "Dorsiflexion",
+            "secondary_label": "Plantarflexion",
+            "compensations": _track_ankle_compensations(
+                "flexion",  # merged trial uses the looser dorsi knee threshold
+                hx_c, hy_c, vh_c,
+                kx, ky, vk,
+                ax, ay, va,
+                lsx_c, lsy_c, lsv_c,
+                rsx_c, rsy_c, rsv_c,
+                n,
+            ),
+        }
 
     # Per-frame interior ankle angle. NaN when the chosen gate rejects
     # the frame OR when the angle math degenerates (zero-length vector).

@@ -26,24 +26,56 @@
 import type { LiveKeypoint as Keypoint } from "@/hooks/usePoseDetectionLive";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 
-export type AnkleMovementId = "flexion" | "extension";
+export type AnkleMovementId = "flexion" | "extension" | "flexion_extension";
 
 export interface AnkleMovement {
   id: AnkleMovementId;
   label: string;
   description: string;
   target: [number, number];
+  /** Merged two-direction entries carry a secondary direction with its
+   *  own target (mirrors knee flexion_extension / hip rotation). */
+  merged?: boolean;
+  primaryLabel?: string;
+  secondaryLabel?: string;
+  secondaryTarget?: [number, number];
+  /** Hidden from the movement chooser. Legacy single-direction entries
+   *  are kept so saved reports referencing them still resolve labels /
+   *  targets, but they no longer appear when starting a new trial. */
+  hidden?: boolean;
   /** Optional reference illustration. See MovementGrid's
    *  MovementOption.imageUrl for the path convention. */
   imageUrl?: string;
 }
 
 export const ANKLE_MOVEMENTS: AnkleMovement[] = [
+  // Combined Dorsiflexion + Plantarflexion. One recording captures
+  // both peaks. Measurement = angle between the FOOT SOLE LINE
+  // (heel → toe) and the SHIN LINE (knee–ankle). Neutral is the
+  // geometric 90° crossing — no timed neutral capture needed:
+  //   angle < 90° (foot pulled toward shin)  → dorsiflexion  = 90 − θ
+  //   angle > 90° (foot pointed away)        → plantarflexion = θ − 90
+  {
+    id: "flexion_extension",
+    label: "Dorsiflexion + Plantarflexion",
+    description:
+      "Seated, leg extended. Pull the foot up toward the shin (dorsiflexion), then point the toes down like a gas pedal (plantarflexion). One session captures both ends of the ROM.",
+    target: [15, 25],
+    merged: true,
+    primaryLabel: "Dorsiflexion",
+    secondaryLabel: "Plantarflexion",
+    secondaryTarget: [40, 55],
+    imageUrl: "/images/biomech/ankle/ankle_dorsi_plantar.png",
+  },
+  // Legacy single-direction entries — kept so saved reports referring
+  // to "flexion" or "extension" alone still resolve a label/target.
+  // Hidden from the chooser since the merged entry is the new default.
   {
     id: "flexion",
     label: "Dorsiflexion",
     description: "Pull the foot upward (toes toward shin) — knee-to-wall lean",
     target: [15, 25],
+    hidden: true,
     imageUrl: "/images/biomech/ankle/ankle_dorsiflexion.png",
   },
   {
@@ -51,6 +83,7 @@ export const ANKLE_MOVEMENTS: AnkleMovement[] = [
     label: "Plantarflexion",
     description: "Point the foot down, like pressing a gas pedal",
     target: [40, 55],
+    hidden: true,
     imageUrl: "/images/biomech/ankle/ankle_plantarflexion.png",
   },
 ];
@@ -74,14 +107,21 @@ const SIDE_INDICES = {
   left:  {
     knee:  LM.LEFT_KNEE,
     ankle: LM.LEFT_ANKLE,
+    heel:  LM.LEFT_HEEL,
     foot:  LM.LEFT_FOOT_INDEX,
   },
   right: {
     knee:  LM.RIGHT_KNEE,
     ankle: LM.RIGHT_ANKLE,
+    heel:  LM.RIGHT_HEEL,
     foot:  LM.RIGHT_FOOT_INDEX,
   },
 } as const;
+
+// Foot landmarks (heel + foot_index) are intrinsically noisier than
+// the anchor joints — accept a lower confidence for them so the peak
+// frames (where the foot is at its extreme) aren't dropped.
+const FOOT_VIS_THRESHOLD = 0.1;
 
 export function computeAnkleAngle(
   movement: AnkleMovementId,
@@ -91,23 +131,45 @@ export function computeAnkleAngle(
   const idx = SIDE_INDICES[side];
   const knee  = keypoints[idx.knee];
   const ankle = keypoints[idx.ankle];
+  const heel  = keypoints[idx.heel];
   const foot  = keypoints[idx.foot];
+
+  if (movement === "flexion_extension") {
+    // Merged dorsi + plantar. Angle between the FOOT SOLE LINE
+    // (heel → toe) and the SHIN LINE (ankle → knee, pointing up the
+    // leg). Neutral (foot ⟂ shin) reads 90°:
+    //   • dorsiflexion  (foot toward shin) → θ < 90 → signed = +(90−θ)
+    //   • plantarflexion (foot away)       → θ > 90 → signed = −(θ−90)
+    // The SIGNED value routes the live merged slots (positive =
+    // primary/dorsi, negative = secondary/plantar); each slot's peak
+    // magnitude is |signed|.
+    for (const k of [knee, ankle]) {
+      if (!k || (k.score ?? 0) < VIS_THRESHOLD) return null;
+    }
+    for (const k of [heel, foot]) {
+      if (!k || (k.score ?? 0) < FOOT_VIS_THRESHOLD) return null;
+    }
+    const sx = knee.x - ankle.x;   // shin: ankle → knee
+    const sy = knee.y - ankle.y;
+    const fx = foot.x - heel.x;    // sole: heel → toe
+    const fy = foot.y - heel.y;
+    if (Math.hypot(sx, sy) < 1e-6 || Math.hypot(fx, fy) < 1e-6) return null;
+    const dot = sx * fx + sy * fy;
+    const cross = sx * fy - sy * fx;
+    const theta = (Math.atan2(Math.abs(cross), dot) * 180) / Math.PI;
+    return 90 - theta;
+  }
+
   for (const k of [knee, ankle, foot]) {
     if (!k || (k.score ?? 0) < VIS_THRESHOLD) return null;
   }
-  // Interior angle at the ANKLE vertex between the shin and foot
-  // vectors. With foot ⟂ shin (neutral) the angle ≈ 90°; dorsiflexion
-  // closes it below 90°, plantarflexion opens it above 90°.
+  // Legacy single-direction math — interior angle at the ANKLE vertex
+  // between the shin and foot vectors. Kept for saved-report parity;
+  // the chooser no longer offers these movements.
   const interior = angleAt(knee.x, knee.y, ankle.x, ankle.y, foot.x, foot.y);
   if (movement === "flexion") {
-    // Dorsiflexion test: + when foot is past neutral toward shin
-    // (true dorsi), − while the foot is still on the plantar side.
-    // Live UI reflects motion either way; peak tracker locks the
-    // maximum signed value seen during the recording.
     return 90 - interior;
   }
-  // Plantarflexion test: + when foot points away from shin past
-  // neutral, − while it's on the dorsi side.
   return interior - 90;
 }
 

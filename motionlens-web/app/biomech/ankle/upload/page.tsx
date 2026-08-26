@@ -12,7 +12,8 @@ import { ANKLE_MOVEMENTS, type AnkleMovementId } from "@/lib/biomech/ankle";
 
 function AnkleUploadInner() {
   const params = useSearchParams();
-  const movementId = (params.get("movement") as AnkleMovementId) || "flexion";
+  const movementId =
+    (params.get("movement") as AnkleMovementId) || "flexion_extension";
   const sideParam = params.get("side");
   const side: "left" | "right" = sideParam === "left" ? "left" : "right";
   const movement =

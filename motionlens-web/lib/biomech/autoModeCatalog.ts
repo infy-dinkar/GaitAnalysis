@@ -145,17 +145,15 @@ export const MOVEMENTS_BY_JOINT: Record<Joint, MovementDef[]> = {
     },
   ],
   ankle: [
+    // Merged dorsi + plantar — one recording captures both peaks
+    // (heel→toe sole line vs knee–ankle shin line, 90° = neutral).
+    // The run page resolves the full movement def (merged flag +
+    // labels + secondaryTarget) via resolveMovement, same as knee.
     {
-      id: "flexion",
-      label: "Dorsiflexion",
-      description: "Foot up, toes toward shin",
+      id: "flexion_extension",
+      label: "Dorsiflexion + Plantarflexion",
+      description: "Foot up toward shin, then down like a pedal",
       target: [15, 25],
-    },
-    {
-      id: "extension",
-      label: "Plantarflexion",
-      description: "Foot down, like pressing pedal",
-      target: [40, 55],
     },
   ],
 };

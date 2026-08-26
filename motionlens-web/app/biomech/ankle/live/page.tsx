@@ -28,7 +28,8 @@ import {
 
 function AnkleLiveInner() {
   const params = useSearchParams();
-  const movementId = (params.get("movement") as AnkleMovementId) || "flexion";
+  const movementId =
+    (params.get("movement") as AnkleMovementId) || "flexion_extension";
   const sideParam = params.get("side");
   const side: "left" | "right" = sideParam === "left" ? "left" : "right";
   const movement =
@@ -42,6 +43,10 @@ function AnkleLiveInner() {
       description={movement.description}
       target={movement.target}
       side={side}
+      merged={movement.merged}
+      primaryLabel={movement.primaryLabel}
+      secondaryLabel={movement.secondaryLabel}
+      secondaryTarget={movement.secondaryTarget}
     />
   );
 }

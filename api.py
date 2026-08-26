@@ -4621,7 +4621,7 @@ async def analyze_sppb_gait_speed_endpoint(
 @app.post("/api/analyze-ankle", response_model=BiomechResponse)
 async def analyze_ankle(
     video: UploadFile = File(...),
-    movement_type: str = Form(...),    # "flexion" (dorsi) or "extension" (plantar)
+    movement_type: str = Form(...),    # "flexion_extension" (merged dorsi+plantar; default), or legacy "flexion" / "extension"
     side: str = Form("right"),         # "left" or "right"
     patient_name: Optional[str] = Form(None),
     recording_duration_ms: Optional[int] = Form(None),
