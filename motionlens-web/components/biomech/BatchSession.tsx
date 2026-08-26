@@ -394,11 +394,20 @@ export function BatchSession() {
 
   const allDone =
     queue.length > 0 && queue.every((it) => it.status === "done");
+  // Settled = nothing still pending/uploading. Saving + PDF are
+  // allowed as soon as the queue has settled AND at least one item
+  // completed — a failed item no longer blocks saving the successful
+  // ones (it's simply excluded; the operator can still retry first).
+  const allSettled =
+    queue.length > 0 &&
+    queue.every((it) => it.status === "done" || it.status === "error");
+  const doneCount = queue.filter((it) => it.status === "done").length;
+  const canSave = allSettled && doneCount > 0;
   const someErrored = queue.some((it) => it.status === "error");
   const anySaved = queue.some((it) => it.saved);
 
   async function saveAll(auto = false) {
-    if (!patientId || !allDone) return;
+    if (!patientId || !canSave) return;
     const completed = queue.filter((it) => it.status === "done");
     if (completed.length === 0 || queue.some((it) => it.saved)) return;
     setSaveState({ kind: "saving", done: 0, total: 1 });
@@ -864,8 +873,11 @@ export function BatchSession() {
             <div className="flex items-start gap-2 rounded-card border border-error/30 bg-error/5 px-4 py-3 text-sm">
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-error" />
               <p className="text-foreground">
-                Some uploads failed. Retry them before saving or generating
-                the PDF — only completed items will be included.
+                Some uploads failed. You can retry them, or go ahead and
+                save / download now — only the{" "}
+                <span className="tabular font-semibold">{doneCount}</span>{" "}
+                completed test{doneCount === 1 ? "" : "s"} will be included;
+                failed ones are skipped.
               </p>
             </div>
           )}
@@ -895,7 +907,7 @@ export function BatchSession() {
               <Button
                 onClick={() => saveAll()}
                 disabled={
-                  !allDone ||
+                  !canSave ||
                   saveState.kind === "saving" ||
                   (anySaved && saveState.kind === "saved")
                 }
@@ -921,7 +933,7 @@ export function BatchSession() {
             <Button
               variant="secondary"
               onClick={downloadPdf}
-              disabled={!allDone || pdfBusy}
+              disabled={!canSave || pdfBusy}
             >
               {pdfBusy ? (
                 <>
