@@ -541,8 +541,23 @@ _HIP_FE_DIRECTION_DEADBAND_DEG = 5.0
 # Frames beyond these magnitudes are keypoint artefacts, not anatomy —
 # DROPPED (not clamped). Clamping is what produced the old cohort-wide
 # "exactly 30.0°" extension readings.
+#
+# These sit at true-garbage level, NOT at the clinical maximum. The
+# thigh angle is measured in SPACE (from the vertical), and a patient
+# who leans the trunk forward tips the pelvis with it, letting the leg
+# travel well past the ~30° the hip joint alone allows — 45-60° in
+# space is common. An extension limit of 45° silently truncated those
+# and pinned a whole set of readings at ~44.7°, the same hidden-ceiling
+# failure the old 30° clamp caused. Compensation is surfaced by the
+# trunk-lean / pelvic-tilt flags instead of by hiding the number.
+#
+# Live mode applies NO limit — it filters spikes with a held-peak
+# requirement (a value must persist for several frames) plus a
+# per-frame delta gate. The backend has no such hold mechanism, so
+# these limits are its single-bad-frame guard; they only need to be
+# tight enough to catch keypoint breakdown.
 _HIP_FE_FLEXION_DROP_ABOVE_DEG   = 145.0
-_HIP_FE_EXTENSION_DROP_ABOVE_DEG = 45.0
+_HIP_FE_EXTENSION_DROP_ABOVE_DEG = 70.0
 
 # Minimum |nose.x − hip.x| as a fraction of trunk length before a
 # facing direction is trusted. Below this the view is near-frontal and
