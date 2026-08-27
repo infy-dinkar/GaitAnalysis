@@ -8,6 +8,7 @@ import type { LiveKeypoint as Keypoint } from "@/hooks/usePoseDetectionLive";
 import { LM_LIVE as LM } from "@/lib/pose/landmarks-live";
 
 export type HipMovementId =
+  | "flexion_extension"
   | "flexion"
   | "extension"
   | "rotation"
@@ -36,11 +37,29 @@ export interface HipMovement {
 }
 
 export const HIP_MOVEMENTS: HipMovement[] = [
+  // Combined Flexion + Extension. Standing, side-on camera; one
+  // recording captures both peaks — lift the knee forward, then swing
+  // the leg back behind the body.
+  {
+    id: "flexion_extension",
+    label: "Flexion + Extension",
+    description:
+      "Standing, side-on to the camera. Lift the knee forward as far as comfortable (flexion), then swing the leg back behind the body (extension). One session captures both ends of the ROM.",
+    target: [100, 120],
+    merged: true,
+    primaryLabel: "Flexion",
+    secondaryLabel: "Extension",
+    secondaryTarget: [10, 30],
+    imageUrl: "/images/biomech/hip/hip_flexion_extension.png",
+  },
+  // Legacy single-direction entries — hidden from the chooser, kept so
+  // saved reports referencing them still resolve labels + targets.
   {
     id: "flexion",
     label: "Flexion",
     description: "Lift the leg forward — bringing the thigh toward the chest",
     target: [110, 130],
+    hidden: true,
     imageUrl: "/images/biomech/hip/hip_flexion.png",
   },
   {
@@ -48,6 +67,7 @@ export const HIP_MOVEMENTS: HipMovement[] = [
     label: "Extension",
     description: "Move the leg backward behind the body",
     target: [10, 30],
+    hidden: true,
     imageUrl: "/images/biomech/hip/hip_extension.png",
   },
   // Merged Internal + External rotation. Seated heel-fixed test:
@@ -141,8 +161,16 @@ export function computeHipAngle(
   const heel     = keypoints[idx.heel];
   const footIdx  = keypoints[idx.footIndex];
 
+  const nose = keypoints[LM.NOSE];
+
   const needed: Keypoint[] = [hip, knee];
   if (movement === "flexion" || movement === "extension") needed.push(shoulder);
+  if (movement === "flexion_extension") {
+    // Merged test needs the shoulder (facing scale) + nose (facing
+    // direction). The thigh angle itself only needs hip + knee.
+    needed.push(shoulder);
+    needed.push(nose);
+  }
   if (
     movement === "internal_rotation" ||
     movement === "external_rotation" ||
@@ -156,6 +184,43 @@ export function computeHipAngle(
   }
   for (const k of needed) {
     if (!k || (k.score ?? 0) < VIS_THRESHOLD) return null;
+  }
+
+  if (movement === "flexion_extension") {
+    // Merged flexion + extension. The thigh's angle from the IMAGE
+    // VERTICAL (a plumb line) — NOT from the trunk.
+    //
+    // Why not the trunk: the trunk-referenced formula the legacy
+    // single-direction tests use adds any forward trunk lean straight
+    // onto the reading (20° of real extension with a 15° lean measured
+    // 35°). Hip extension's 30° anatomical clamp then silently pinned
+    // those to exactly 30° — which is why a whole cohort reported 30°
+    // and scored "normal". A vertical reference is immune to lean: the
+    // reference isn't part of the body at all.
+    //
+    //   thigh  = knee − hip
+    //   signed = atan2(thigh.x, thigh.y)   [from straight-DOWN, y-down
+    //            image coords], normalised by the facing sign so
+    //            "forward" is positive whichever way the patient faces:
+    //     • leg hanging straight down → 0°
+    //     • leg FORWARD  → positive → flexion  (primary slot)
+    //     • leg BACKWARD → negative → extension (secondary slot)
+    //
+    // Facing: in a lateral view the nose sits in FRONT of the hip, so
+    // sign(nose.x − hip.x) gives the direction the patient faces.
+    // Scaled by trunk length; too small a ratio means a near-frontal
+    // view where sagittal flex/ext can't be resolved → skip the frame.
+    const trunkLen = Math.hypot(shoulder.x - hip.x, shoulder.y - hip.y);
+    if (trunkLen < 1e-4) return null;
+    const facingDx = nose.x - hip.x;
+    if (Math.abs(facingDx) / trunkLen < 0.08) return null;
+    const facingSign = Math.sign(facingDx);
+
+    const thighX = knee.x - hip.x;
+    const thighY = knee.y - hip.y;
+    if (Math.hypot(thighX, thighY) < 1e-6) return null;
+    const raw = (Math.atan2(thighX, thighY) * 180) / Math.PI;
+    return raw * facingSign;
   }
 
   if (movement === "flexion" || movement === "extension") {

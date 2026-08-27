@@ -526,6 +526,221 @@ def _track_hip_rotation_compensations(
     ]
 
 
+# ─── Merged flexion + extension (standing, side-on) ─────────────
+# Reference ranges for the merged test. Primary = flexion,
+# secondary = extension. Mirrors the browser HIP_MOVEMENTS
+# "flexion_extension" entry so live + upload report the same bands.
+_MERGED_HIPFE_PRIMARY_TARGET:   tuple[float, float] = (100.0, 120.0)  # Flexion
+_MERGED_HIPFE_SECONDARY_TARGET: tuple[float, float] = (10.0, 30.0)    # Extension
+
+# Direction deadband on the signed thigh angle. Below this the leg is
+# effectively hanging at standing-neutral; the frame counts as valid
+# but updates neither peak slot. Mirrors the live constant.
+_HIP_FE_DIRECTION_DEADBAND_DEG = 5.0
+
+# Frames beyond these magnitudes are keypoint artefacts, not anatomy —
+# DROPPED (not clamped). Clamping is what produced the old cohort-wide
+# "exactly 30.0°" extension readings.
+_HIP_FE_FLEXION_DROP_ABOVE_DEG   = 145.0
+_HIP_FE_EXTENSION_DROP_ABOVE_DEG = 45.0
+
+# Minimum |nose.x − hip.x| as a fraction of trunk length before a
+# facing direction is trusted. Below this the view is near-frontal and
+# sagittal flexion/extension can't be resolved.
+_HIP_FE_FACING_MIN_FRAC = 0.08
+
+
+def _analyze_hip_flexion_extension(
+    video_path: str,
+    pose_options,
+    side: str,
+) -> dict:
+    """Backend pipeline for the MERGED hip flexion + extension test.
+    Standing, side-on camera; one recording captures both peaks.
+
+    Per-frame math (mirrors lib/biomech/hip-live.ts
+    computeHipAngle("flexion_extension")) — the thigh's angle from the
+    IMAGE VERTICAL, NOT from the trunk:
+
+        thigh   = knee − hip
+        raw     = atan2(thigh.x, thigh.y) × 180/π   (0° = hanging down)
+        facing  = sign(nose.x − hip.x)              (lateral view)
+        signed  = raw × facing
+          • signed > 0 → leg FORWARD  → flexion   (primary slot)
+          • signed < 0 → leg BACKWARD → extension (secondary slot)
+
+    Why vertical and not the trunk: the legacy single-direction tests
+    measure the trunk→thigh angle, so any forward trunk lean — the
+    near-universal compensation in this test — adds straight onto the
+    reading (20° of true extension with a 15° lean measured 35°). The
+    30° extension clamp then pinned those to exactly 30°, which is why
+    an entire student cohort reported 30° and scored "normal". A
+    vertical reference is immune: it isn't part of the body.
+
+    Frames inside the deadband count toward valid_frames but update
+    neither slot; frames past the anatomical drop limits are discarded
+    outright rather than clamped.
+    """
+    if side not in ("left", "right"):
+        raise ValueError(f"Unsupported side: {side!r}")
+
+    raw, fps, _cv_total_frames = extract_poses(video_path, pose_options)
+    ts = build_time_series(raw)
+
+    wrong_side_msg = _wrong_side_for_hip_video(ts, side)
+    if wrong_side_msg:
+        raise ValueError(wrong_side_msg)
+
+    shoulder_key = f"{side}_shoulder"
+    hip_key      = f"{side}_hip"
+    knee_key     = f"{side}_knee"
+
+    sx = ts[shoulder_key]["x_px"]; sy = ts[shoulder_key]["y_px"]; vs = ts[shoulder_key]["vis"]
+    hx = ts[hip_key]["x_px"];      hy = ts[hip_key]["y_px"];      vh = ts[hip_key]["vis"]
+    kx = ts[knee_key]["x_px"];     ky = ts[knee_key]["y_px"];     vk = ts[knee_key]["vis"]
+    nx = ts["nose"]["x_px"];       nv = ts["nose"]["vis"]
+
+    # Compensation tracker inputs.
+    lhx_c = ts["left_hip"]["x_px"];       lhy_c = ts["left_hip"]["y_px"];       lhv_c = ts["left_hip"]["vis"]
+    rhx_c = ts["right_hip"]["x_px"];      rhy_c = ts["right_hip"]["y_px"];      rhv_c = ts["right_hip"]["vis"]
+    lsx_c = ts["left_shoulder"]["x_px"];  lsy_c = ts["left_shoulder"]["y_px"];  lsv_c = ts["left_shoulder"]["vis"]
+    rsx_c = ts["right_shoulder"]["x_px"]; rsy_c = ts["right_shoulder"]["y_px"]; rsv_c = ts["right_shoulder"]["vis"]
+
+    n = int(min(len(sx), len(hx), len(kx), len(nx)))
+
+    primary_peak_mag:   Optional[float] = None  # flexion
+    primary_peak_idx   = -1
+    secondary_peak_mag: Optional[float] = None  # extension
+    secondary_peak_idx = -1
+    valid_frames = 0
+    direction_frames = 0
+
+    for i in range(n):
+        if (vs[i] < _HIP_VIS_THRESHOLD
+                or vh[i] < _HIP_VIS_THRESHOLD
+                or vk[i] < _HIP_VIS_THRESHOLD
+                or nv[i] < _HIP_VIS_THRESHOLD):
+            continue
+
+        hip_x = float(hx[i]); hip_y = float(hy[i])
+        trunk_len = math.hypot(float(sx[i]) - hip_x, float(sy[i]) - hip_y)
+        if trunk_len < 1e-4:
+            continue
+        facing_dx = float(nx[i]) - hip_x
+        if abs(facing_dx) / trunk_len < _HIP_FE_FACING_MIN_FRAC:
+            # Near-frontal view for this frame — can't resolve sagittal
+            # direction reliably.
+            continue
+        facing_sign = 1.0 if facing_dx > 0 else -1.0
+
+        thigh_x = float(kx[i]) - hip_x
+        thigh_y = float(ky[i]) - hip_y
+        if math.hypot(thigh_x, thigh_y) < 1e-6:
+            continue
+
+        valid_frames += 1
+        signed = math.degrees(math.atan2(thigh_x, thigh_y)) * facing_sign
+
+        if signed > _HIP_FE_DIRECTION_DEADBAND_DEG:
+            if signed > _HIP_FE_FLEXION_DROP_ABOVE_DEG:
+                continue
+            direction_frames += 1
+            if primary_peak_mag is None or signed > primary_peak_mag:
+                primary_peak_mag = signed
+                primary_peak_idx = i
+        elif signed < -_HIP_FE_DIRECTION_DEADBAND_DEG:
+            mag = -signed
+            if mag > _HIP_FE_EXTENSION_DROP_ABOVE_DEG:
+                continue
+            direction_frames += 1
+            if secondary_peak_mag is None or mag > secondary_peak_mag:
+                secondary_peak_mag = mag
+                secondary_peak_idx = i
+
+    if valid_frames < max(3, int(fps * 0.5)):
+        raise ValueError("poor_visibility")
+
+    if direction_frames == 0:
+        raise ValueError(
+            "No hip flexion or extension detected. Re-record standing "
+            "SIDE-ON to the camera: lift the knee forward as far as "
+            "comfortable, then swing the leg back behind the body."
+        )
+
+    primary_mag = float(primary_peak_mag) if primary_peak_mag is not None else 0.0
+    secondary_mag = float(secondary_peak_mag) if secondary_peak_mag is not None else 0.0
+
+    p_lo, p_hi = _MERGED_HIPFE_PRIMARY_TARGET
+    s_lo, s_hi = _MERGED_HIPFE_SECONDARY_TARGET
+    p_target = p_hi
+    p_pct = (primary_mag / p_target) * 100.0 if p_target > 0 else 0.0
+    p_status = _classify_in_range(primary_mag, p_lo, p_hi)
+
+    side_label = side.capitalize()
+    if primary_mag > 0:
+        interp_primary = (
+            f"Flexion ({side_label}) measured {primary_mag:.1f}°, which is "
+            f"{p_pct:.0f}% of the {p_lo:.0f}°–{p_hi:.0f}° normal range — "
+            f"{p_status}."
+        )
+    else:
+        interp_primary = "Flexion direction was not detected in this recording."
+    if secondary_mag > 0:
+        s_status = _classify_in_range(secondary_mag, s_lo, s_hi)
+        interp_secondary = (
+            f"Extension ({side_label}) measured {secondary_mag:.1f}°, which "
+            f"is {(secondary_mag / s_hi) * 100.0:.0f}% of the "
+            f"{s_lo:.0f}°–{s_hi:.0f}° normal range — {s_status}."
+        )
+    else:
+        interp_secondary = "Extension direction was not detected in this recording."
+    interpretation = f"{interp_primary} {interp_secondary}"
+
+    key_frames: list[dict] = []
+    if primary_peak_idx >= 0 and primary_mag > 0:
+        kf = _grab_hip_key_frame(
+            video_path, primary_peak_idx, raw,
+            f"Peak Flexion ({primary_mag:.1f}°)", side,
+        )
+        if kf:
+            key_frames.append(kf)
+    if secondary_peak_idx >= 0 and secondary_mag > 0:
+        kf = _grab_hip_key_frame(
+            video_path, secondary_peak_idx, raw,
+            f"Peak Extension ({secondary_mag:.1f}°)", side,
+        )
+        if kf:
+            key_frames.append(kf)
+
+    return {
+        "body_part": "hip",
+        "movement": "flexion_extension",
+        "side": side,
+        "peak_angle": primary_mag if primary_mag > 0 else None,
+        "peak_magnitude": primary_mag,
+        "reference_range": [float(p_lo), float(p_hi)],
+        "target": float(p_target),
+        "percentage": p_pct,
+        "status": p_status,
+        "valid_frames": valid_frames,
+        "total_frames": n,
+        "fps": float(fps),
+        "interpretation": interpretation,
+        "key_frames": key_frames,
+        "secondary_peak_angle": -secondary_mag if secondary_mag > 0 else None,
+        "secondary_peak_magnitude": secondary_mag if secondary_mag > 0 else None,
+        "secondary_reference_range": [float(s_lo), float(s_hi)],
+        "primary_label": "Flexion",
+        "secondary_label": "Extension",
+        "compensations": _track_hip_flexext_compensations(
+            "flexion",  # trunk-lean + pelvic-tilt checks span both directions
+            lhx_c, lhy_c, lhv_c, rhx_c, rhy_c, rhv_c,
+            lsx_c, lsy_c, lsv_c, rsx_c, rsy_c, rsv_c,
+            n,
+        ),
+    }
+
+
 def _analyze_hip_rotation(
     video_path: str,
     pose_options,
@@ -792,6 +1007,12 @@ def analyze_hip(
     # existing flexion / extension code below stays untouched.
     if movement == "rotation":
         return _analyze_hip_rotation(video_path, pose_options, side)
+
+    # Merged flexion + extension — standing side-on, thigh-vs-vertical
+    # geometry with sign-routed peaks. Branches early so the legacy
+    # single-direction code below stays untouched for saved reports.
+    if movement == "flexion_extension":
+        return _analyze_hip_flexion_extension(video_path, pose_options, side)
 
     if movement not in ("flexion", "extension"):
         raise ValueError(f"Unsupported hip movement: {movement!r}")

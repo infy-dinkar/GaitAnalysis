@@ -188,10 +188,17 @@ export async function analyzeBiomechVideo(
   }
 
   // ── Hip flexion + extension + rotation → backend MediaPipe ──
-  // All three hip tests now route to /api/analyze-hip. The
-  // backend's analyze_hip dispatches on the movement string:
-  //   • flexion / extension use `180° − interior(trunk, thigh)`
-  //     and a simple max-tracker (single-direction tests).
+  // All hip tests route to /api/analyze-hip. The backend's
+  // analyze_hip dispatches on the movement string:
+  //   • flexion_extension is the MERGED standing side-on test —
+  //     the thigh's signed angle from the image VERTICAL routes
+  //     each frame into the flexion or extension peak slot. The
+  //     vertical reference makes it immune to trunk lean, which
+  //     the legacy trunk-referenced formula folded into the
+  //     reading (and the 30° extension clamp then hid).
+  //   • flexion / extension are the legacy single-direction tests
+  //     (`180° − interior(trunk, thigh)` + max-tracker), kept for
+  //     saved-report re-runs.
   //   • rotation is a merged test (internal + external captured
   //     in one trial) with a calibration baseline locked at the
   //     supine neutral pose — patient must hold "knee at 90°,
@@ -203,6 +210,7 @@ export async function analyzeBiomechVideo(
   // saved-report compatibility (hidden from the chooser); only
   // the merged "rotation" ID is reachable from the new UI.
   if (bodyPart === "hip" && (
+        movement === "flexion_extension" ||
         movement === "flexion" ||
         movement === "extension" ||
         movement === "rotation"

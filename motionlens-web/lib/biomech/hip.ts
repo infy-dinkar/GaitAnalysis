@@ -8,6 +8,7 @@ import type { Keypoint } from "@tensorflow-models/pose-detection";
 import { LM } from "@/lib/pose/landmarks";
 
 export type HipMovementId =
+  | "flexion_extension"
   | "flexion"
   | "extension"
   | "rotation"
@@ -36,11 +37,29 @@ export interface HipMovement {
 }
 
 export const HIP_MOVEMENTS: HipMovement[] = [
+  // Combined Flexion + Extension — standing, side-on camera, one
+  // recording captures both peaks. Measured as the thigh's angle from
+  // the image vertical (lean-proof); see hip-live.ts computeHipAngle.
+  {
+    id: "flexion_extension",
+    label: "Flexion + Extension",
+    description:
+      "Standing, side-on to the camera. Lift the knee forward as far as comfortable (flexion), then swing the leg back behind the body (extension). One session captures both ends of the ROM.",
+    target: [100, 120],
+    merged: true,
+    primaryLabel: "Flexion",
+    secondaryLabel: "Extension",
+    secondaryTarget: [10, 30],
+    imageUrl: "/images/biomech/hip/hip_flexion_extension.png",
+  },
+  // Legacy single-direction entries — hidden from the chooser, kept so
+  // saved reports referencing them still resolve labels + targets.
   {
     id: "flexion",
     label: "Flexion",
     description: "Lift the leg forward — bringing the thigh toward the chest",
     target: [110, 130],
+    hidden: true,
     imageUrl: "/images/biomech/hip/hip_flexion.png",
   },
   {
@@ -48,6 +67,7 @@ export const HIP_MOVEMENTS: HipMovement[] = [
     label: "Extension",
     description: "Move the leg backward behind the body",
     target: [10, 30],
+    hidden: true,
     imageUrl: "/images/biomech/hip/hip_extension.png",
   },
   // Merged Internal + External rotation. Seated heel-fixed test:
