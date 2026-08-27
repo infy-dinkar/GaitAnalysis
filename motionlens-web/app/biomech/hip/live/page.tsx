@@ -15,7 +15,8 @@ import {
 
 function HipLiveInner() {
   const params = useSearchParams();
-  const movementId = (params.get("movement") as HipMovementId) || "flexion";
+  const movementId =
+    (params.get("movement") as HipMovementId) || "flexion_extension";
   const sideParam = params.get("side");
   const side: "left" | "right" = sideParam === "left" ? "left" : "right";
   const movement = HIP_MOVEMENTS.find((m) => m.id === movementId) ?? HIP_MOVEMENTS[0];

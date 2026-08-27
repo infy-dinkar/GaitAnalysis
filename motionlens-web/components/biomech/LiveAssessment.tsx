@@ -389,6 +389,12 @@ export function LiveAssessment({
   // (foot pointed away, θ>90) = secondary/plantarflexion.
   const isMergedAnkleFE =
     !!merged && bodyPart === "ankle" && movementId === "flexion_extension";
+  // Hip merged (flexion + extension): computeHipAngle("flexion_extension")
+  // returns the thigh's SIGNED angle from the image vertical, facing-
+  // normalised — positive (leg forward) = primary/flexion, negative
+  // (leg back) = secondary/extension. Sign-routed, same as ankle.
+  const isMergedHipFE =
+    !!merged && bodyPart === "hip" && movementId === "flexion_extension";
   const isMergedMovement =
     isMergedShoulderRotation ||
     isMergedShoulderAbAd ||
@@ -397,7 +403,8 @@ export function LiveAssessment({
     isMergedNeckFE ||
     isMergedNeckLateral ||
     isMergedHipRotation ||
-    isMergedAnkleFE;
+    isMergedAnkleFE ||
+    isMergedHipFE;
 
   // Single-direction movements that ALSO run compensation tracking
   // (hip flex/ext, ankle flex/ext). These don't share the merged
@@ -712,7 +719,8 @@ export function LiveAssessment({
       isMergedNeckFE ||
       isMergedNeckLateral ||
       isMergedHipRotation ||
-      isMergedAnkleFE
+      isMergedAnkleFE ||
+      isMergedHipFE
     ) {
       const kpsForDir: Keypoint[] = data.landmarks.map((l) => ({
         x: l.x,
@@ -812,6 +820,21 @@ export function LiveAssessment({
         }
         compAnkleFlexionTrackerRef.current.feed(kpsForDir);
         s.currentCompensations = compAnkleFlexionTrackerRef.current.currentFlags();
+      } else if (isMergedHipFE) {
+        // Sign-routed: signed = thigh angle from vertical, facing-
+        // normalised. Positive = leg forward (flexion, primary);
+        // negative = leg back (extension, secondary). A deadband around
+        // standing-neutral keeps jitter from flapping the slots.
+        const HIP_FE_DIR_DEADBAND_DEG = 5;
+        if (angle > HIP_FE_DIR_DEADBAND_DEG) dir = "primary";
+        else if (angle < -HIP_FE_DIR_DEADBAND_DEG) dir = "secondary";
+        // Compensation tracker — the flexion tracker covers the pelvic
+        // tilt + trunk lean checks that matter across both directions.
+        if (!compHipFlexionTrackerRef.current) {
+          compHipFlexionTrackerRef.current = new HipFlexionCompensationTracker();
+        }
+        compHipFlexionTrackerRef.current.feed(kpsForDir);
+        s.currentCompensations = compHipFlexionTrackerRef.current.currentFlags();
       }
       s.currentDirection = dir;
       if (!dir) {
@@ -1108,6 +1131,7 @@ export function LiveAssessment({
         else if (isMergedKneeFE) compKneeFETrackerRef.current?.markPrimaryPeak();
         else if (isMergedHipRotation) compHipRotationTrackerRef.current?.markPrimaryPeak();
         else if (isMergedAnkleFE) compAnkleFlexionTrackerRef.current?.markPrimaryPeak();
+        else if (isMergedHipFE) compHipFlexionTrackerRef.current?.markPrimaryPeak();
       }
       s.peakCandidateSigned = candSigned;
       s.peakCandidateHeld = candHeld;
@@ -1124,6 +1148,7 @@ export function LiveAssessment({
         else if (isMergedKneeFE) compKneeFETrackerRef.current?.markSecondaryPeak();
         else if (isMergedHipRotation) compHipRotationTrackerRef.current?.markSecondaryPeak();
         else if (isMergedAnkleFE) compAnkleFlexionTrackerRef.current?.markSecondaryPeak();
+        else if (isMergedHipFE) compHipFlexionTrackerRef.current?.markSecondaryPeak();
       }
       s.peakCandidateSignedB = candSigned;
       s.peakCandidateHeldB = candHeld;
@@ -1147,6 +1172,7 @@ export function LiveAssessment({
     isMergedNeckLateral,
     isMergedHipRotation,
     isMergedAnkleFE,
+    isMergedHipFE,
     isNeckRotation,
     isHipFlexion,
     isHipExtension,
@@ -1679,6 +1705,7 @@ export function LiveAssessment({
             isMergedKneeFE ||
             isMergedHipRotation ||
             isMergedAnkleFE ||
+            isMergedHipFE ||
             isHipFlexion ||
             isHipExtension ||
             isAnkleFlexion ||
@@ -1998,6 +2025,8 @@ export function LiveAssessment({
                           ? compHipRotationTrackerRef.current?.finish()
                           : isMergedAnkleFE
                             ? compAnkleFlexionTrackerRef.current?.finish()
+                            : isMergedHipFE
+                            ? compHipFlexionTrackerRef.current?.finish()
                             : isHipFlexion
                               ? compHipFlexionTrackerRef.current?.finish()
                               : isHipExtension
@@ -2060,6 +2089,8 @@ export function LiveAssessment({
                             ? compHipRotationTrackerRef.current?.finish()
                             : isMergedAnkleFE
                               ? compAnkleFlexionTrackerRef.current?.finish()
+                              : isMergedHipFE
+                              ? compHipFlexionTrackerRef.current?.finish()
                               : isHipFlexion
                                 ? compHipFlexionTrackerRef.current?.finish()
                                 : isHipExtension

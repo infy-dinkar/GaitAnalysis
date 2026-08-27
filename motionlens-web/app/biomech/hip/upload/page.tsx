@@ -12,7 +12,8 @@ import { HIP_MOVEMENTS, type HipMovementId } from "@/lib/biomech/hip";
 
 function HipUploadInner() {
   const params = useSearchParams();
-  const movementId = (params.get("movement") as HipMovementId) || "flexion";
+  const movementId =
+    (params.get("movement") as HipMovementId) || "flexion_extension";
   const sideParam = params.get("side");
   const side: "left" | "right" = sideParam === "left" ? "left" : "right";
   const movement =

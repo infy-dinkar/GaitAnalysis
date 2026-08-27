@@ -5177,12 +5177,14 @@ async def analyze_hip(
 ) -> BiomechResponse:
     """Hip ROM upload analysis on backend MediaPipe BlazePose Full.
 
-    movement_type accepts "flexion" only — extension, internal /
-    external rotation still run through the browser MoveNet path
-    and will migrate in a follow-up. Per-frame max-tracker captures
-    peak hip flexion (180° − interior angle between trunk and
-    thigh vectors); no direction detection / no calibration —
-    same complexity tier as the merged knee test.
+    movement_type accepts:
+      • "flexion_extension" — merged standing side-on test (default).
+        Sign-routed peaks from the thigh's angle to the image
+        vertical, so a forward trunk lean can't inflate either
+        direction. Returns the dual-row DTO.
+      • "rotation" — merged seated internal + external rotation.
+      • "flexion" / "extension" — legacy single-direction tests,
+        kept so saved reports referencing them still re-run.
 
     Validation gates (raise HTTPException → frontend maps to
     user-facing error text):
@@ -5204,7 +5206,12 @@ async def analyze_hip(
     fixed_path_cleanup: str | None = None
     try:
         movement = movement_type.lower().strip()
-        _ALLOWED_HIP = ("flexion", "extension", "rotation")
+        _ALLOWED_HIP = (
+            "flexion_extension",  # merged standing side-on test (default)
+            "flexion",            # legacy single-direction
+            "extension",          # legacy single-direction
+            "rotation",           # merged seated internal + external
+        )
         if movement not in _ALLOWED_HIP:
             return BiomechResponse(
                 success=False,

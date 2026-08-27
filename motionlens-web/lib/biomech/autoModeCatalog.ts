@@ -117,17 +117,15 @@ export const MOVEMENTS_BY_JOINT: Record<Joint, MovementDef[]> = {
     },
   ],
   hip: [
+    // Merged flexion + extension — one standing, side-on recording
+    // captures both peaks (thigh angle from vertical, lean-proof).
+    // The run page resolves the full movement def (merged flag +
+    // labels + secondaryTarget) via the shared catalogue.
     {
-      id: "flexion",
-      label: "Flexion",
-      description: "Lift knee toward chest",
-      target: [110, 130],
-    },
-    {
-      id: "extension",
-      label: "Extension",
-      description: "Extend leg backward",
-      target: [10, 30],
+      id: "flexion_extension",
+      label: "Flexion + Extension",
+      description: "Knee forward, then leg backward",
+      target: [100, 120],
     },
     {
       id: "rotation",

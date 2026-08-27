@@ -50,12 +50,14 @@ function isBackendRouted(bodyPart: Props["bodyPart"], movementId: string): boole
     );
   }
   if (bodyPart === "hip") {
-    // All three hip tests (flexion / extension / merged rotation)
-    // route to /api/analyze-hip. The legacy single-direction
-    // internal_rotation / external_rotation IDs are hidden from
-    // the chooser and only resolve for saved-report
-    // compatibility — never reachable from the upload flow.
+    // All hip tests route to /api/analyze-hip: the merged
+    // flexion_extension (standing side-on) + merged rotation
+    // (seated), plus the legacy single-direction flexion / extension
+    // kept for saved-report re-runs. The legacy internal_rotation /
+    // external_rotation IDs are hidden from the chooser and only
+    // resolve for saved-report compatibility.
     return (
+      movementId === "flexion_extension" ||
       movementId === "flexion" ||
       movementId === "extension" ||
       movementId === "rotation"
