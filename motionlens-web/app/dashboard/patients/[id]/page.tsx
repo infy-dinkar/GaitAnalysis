@@ -13,19 +13,23 @@ import {
   Flame,
   GitCompare,
   Loader2,
+  Pencil,
   Phone,
   Ruler,
   Scale,
   Trash2,
   User,
+  X,
 } from "lucide-react";
 import { AuthGuard } from "@/components/auth/AuthGuard";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
+import { PatientForm } from "@/components/dashboard/PatientForm";
 import { ReportCard } from "@/components/dashboard/ReportCard";
 import { Button } from "@/components/ui/Button";
 import {
   deletePatient,
   getPatient,
+  updatePatient,
   type PatientDTO,
 } from "@/lib/patients";
 import { listPatientReports, type ReportSummaryDTO } from "@/lib/reports";
@@ -51,6 +55,10 @@ function PatientDetail({ id }: { id: string }) {
   const [reports, setReports] = useState<ReportSummaryDTO[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // Inline edit mode. The registration form is reused verbatim
+  // (it already accepts `initial`), so validation stays identical
+  // between creating and correcting a patient.
+  const [editing, setEditing] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -81,6 +89,15 @@ function PatientDetail({ id }: { id: string }) {
     }
   }
 
+  // PatientCreatePayload has every field populated, which satisfies
+  // the all-optional PatientUpdatePayload — the PATCH endpoint treats
+  // it as a full overwrite of the editable columns.
+  async function handleSaveEdit(payload: Parameters<typeof updatePatient>[1]) {
+    const updated = await updatePatient(id, payload);
+    setPatient(updated);
+    setEditing(false);
+  }
+
   if (error) {
     return (
       <div className="rounded-card border border-error/40 bg-error/5 p-4 text-sm text-error">
@@ -100,7 +117,10 @@ function PatientDetail({ id }: { id: string }) {
   return (
     <div className="space-y-8">
       {/* Header */}
-      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+      {/* Patient info sits on its own row and the actions wrap beneath
+          it. Six buttons never fit beside the demographics — side-by-side
+          collapsed the name/stats column and overflowed the viewport. */}
+      <div className="flex flex-col gap-4">
         <div className="min-w-0 flex-1">
           <p className="eyebrow">Patient profile</p>
           <h1 className="mt-1 text-3xl font-semibold tracking-tight md:text-4xl">
@@ -127,7 +147,7 @@ function PatientDetail({ id }: { id: string }) {
           </div>
         </div>
 
-        <div className="flex shrink-0 gap-2">
+        <div className="flex flex-wrap gap-2">
           <Link href={`/dashboard/patients/${id}/analyze`}>
             <Button>
               <Activity className="h-4 w-4" />
@@ -163,6 +183,23 @@ function PatientDetail({ id }: { id: string }) {
           )}
           <Button
             variant="secondary"
+            onClick={() => setEditing((v) => !v)}
+            disabled={deleting}
+          >
+            {editing ? (
+              <>
+                <X className="h-4 w-4" />
+                Cancel edit
+              </>
+            ) : (
+              <>
+                <Pencil className="h-4 w-4" />
+                Edit details
+              </>
+            )}
+          </Button>
+          <Button
+            variant="secondary"
             onClick={handleDelete}
             disabled={deleting}
             className="text-error hover:bg-error/10"
@@ -172,6 +209,27 @@ function PatientDetail({ id }: { id: string }) {
           </Button>
         </div>
       </div>
+
+      {/* Edit details — inline panel. Reuses the registration form so
+          the field set + validation stay in one place. */}
+      {editing && (
+        <section className="rounded-card border border-border bg-surface p-5 md:p-6">
+          <h2 className="text-lg font-semibold tracking-tight">
+            Edit patient details
+          </h2>
+          <p className="mt-1 text-sm text-muted">
+            Corrections apply everywhere this patient appears, including
+            previously saved reports.
+          </p>
+          <div className="mt-5">
+            <PatientForm
+              initial={patient}
+              onSubmit={handleSaveEdit}
+              submitLabel="Save changes"
+            />
+          </div>
+        </section>
+      )}
 
       {/* Notes */}
       {patient.medical_notes && (
