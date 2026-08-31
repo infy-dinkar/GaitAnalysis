@@ -246,12 +246,62 @@ function ReportBody({
     const o = report.observations as Record<string, unknown>;
     const ff = (o.front_findings as PostureFinding[] | undefined) ?? null;
     const sf = (o.side_findings as PostureFinding[] | undefined) ?? null;
+
+    // Annotated photos + landmarks. Extracted exactly as the standalone
+    // report viewer does — without these, SavedPostureReport falls back
+    // to findings-only rendering, which is why the patient's images
+    // vanished on the compare screen while the same report showed them
+    // when opened on its own. All optional: reports saved before image
+    // persistence (or from the 2-view upload flow) simply omit them.
+    type SavedImg = { data_url: string; width: number; height: number };
+    type P = Parameters<typeof SavedPostureReport>[0];
+    const kpRoot = (report.keypoints ?? {}) as Record<string, unknown>;
+
+    const frontImage = (m.front_image as SavedImg | null | undefined) ?? null;
+    const sideImage = (m.side_image as SavedImg | null | undefined) ?? null;
+    const frontKeypoints = (kpRoot.front as P["frontKeypoints"]) ?? null;
+    const sideKeypoints = (kpRoot.side as P["sideKeypoints"]) ?? null;
+
+    // 4-view live-capture extras.
+    const back = (m.back as P["back"]) ?? null;
+    const leftSide = (m.left_side as SideMeasurements | undefined) ?? null;
+    const rightSide = (m.right_side as SideMeasurements | undefined) ?? null;
+    const backImage = (m.back_image as SavedImg | null | undefined) ?? null;
+    const leftSideImage = (m.left_side_image as SavedImg | null | undefined) ?? null;
+    const rightSideImage = (m.right_side_image as SavedImg | null | undefined) ?? null;
+    const backKeypoints = (kpRoot.back as P["backKeypoints"]) ?? null;
+    const leftSideKeypoints = (kpRoot.left_side as P["leftSideKeypoints"]) ?? null;
+    const rightSideKeypoints = (kpRoot.right_side as P["rightSideKeypoints"]) ?? null;
+    const backFindings = (o.back_findings as PostureFinding[] | undefined) ?? null;
+    const leftSideFindings = (o.left_side_findings as PostureFinding[] | undefined) ?? null;
+    const rightSideFindings = (o.right_side_findings as PostureFinding[] | undefined) ?? null;
+    const backNotAssessed = (m.back_not_assessed as P["backNotAssessed"]) ?? null;
+    const backLrSwapApplied = (m.back_lr_swap_applied as boolean | null | undefined) ?? null;
+
     return (
       <SavedPostureReport
         front={front}
         side={side}
         frontFindings={ff}
         sideFindings={sf}
+        frontImage={frontImage}
+        sideImage={sideImage}
+        frontKeypoints={frontKeypoints}
+        sideKeypoints={sideKeypoints}
+        back={back}
+        backFindings={backFindings}
+        backImage={backImage}
+        backKeypoints={backKeypoints}
+        backNotAssessed={backNotAssessed}
+        backLrSwapApplied={backLrSwapApplied}
+        leftSide={leftSide}
+        leftSideFindings={leftSideFindings}
+        leftSideImage={leftSideImage}
+        leftSideKeypoints={leftSideKeypoints}
+        rightSide={rightSide}
+        rightSideFindings={rightSideFindings}
+        rightSideImage={rightSideImage}
+        rightSideKeypoints={rightSideKeypoints}
         patient={patient}
         patientName={patient.name}
       />
