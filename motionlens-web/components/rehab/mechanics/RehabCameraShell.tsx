@@ -204,12 +204,44 @@ export function RehabCameraShell({
     ctx.clearRect(0, 0, w, h);
     if (!landmarks || landmarks.length === 0) return;
 
-    const px = (n: Norm) => ({ x: n.x * w, y: n.y * h });
+    // ── object-cover compensation ────────────────────────────────
+    // The <video> is styled `object-cover`: it scales to COVER the
+    // container and the overflow is cropped. Mapping a normalised
+    // landmark straight onto the container (n.x * w) therefore
+    // assumed the whole frame was visible, which squashed the
+    // skeleton along whichever axis got cropped — correct at the
+    // centre, progressively wrong toward the edges (a wrist landed
+    // mid-forearm on a 16:9 camera in a ~4:3 box).
+    //
+    // Reproduce the browser's own object-cover geometry: scale by
+    // the LARGER ratio, then centre the overflow.
+    //
+    // When the container and video aspects match, scale === w / vw,
+    // so dispW === w, dispH === h and offX === offY === 0 — the
+    // mapping collapses to exactly `n.x * w, n.y * h`. Setups that
+    // were never cropped are byte-identical to before.
+    const video = videoRef.current;
+    const vw = video?.videoWidth ?? 0;
+    const vh = video?.videoHeight ?? 0;
+    const scale = vw > 0 && vh > 0 ? Math.max(w / vw, h / vh) : 0;
+    const dispW = scale > 0 ? vw * scale : w;
+    const dispH = scale > 0 ? vh * scale : h;
+    const offX = (w - dispW) / 2;
+    const offY = (h - dispH) / 2;
+
+    const px = (n: Norm) => ({
+      x: offX + n.x * dispW,
+      y: offY + n.y * dispH,
+    });
 
     // ── Bones — side-coded strokes with matching glow. Torso sides
     //    still skipped so the shoulders + hips don't close into a
     //    rectangle across the trunk.
-    ctx.lineWidth = Math.max(3, w * 0.005);
+    // Stroke/dot sizes scale off dispW, not w — the body on screen is
+    // as large as the DISPLAYED video, so a width tied to the
+    // container read too thin once the frame was cropped. Identical to
+    // before whenever dispW === w (no crop).
+    ctx.lineWidth = Math.max(3, dispW * 0.005);
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     ctx.shadowBlur = 12;
@@ -236,8 +268,8 @@ export function RehabCameraShell({
     //    landmarks (nose/eyes/ears) stay small orange per the
     //    "face ko chod ke" instruction.
     ctx.shadowBlur = 10;
-    const bodyDotR = Math.max(6, w * 0.009);
-    const faceDotR = Math.max(3, w * 0.004);
+    const bodyDotR = Math.max(6, dispW * 0.009);
+    const faceDotR = Math.max(3, dispW * 0.004);
     for (const i of FULL_BODY_DOTS) {
       const p = landmarks[i];
       if (!p || p.visibility < OVERLAY_VIS_THRESHOLD) continue;
@@ -272,21 +304,31 @@ export function RehabCameraShell({
     // annotation rather than under the bones. Each helper is
     // visibility-gated internally and no-ops on degenerate frames,
     // so absence of any required landmark simply skips that guide.
-    drawCenterline(ctx, landmarks, w, h, {
+    //
+    // The extras map their own pixels as `n.x * w`, so they get the
+    // DISPLAYED frame size and a matching origin shift instead of the
+    // container size — same object-cover correction as px() above,
+    // applied through the canvas transform so skeletonExtras.ts needs
+    // no change. Translate only (no scale), so the arc's text label
+    // stays crisp and unscaled. No-op when the frame isn't cropped.
+    ctx.save();
+    ctx.translate(offX, offY);
+    drawCenterline(ctx, landmarks, dispW, dispH, {
       visibilityThreshold: OVERLAY_VIS_THRESHOLD,
     });
-    drawSpineSegment(ctx, landmarks, w, h, {
+    drawSpineSegment(ctx, landmarks, dispW, dispH, {
       visibilityThreshold: OVERLAY_VIS_THRESHOLD,
     });
     const arc = angleArcRef.current;
     if (arc) {
-      drawAngleArc(ctx, landmarks, w, h, {
+      drawAngleArc(ctx, landmarks, dispW, dispH, {
         ...arc,
         visibilityThreshold:
           arc.visibilityThreshold ?? OVERLAY_VIS_THRESHOLD,
       });
     }
-  }, []);
+    ctx.restore();
+  }, [videoRef]);
 
   useEffect(() => {
     if (!active || !detectorReady) {
