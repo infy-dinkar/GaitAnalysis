@@ -30,7 +30,7 @@
 //   • LM_LIVE ankle indices
 //   • usePoseDetectionLive, useCamera, usePatientContext
 
-import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Nav } from "@/components/layout/Nav";
 import { Footer } from "@/components/layout/Footer";
@@ -99,7 +99,20 @@ function Inner() {
   const [side, setSide] = useState<Side | null>(null);
   // Live knee extension (180 − flexion) — feeds both the on-camera
   // overlay AND the rep counter (signal).
-  const [liveExtension, setLiveExtension] = useState<number>(90);
+  // Live knee extension, split into two paths:
+  //   • liveExtRef — written every frame by handleFrame. This is the
+  //     FULL-RATE value; the rep engine reads it directly through
+  //     RepCountShell's `signalRef` so a fast rep's true min/max is
+  //     never missed.
+  //   • displayExt — a 10 Hz snapshot of that ref, used for anything
+  //     rendered. Writing the per-frame value straight to state forced
+  //     a full re-render at ~60 Hz on the same main thread that runs
+  //     detect() and the canvas draw, so the rAF callback fired late
+  //     and the skeleton trailed the video.
+  // Mirrors LiveAssessment.tsx's 10 Hz UI sync. Kept as state rather
+  // than reading the ref during render, which React forbids.
+  const liveExtRef = useRef<number>(90);
+  const [displayExt, setDisplayExt] = useState<number>(90);
   const [reps, setReps] = useState(0);
   const [elapsedSec, setElapsedSec] = useState(0);
 
@@ -153,6 +166,30 @@ function Inner() {
     return () => window.clearInterval(id);
   }, [sessionPhase]);
 
+  // 10 Hz UI sync — pulls the latest value out of the ref. Reading a
+  // ref inside an interval callback is fine; reading it during render
+  // is not, hence the state copy.
+  useEffect(() => {
+    const id = setInterval(() => setDisplayExt(liveExtRef.current), 100);
+    return () => clearInterval(id);
+  }, []);
+
+  // Angle-arc config. Previously an inline object literal, so every
+  // render handed RehabCameraShell a brand-new reference and re-ran
+  // its useEffect([angleArc]) — at 60 Hz. Memoised, it now changes
+  // only when `side` or the 10 Hz display value changes, i.e. ~6×
+  // less churn.
+  const angleArcCfg = useMemo(
+    () => ({
+      vertex: side === "left" ? LM.LEFT_KNEE : LM.RIGHT_KNEE,
+      armA: side === "left" ? LM.LEFT_HIP : LM.RIGHT_HIP,
+      armB: side === "left" ? LM.LEFT_ANKLE : LM.RIGHT_ANKLE,
+      currentDeg: displayExt,
+      band: { min: 165, max: 180 },
+    }),
+    [side, displayExt],
+  );
+
   const handleFrame = useCallback(
     (kp: Keypoint[], video: HTMLVideoElement) => {
       if (!side) return;
@@ -170,7 +207,7 @@ function Inner() {
       const prev = smoothExtRef.current;
       const extension = prev === null ? rawExt : prev * 0.65 + rawExt * 0.35;
       smoothExtRef.current = extension;
-      setLiveExtension(extension);
+      liveExtRef.current = extension;
       if (extension > peakExtensionRef.current) {
         peakExtensionRef.current = extension;
         if (extension >= 120 && lastKpRef.current) {
@@ -277,23 +314,22 @@ function Inner() {
                   onFrame={handleFrame}
                   autoStart
                   hideControls
-                  angleArc={{
-                    vertex: side === "left" ? LM.LEFT_KNEE : LM.RIGHT_KNEE,
-                    armA: side === "left" ? LM.LEFT_HIP : LM.RIGHT_HIP,
-                    armB: side === "left" ? LM.LEFT_ANKLE : LM.RIGHT_ANKLE,
-                    currentDeg: liveExtension,
-                    band: { min: 165, max: 180 },
-                  }}
+                  angleArc={angleArcCfg}
                 >
-                  <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-black/70 px-3 py-2 backdrop-blur">
+                  {/* Solid background instead of backdrop-blur: the
+                      blur forced the compositor to re-sample the video
+                      frame underneath on every repaint, competing with
+                      pose detection for the same main thread. Raised
+                      the opacity so it stays just as readable. */}
+                  <div className="absolute right-3 top-3 rounded-lg border border-white/15 bg-[#0A0A0B]/95 px-3 py-2">
                     <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-400">
                       {side === "left" ? "L" : "R"} knee · extension
                     </p>
                     <p className="tabular text-2xl font-semibold text-white">
-                      {liveExtension.toFixed(0)}°
+                      {displayExt.toFixed(0)}°
                     </p>
                     <p className="mt-1 text-[10px] text-zinc-300">
-                      {liveExtension >= 165 ? "near terminal" : "extending"}
+                      {displayExt >= 165 ? "near terminal" : "extending"}
                     </p>
                   </div>
                   {sessionPhase === "countdown" && countdown !== null && (
@@ -355,7 +391,12 @@ function Inner() {
                       </div>
                       <div className="flex min-h-0 flex-1 flex-col">
                         <RepCountShell
-                          signal={liveExtension}
+                          // Display (depth bar + readouts) follows the
+                          // 10 Hz render; the rep ENGINE reads the ref
+                          // directly every frame so a fast rep's true
+                          // min/max is never missed.
+                          signal={displayExt}
+                          signalRef={liveExtRef}
                           signalLabel="Knee extension (°)"
                           targetReps={TARGET_REPS}
                           config={REP_CONFIG}

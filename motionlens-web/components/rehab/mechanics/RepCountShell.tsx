@@ -44,6 +44,18 @@ interface Props {
    *  engine input are UNCHANGED — this only relabels displayed
    *  numbers so physios see flexion (0° standing, ~70° deep). */
   signalDisplayName?: "knee_interior" | "knee_flexion";
+  /** Optional FULL-RATE signal source for the rep engine.
+   *
+   *  `signal` is a prop, so a caller that throttles its React state
+   *  (to keep the main thread free for pose detection) would feed the
+   *  engine at that throttled rate and lose the true min/max of a
+   *  fast rep. Passing a ref lets the engine read the live value
+   *  every frame while `signal` keeps driving the DISPLAY at whatever
+   *  rate the caller renders.
+   *
+   *  Strictly optional: when omitted the engine reads `signal`
+   *  exactly as before, so callers that don't pass it are unchanged. */
+  signalRef?: { current: number };
 }
 
 export function RepCountShell({
@@ -54,6 +66,7 @@ export function RepCountShell({
   onSnapshot,
   compact = false,
   signalDisplayName,
+  signalRef,
 }: Props) {
   const stateRef = useRef<RepCountState>(emptyRepCountState());
   const scoreRef = useRef<Score>(emptyScore());
@@ -78,11 +91,35 @@ export function RepCountShell({
     onSnapshotRef.current = onSnapshot;
   }, [onSnapshot]);
 
+  // Same mirror for the optional full-rate signal ref. Deliberately
+  // NOT folded into propsRef above — that one syncs from a
+  // [signal, config] effect and would therefore only refresh at the
+  // caller's render rate, defeating the whole point. The loop reads
+  // `signalRefRef.current?.current` directly instead, so it sees the
+  // freshest value on every frame.
+  const signalRefRef = useRef(signalRef);
+  useEffect(() => {
+    signalRefRef.current = signalRef;
+  }, [signalRef]);
+
   // Delta-gate the snapshot emit: only fire when reps or points
   // actually changed. Both are monotonically non-decreasing in
   // normal play, so this covers every rep_counted event without
   // spamming the consumer 60× per second.
   const lastEmitRef = useRef<{ reps: number; points: number } | null>(null);
+  // Separate delta gate for the RENDER trigger. The JSX reads
+  // stateRef/scoreRef (reps, goodReps, phase, points), which React
+  // cannot observe on its own, so a render still has to be forced —
+  // but only when one of those DISPLAYED values actually changes.
+  // Phase is included because it transitions a few times per rep and
+  // is shown in the sidebar rows; without it those rows would freeze
+  // between reps.
+  const lastRenderRef = useRef<{
+    reps: number;
+    goodReps: number;
+    points: number;
+    phase: string;
+  } | null>(null);
 
   // Single rAF loop, started once on mount. See HoldInZoneShell
   // for the rationale — fixes both max-update-depth at 60 Hz and
@@ -94,7 +131,11 @@ export function RepCountShell({
       if (cancelled) return;
       const now = performance.now();
       const { signal: s, config: c } = propsRef.current;
-      const r = repCountStep(stateRef.current, scoreRef.current, s, c, now);
+      // Full-rate value when the caller supplied a ref; otherwise the
+      // prop, exactly as before. Config and engine logic unchanged —
+      // only where the signal VALUE is read from.
+      const liveSignal = signalRefRef.current?.current ?? s;
+      const r = repCountStep(stateRef.current, scoreRef.current, liveSignal, c, now);
       stateRef.current = r.state;
       scoreRef.current = r.score;
       // Delta-gated snapshot — fire on any rep-or-points change.
@@ -123,7 +164,28 @@ export function RepCountShell({
           setFeedbackTone("good");
         }
       }
-      setTick((t) => (t + 1) % 1_000_000);
+      // Render trigger — delta-gated, mirroring the snapshot gate
+      // above. This used to run unconditionally at 60 Hz, forcing a
+      // React render every frame on the same main thread that runs
+      // detect() and the canvas draw; the rAF callback then fired
+      // late and the skeleton trailed the video. The engine step
+      // above still runs every frame — only the render is gated.
+      const lastRender = lastRenderRef.current;
+      if (
+        !lastRender
+        || lastRender.reps !== r.state.reps
+        || lastRender.goodReps !== r.state.goodReps
+        || lastRender.points !== r.score.points
+        || lastRender.phase !== r.state.phase
+      ) {
+        lastRenderRef.current = {
+          reps: r.state.reps,
+          goodReps: r.state.goodReps,
+          points: r.score.points,
+          phase: r.state.phase,
+        };
+        setTick((t) => (t + 1) % 1_000_000);
+      }
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
