@@ -10,6 +10,7 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  ShieldCheck,
   Stethoscope,
   Users,
   X,
@@ -23,6 +24,12 @@ const NAV = [
   { href: "/dashboard/patients", label: "Patients", icon: Users },
 ];
 
+// Appended only for admins. Hiding the link is presentation, not
+// protection — /api/admin/* is gated by require_admin server-side.
+const ADMIN_NAV = [
+  { href: "/dashboard/admin/users", label: "Users", icon: ShieldCheck },
+];
+
 interface Props {
   children: ReactNode;
   /** Optional back link (rendered next to page title in topbar). */
@@ -33,7 +40,7 @@ interface Props {
 }
 
 export function DashboardShell({ children, backHref, backLabel, title }: Props) {
-  const { doctor, signOut } = useAuth();
+  const { doctor, isAdmin, signOut } = useAuth();
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
 
@@ -62,7 +69,7 @@ export function DashboardShell({ children, backHref, backLabel, title }: Props) 
             Workspace
           </p>
           <ul className="space-y-1">
-            {NAV.map((item) => {
+            {(isAdmin ? [...NAV, ...ADMIN_NAV] : NAV).map((item) => {
               const active =
                 pathname === item.href ||
                 (item.href !== "/dashboard" && pathname?.startsWith(item.href));

@@ -16,6 +16,12 @@ export interface DoctorPublicDTO {
   name: string;
   specialization: string | null;
   license_number: string | null;
+  /** "clinician" | "admin". Served by /api/auth/me. Optional in the
+   *  type so a cached doctor object written by an older build (before
+   *  these fields existed) still parses — treat a missing role as
+   *  clinician, never as admin. */
+  role?: string;
+  is_active?: boolean;
   created_at: string;
 }
 

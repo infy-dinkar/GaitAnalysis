@@ -28,6 +28,15 @@ from passlib.context import CryptContext
 from utils.db import get_db
 
 
+# ─── Roles ─────────────────────────────────────────────────────────
+# Literal allowlist. Any role arriving from a request body must be
+# checked against this before it reaches repositories.doctors_set_role.
+# Two roles only — "clinician" is the default every signup gets;
+# "admin" additionally unlocks /api/admin/* user management. Admin does
+# NOT widen data access: patients and reports stay owner-scoped.
+ROLES = ("clinician", "admin")
+
+
 # ─── Password hashing ──────────────────────────────────────────────
 # bcrypt with 12 rounds — costly enough to slow down brute-force,
 # fast enough that signup/login feel snappy (< 200ms typical).
@@ -146,4 +155,34 @@ async def get_current_doctor(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Doctor account not found",
         )
+    # Deactivation takes effect IMMEDIATELY, on the next request. Tokens
+    # are stateless and there is no denylist, so this DB check is the
+    # only revocation mechanism available — an already-issued JWT stays
+    # cryptographically valid for its full 7-day TTL, but every request
+    # re-loads the doctor here and is rejected once is_active is false.
+    # .get(..., True) keeps rows written before the column existed valid.
+    if not doctor.get("is_active", True):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Account is deactivated",
+        )
     return doctor
+
+
+# ─── FastAPI dependency: require an admin ──────────────────────────
+async def require_admin(current: dict = Depends(get_current_doctor)) -> dict:
+    """Gate a route to admins only.
+
+    Layers on top of get_current_doctor, so it inherits the auth and
+    is_active checks. This is the REAL authorisation boundary — the
+    frontend's isAdmin check only hides UI and is trivially bypassed.
+
+    Returns the admin's own doctor document, so handlers can compare
+    against it (e.g. "you cannot deactivate yourself").
+    """
+    if current.get("role") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    return current

@@ -256,6 +256,100 @@ async def postgres_healthcheck() -> None:
         _pg_pool.max_size,
     )
 
+    await _pg_ensure_schema()
+
+
+async def _pg_ensure_schema() -> None:
+    """Idempotent column migrations for the Postgres backend.
+
+    The base schema was created out-of-band (there is no CREATE TABLE in
+    this repo), so additive columns are applied here instead — at
+    startup, right after the health check, before any request is served.
+
+    Every statement uses IF NOT EXISTS and a NOT NULL DEFAULT, so:
+      • re-running is a no-op,
+      • existing rows backfill automatically ('clinician' / TRUE),
+      • no downtime window where the column is missing.
+
+    Mongo needs no equivalent — documents are schemaless and
+    doctors_insert sets both fields explicitly, while readers use
+    .get(field, default) for rows written before this landed.
+    """
+    if _pg_pool is None:
+        return
+    statements = (
+        "ALTER TABLE doctors ADD COLUMN IF NOT EXISTS "
+        "role TEXT NOT NULL DEFAULT 'clinician'",
+        "ALTER TABLE doctors ADD COLUMN IF NOT EXISTS "
+        "is_active BOOLEAN NOT NULL DEFAULT TRUE",
+    )
+    try:
+        async with _pg_pool.connection() as conn:
+            async with conn.cursor() as cur:
+                for sql in statements:
+                    await cur.execute(sql)
+        log.info("PostgreSQL schema ensured (doctors.role, doctors.is_active)")
+    except Exception as e:
+        # ⚠️ ALTER TABLE requires table ownership. The app connects as
+        # PG_USER (motionlens_user), but `doctors` is owned by
+        # `postgres`, so this raises InsufficientPrivilege in the
+        # current prod setup.
+        #
+        # Deliberately non-fatal: an auth outage is far worse than a
+        # missing feature. The repository layer probes for the columns
+        # below and falls back to the legacy column list when they are
+        # absent, so login keeps working exactly as before — the admin
+        # endpoints are simply inert until a DBA runs the SQL.
+        log.warning(
+            "Could not apply doctors role/is_active migration (%s). "
+            "Admin user-management stays DISABLED until a superuser runs:\n"
+            "  ALTER TABLE doctors ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'clinician';\n"
+            "  ALTER TABLE doctors ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;\n"
+            "(or: ALTER TABLE doctors OWNER TO %s;)",
+            e,
+            _pg_conn_kwargs().get("user", "motionlens_user"),
+        )
+
+    await _pg_detect_doctor_columns()
+
+
+async def _pg_detect_doctor_columns() -> None:
+    """Tell the repository layer whether doctors.role / is_active exist.
+
+    Runs once at startup, after the migration attempt. Without this the
+    SELECT column list would name columns that may not be there and
+    EVERY doctor lookup — including login — would fail with
+    UndefinedColumn. Probing keeps the app fully functional on the old
+    schema and lights the new fields up automatically once the ALTER
+    has been applied, with no code change or redeploy.
+    """
+    if _pg_pool is None:
+        return
+    from utils import repositories as repo
+    try:
+        async with _pg_pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'doctors' "
+                    "AND column_name IN ('role', 'is_active')"
+                )
+                found = {r[0] for r in await cur.fetchall()}
+    except Exception as e:
+        log.warning("Could not probe doctors columns (%s); assuming legacy schema", e)
+        found = set()
+
+    present = {"role", "is_active"} <= found
+    repo.set_doctor_role_columns_present(present)
+    if present:
+        log.info("doctors.role / is_active present — admin features ENABLED")
+    else:
+        log.warning(
+            "doctors.role / is_active MISSING — running in legacy mode: "
+            "everyone is treated as an active clinician and /api/admin/* "
+            "will reject all callers. Apply the ALTER above to enable."
+        )
+
 
 async def postgres_disconnect() -> None:
     """Close the PG pool if one was opened. No-op otherwise."""

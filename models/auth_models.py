@@ -44,6 +44,12 @@ class DoctorPublic(BaseModel):
     name: str
     specialization: Optional[str] = None
     license_number: Optional[str] = None
+    # Authorisation fields. Deliberately absent from DoctorSignupRequest
+    # — they are set server-side only, never accepted from a client
+    # body. Defaults cover doctor rows written before these columns
+    # existed (Mongo documents in particular carry no key at all).
+    role: str = "clinician"
+    is_active: bool = True
     created_at: datetime
 
 

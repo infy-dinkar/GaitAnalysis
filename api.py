@@ -158,6 +158,7 @@ from engines.sppb.sppb_balance_engine import analyze_sppb_balance
 # ─── Auth + database (Phase 1) ─────────────────────────────────────
 from utils import db as db_module
 from routes.auth_routes import router as auth_router
+from routes.admin_routes import router as admin_router
 
 # ─── Patient + report endpoints (Phase 2) ──────────────────────────
 from routes.patient_routes import router as patient_router
@@ -250,6 +251,7 @@ async def _on_shutdown_postgres() -> None:
 
 # ─── Routers ───────────────────────────────────────────────────────
 app.include_router(auth_router)
+app.include_router(admin_router)
 app.include_router(patient_router)
 app.include_router(patient_reports_router)
 app.include_router(reports_router)
