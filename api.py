@@ -259,9 +259,21 @@ app.include_router(prescription_router)
 # ══════════════════════════════════════════════════════════════════════
 # Pose-model setup (module-level, reused across requests)
 # ══════════════════════════════════════════════════════════════════════
-# Using Full variant for clinical-grade landmark accuracy
-# (BlazePose Full per MotionLens Test Battery spec v1.0).
-# Lite was previously used; upgraded for Module D readiness.
+# Upload / offline analysis — BlazePose HEAVY.
+#
+# Every video-upload endpoint routes through this builder, and it takes
+# _ensure_pose_model_file's "heavy" default: offline analysis is not
+# latency-bound, so it buys the most accurate landmarks available.
+#
+# The live paths deliberately stay on FULL:
+#   • browser detector      — motionlens-web/lib/pose/detector-live.ts
+#                             (modelComplexity: 1)
+#   • backend stream pool   — _build_video_landmarker() below
+#
+# NOTE: live and upload readings may differ slightly because the
+# variants differ. That is INTENTIONAL. Do not "align" them by moving
+# the live paths to Heavy — Heavy cannot hold real-time frame rates,
+# and a lagging overlay is a worse failure than a small numeric gap.
 def _build_gait_pose_options():
     """Construct PoseLandmarkerOptions for VIDEO running mode — exactly
     matching app.py's load_pose_model_options() construction."""
@@ -277,9 +289,15 @@ def _build_gait_pose_options():
 
 @app.on_event("startup")
 async def _warmup() -> None:
+    # Both variants: heavy for uploads (the default), full for the
+    # real-time stream pool. Without the second call the full asset
+    # would be fetched lazily during the first live session — a ~9 MB
+    # download stalling a request that is latency-bound. In the Docker
+    # image both are already baked, so these are no-ops there.
     try:
-        _ensure_pose_model_file()
-        log.info("Pose model file ready.")
+        _ensure_pose_model_file()                  # heavy — uploads
+        _ensure_pose_model_file(variant="full")    # full  — live stream
+        log.info("Pose model files ready (heavy + full).")
     except Exception as e:
         log.warning("Pose model preload failed (will retry on first call): %s", e)
 
@@ -378,9 +396,15 @@ _OVERLAY_SMOOTH_ALPHA = float(
 )
 
 
-# Using Full variant for clinical-grade landmark accuracy
-# (BlazePose Full per MotionLens Test Battery spec v1.0).
-# Lite was previously used; upgraded for Module D readiness.
+# Real-time stream pool — BlazePose FULL.
+#
+# Full: real-time stream, latency-bound. Uploads use Heavy (see
+# _build_gait_pose_options). Heavy's per-frame cost would stall the
+# live overlay, which has to keep up with the incoming stream; the
+# accuracy it buys is only worth paying for offline.
+#
+# This is the ONLY backend caller that pins a variant — every other
+# site takes _ensure_pose_model_file's "heavy" default.
 def _build_video_landmarker() -> _StatefulVideoLandmarker:
     from mediapipe.tasks.python import BaseOptions
     from mediapipe.tasks.python.vision import (
@@ -388,7 +412,7 @@ def _build_video_landmarker() -> _StatefulVideoLandmarker:
         PoseLandmarkerOptions,
         RunningMode,
     )
-    model_path = _ensure_pose_model_file()
+    model_path = _ensure_pose_model_file(variant="full")
     raw = PoseLandmarker.create_from_options(
         PoseLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=model_path),
@@ -5838,67 +5862,3 @@ def analyze_live_biomech_frame(
         log.exception("live biomech frame analysis failed")
         return LiveBiomechFrameResponse(success=False, error=f"Analysis failed: {e}")
 
-
-@app.post("/api/analyze-neck", response_model=BiomechResponse)
-async def analyze_neck(
-    video: UploadFile = File(...),
-    movement_type: str = Form(...),
-    patient_name: Optional[str] = Form(None),
-) -> BiomechResponse:
-    """Neck ROM. movement_type ∈ flexion / extension / lateral_flexion /
-    rotation. (Engine has no per-side parameter — both lateral_flexion
-    and rotation are computed from both ears + shoulder midline.)"""
-    tmp_path: str | None = None
-    try:
-        movement = movement_type.lower().strip()
-        if movement not in NECK_NORMAL_RANGES:
-            return BiomechResponse(
-                success=False,
-                error=(
-                    f"Unknown neck movement '{movement_type}'. "
-                    f"Allowed: {sorted(NECK_NORMAL_RANGES.keys())}"
-                ),
-            )
-
-        contents = await video.read()
-        if not contents:
-            raise HTTPException(status_code=400, detail="Empty video upload.")
-        tmp_path = save_uploaded_video(contents, video.filename or "video.mp4")
-        log.info(
-            "neck: file=%s size=%.2f MB movement=%s",
-            video.filename, len(contents) / 1024 / 1024, movement,
-        )
-
-        raw_result = _run_biomech_upload_analysis(
-            tmp_path, "neck", movement, "Right",  # side is unused by neck_engine
-        )
-        if raw_result.get("valid_frames", 0) == 0:
-            return BiomechResponse(
-                success=False,
-                error=(
-                    "No frames had high-confidence pose landmarks. "
-                    "Re-record with better lighting or position."
-                ),
-            )
-
-        normal = NECK_NORMAL_RANGES[movement]
-        data = format_biomech_response(
-            body_part="neck",
-            movement=movement,
-            side=None,
-            raw_result=raw_result,
-            normal_range=normal["range"],
-            target=normal["target"],
-        )
-        return BiomechResponse(success=True, data=data, error=None)
-
-    except HTTPException:
-        raise
-    except ValueError as e:
-        log.warning("neck validation: %s", e)
-        return BiomechResponse(success=False, error=str(e))
-    except Exception as e:
-        log.exception("neck analysis failed")
-        return BiomechResponse(success=False, error=f"Analysis failed: {e}")
-    finally:
-        cleanup_temp_file(tmp_path)

@@ -30,12 +30,16 @@ WORKDIR /app
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ── Pre-download the pose-landmarker .task at build time ──────────
+# ── Pre-download the pose-landmarker .task files at build time ────
 # Saves ~5 sec on every cold start.
-# Using Full variant for clinical-grade landmark accuracy
-# (BlazePose Full per MotionLens Test Battery spec v1.0).
-# Lite was previously used; upgraded for Module D readiness.
-RUN wget -q -O /app/pose_landmarker_full.task \
+# BOTH variants are baked:
+#   heavy — every upload / offline analysis path (the default in
+#           engines/biomech_flow._ensure_pose_model_file)
+#   full  — the real-time stream pool only (api._build_video_landmarker),
+#           which is latency-bound and cannot afford heavy's per-frame cost
+RUN wget -q -O /app/pose_landmarker_heavy.task \
+    https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task && \
+    wget -q -O /app/pose_landmarker_full.task \
     https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task
 
 # ── App code ──────────────────────────────────────────────────────

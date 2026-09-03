@@ -168,21 +168,37 @@ MOVEMENT_INSTRUCTIONS = {
 # removed from recent MediaPipe builds and was crashing on
 # Streamlit Cloud with `AttributeError`). Same model + API the gait
 # pipeline already uses, so deployment compatibility is identical.
-# Using Full variant for clinical-grade landmark accuracy
-# (BlazePose Full per MotionLens Test Battery spec v1.0).
-# Lite was previously used; upgraded for Module D readiness.
+# Variant policy: HEAVY by default (all upload / offline analysis —
+# maximum landmark accuracy, not latency-bound), FULL only where a
+# caller asks for it (api._build_video_landmarker's real-time stream
+# pool, and the browser detector in detector-live.ts).
+#
+# NOTE: live and upload readings may differ slightly by variant. That
+# is intentional — do not "align" them by moving live to Heavy.
 # ──────────────────────────────────────────────
-def _ensure_pose_model_file() -> str:
+def _ensure_pose_model_file(variant: str = "heavy") -> str:
     """Download the pose-landmarker .task file if it's not already in
-    the working directory. Returns the local path."""
+    the working directory. Returns the local path.
+
+    variant: "heavy" | "full" | "lite" — the BlazePose model size.
+
+    The default is HEAVY: every offline/upload analysis path calls this
+    with no argument, so they all get maximum landmark accuracy. The
+    only caller that passes a variant explicitly is the real-time
+    stream pool (api._build_video_landmarker), which stays on "full"
+    because it is latency-bound.
+
+    Both assets are pre-baked into the Docker image, so the urlretrieve
+    below only fires for local runs that have not fetched a variant
+    yet."""
     import os
     import urllib.request
 
-    model_path = "pose_landmarker_full.task"
+    model_path = f"pose_landmarker_{variant}.task"
     if not os.path.exists(model_path):
         url = ("https://storage.googleapis.com/mediapipe-models/"
-               "pose_landmarker/pose_landmarker_full/float16/1/"
-               "pose_landmarker_full.task")
+               f"pose_landmarker/pose_landmarker_{variant}/float16/1/"
+               f"pose_landmarker_{variant}.task")
         urllib.request.urlretrieve(url, model_path)
     return model_path
 
@@ -261,6 +277,13 @@ def _run_biomech_upload_analysis(video_path: str,
     valid_frames = 0
     total_frames = 0
 
+    # Pose-inference timing — mirrors gait_engine.extract_poses. Only
+    # the detect() call is measured, and only one summary line is
+    # logged per request.
+    import time as _time
+    _infer_total_s = 0.0
+    _infer_frames = 0
+
     try:
         while True:
             ok, frame_bgr = cap.read()
@@ -271,7 +294,10 @@ def _run_biomech_upload_analysis(video_path: str,
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB,
                                  data=frame_rgb)
             # IMAGE mode: per-frame independent detect, no timestamp.
+            _t0 = _time.perf_counter()
             result = landmarker.detect(mp_image)
+            _infer_total_s += _time.perf_counter() - _t0
+            _infer_frames += 1
             if not result.pose_landmarks:
                 continue
 
@@ -293,6 +319,23 @@ def _run_biomech_upload_analysis(video_path: str,
             landmarker.close()
         except Exception:
             pass
+
+    try:
+        import logging as _lg, os as _os
+        _variant = (
+            _os.path.basename(_ensure_pose_model_file())
+            .replace("pose_landmarker_", "").replace(".task", "")
+        )
+        _lg.getLogger("motionlens.biomech").info(
+            "pose_inference variant=%s frames=%d total_ms=%.1f "
+            "mean_ms_per_frame=%.2f",
+            _variant,
+            _infer_frames,
+            _infer_total_s * 1000.0,
+            (_infer_total_s * 1000.0 / _infer_frames) if _infer_frames else 0.0,
+        )
+    except Exception:
+        pass
 
     return {
         "peak_angle":     peak_angle,
