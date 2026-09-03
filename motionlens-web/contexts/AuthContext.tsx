@@ -25,7 +25,11 @@ import {
 
 interface AuthContextValue {
   doctor: DoctorPublicDTO | null;
-  loading: boolean;            // true during initial auth check
+  loading: boolean;
+  /** Convenience flag for hiding admin-only UI. COSMETIC ONLY — the
+   *  real authorisation boundary is require_admin on the backend,
+   *  which returns 403. Never rely on this to protect data. */
+  isAdmin: boolean;            // true during initial auth check
   signIn: (payload: LoginPayload) => Promise<void>;
   signUp: (payload: SignupPayload) => Promise<void>;
   signOut: () => void;
@@ -78,9 +82,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setDoctor(fresh);
   }, []);
 
+  // Strict equality against the literal: an absent/unknown role is
+  // never treated as admin.
+  const isAdmin = doctor?.role === "admin";
+
   const value = useMemo<AuthContextValue>(
-    () => ({ doctor, loading, signIn, signUp, signOut, refresh }),
-    [doctor, loading, signIn, signUp, signOut, refresh],
+    () => ({ doctor, loading, isAdmin, signIn, signUp, signOut, refresh }),
+    [doctor, loading, isAdmin, signIn, signUp, signOut, refresh],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

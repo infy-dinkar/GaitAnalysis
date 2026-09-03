@@ -67,10 +67,47 @@ from utils.db import get_db_backend
 _ID = "id"
 _ID_SEL = "id AS _id"
 
-DOCTORS_COLS = [
+_DOCTORS_BASE_COLS = [
     _ID_SEL, "email", "password_hash", "name", "specialization",
     "license_number", "created_at", "updated_at",
 ]
+_DOCTORS_ROLE_COLS = ["role", "is_active"]
+
+DOCTORS_COLS = _DOCTORS_BASE_COLS + _DOCTORS_ROLE_COLS
+
+# Whether doctors.role / doctors.is_active actually exist in Postgres.
+# Set once at startup by db._pg_detect_doctor_columns(). Defaults to
+# True so the Mongo backend (schemaless — the keys are simply absent
+# and readers use .get() defaults) and any pre-probe call behave
+# normally; only a confirmed-legacy Postgres schema flips it off.
+#
+# ⚠️ When False, every SELECT drops those two columns. Without this the
+# app would 500 on login against a database whose ALTER TABLE has not
+# been applied — the migration needs table ownership the app role does
+# not have. Callers all read via .get(field, default), so a missing
+# column degrades to "active clinician" rather than an error.
+_DOCTOR_ROLE_COLUMNS_PRESENT = True
+
+
+def set_doctor_role_columns_present(present: bool) -> None:
+    global _DOCTOR_ROLE_COLUMNS_PRESENT
+    _DOCTOR_ROLE_COLUMNS_PRESENT = present
+
+
+def doctor_role_columns_present() -> bool:
+    return _DOCTOR_ROLE_COLUMNS_PRESENT
+
+
+def _doctors_cols(include_password: bool) -> list[str]:
+    """The SELECT list for a doctor row, adapted to the live schema."""
+    cols = list(_DOCTORS_BASE_COLS)
+    if _DOCTOR_ROLE_COLUMNS_PRESENT:
+        cols += _DOCTORS_ROLE_COLS
+    if not include_password:
+        cols = [c for c in cols if c != "password_hash"]
+    return cols
+
+
 DOCTORS_COLS_NO_PW = [c for c in DOCTORS_COLS if c != "password_hash"]
 
 PATIENTS_COLS = [
@@ -147,7 +184,7 @@ async def _pg_execute(sql: str, params: list) -> int:
 async def doctors_find_one_by_email(db, email: str) -> Optional[dict]:
     if not _is_pg():
         return await db.doctors.find_one({"email": email})
-    sql = f'SELECT {", ".join(DOCTORS_COLS)} FROM doctors WHERE email = %s'
+    sql = f'SELECT {", ".join(_doctors_cols(True))} FROM doctors WHERE email = %s'
     return await _pg_fetchone(sql, [email])
 
 
@@ -157,15 +194,27 @@ async def doctors_find_one_by_id(
     if not _is_pg():
         proj = None if include_password else {"password_hash": 0}
         return await db.doctors.find_one({"_id": doctor_id}, proj)
-    cols = DOCTORS_COLS if include_password else DOCTORS_COLS_NO_PW
+    cols = _doctors_cols(include_password)
     sql = f'SELECT {", ".join(cols)} FROM doctors WHERE {_ID} = %s'
     return await _pg_fetchone(sql, [str(doctor_id)])
 
 
 async def doctors_insert(db, doc: dict):
     """Insert a doctor. Returns the new id (ObjectId on Mongo / hex str
-    on Postgres) — str(...) in the mapper makes both identical."""
+    on Postgres) — str(...) in the mapper makes both identical.
+
+    role / is_active are read with .get() defaults rather than taken as
+    required keys, so a caller that omits them lands on the same
+    'clinician' / TRUE the Postgres column defaults use. Callers must
+    pass role as a server-side literal — never from a request body."""
     if not _is_pg():
+        # Mongo is schemaless, so the defaults have to be materialised
+        # onto the document here or the field is simply absent.
+        doc = {
+            **doc,
+            "role": doc.get("role", "clinician"),
+            "is_active": doc.get("is_active", True),
+        }
         res = await db.doctors.insert_one(doc)
         return res.inserted_id
     nid = str(ObjectId())
@@ -174,12 +223,118 @@ async def doctors_insert(db, doc: dict):
     vals = [nid, doc["email"], doc["password_hash"], doc["name"],
             doc.get("specialization"), doc.get("license_number"),
             doc["created_at"], doc["updated_at"]]
+    if _DOCTOR_ROLE_COLUMNS_PRESENT:
+        cols += ["role", "is_active"]
+        vals += [doc.get("role", "clinician"), doc.get("is_active", True)]
     await _pg_execute(
         f'INSERT INTO doctors ({", ".join(cols)}) '
         f'VALUES ({", ".join(["%s"] * len(cols))})',
         vals,
     )
     return nid
+
+
+async def doctors_list_all(db) -> list[dict]:
+    """Every doctor, newest first, WITHOUT password_hash.
+
+    Admin user-management listing only. Deliberately not doctor-scoped —
+    unlike patients/reports, which stay owner-scoped and are untouched
+    by the admin role."""
+    if not _is_pg():
+        cursor = db.doctors.find({}, {"password_hash": 0}).sort("created_at", -1)
+        return await cursor.to_list(length=1000)
+    sql = (
+        f'SELECT {", ".join(_doctors_cols(False))} FROM doctors '
+        f'ORDER BY created_at DESC LIMIT %s'
+    )
+    return await _pg_fetchall(sql, [1000])
+
+
+async def doctors_count_active_admins(db) -> int:
+    """Number of doctors with role='admin' AND is_active=true.
+
+    Used by the admin PATCH guard so the last active admin can never be
+    demoted or deactivated — that would lock everyone out of user
+    management with no recovery path short of DB surgery."""
+    if not _is_pg():
+        return await db.doctors.count_documents(
+            {"role": "admin", "is_active": True}
+        )
+    if not _DOCTOR_ROLE_COLUMNS_PRESENT:
+        # Legacy schema: the column doesn't exist, so no row can be an
+        # admin. Returning 0 (rather than querying and blowing up) keeps
+        # this callable from the admin guard path.
+        return 0
+    row = await _pg_fetchone(
+        "SELECT count(*) AS n FROM doctors "
+        "WHERE role = %s AND is_active = TRUE",
+        ["admin"],
+    )
+    return int(row["n"]) if row else 0
+
+
+async def doctors_set_role(db, doctor_id, role: str) -> Optional[dict]:
+    """THE ONLY write path for doctors.role.
+
+    Centralised so role can never be set from a request body: every
+    caller passes a value already checked against auth_utils.ROLES."""
+    return await _doctors_set_fields(db, doctor_id, {"role": role})
+
+
+async def doctors_set_active(db, doctor_id, is_active: bool) -> Optional[dict]:
+    """The only write path for doctors.is_active."""
+    return await _doctors_set_fields(db, doctor_id, {"is_active": is_active})
+
+
+async def doctors_set_password_hash(db, doctor_id, password_hash: str) -> Optional[dict]:
+    """Admin-initiated password reset. Takes an ALREADY-HASHED value —
+    never a plain password."""
+    return await _doctors_set_fields(
+        db, doctor_id, {"password_hash": password_hash}
+    )
+
+
+# Columns a doctor UPDATE may touch. Whitelisted so the dynamic SQL
+# below can never interpolate an untrusted column name.
+DOCTORS_UPDATABLE = {"role", "is_active", "password_hash", "updated_at"}
+
+
+async def _doctors_set_fields(db, doctor_id, fields: dict) -> Optional[dict]:
+    """Shared UPDATE helper. Returns the updated doctor (no password
+    hash) or None when the id doesn't exist."""
+    from datetime import datetime, timezone
+    set_fields = {**fields, "updated_at": datetime.now(timezone.utc)}
+    bad = [k for k in set_fields if k not in DOCTORS_UPDATABLE]
+    if bad:
+        raise ValueError(f"doctors update: non-updatable column(s): {bad}")
+
+    # Writing role / is_active against a schema that lacks them would
+    # fail with an opaque UndefinedColumn. Fail early with the fix.
+    if (
+        _is_pg()
+        and not _DOCTOR_ROLE_COLUMNS_PRESENT
+        and ({"role", "is_active"} & set(fields))
+    ):
+        raise RuntimeError(
+            "doctors.role / doctors.is_active do not exist in this database. "
+            "A superuser must run:  ALTER TABLE doctors ADD COLUMN IF NOT "
+            "EXISTS role TEXT NOT NULL DEFAULT 'clinician';  ALTER TABLE "
+            "doctors ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL "
+            "DEFAULT TRUE;"
+        )
+
+    if not _is_pg():
+        await db.doctors.update_one({"_id": doctor_id}, {"$set": set_fields})
+        return await db.doctors.find_one(
+            {"_id": doctor_id}, {"password_hash": 0}
+        )
+    keys = list(set_fields.keys())
+    sql = (
+        f'UPDATE doctors SET {", ".join(f"{k} = %s" for k in keys)} '
+        f'WHERE {_ID} = %s '
+        f'RETURNING {", ".join(_doctors_cols(False))}'
+    )
+    return await _pg_fetchone(sql, [set_fields[k] for k in keys] + [str(doctor_id)])
 
 
 # ════════════════════════════════════════════════════════════════════
