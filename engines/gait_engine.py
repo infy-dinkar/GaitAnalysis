@@ -329,6 +329,13 @@ def extract_poses(video_path: str, pose_options, progress_callback=None):
 
     frame_idx = 0
     last_ts_ms = -1
+    # Pose-inference timing. Accumulates ONLY the detect_for_video()
+    # call — not decode, colour conversion or the landmark copy — so
+    # the number quoted is the model's own cost. One summary line per
+    # request at the end; no per-frame logging.
+    import time as _time
+    _infer_total_s = 0.0
+    _infer_frames = 0
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -343,7 +350,10 @@ def extract_poses(video_path: str, pose_options, progress_callback=None):
             ts_ms = last_ts_ms + 1
         last_ts_ms = ts_ms
 
+        _t0 = _time.perf_counter()
         result = pose_model.detect_for_video(mp_image, ts_ms)
+        _infer_total_s += _time.perf_counter() - _t0
+        _infer_frames += 1
         if result.pose_landmarks and len(result.pose_landmarks) > 0:
             lms = result.pose_landmarks[0]
             for name, idx in LM.items():
@@ -362,6 +372,29 @@ def extract_poses(video_path: str, pose_options, progress_callback=None):
 
     cap.release()
     pose_model.close()
+
+    # One summary line per request. The variant is read back off the
+    # options object so the log can never claim a model that wasn't
+    # actually loaded.
+    try:
+        import logging as _lg, os as _os
+        _asset = getattr(
+            getattr(pose_options, "base_options", None), "model_asset_path", "",
+        ) or ""
+        _variant = (
+            _os.path.basename(_asset)
+            .replace("pose_landmarker_", "").replace(".task", "")
+        ) or "unknown"
+        _lg.getLogger("motionlens.gait").info(
+            "pose_inference variant=%s frames=%d total_ms=%.1f "
+            "mean_ms_per_frame=%.2f",
+            _variant,
+            _infer_frames,
+            _infer_total_s * 1000.0,
+            (_infer_total_s * 1000.0 / _infer_frames) if _infer_frames else 0.0,
+        )
+    except Exception:
+        pass
 
     # Platform-independent rotation correction. cv2 honours rotation
     # metadata by default on Linux opencv-python-headless (HF Space)

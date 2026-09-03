@@ -31,6 +31,12 @@ export interface HipMovement {
    *  direction IDs (`internal_rotation` / `external_rotation`) still
    *  resolve their labels + targets. */
   hidden?: boolean;
+  /** Deprecated: superseded by the merged test. Still resolvable so
+   *  previously SAVED REPORTS that stored this id keep rendering their
+   *  label + reference range (see resolveMovement in movements.ts).
+   *  Never offered in the chooser and never routed for a new upload —
+   *  the upload pages redirect it to the merged equivalent. */
+  deprecated?: boolean;
   /** Optional reference illustration. See MovementGrid's
    *  MovementOption.imageUrl for the path convention. */
   imageUrl?: string;
@@ -98,6 +104,7 @@ export const HIP_MOVEMENTS: HipMovement[] = [
     description: "Rotate the thigh inward (knee bent at 90°)",
     target: [30, 45],
     hidden: true,
+    deprecated: true,
   },
   {
     id: "external_rotation",
@@ -105,6 +112,7 @@ export const HIP_MOVEMENTS: HipMovement[] = [
     description: "Rotate the thigh outward (knee bent at 90°)",
     target: [40, 60],
     hidden: true,
+    deprecated: true,
   },
 ];
 

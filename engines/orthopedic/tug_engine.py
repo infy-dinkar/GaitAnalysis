@@ -1,8 +1,9 @@
 """tug_engine.py — Timed Up and Go (TUG) analysis pipeline.
 
 End-to-end TUG processing:
-  1. Reuse gait_engine.extract_poses() to get MediaPipe BlazePose Full
-     33-keypoint landmarks per frame (model: pose_landmarker_full.task).
+  1. Reuse gait_engine.extract_poses() to get MediaPipe BlazePose
+     33-keypoint landmarks per frame (upload variant — currently
+     pose_landmarker_heavy.task).
   2. Reuse gait_engine.build_time_series() to smooth + interpolate.
   3. Run TUG-specific phase detection (5 sub-phases).
   4. Compute per-phase metrics (duration, step count, length, cadence,

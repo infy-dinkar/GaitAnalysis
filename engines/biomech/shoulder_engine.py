@@ -1066,7 +1066,8 @@ def analyze_shoulder(
         video_path:   path to the uploaded (and optionally repaired)
                       video file on disk.
         pose_options: PoseLandmarkerOptions configured for VIDEO mode
-                      against pose_landmarker_full.task — built by
+                      against the upload variant (currently
+                      pose_landmarker_heavy.task) — built by
                       api._build_gait_pose_options().
         movement:     "flexion_extension" (merged) or any single key
                       from SHOULDER_NORMAL_RANGES.

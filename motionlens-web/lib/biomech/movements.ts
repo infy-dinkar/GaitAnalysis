@@ -9,6 +9,43 @@ import { ANKLE_MOVEMENTS } from "@/lib/biomech/ankle";
 
 type BodyPart = "shoulder" | "neck" | "knee" | "hip" | "ankle";
 
+/** Deprecated single-direction movement IDs → the merged test that
+ *  replaced them.
+ *
+ *  These IDs stay resolvable (see resolveMovement below) so SAVED
+ *  REPORTS that recorded them keep rendering their label + reference
+ *  range. They must never start a NEW analysis though: the upload
+ *  pipeline has no backend branch for them, and they used to fall
+ *  through to an in-browser MoveNet analyser running a different model
+ *  with a different keypoint set. Upload pages look the requested
+ *  movement up here and silently redirect to the merged equivalent.
+ *
+ *  Shoulder and ankle legacy IDs are deliberately absent: the backend
+ *  accepts those verbatim, so they still analyse correctly as-is. */
+export const LEGACY_MOVEMENT_MAP: Record<string, Record<string, string>> = {
+  knee: {
+    flexion: "flexion_extension",
+    extension: "flexion_extension",
+  },
+  neck: {
+    flexion: "flexion_extension",
+    extension: "flexion_extension",
+  },
+  hip: {
+    internal_rotation: "rotation",
+    external_rotation: "rotation",
+  },
+};
+
+/** The merged replacement for a deprecated ID, or null when the ID is
+ *  still analysable as requested. */
+export function resolveLegacyMovement(
+  bodyPart: string,
+  movementId: string,
+): string | null {
+  return LEGACY_MOVEMENT_MAP[bodyPart]?.[movementId] ?? null;
+}
+
 interface MovementMeta {
   label: string;
   target: [number, number];
