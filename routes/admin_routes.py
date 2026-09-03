@@ -21,8 +21,8 @@ Scope boundary — deliberately narrow:
 Password handling:
     Hashes are one-way, so an admin can never read an existing password
     — only overwrite it. The reset endpoint takes a new plain password,
-    hashes it with the same bcrypt context signup uses, and stores only
-    the hash. No response in this module ever carries password_hash:
+    hashes it with the shared bcrypt context (utils.auth_utils), and
+    stores only the hash. No response in this module ever carries password_hash:
     every doctor is serialised through DoctorPublic.
 """
 from __future__ import annotations
@@ -46,10 +46,10 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 class AdminCreateUserRequest(BaseModel):
     """Body for POST /api/admin/users.
 
-    Unlike DoctorSignupRequest this one DOES accept `role` — that is
-    safe here precisely because the route is admin-gated and the value
-    is validated against the ROLES allowlist below before it reaches
-    the repository."""
+    This is the ONLY account-creation payload in the app (public signup
+    was removed). It DOES accept `role`, which is safe precisely
+    because the route is admin-gated and the value is validated against
+    the ROLES allowlist below before it reaches the repository."""
 
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=128)
@@ -198,10 +198,11 @@ async def update_user(
 
       1. An admin cannot deactivate themselves — an easy way to lock
          yourself out mid-session by mis-clicking your own row.
-      2. The LAST ACTIVE ADMIN cannot be demoted or deactivated. With
-         public signup only ever minting clinicians and no self-service
-         role change, zero active admins means nobody can reach
-         /api/admin/* again and recovery requires direct DB access.
+      2. The LAST ACTIVE ADMIN cannot be demoted or deactivated. There
+         is no public signup and no self-service role change, so zero
+         active admins means nobody can reach /api/admin/* again — and
+         no new account can be created at all. Recovery would require
+         direct DB access.
 
     Both are reversible operations otherwise, so there is no confirm
     step — the guards are the safety net.

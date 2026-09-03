@@ -2,7 +2,6 @@
 // Sign-in form for doctors. Clean medical-tech style.
 
 import { useState } from "react";
-import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Mail, Lock, Loader2, AlertCircle, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/Button";
@@ -112,10 +111,7 @@ export function SignInForm() {
       {/* Footer */}
       <div className="border-t border-border pt-5 text-center">
         <p className="text-sm text-muted">
-          New to MotionLens?{" "}
-          <Link href="/auth/signup" className="font-medium text-accent hover:underline">
-            Create an account
-          </Link>
+          Need access? Contact your administrator.
         </p>
       </div>
     </form>

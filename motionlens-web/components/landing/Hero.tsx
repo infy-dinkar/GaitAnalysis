@@ -27,8 +27,10 @@ export function Hero() {
             No markers, no labs, no waiting room.
           </p>
 
-          {/* CTA — auth-aware. Casual visitors are guided to sign up;
-              already-logged-in doctors land on their dashboard. */}
+          {/* CTA — auth-aware. Logged-in doctors land on their
+              dashboard; everyone else gets a single Sign in button.
+              There is no "Get started" any more: accounts are issued by
+              an administrator, so a self-service path would dead-end. */}
           <div className="mt-10 flex flex-wrap items-center gap-3">
             {!loading && doctor ? (
               <Link href="/dashboard">
@@ -39,20 +41,13 @@ export function Hero() {
                 </Button>
               </Link>
             ) : (
-              <>
-                <Link href="/auth/signup">
-                  <Button size="lg">
-                    Get started
-                    <ArrowRight className="h-4 w-4" />
-                  </Button>
-                </Link>
-                <Link href="/auth/signin">
-                  <Button size="lg" variant="secondary">
-                    <LogIn className="h-4 w-4" />
-                    Sign in
-                  </Button>
-                </Link>
-              </>
+              <Link href="/auth/signin">
+                <Button size="lg">
+                  <LogIn className="h-4 w-4" />
+                  Sign in
+                  <ArrowRight className="h-4 w-4" />
+                </Button>
+              </Link>
             )}
           </div>
 

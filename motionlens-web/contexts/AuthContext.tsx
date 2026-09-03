@@ -15,12 +15,10 @@ import {
 import {
   type DoctorPublicDTO,
   type LoginPayload,
-  type SignupPayload,
   fetchCurrentDoctor,
   getCachedDoctor,
   login as apiLogin,
   logout as apiLogout,
-  signup as apiSignup,
 } from "@/lib/auth";
 
 interface AuthContextValue {
@@ -31,7 +29,6 @@ interface AuthContextValue {
    *  which returns 403. Never rely on this to protect data. */
   isAdmin: boolean;            // true during initial auth check
   signIn: (payload: LoginPayload) => Promise<void>;
-  signUp: (payload: SignupPayload) => Promise<void>;
   signOut: () => void;
   refresh: () => Promise<void>;
 }
@@ -67,11 +64,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setDoctor(res.doctor);
   }, []);
 
-  const signUp = useCallback(async (payload: SignupPayload) => {
-    const res = await apiSignup(payload);
-    setDoctor(res.doctor);
-  }, []);
-
   const signOut = useCallback(() => {
     apiLogout();
     setDoctor(null);
@@ -87,8 +79,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const isAdmin = doctor?.role === "admin";
 
   const value = useMemo<AuthContextValue>(
-    () => ({ doctor, loading, isAdmin, signIn, signUp, signOut, refresh }),
-    [doctor, loading, isAdmin, signIn, signUp, signOut, refresh],
+    () => ({ doctor, loading, isAdmin, signIn, signOut, refresh }),
+    [doctor, loading, isAdmin, signIn, signOut, refresh],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
