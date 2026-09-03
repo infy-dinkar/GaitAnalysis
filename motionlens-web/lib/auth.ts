@@ -33,14 +33,6 @@ export interface AuthTokenResponse {
   doctor: DoctorPublicDTO;
 }
 
-export interface SignupPayload {
-  email: string;
-  password: string;
-  name: string;
-  specialization?: string;
-  license_number?: string;
-}
-
 export interface LoginPayload {
   email: string;
   password: string;
@@ -114,13 +106,8 @@ export class AuthError extends Error {
 }
 
 // ─── Public API ───────────────────────────────────────────────────
-export async function signup(payload: SignupPayload): Promise<AuthTokenResponse> {
-  const data = await postJSON<AuthTokenResponse>("/api/auth/signup", payload);
-  setToken(data.token);
-  setCachedDoctor(data.doctor);
-  return data;
-}
-
+// No signup(): public self-registration was removed. Accounts are
+// created by an admin via lib/admin.ts adminCreateUser().
 export async function login(payload: LoginPayload): Promise<AuthTokenResponse> {
   const data = await postJSON<AuthTokenResponse>("/api/auth/login", payload);
   setToken(data.token);

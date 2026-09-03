@@ -1,11 +1,15 @@
-"""Auth endpoints — sign up, sign in, current user.
+"""Auth endpoints — sign in, current user.
 
 Mounted at /api/auth/* by api.py.
 
 Endpoints:
-    POST /api/auth/signup   — register a new doctor
     POST /api/auth/login    — exchange email+password for a JWT
     GET  /api/auth/me       — return the current logged-in doctor (protected)
+
+There is deliberately NO public signup. Accounts are created only by an
+admin via POST /api/admin/users (see routes/admin_routes.py), so the
+only way to obtain credentials is for an existing admin to issue them.
+The first admin is bootstrapped with scripts/promote_admin.py.
 
 All responses use the same envelope shape the frontend already
 expects: { success, data, error }.
@@ -14,22 +18,17 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime, timezone
-from typing import Optional
 
-from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from models.auth_models import (
     AuthTokenResponse,
     DoctorLoginRequest,
     DoctorPublic,
-    DoctorSignupRequest,
 )
 from utils.auth_utils import (
     create_access_token,
     get_current_doctor,
-    hash_password,
     verify_password,
 )
 from utils.db import get_db
@@ -133,61 +132,6 @@ def _expiry_seconds() -> int:
         return max(60, int(os.environ.get("JWT_EXPIRY_SECONDS", "604800")))
     except ValueError:
         return 604800
-
-
-# ─── POST /api/auth/signup ─────────────────────────────────────────
-@router.post(
-    "/signup",
-    response_model=AuthTokenResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def signup(payload: DoctorSignupRequest):
-    """Register a new doctor and issue an auth token.
-
-    Email must be unique. Password is bcrypt-hashed (12 rounds) before
-    storage. On success returns a JWT the client can use immediately.
-    """
-    db = get_db()
-    email = payload.email.lower().strip()
-
-    # Reject duplicate emails early — also enforced by the unique index
-    # in db._ensure_indexes(), but a friendlier error is nicer than a
-    # raw DuplicateKeyError surfacing as a 500.
-    existing = await repo.doctors_find_one_by_email(db, email)
-    if existing is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="An account with this email already exists",
-        )
-
-    now = datetime.now(timezone.utc)
-    doc = {
-        "email": email,
-        "password_hash": hash_password(payload.password),
-        "name": payload.name,
-        "specialization": payload.specialization,
-        "license_number": payload.license_number,
-        # SERVER-SIDE LITERALS. Never read from `payload` — that is the
-        # whole privilege-escalation guard. DoctorSignupRequest does not
-        # declare these fields (so Pydantic drops them from the body),
-        # and the doc is built key-by-key rather than splatted, so a
-        # client cannot self-promote by POSTing {"role": "admin"}.
-        # Role changes go exclusively through repo.doctors_set_role,
-        # which is admin-gated.
-        "role": "clinician",
-        "is_active": True,
-        "created_at": now,
-        "updated_at": now,
-    }
-    new_id = await repo.doctors_insert(db, doc)
-    doc["_id"] = new_id
-
-    token = create_access_token(str(new_id))
-    return AuthTokenResponse(
-        token=token,
-        expires_in=_expiry_seconds(),
-        doctor=_to_public(doc),
-    )
 
 
 # ─── POST /api/auth/login ──────────────────────────────────────────

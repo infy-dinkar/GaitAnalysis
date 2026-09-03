@@ -19,8 +19,13 @@ admin. Doing it as a CLI means:
   • no admin password ever has to live in an env var or .env file.
 
 It only PROMOTES an existing account — it never creates one and never
-touches passwords. Sign up normally first (public signup is still
-enabled), then promote that account here.
+touches passwords, so it needs a doctor row to already exist.
+
+⚠️ Public signup has been REMOVED, so on a brand-new deployment with an
+empty doctors table there is no way to create that first row through
+the app. In that situation insert one directly (or restore a dump)
+before running this. Existing deployments are unaffected — promote any
+account that signed up while signup was still open.
 
 Both DB backends are supported: it reuses the app's own connect/
 repository layer, so DB_BACKEND, PG_* and MONGODB_URI are read from

@@ -1,7 +1,7 @@
 """Authentication utilities — password hashing + JWT encode/decode.
 
 Used by:
-    auth_routes.py      — to issue tokens on signup/login
+    auth_routes.py      — to issue tokens on login
     patient_routes.py   — via get_current_doctor dependency
     report_routes.py    — same dependency
 
@@ -31,9 +31,10 @@ from utils.db import get_db
 # ─── Roles ─────────────────────────────────────────────────────────
 # Literal allowlist. Any role arriving from a request body must be
 # checked against this before it reaches repositories.doctors_set_role.
-# Two roles only — "clinician" is the default every signup gets;
-# "admin" additionally unlocks /api/admin/* user management. Admin does
-# NOT widen data access: patients and reports stay owner-scoped.
+# Two roles only — "clinician" is the default for accounts an admin
+# creates without specifying a role; "admin" additionally unlocks
+# /api/admin/* user management. Admin does NOT widen data access:
+# patients and reports stay owner-scoped.
 ROLES = ("clinician", "admin")
 
 

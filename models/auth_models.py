@@ -1,30 +1,19 @@
 """Pydantic schemas for authentication endpoints.
 
 Used by:
-    auth_routes.py — request/response validation for /api/auth/*
+    auth_routes.py  — request/response validation for /api/auth/*
+    admin_routes.py — DoctorPublic as the response model for /api/admin/users
+
+There is no signup request model: public self-registration was removed,
+so the only account-creation payload is AdminCreateUserRequest, defined
+in routes/admin_routes.py behind require_admin.
 """
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
-
-
-# ─── Sign up ───────────────────────────────────────────────────────
-class DoctorSignupRequest(BaseModel):
-    """Payload for POST /api/auth/signup."""
-
-    email: EmailStr
-    password: str = Field(..., min_length=8, max_length=128)
-    name: str = Field(..., min_length=2, max_length=100)
-    specialization: Optional[str] = Field(default=None, max_length=100)
-    license_number: Optional[str] = Field(default=None, max_length=50)
-
-    @field_validator("name", "specialization", "license_number")
-    @classmethod
-    def _strip_whitespace(cls, v: Optional[str]) -> Optional[str]:
-        return v.strip() if isinstance(v, str) else v
+from pydantic import BaseModel, EmailStr, Field
 
 
 # ─── Sign in ───────────────────────────────────────────────────────
@@ -44,18 +33,20 @@ class DoctorPublic(BaseModel):
     name: str
     specialization: Optional[str] = None
     license_number: Optional[str] = None
-    # Authorisation fields. Deliberately absent from DoctorSignupRequest
-    # — they are set server-side only, never accepted from a client
-    # body. Defaults cover doctor rows written before these columns
-    # existed (Mongo documents in particular carry no key at all).
+    # Authorisation fields. Response-only: no request model in this
+    # file declares them, and the sole creation endpoint
+    # (POST /api/admin/users) validates role against the ROLES
+    # allowlist before it reaches the repository. Defaults cover doctor
+    # rows written before these columns existed (Mongo documents in
+    # particular carry no key at all).
     role: str = "clinician"
     is_active: bool = True
     created_at: datetime
 
 
-# ─── Auth response (signup + login both return this) ───────────────
+# ─── Auth response (login) ─────────────────────────────────────────
 class AuthTokenResponse(BaseModel):
-    """Returned after successful signup or login."""
+    """Returned after a successful login."""
 
     success: bool = True
     token: str = Field(..., description="JWT bearer token")

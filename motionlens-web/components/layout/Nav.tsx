@@ -85,12 +85,6 @@ export function Nav() {
                   >
                     Sign in
                   </Link>
-                  <Link
-                    href="/auth/signup"
-                    className="rounded-full bg-accent px-4 py-1.5 text-sm font-medium text-white transition hover:bg-accent/90"
-                  >
-                    Sign up
-                  </Link>
                 </>
               )}
             </div>
@@ -160,13 +154,6 @@ export function Nav() {
                     className="text-sm text-foreground"
                   >
                     Sign in
-                  </Link>
-                  <Link
-                    href="/auth/signup"
-                    onClick={() => setOpen(false)}
-                    className="inline-block rounded-full bg-accent px-4 py-2 text-center text-sm font-medium text-white"
-                  >
-                    Sign up
                   </Link>
                 </div>
               )}
