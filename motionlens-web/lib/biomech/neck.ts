@@ -33,6 +33,12 @@ export interface NeckMovement {
    *  to "flexion" / "extension" alone resolve labels + targets,
    *  but they no longer appear when starting a new trial. */
   hidden?: boolean;
+  /** Deprecated: superseded by the merged test. Still resolvable so
+   *  previously SAVED REPORTS that stored this id keep rendering their
+   *  label + reference range (see resolveMovement in movements.ts).
+   *  Never offered in the chooser and never routed for a new upload —
+   *  the upload pages redirect it to the merged equivalent. */
+  deprecated?: boolean;
   /** Optional reference illustration. See MovementGrid's
    *  MovementOption.imageUrl for the path convention. */
   imageUrl?: string;
@@ -87,8 +93,8 @@ export const NECK_MOVEMENTS: NeckMovement[] = [
   // Legacy single-direction entries — kept so saved reports
   // referring to them still resolve labels + targets, but hidden
   // from the chooser since the merged version above replaces them.
-  { id: "flexion",   label: "Flexion",   description: "Tilt the head forward, chin to chest", target: [45, 80], hidden: true },
-  { id: "extension", label: "Extension", description: "Tilt the head backward",                target: [50, 70], hidden: true },
+  { id: "flexion",   label: "Flexion",   description: "Tilt the head forward, chin to chest", target: [45, 80], hidden: true, deprecated: true },
+  { id: "extension", label: "Extension", description: "Tilt the head backward",                target: [50, 70], hidden: true, deprecated: true },
 ];
 
 // BlazePose-tfjs scores are lower than MediaPipe's `visibility` field —
