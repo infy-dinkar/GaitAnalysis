@@ -222,14 +222,14 @@ export function drawSpineSegment(
         d0x /= d0Len;
         d0y /= d0Len;
 
-        // Clamp the start tangent to ±40° off the trunk axis. Without
+        // Clamp the start tangent to ±50° off the trunk axis. Without
         // this a mis-tracked ear (or a head turned to the camera) can
         // swing d0 far off-axis and whip the curve into a hook; the
         // clamp bounds the bow instead of rejecting the frame.
         const cross = ux * d0y - uy * d0x;
         const dot = ux * d0x + uy * d0y;
         const ang = Math.atan2(cross, dot);
-        const maxAng = (40 * Math.PI) / 180;
+        const maxAng = (50 * Math.PI) / 180;
         if (Math.abs(ang) > maxAng) {
           const a = ang > 0 ? maxAng : -maxAng;
           const ca = Math.cos(a);
@@ -238,12 +238,15 @@ export function drawSpineSegment(
           d0y = ux * sa + uy * ca;
         }
 
-        // Tangent magnitudes at 0.6·L keep the bow subtle — a full-L
-        // tangent overshoots into an S-curve on a straight back.
-        const m0x = d0x * L * 0.6;
-        const m0y = d0y * L * 0.6;
-        const m1x = dx * 0.6;
-        const m1y = dy * 0.6;
+        // Tangent magnitudes. The start tangent runs the full trunk
+        // length so the head's lean actually shows on camera (0.6·L
+        // read as almost straight); the end tangent stays shorter so
+        // the curve settles onto the axis at the hips instead of
+        // overshooting into an S.
+        const m0x = d0x * L * 1.0;
+        const m0y = d0y * L * 1.0;
+        const m1x = dx * 0.8;
+        const m1y = dy * 0.8;
 
         const N = 12;
         for (let k = 0; k <= N; k++) {
