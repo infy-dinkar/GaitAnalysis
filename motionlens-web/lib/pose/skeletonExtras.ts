@@ -128,6 +128,10 @@ export interface SpineSegmentOptions {
   dotColor?: string;
   /** Interior vertebra dot radius. Auto-scales to canvas by default. */
   dotRadius?: number;
+  /** Draw the interior vertebra dots. Default true, so every existing
+   *  caller is unaffected. Set false to render the trunk as a single
+   *  clean polyline stroke — the stroke itself is unchanged. */
+  showDots?: boolean;
   /** Caller-supplied spine polyline, ALREADY in the same pixel space
    *  as `w`/`h` (i.e. dispW/dispH, after the caller's ctx.translate).
    *
@@ -261,15 +265,20 @@ export function drawSpineSegment(
   // exactly on the straight polyline so each "turn" is a visible
   // hinge; the line stays straight between hinges because the pose
   // does not provide the data to justify anything else.
-  ctx.fillStyle = opts?.dotColor ?? "#F97316";
-  ctx.shadowColor = "rgba(249, 115, 22, 0.6)";
-  ctx.shadowBlur = 10;
-  const r = opts?.dotRadius ?? Math.max(5, w * 0.008);
-  for (let i = 1; i < spinePoints.length - 1; i++) {
-    const p = spinePoints[i];
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-    ctx.fill();
+  //
+  // Skipped entirely when showDots is false — the polyline above has
+  // already been stroked, so the trunk still renders.
+  if (opts?.showDots ?? true) {
+    ctx.fillStyle = opts?.dotColor ?? "#F97316";
+    ctx.shadowColor = "rgba(249, 115, 22, 0.6)";
+    ctx.shadowBlur = 10;
+    const r = opts?.dotRadius ?? Math.max(5, w * 0.008);
+    for (let i = 1; i < spinePoints.length - 1; i++) {
+      const p = spinePoints[i];
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
   ctx.restore();
 }

@@ -313,8 +313,14 @@ export function RehabCameraShell({
     // stays crisp and unscaled. No-op when the frame isn't cropped.
     ctx.save();
     ctx.translate(offX, offY);
+    // Neck (nose -> shoulder-mid) deliberately thinner and more
+    // transparent than the spine below it. At the spine's own weight
+    // the two read as one continuous orange rod running through the
+    // head; dropping to ~2/3 the width and 0.55 alpha separates them.
     drawCenterline(ctx, landmarks, dispW, dispH, {
       visibilityThreshold: OVERLAY_VIS_THRESHOLD,
+      strokeStyle: "rgba(249, 115, 22, 0.55)",
+      lineWidth: Math.max(2, dispW * 0.002),
     });
     // Spine as a STRAIGHT shoulder-mid → hip-mid line.
     //
@@ -322,10 +328,14 @@ export function RehabCameraShell({
     // shoulder-mid → hip-mid x-offset alone, which reads a forward
     // lean, a torso rotation, or plain landmark jitter as spinal
     // curvature — the spine visibly bent on a straight back. Passing
-    // explicit points bypasses that inference entirely; the helper
-    // still expands a 2-point segment into the usual 3 interior
-    // vertebra dots. Same dispW/dispH space as the other extras, so
-    // the enclosing ctx.translate(offX, offY) applies unchanged.
+    // explicit points bypasses that inference entirely. Same
+    // dispW/dispH space as the other extras, so the enclosing
+    // ctx.translate(offX, offY) applies unchanged.
+    //
+    // showDots:false — the interior "vertebra" dots were never
+    // measured positions, just evenly-spaced marks on the segment.
+    // On a straight line they add nothing but visual noise, so the
+    // trunk renders as a single clean stroke.
     const lShP = landmarks[LM.LEFT_SHOULDER];
     const rShP = landmarks[LM.RIGHT_SHOULDER];
     const lHipP = landmarks[LM.LEFT_HIP];
@@ -346,6 +356,7 @@ export function RehabCameraShell({
     drawSpineSegment(ctx, landmarks, dispW, dispH, {
       visibilityThreshold: OVERLAY_VIS_THRESHOLD,
       points: spinePts,
+      showDots: false,
     });
     const arc = angleArcRef.current;
     if (arc) {
