@@ -174,6 +174,13 @@ export function RehabCameraShell({
   // drawSkeleton closure (with [] deps) picks up new values
   // without needing to rebind on every prop change.
   const angleArcRef = useRef<AngleArcConfig | undefined>(angleArc);
+  // Side-profile spine curvature state. Both are draw-only — nothing
+  // here reaches onFrame or any mechanic engine.
+  //   sideViewRef  — last frame's side/front verdict, for hysteresis.
+  //   spineDirRef  — EMA-smoothed unit vector ear → shoulder-mid, so
+  //                  the curve doesn't twitch with per-frame ear jitter.
+  const sideViewRef = useRef(false);
+  const spineDirRef = useRef<{ x: number; y: number } | null>(null);
 
   const [busy, setBusy] = useState(false);
 
@@ -353,10 +360,89 @@ export function RehabCameraShell({
             },
           ]
         : undefined;
+    // ── Side-profile curvature ────────────────────────────────
+    // The spine only curves in a LATERAL view. Front-on there is no
+    // depth information at all — any apparent bow would be torso
+    // rotation or landmark jitter, which is exactly the artefact the
+    // straight-line rewrite removed. So the curve is gated on view.
+    //
+    // Gate = shoulder width / trunk length, both in display pixels.
+    // Facing the camera the shoulders span roughly half the trunk or
+    // more (~0.5+); in true profile one shoulder hides behind the
+    // other and the projected span collapses to ~0.15. 0.30 sits in
+    // the empty middle. Hysteresis (enter < 0.30, leave > 0.38) stops
+    // the spine snapping straight/curved as a patient turns through
+    // the boundary.
+    //
+    // The direction comes from the EAR: as the thoracic spine rounds,
+    // the head translates forward and the ear goes with it, so the
+    // ear → shoulder-mid vector carries the actual curvature. It is
+    // also the steadiest head landmark in profile — the nose swings
+    // with head rotation and the eyes occlude.
+    let spineTangentFrom: { x: number; y: number } | undefined;
+    if (spinePts && lShP && rShP) {
+      const S = spinePts[0];
+      const H = spinePts[1];
+      const shoulderW = Math.hypot(
+        (lShP.x - rShP.x) * dispW,
+        (lShP.y - rShP.y) * dispH,
+      );
+      const trunkLen = Math.hypot(H.x - S.x, H.y - S.y);
+      const ratio = trunkLen >= 1 ? shoulderW / trunkLen : Infinity;
+      const isSide = sideViewRef.current ? ratio <= 0.38 : ratio < 0.30;
+      sideViewRef.current = isSide;
+
+      const lEar = landmarks[LM.LEFT_EAR];
+      const rEar = landmarks[LM.RIGHT_EAR];
+      const nearEar =
+        (lEar?.visibility ?? 0) >= (rEar?.visibility ?? 0) ? lEar : rEar;
+      const ear =
+        nearEar && nearEar.visibility >= OVERLAY_VIS_THRESHOLD
+          ? nearEar
+          : undefined;
+
+      if (!isSide || !ear || trunkLen < 1) {
+        // Front view, or the ear dropped out: forget the smoothed
+        // direction so re-entry seeds fresh instead of easing out of a
+        // stale vector, and leave tangentFrom undefined — the helper
+        // then draws the same straight line as before this change.
+        spineDirRef.current = null;
+      } else {
+        const rawX = S.x - ear.x * dispW;
+        const rawY = S.y - ear.y * dispH;
+        const rawLen = Math.hypot(rawX, rawY);
+        if (rawLen >= 1) {
+          let dx = rawX / rawLen;
+          let dy = rawY / rawLen;
+          const prev = spineDirRef.current;
+          if (prev) {
+            dx = prev.x + 0.3 * (dx - prev.x);
+            dy = prev.y + 0.3 * (dy - prev.y);
+            const l = Math.hypot(dx, dy);
+            if (l >= 1e-6) {
+              dx /= l;
+              dy /= l;
+            } else {
+              dx = rawX / rawLen;
+              dy = rawY / rawLen;
+            }
+          }
+          spineDirRef.current = { x: dx, y: dy };
+          // Only the DIRECTION matters downstream (drawSpineSegment
+          // renormalises), so project a synthetic anchor one trunk
+          // length back along the smoothed vector.
+          spineTangentFrom = {
+            x: S.x - dx * trunkLen,
+            y: S.y - dy * trunkLen,
+          };
+        }
+      }
+    }
     drawSpineSegment(ctx, landmarks, dispW, dispH, {
       visibilityThreshold: OVERLAY_VIS_THRESHOLD,
       points: spinePts,
       showDots: false,
+      tangentFrom: spineTangentFrom,
     });
     const arc = angleArcRef.current;
     if (arc) {

@@ -147,6 +147,21 @@ export interface SpineSegmentOptions {
    *  vertebra dots by linear interpolation, so the chain still reads
    *  as a spine rather than a bare segment. */
   points?: { x: number; y: number }[];
+  /** Incoming direction anchor for the top of the spine, in the SAME
+   *  pixel space as `points`. Only honoured together with a 2-point
+   *  `points` pair; ignored otherwise.
+   *
+   *  The curve is made C1-continuous with the imaginary segment
+   *  `tangentFrom → S`, i.e. the spine leaves the shoulder-mid heading
+   *  the same way the neck arrived. Callers pass the EAR here: in a
+   *  lateral view the ear travels forward as the thoracic spine rounds,
+   *  so it carries real curvature information, and it is the most
+   *  stable head landmark in profile (the nose swings with head
+   *  rotation; the eyes occlude).
+   *
+   *  Omit it — as every frontal-view frame does — and the straight
+   *  2-point expansion below runs unchanged. */
+  tangentFrom?: { x: number; y: number };
 }
 
 export function drawSpineSegment(
@@ -185,16 +200,74 @@ export function drawSpineSegment(
     // points are already in this function's pixel space, so they are
     // stroked verbatim.
     if (supplied.length === 2) {
-      // Expand a bare segment into 5 points so the 3 interior
-      // vertebra dots still render: P_k = P0 + (k/4)·(P1 − P0).
       const [p0, p1] = supplied;
       const dx = p1.x - p0.x;
       const dy = p1.y - p0.y;
-      spinePoints.push({ x: p0.x, y: p0.y });
-      for (let k = 1; k <= 3; k++) {
-        spinePoints.push({ x: p0.x + (k / 4) * dx, y: p0.y + (k / 4) * dy });
+      const L = Math.hypot(dx, dy);
+      const tf = opts?.tangentFrom;
+      // Direction the neck arrives at the shoulder-mid from. Degenerate
+      // when the anchor sits on top of S, in which case there is no
+      // direction to read and we fall through to the straight path.
+      let d0x = tf ? p0.x - tf.x : 0;
+      let d0y = tf ? p0.y - tf.y : 0;
+      const d0Len = Math.hypot(d0x, d0y);
+
+      if (tf && L >= 1 && d0Len >= 1) {
+        // ── Cubic Hermite S → H ───────────────────────────
+        // Start tangent follows the neck direction, end tangent follows
+        // the trunk axis, so the curve leaves the shoulders along the
+        // head's lean and settles parallel to the axis at the hips.
+        const ux = dx / L;
+        const uy = dy / L;
+        d0x /= d0Len;
+        d0y /= d0Len;
+
+        // Clamp the start tangent to ±40° off the trunk axis. Without
+        // this a mis-tracked ear (or a head turned to the camera) can
+        // swing d0 far off-axis and whip the curve into a hook; the
+        // clamp bounds the bow instead of rejecting the frame.
+        const cross = ux * d0y - uy * d0x;
+        const dot = ux * d0x + uy * d0y;
+        const ang = Math.atan2(cross, dot);
+        const maxAng = (40 * Math.PI) / 180;
+        if (Math.abs(ang) > maxAng) {
+          const a = ang > 0 ? maxAng : -maxAng;
+          const ca = Math.cos(a);
+          const sa = Math.sin(a);
+          d0x = ux * ca - uy * sa;
+          d0y = ux * sa + uy * ca;
+        }
+
+        // Tangent magnitudes at 0.6·L keep the bow subtle — a full-L
+        // tangent overshoots into an S-curve on a straight back.
+        const m0x = d0x * L * 0.6;
+        const m0y = d0y * L * 0.6;
+        const m1x = dx * 0.6;
+        const m1y = dy * 0.6;
+
+        const N = 12;
+        for (let k = 0; k <= N; k++) {
+          const t = k / N;
+          const t2 = t * t;
+          const t3 = t2 * t;
+          const h00 = 2 * t3 - 3 * t2 + 1;
+          const h10 = t3 - 2 * t2 + t;
+          const h01 = -2 * t3 + 3 * t2;
+          const h11 = t3 - t2;
+          spinePoints.push({
+            x: h00 * p0.x + h10 * m0x + h01 * p1.x + h11 * m1x,
+            y: h00 * p0.y + h10 * m0y + h01 * p1.y + h11 * m1y,
+          });
+        }
+      } else {
+        // Expand a bare segment into 5 points so the 3 interior
+        // vertebra dots still render: P_k = P0 + (k/4)·(P1 − P0).
+        spinePoints.push({ x: p0.x, y: p0.y });
+        for (let k = 1; k <= 3; k++) {
+          spinePoints.push({ x: p0.x + (k / 4) * dx, y: p0.y + (k / 4) * dy });
+        }
+        spinePoints.push({ x: p1.x, y: p1.y });
       }
-      spinePoints.push({ x: p1.x, y: p1.y });
     } else {
       spinePoints.push(...supplied);
     }
