@@ -128,6 +128,21 @@ export interface SpineSegmentOptions {
   dotColor?: string;
   /** Interior vertebra dot radius. Auto-scales to canvas by default. */
   dotRadius?: number;
+  /** Caller-supplied spine polyline, ALREADY in the same pixel space
+   *  as `w`/`h` (i.e. dispW/dispH, after the caller's ctx.translate).
+   *
+   *  When given (>= 2 points) the inferred-bow geometry below is
+   *  skipped entirely and these points are stroked as-is. That bow was
+   *  derived from the shoulder-mid → hip-mid x-offset alone, which
+   *  reads any forward lean, torso rotation, or landmark jitter as
+   *  spinal curvature — it bent the spine on a straight back. A caller
+   *  that can supply real points (a straight line, or later a
+   *  measured centreline) should do so.
+   *
+   *  Supplying exactly 2 points yields 3 evenly-spaced interior
+   *  vertebra dots by linear interpolation, so the chain still reads
+   *  as a spine rather than a bare segment. */
+  points?: { x: number; y: number }[];
 }
 
 export function drawSpineSegment(
@@ -157,49 +172,72 @@ export function drawSpineSegment(
   const axisLen = Math.hypot(axisX, axisY);
   if (axisLen < 1) return;
 
-  // ── Faceted polyline with mild lean-driven bend. ─────────────
-  //
-  // BlazePose 33-keypoint gives no mid-torso landmarks, so the
-  // interior "vertebra" positions are inferred. Prior versions
-  // drew one smooth quadratic bezier (too curvy — read as a rod
-  // bowing), then a fully straight polyline (read as too rigid
-  // when the patient was actively bending). Middle ground:
-  //   • Compute a subtle bezier control point from the observed
-  //     lean signal (how far the shoulder-mid has drifted off the
-  //     vertical stack over the hip-mid).
-  //   • Sample interior points along that bezier.
-  //   • Connect them with STRAIGHT segments — no curveTo. The eye
-  //     reads it as a jointed chain that hinges at every dot
-  //     while still tracking the actual body lean.
-  //
-  // Bow strength kept low (0.35 × raw lean, capped at 20 % of
-  // trunk length) so a straight upper body gives an effectively
-  // straight polyline, and a real forward/lateral bend nudges
-  // the chain enough to be visible but not exaggerated.
-  const perpX =  axisY / axisLen;
-  const perpY = -axisX / axisLen;
-  const rawBow = (hipMid.x - shMid.x) * 0.35;
-  const maxBow = axisLen * 0.2;
-  const bow = Math.max(-maxBow, Math.min(maxBow, rawBow));
-  const straightMidX = (shMid.x + hipMid.x) / 2;
-  const straightMidY = (shMid.y + hipMid.y) / 2;
-  const controlX = straightMidX + 2 * perpX * bow;
-  const controlY = straightMidY + 2 * perpY * bow;
-  const bezierAt = (t: number) => {
-    const u = 1 - t;
-    return {
-      x: u * u * shMid.x + 2 * u * t * controlX + t * t * hipMid.x,
-      y: u * u * shMid.y + 2 * u * t * controlY + t * t * hipMid.y,
-    };
-  };
-
-  const nSegments = Math.max(2, opts?.segments ?? 4);
   const spinePoints: { x: number; y: number }[] = [];
-  spinePoints.push({ x: shMid.x, y: shMid.y });
-  for (let i = 1; i < nSegments; i++) {
-    spinePoints.push(bezierAt(i / nSegments));
+
+  const supplied = opts?.points;
+  if (supplied && supplied.length >= 2) {
+    // ── Caller-supplied polyline ─────────────────────────────────
+    // The inferred-bow block below is UNREACHABLE on this path. The
+    // points are already in this function's pixel space, so they are
+    // stroked verbatim.
+    if (supplied.length === 2) {
+      // Expand a bare segment into 5 points so the 3 interior
+      // vertebra dots still render: P_k = P0 + (k/4)·(P1 − P0).
+      const [p0, p1] = supplied;
+      const dx = p1.x - p0.x;
+      const dy = p1.y - p0.y;
+      spinePoints.push({ x: p0.x, y: p0.y });
+      for (let k = 1; k <= 3; k++) {
+        spinePoints.push({ x: p0.x + (k / 4) * dx, y: p0.y + (k / 4) * dy });
+      }
+      spinePoints.push({ x: p1.x, y: p1.y });
+    } else {
+      spinePoints.push(...supplied);
+    }
+  } else {
+    // ── Faceted polyline with mild lean-driven bend. ─────────────
+    //
+    // BlazePose 33-keypoint gives no mid-torso landmarks, so the
+    // interior "vertebra" positions are inferred. Prior versions
+    // drew one smooth quadratic bezier (too curvy — read as a rod
+    // bowing), then a fully straight polyline (read as too rigid
+    // when the patient was actively bending). Middle ground:
+    //   • Compute a subtle bezier control point from the observed
+    //     lean signal (how far the shoulder-mid has drifted off the
+    //     vertical stack over the hip-mid).
+    //   • Sample interior points along that bezier.
+    //   • Connect them with STRAIGHT segments — no curveTo. The eye
+    //     reads it as a jointed chain that hinges at every dot
+    //     while still tracking the actual body lean.
+    //
+    // Bow strength kept low (0.35 × raw lean, capped at 20 % of
+    // trunk length) so a straight upper body gives an effectively
+    // straight polyline, and a real forward/lateral bend nudges
+    // the chain enough to be visible but not exaggerated.
+    const perpX =  axisY / axisLen;
+    const perpY = -axisX / axisLen;
+    const rawBow = (hipMid.x - shMid.x) * 0.35;
+    const maxBow = axisLen * 0.2;
+    const bow = Math.max(-maxBow, Math.min(maxBow, rawBow));
+    const straightMidX = (shMid.x + hipMid.x) / 2;
+    const straightMidY = (shMid.y + hipMid.y) / 2;
+    const controlX = straightMidX + 2 * perpX * bow;
+    const controlY = straightMidY + 2 * perpY * bow;
+    const bezierAt = (t: number) => {
+      const u = 1 - t;
+      return {
+        x: u * u * shMid.x + 2 * u * t * controlX + t * t * hipMid.x,
+        y: u * u * shMid.y + 2 * u * t * controlY + t * t * hipMid.y,
+      };
+    };
+
+    const nSegments = Math.max(2, opts?.segments ?? 4);
+    spinePoints.push({ x: shMid.x, y: shMid.y });
+    for (let i = 1; i < nSegments; i++) {
+      spinePoints.push(bezierAt(i / nSegments));
+    }
+    spinePoints.push({ x: hipMid.x, y: hipMid.y });
   }
-  spinePoints.push({ x: hipMid.x, y: hipMid.y });
 
   const baseLineWidth = Math.max(3, w * 0.005);
   ctx.save();

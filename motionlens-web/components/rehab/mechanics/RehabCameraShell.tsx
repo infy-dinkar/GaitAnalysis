@@ -316,8 +316,36 @@ export function RehabCameraShell({
     drawCenterline(ctx, landmarks, dispW, dispH, {
       visibilityThreshold: OVERLAY_VIS_THRESHOLD,
     });
+    // Spine as a STRAIGHT shoulder-mid → hip-mid line.
+    //
+    // drawSpineSegment's own geometry infers a bow from the
+    // shoulder-mid → hip-mid x-offset alone, which reads a forward
+    // lean, a torso rotation, or plain landmark jitter as spinal
+    // curvature — the spine visibly bent on a straight back. Passing
+    // explicit points bypasses that inference entirely; the helper
+    // still expands a 2-point segment into the usual 3 interior
+    // vertebra dots. Same dispW/dispH space as the other extras, so
+    // the enclosing ctx.translate(offX, offY) applies unchanged.
+    const lShP = landmarks[LM.LEFT_SHOULDER];
+    const rShP = landmarks[LM.RIGHT_SHOULDER];
+    const lHipP = landmarks[LM.LEFT_HIP];
+    const rHipP = landmarks[LM.RIGHT_HIP];
+    const spinePts =
+      lShP && rShP && lHipP && rHipP
+        ? [
+            {
+              x: ((lShP.x + rShP.x) / 2) * dispW,
+              y: ((lShP.y + rShP.y) / 2) * dispH,
+            },
+            {
+              x: ((lHipP.x + rHipP.x) / 2) * dispW,
+              y: ((lHipP.y + rHipP.y) / 2) * dispH,
+            },
+          ]
+        : undefined;
     drawSpineSegment(ctx, landmarks, dispW, dispH, {
       visibilityThreshold: OVERLAY_VIS_THRESHOLD,
+      points: spinePts,
     });
     const arc = angleArcRef.current;
     if (arc) {
