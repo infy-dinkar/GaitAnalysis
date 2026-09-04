@@ -228,16 +228,36 @@ export function drawSpineSegment(
         d0x /= d0Len;
         d0y /= d0Len;
 
-        // θ = signed angle from the trunk axis to the neck direction,
-        // clamped to ±50°. Without the clamp a mis-tracked ear (or a
-        // head turned to the camera) swings θ far off-axis and whips
-        // the curve into a hook; clamping bounds the bow instead of
-        // rejecting the frame.
-        const cross = ux * d0y - uy * d0x;
-        const dot = ux * d0x + uy * d0y;
-        const raw = Math.atan2(cross, dot);
+        // θ_raw = signed angle from the trunk axis to the neck
+        // direction. Measured against the ORIGINAL shoulder-mid →
+        // hip-mid axis, not the p0→p1 chord: a caller that offsets the
+        // drawn endpoints by different amounts (Rehab shifts the
+        // shoulders further back than the hips) tilts that chord a
+        // couple of degrees, which would otherwise show up as a small
+        // permanent bow.
+        const ax0 = axisX / axisLen;
+        const ay0 = axisY / axisLen;
+        const raw = Math.atan2(
+          ax0 * d0y - ay0 * d0x,
+          ax0 * d0x + ay0 * d0y,
+        );
+
+        // DEAD-ZONE. In profile the ear sits naturally ~12–18° ahead
+        // of the shoulder landmark even on a perfectly upright spine,
+        // so raw angle alone drew a permanent arc on neutral posture.
+        // Subtract 15° and rescale the remainder back over the full
+        // range, so 15° → 0 (dead straight) and 50° → 50° (unchanged
+        // at the top end): only curvature BEYOND the neutral head
+        // carriage bends the line.
+        //
+        // The clamp still matters above that — a mis-tracked ear, or a
+        // head turned to the camera, otherwise whips the curve into a
+        // hook.
         const maxAng = (50 * Math.PI) / 180;
-        const theta = Math.max(-maxAng, Math.min(maxAng, raw));
+        const deadAng = (15 * Math.PI) / 180;
+        const mag = Math.max(0, Math.abs(raw) - deadAng)
+          * (maxAng / (maxAng - deadAng));
+        const theta = (raw < 0 ? -1 : 1) * Math.min(maxAng, mag);
 
         // SYMMETRIC arc: the curve leaves S rotated +θ off the axis
         // and arrives at H rotated −θ, i.e. mirrored about the
@@ -247,8 +267,10 @@ export function drawSpineSegment(
         // a single side rather than an asymmetric hook that
         // straightens out before the hips.
         //
-        // Sagitta = 0.25·L·sin θ (θ = 30° → 12.5 px on a 100 px
-        // trunk), close to the circular-arc (L/2)·tan(θ/2) = 13.4.
+        // Sagitta = 0.25·L·sin θ_eff. On a 100 px trunk a raw 30°
+        // becomes 21.4° after the dead-zone → 9.1 px; raw 50° stays
+        // 50° → 19.2 px. θ_eff = 0 collapses m0 and m1 onto the chord,
+        // giving an exactly straight line between the two endpoints.
         const cT = Math.cos(theta);
         const sT = Math.sin(theta);
         const m0x = (ux * cT - uy * sT) * L;
