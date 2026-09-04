@@ -68,6 +68,12 @@ export interface CenterlineOptions {
   lineWidth?: number;
   /** Dash pattern. */
   dash?: [number, number];
+  /** Override the LOWER endpoint (default: shoulder-mid), in the same
+   *  pixel space as `w`/`h`. Rehab uses it in side profile, where the
+   *  spine is drawn shifted posteriorly — without this the neck would
+   *  stop short of the spine's top and leave a visible gap. The
+   *  shoulder visibility gate above still applies. */
+  endPoint?: { x: number; y: number };
 }
 
 export function drawCenterline(
@@ -88,7 +94,7 @@ export function drawCenterline(
   // so we no longer duplicate a straight segment through the torso.
   if (!visible(nose, threshold)) return;
   if (!visible(lSh, threshold) || !visible(rSh, threshold)) return;
-  const shMid = midpointPx(lSh!, rSh!, w, h);
+  const shMid = opts?.endPoint ?? midpointPx(lSh!, rSh!, w, h);
   const nosePx = toPx(nose!, w, h);
   if (Math.hypot(nosePx.x - shMid.x, nosePx.y - shMid.y) < 1) return;
 
@@ -147,6 +153,21 @@ export interface SpineSegmentOptions {
    *  vertebra dots by linear interpolation, so the chain still reads
    *  as a spine rather than a bare segment. */
   points?: { x: number; y: number }[];
+  /** Incoming direction anchor for the top of the spine, in the SAME
+   *  pixel space as `points`. Only honoured together with a 2-point
+   *  `points` pair; ignored otherwise.
+   *
+   *  The curve is made C1-continuous with the imaginary segment
+   *  `tangentFrom → S`, i.e. the spine leaves the shoulder-mid heading
+   *  the same way the neck arrived. Callers pass the EAR here: in a
+   *  lateral view the ear travels forward as the thoracic spine rounds,
+   *  so it carries real curvature information, and it is the most
+   *  stable head landmark in profile (the nose swings with head
+   *  rotation; the eyes occlude).
+   *
+   *  Omit it — as every frontal-view frame does — and the straight
+   *  2-point expansion below runs unchanged. */
+  tangentFrom?: { x: number; y: number };
 }
 
 export function drawSpineSegment(
@@ -185,16 +206,101 @@ export function drawSpineSegment(
     // points are already in this function's pixel space, so they are
     // stroked verbatim.
     if (supplied.length === 2) {
-      // Expand a bare segment into 5 points so the 3 interior
-      // vertebra dots still render: P_k = P0 + (k/4)·(P1 − P0).
       const [p0, p1] = supplied;
       const dx = p1.x - p0.x;
       const dy = p1.y - p0.y;
-      spinePoints.push({ x: p0.x, y: p0.y });
-      for (let k = 1; k <= 3; k++) {
-        spinePoints.push({ x: p0.x + (k / 4) * dx, y: p0.y + (k / 4) * dy });
+      const L = Math.hypot(dx, dy);
+      const tf = opts?.tangentFrom;
+      // Direction the neck arrives at the shoulder-mid from. Degenerate
+      // when the anchor sits on top of S, in which case there is no
+      // direction to read and we fall through to the straight path.
+      let d0x = tf ? p0.x - tf.x : 0;
+      let d0y = tf ? p0.y - tf.y : 0;
+      const d0Len = Math.hypot(d0x, d0y);
+
+      if (tf && L >= 1 && d0Len >= 1) {
+        // ── Cubic Hermite S → H ───────────────────────────
+        // Start tangent follows the neck direction, end tangent follows
+        // the trunk axis, so the curve leaves the shoulders along the
+        // head's lean and settles parallel to the axis at the hips.
+        const ux = dx / L;
+        const uy = dy / L;
+        d0x /= d0Len;
+        d0y /= d0Len;
+
+        // θ_raw = signed angle from the trunk axis to the neck
+        // direction. Measured against the ORIGINAL shoulder-mid →
+        // hip-mid axis, not the p0→p1 chord: a caller that offsets the
+        // drawn endpoints by different amounts (Rehab shifts the
+        // shoulders further back than the hips) tilts that chord a
+        // couple of degrees, which would otherwise show up as a small
+        // permanent bow.
+        const ax0 = axisX / axisLen;
+        const ay0 = axisY / axisLen;
+        const raw = Math.atan2(
+          ax0 * d0y - ay0 * d0x,
+          ax0 * d0x + ay0 * d0y,
+        );
+
+        // DEAD-ZONE. In profile the ear sits naturally ~12–18° ahead
+        // of the shoulder landmark even on a perfectly upright spine,
+        // so raw angle alone drew a permanent arc on neutral posture.
+        // Subtract 15° and rescale the remainder back over the full
+        // range, so 15° → 0 (dead straight) and 50° → 50° (unchanged
+        // at the top end): only curvature BEYOND the neutral head
+        // carriage bends the line.
+        //
+        // The clamp still matters above that — a mis-tracked ear, or a
+        // head turned to the camera, otherwise whips the curve into a
+        // hook.
+        const maxAng = (50 * Math.PI) / 180;
+        const deadAng = (15 * Math.PI) / 180;
+        const mag = Math.max(0, Math.abs(raw) - deadAng)
+          * (maxAng / (maxAng - deadAng));
+        const theta = (raw < 0 ? -1 : 1) * Math.min(maxAng, mag);
+
+        // SYMMETRIC arc: the curve leaves S rotated +θ off the axis
+        // and arrives at H rotated −θ, i.e. mirrored about the
+        // midpoint. Equal magnitudes (both L) make the perpendicular
+        // offset exactly L·sin θ·t(1−t) — a parabola peaking at
+        // t = 0.5, so the trunk reads as one clean banana bulging to
+        // a single side rather than an asymmetric hook that
+        // straightens out before the hips.
+        //
+        // Sagitta = 0.25·L·sin θ_eff. On a 100 px trunk a raw 30°
+        // becomes 21.4° after the dead-zone → 9.1 px; raw 50° stays
+        // 50° → 19.2 px. θ_eff = 0 collapses m0 and m1 onto the chord,
+        // giving an exactly straight line between the two endpoints.
+        const cT = Math.cos(theta);
+        const sT = Math.sin(theta);
+        const m0x = (ux * cT - uy * sT) * L;
+        const m0y = (ux * sT + uy * cT) * L;
+        const m1x = (ux * cT + uy * sT) * L;
+        const m1y = (-ux * sT + uy * cT) * L;
+
+        const N = 12;
+        for (let k = 0; k <= N; k++) {
+          const t = k / N;
+          const t2 = t * t;
+          const t3 = t2 * t;
+          const h00 = 2 * t3 - 3 * t2 + 1;
+          const h10 = t3 - 2 * t2 + t;
+          const h01 = -2 * t3 + 3 * t2;
+          const h11 = t3 - t2;
+          spinePoints.push({
+            x: h00 * p0.x + h10 * m0x + h01 * p1.x + h11 * m1x,
+            y: h00 * p0.y + h10 * m0y + h01 * p1.y + h11 * m1y,
+          });
+        }
+      } else {
+        // Expand a bare segment into 5 points so the 3 interior
+        // vertebra dots still render: P_k = P0 + (k/4)·(P1 − P0).
+        spinePoints.push({ x: p0.x, y: p0.y });
+        for (let k = 1; k <= 3; k++) {
+          spinePoints.push({ x: p0.x + (k / 4) * dx, y: p0.y + (k / 4) * dy });
+        }
+        spinePoints.push({ x: p1.x, y: p1.y });
       }
-      spinePoints.push({ x: p1.x, y: p1.y });
     } else {
       spinePoints.push(...supplied);
     }
