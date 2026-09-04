@@ -181,6 +181,9 @@ export function RehabCameraShell({
   //                  the curve doesn't twitch with per-frame ear jitter.
   const sideViewRef = useRef(false);
   const spineDirRef = useRef<{ x: number; y: number } | null>(null);
+  //   spinePerpRef — EMA-smoothed unit vector pointing POSTERIORLY
+  //                  (away from the nose), for the back-tracking offset.
+  const spinePerpRef = useRef<{ x: number; y: number } | null>(null);
 
   const [busy, setBusy] = useState(false);
 
@@ -320,15 +323,6 @@ export function RehabCameraShell({
     // stays crisp and unscaled. No-op when the frame isn't cropped.
     ctx.save();
     ctx.translate(offX, offY);
-    // Neck (nose -> shoulder-mid) deliberately thinner and more
-    // transparent than the spine below it. At the spine's own weight
-    // the two read as one continuous orange rod running through the
-    // head; dropping to ~2/3 the width and 0.55 alpha separates them.
-    drawCenterline(ctx, landmarks, dispW, dispH, {
-      visibilityThreshold: OVERLAY_VIS_THRESHOLD,
-      strokeStyle: "rgba(249, 115, 22, 0.55)",
-      lineWidth: Math.max(2, dispW * 0.002),
-    });
     // Spine as a STRAIGHT shoulder-mid → hip-mid line.
     //
     // drawSpineSegment's own geometry infers a bow from the
@@ -379,6 +373,17 @@ export function RehabCameraShell({
     // ear → shoulder-mid vector carries the actual curvature. It is
     // also the steadiest head landmark in profile — the nose swings
     // with head rotation and the eyes occlude.
+    //
+    // POSTERIOR OFFSET (side view only): shoulder-mid and hip-mid sit
+    // at the body's mid-depth, so a line between them runs through the
+    // middle of the trunk, not along the back the clinician is looking
+    // at. Shifting both ends backward by a fraction of trunk length —
+    // more at the chest (0.12) than the pelvis (0.07), because the
+    // ribcage is the deeper of the two — puts the stroke on the
+    // posterior surface. "Backward" is derived from the ear → nose
+    // vector, which is the only reliable facing signal in profile.
+    let spineDraw = spinePts;
+    let neckAnchor: { x: number; y: number } | undefined;
     let spineTangentFrom: { x: number; y: number } | undefined;
     if (spinePts && lShP && rShP) {
       const S = spinePts[0];
@@ -400,14 +405,25 @@ export function RehabCameraShell({
         nearEar && nearEar.visibility >= OVERLAY_VIS_THRESHOLD
           ? nearEar
           : undefined;
+      const noseP = landmarks[LM.NOSE];
+      const nose =
+        noseP && noseP.visibility >= OVERLAY_VIS_THRESHOLD ? noseP : undefined;
 
       if (!isSide || !ear || trunkLen < 1) {
-        // Front view, or the ear dropped out: forget the smoothed
-        // direction so re-entry seeds fresh instead of easing out of a
-        // stale vector, and leave tangentFrom undefined — the helper
-        // then draws the same straight line as before this change.
+        // Front view, or the ear dropped out: forget both smoothed
+        // vectors so re-entry seeds fresh instead of easing out of a
+        // stale one, and leave tangentFrom/spineDraw untouched — the
+        // helper then draws the same straight [S, H] line as before
+        // this change.
         spineDirRef.current = null;
+        spinePerpRef.current = null;
       } else {
+        // Nose lost: no facing signal, so the offset is skipped for
+        // this frame and both refs re-seed on the next good one.
+        if (!nose) {
+          spineDirRef.current = null;
+          spinePerpRef.current = null;
+        }
         const rawX = S.x - ear.x * dispW;
         const rawY = S.y - ear.y * dispH;
         const rawLen = Math.hypot(rawX, rawY);
@@ -428,19 +444,74 @@ export function RehabCameraShell({
             }
           }
           spineDirRef.current = { x: dx, y: dy };
+
+          // ── Posterior offset ──────────────────────────────
+          // fwd = ear → nose (which way the patient faces);
+          // p    = the trunk-axis perpendicular pointing AWAY from
+          //        the nose, i.e. toward the back.
+          if (nose) {
+            const fx = (nose.x - ear.x) * dispW;
+            const fy = (nose.y - ear.y) * dispH;
+            const fLen = Math.hypot(fx, fy);
+            if (fLen >= 1) {
+              const ax = (H.x - S.x) / trunkLen;
+              const ay = (H.y - S.y) / trunkLen;
+              let px = ay;
+              let py = -ax;
+              if (px * (fx / fLen) + py * (fy / fLen) > 0) {
+                px = -px;
+                py = -py;
+              }
+              const prevP = spinePerpRef.current;
+              if (prevP) {
+                px = prevP.x + 0.3 * (px - prevP.x);
+                py = prevP.y + 0.3 * (py - prevP.y);
+                const pl = Math.hypot(px, py);
+                if (pl >= 1e-6) {
+                  px /= pl;
+                  py /= pl;
+                }
+              }
+              spinePerpRef.current = { x: px, y: py };
+              const sOff = 0.12 * trunkLen;
+              const hOff = 0.07 * trunkLen;
+              spineDraw = [
+                { x: S.x + px * sOff, y: S.y + py * sOff },
+                { x: H.x + px * hOff, y: H.y + py * hOff },
+              ];
+              // The neck must land on the spine's new top, not the
+              // raw shoulder-mid, or it stops short and leaves a gap.
+              neckAnchor = spineDraw[0];
+            }
+          }
+
           // Only the DIRECTION matters downstream (drawSpineSegment
           // renormalises), so project a synthetic anchor one trunk
-          // length back along the smoothed vector.
+          // length back along the smoothed vector. Anchored at the
+          // DRAWN top point so the offset does not tilt θ.
+          const top = neckAnchor ?? S;
           spineTangentFrom = {
-            x: S.x - dx * trunkLen,
-            y: S.y - dy * trunkLen,
+            x: top.x - dx * trunkLen,
+            y: top.y - dy * trunkLen,
           };
         }
       }
     }
+    // Neck (nose -> shoulder-mid) deliberately thinner and more
+    // transparent than the spine below it. At the spine's own weight
+    // the two read as one continuous orange rod running through the
+    // head; dropping to ~2/3 the width and 0.55 alpha separates them.
+    // Drawn here (after the spine geometry, before the spine stroke)
+    // only so it can reuse neckAnchor; z-order is unchanged.
+    drawCenterline(ctx, landmarks, dispW, dispH, {
+      visibilityThreshold: OVERLAY_VIS_THRESHOLD,
+      strokeStyle: "rgba(249, 115, 22, 0.55)",
+      lineWidth: Math.max(2, dispW * 0.002),
+      endPoint: neckAnchor,
+    });
     drawSpineSegment(ctx, landmarks, dispW, dispH, {
       visibilityThreshold: OVERLAY_VIS_THRESHOLD,
-      points: spinePts,
+      points: spineDraw,
       showDots: false,
       tangentFrom: spineTangentFrom,
     });

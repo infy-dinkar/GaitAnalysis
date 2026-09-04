@@ -68,6 +68,12 @@ export interface CenterlineOptions {
   lineWidth?: number;
   /** Dash pattern. */
   dash?: [number, number];
+  /** Override the LOWER endpoint (default: shoulder-mid), in the same
+   *  pixel space as `w`/`h`. Rehab uses it in side profile, where the
+   *  spine is drawn shifted posteriorly — without this the neck would
+   *  stop short of the spine's top and leave a visible gap. The
+   *  shoulder visibility gate above still applies. */
+  endPoint?: { x: number; y: number };
 }
 
 export function drawCenterline(
@@ -88,7 +94,7 @@ export function drawCenterline(
   // so we no longer duplicate a straight segment through the torso.
   if (!visible(nose, threshold)) return;
   if (!visible(lSh, threshold) || !visible(rSh, threshold)) return;
-  const shMid = midpointPx(lSh!, rSh!, w, h);
+  const shMid = opts?.endPoint ?? midpointPx(lSh!, rSh!, w, h);
   const nosePx = toPx(nose!, w, h);
   if (Math.hypot(nosePx.x - shMid.x, nosePx.y - shMid.y) < 1) return;
 
@@ -222,31 +228,33 @@ export function drawSpineSegment(
         d0x /= d0Len;
         d0y /= d0Len;
 
-        // Clamp the start tangent to ±50° off the trunk axis. Without
-        // this a mis-tracked ear (or a head turned to the camera) can
-        // swing d0 far off-axis and whip the curve into a hook; the
-        // clamp bounds the bow instead of rejecting the frame.
+        // θ = signed angle from the trunk axis to the neck direction,
+        // clamped to ±50°. Without the clamp a mis-tracked ear (or a
+        // head turned to the camera) swings θ far off-axis and whips
+        // the curve into a hook; clamping bounds the bow instead of
+        // rejecting the frame.
         const cross = ux * d0y - uy * d0x;
         const dot = ux * d0x + uy * d0y;
-        const ang = Math.atan2(cross, dot);
+        const raw = Math.atan2(cross, dot);
         const maxAng = (50 * Math.PI) / 180;
-        if (Math.abs(ang) > maxAng) {
-          const a = ang > 0 ? maxAng : -maxAng;
-          const ca = Math.cos(a);
-          const sa = Math.sin(a);
-          d0x = ux * ca - uy * sa;
-          d0y = ux * sa + uy * ca;
-        }
+        const theta = Math.max(-maxAng, Math.min(maxAng, raw));
 
-        // Tangent magnitudes. The start tangent runs the full trunk
-        // length so the head's lean actually shows on camera (0.6·L
-        // read as almost straight); the end tangent stays shorter so
-        // the curve settles onto the axis at the hips instead of
-        // overshooting into an S.
-        const m0x = d0x * L * 1.0;
-        const m0y = d0y * L * 1.0;
-        const m1x = dx * 0.8;
-        const m1y = dy * 0.8;
+        // SYMMETRIC arc: the curve leaves S rotated +θ off the axis
+        // and arrives at H rotated −θ, i.e. mirrored about the
+        // midpoint. Equal magnitudes (both L) make the perpendicular
+        // offset exactly L·sin θ·t(1−t) — a parabola peaking at
+        // t = 0.5, so the trunk reads as one clean banana bulging to
+        // a single side rather than an asymmetric hook that
+        // straightens out before the hips.
+        //
+        // Sagitta = 0.25·L·sin θ (θ = 30° → 12.5 px on a 100 px
+        // trunk), close to the circular-arc (L/2)·tan(θ/2) = 13.4.
+        const cT = Math.cos(theta);
+        const sT = Math.sin(theta);
+        const m0x = (ux * cT - uy * sT) * L;
+        const m0y = (ux * sT + uy * cT) * L;
+        const m1x = (ux * cT + uy * sT) * L;
+        const m1y = (-ux * sT + uy * cT) * L;
 
         const N = 12;
         for (let k = 0; k <= N; k++) {
