@@ -14,7 +14,14 @@
 # app.py (excluded from the image via .dockerignore).
 
 # Core ML
-mediapipe>=0.10.10
+# PINNED, not >=. A floating mediapipe silently upgraded the prod image
+# from 0.10.x to 1.0.0, which changed the segmentation mask's shape from
+# (H, W) to (H, W, 1) and took the whole posture-silhouette overlay out
+# with it — no error, no log, just a missing response key. The engine
+# now normalises the shape either way, but the version stays pinned so
+# a rebuild cannot move the ML runtime under the app again. Bump this
+# deliberately, and re-run the posture verification when you do.
+mediapipe==1.0.0
 opencv-python-headless>=4.9.0
 numpy>=1.26.0
 scipy>=1.13.0

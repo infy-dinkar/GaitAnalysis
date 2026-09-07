@@ -70,7 +70,7 @@ from typing import Optional
 import mediapipe as mp
 import numpy as np
 
-from engines.posture_silhouette import build_silhouette
+from engines.posture_silhouette import attach_silhouette
 
 # Pillow imported lazily inside _load_image_rgb so a missing PIL
 # dependency only breaks the posture endpoint, not the whole
@@ -308,6 +308,22 @@ def _extract_posture_keypoints(
     if masks:
         try:
             mask = np.array(masks[0].numpy_view(), dtype=np.float32, copy=True)
+            # SHAPE NORMALISATION. mediapipe 0.10.x hands back (H, W);
+            # 1.0.0 hands back (H, W, 1) — a trailing channel axis. Every
+            # consumer downstream indexes rows as mask[y] and expects a
+            # 1-D row, so the 3-D form silently produced no geometry at
+            # all: build_silhouette's `ndim != 2` guard returned None,
+            # the attach is conditional, and the key simply vanished from
+            # every view. That shipped to prod as a total feature outage
+            # that looked exactly like "no mask available", because the
+            # version was floating (requirements pinned only
+            # mediapipe>=0.10.10) and the local env was still on 0.10.x.
+            #
+            # Collapse it here, once, so shape handling lives at the
+            # single point the mask enters the codebase rather than in
+            # each consumer.
+            if mask.ndim == 3:
+                mask = mask[:, :, 0]
         except Exception:  # pragma: no cover — never fail a view on this
             log.warning("posture: segmentation mask unreadable", exc_info=True)
             mask = None
@@ -735,13 +751,7 @@ def analyze_posture_image(image_path: str, view: str) -> dict:
     # this function returned before — which is also exactly what every
     # already-saved report looks like, and what the frontend's fallback
     # path expects. Never let overlay geometry fail an analysis.
-    try:
-        silhouette = build_silhouette(mask, kps)
-    except Exception:  # pragma: no cover — defensive
-        log.warning("posture: silhouette build failed", exc_info=True)
-        silhouette = None
-    if silhouette is not None:
-        out["silhouette"] = silhouette
+    attach_silhouette(out, mask, kps, view)
     return out
 
 

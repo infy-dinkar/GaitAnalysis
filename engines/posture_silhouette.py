@@ -25,9 +25,12 @@ back to its previous landmark-anchored line.
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import numpy as np
+
+log = logging.getLogger("motionlens.posture.silhouette")
 
 # MediaPipe Tasks hands back a float32 confidence map in [0, 1] -- NOT
 # the 0/255 RED-channel bitmap the browser Solutions API produces. The
@@ -342,8 +345,45 @@ def build_silhouette(
     return out
 
 
+def attach_silhouette(
+    out: dict, mask: Optional[np.ndarray], kps: list[dict], view: str,
+) -> None:
+    """Attach the silhouette block to a view result, in place, or log
+    why it could not.
+
+    The single attach point for every view. Best-effort by contract: a
+    missing mask, geometry the mask and the landmarks disagree on, or an
+    outright exception all leave the key absent — which is what a
+    response looked like before the silhouette existed, and what the
+    frontend's fallback path already handles. A view is never failed
+    over overlay decoration.
+
+    ⚠️ That silence is why a total outage went unnoticed in prod: on
+    mediapipe 1.0.0 every view returned None and the response was simply
+    missing a key, indistinguishable from "this photo had no usable
+    mask". ONE line per view (never per row) now records the mask's
+    actual shape whenever the block comes back empty, which turns that
+    class of bug into a log read instead of a container autopsy.
+    """
+    try:
+        sil = build_silhouette(mask, kps)
+    except Exception:  # pragma: no cover — defensive
+        log.warning("posture: silhouette build failed for %s",
+                    view, exc_info=True)
+        return
+    if sil is None:
+        log.info(
+            "posture: silhouette None for %s — mask=%s", view,
+            "absent" if mask is None
+            else f"shape={mask.shape} ndim={mask.ndim}",
+        )
+        return
+    out["silhouette"] = sil
+
+
 __all__ = (
     "MASK_THRESHOLD",
+    "attach_silhouette",
     "body_midline_x",
     "build_silhouette",
     "plumb_x_side",

@@ -49,33 +49,99 @@ type SlotKey = "front" | "side" | "back" | "left_side" | "right_side";
 // `maxWidth` pixels wide. Keeps the saved-report payload manageable
 // (a 4000-px phone photo would otherwise serialise to ~3-5 MB of
 // base64 in Mongo); 800 px / 0.8 quality lands at ~50-150 KB per view.
+//
+// THUMBNAIL ONLY. The analysis uploads the ORIGINAL file and decodes it
+// server-side with PIL, so nothing here affects a measurement — which
+// is why this returns null on failure instead of throwing. It used to
+// throw, inside a Promise.all that also held the analysis, so a photo
+// the browser could not decode failed the whole assessment with
+// "Analysis failed — Failed to load image for compression" even though
+// the backend would have analysed it fine.
+//
+// Decode order:
+//   1. createImageBitmap with resizeWidth — decodes and downscales in
+//      one step, off the main thread, and without materialising the
+//      full-size bitmap. A 4284x5712 (24.5 MP) phone photo is the case
+//      that broke the old path.
+//   2. new Image() + object URL — the historical path, kept for
+//      browsers without createImageBitmap resize options (Safari < 17).
+//   3. null.
+//
+// Note resizeWidth would UPSCALE a source narrower than maxWidth. A
+// posture photo that small cannot pass the backend's visibility gate
+// anyway, and the persisted width is what the keypoints are scaled to,
+// so the overlay stays self-consistent either way.
 async function compressFileToDataUrl(
   file: File,
   maxWidth = 800,
   quality = 0.8,
-): Promise<PersistedView> {
+): Promise<PersistedView | null> {
+  const encode = (
+    src: CanvasImageSource, w: number, h: number,
+  ): PersistedView | null => {
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(src, 0, 0, w, h);
+    return { dataUrl: canvas.toDataURL("image/jpeg", quality), width: w, height: h };
+  };
+
+  // 1 — createImageBitmap
+  if (typeof createImageBitmap === "function") {
+    let bitmap: ImageBitmap | null = null;
+    try {
+      bitmap = await createImageBitmap(file, {
+        resizeWidth: maxWidth,
+        resizeQuality: "high",
+      });
+      return encode(bitmap, bitmap.width, bitmap.height);
+    } catch {
+      // fall through to the <img> path
+    } finally {
+      bitmap?.close();
+    }
+  }
+
+  // 2 — <img> + object URL
   const imgUrl = URL.createObjectURL(file);
   try {
     const img = await new Promise<HTMLImageElement>((resolve, reject) => {
       const el = new Image();
       el.onload = () => resolve(el);
-      el.onerror = () => reject(new Error("Failed to load image for compression"));
+      el.onerror = () => reject(new Error("decode failed"));
       el.src = imgUrl;
     });
     const scale = Math.min(1, maxWidth / img.naturalWidth);
-    const w = Math.round(img.naturalWidth * scale);
-    const h = Math.round(img.naturalHeight * scale);
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("Canvas 2D context unavailable");
-    ctx.drawImage(img, 0, 0, w, h);
-    const dataUrl = canvas.toDataURL("image/jpeg", quality);
-    return { dataUrl, width: w, height: h };
+    return encode(
+      img,
+      Math.round(img.naturalWidth * scale),
+      Math.round(img.naturalHeight * scale),
+    );
+  } catch {
+    // 3 — give up on the thumbnail, never on the analysis. One line,
+    // with everything needed to identify the file that did it.
+    console.warn(
+      "[POSTURE] thumbnail decode failed — the analysis is unaffected, "
+      + "the saved report will omit this view's image.",
+      { name: file.name, type: file.type, size: file.size },
+    );
+    return null;
   } finally {
     URL.revokeObjectURL(imgUrl);
   }
+}
+
+/** iPhone photos arrive as HEIC often enough — and survive a trip
+ *  through chat apps as .heic — that it is worth naming the format
+ *  rather than letting the decode fail. Checks the MIME type first and
+ *  the extension second, because a file re-containerised by a chat app
+ *  can arrive with an empty or wrong `type`. */
+function isHeic(f: File): boolean {
+  const t = (f.type || "").toLowerCase();
+  if (t === "image/heic" || t === "image/heif") return true;
+  return /\.(heic|heif)$/i.test(f.name || "");
 }
 
 export function PostureCapture() {
@@ -111,6 +177,16 @@ export function PostureCapture() {
 
   const onPick = useCallback((which: SlotKey, f: File | null) => {
     setError(null);
+    // accept="image/*" lets HEIC/HEIF through on macOS and iOS, and
+    // Chrome and Firefox cannot decode it at all — the analysis would
+    // fail server-side with an opaque invalid_image. Say so here, at
+    // the point the operator can still pick a different file.
+    if (f && isHeic(f)) {
+      setError(
+        `${f.name}: HEIC not supported — please export as JPEG.`,
+      );
+      return;
+    }
     switch (which) {
       case "front":      setFrontFile(f); break;
       case "side":       setSideFile(f); break;
@@ -134,33 +210,39 @@ export function PostureCapture() {
       // sends whichever of the 3 optional file fields are present;
       // the response shape stays back-compat when only front+side
       // are uploaded (see analyzer.ts contract).
-      const compressFront = compressFileToDataUrl(frontFile);
-      const compressSide  = compressFileToDataUrl(sideFile);
-      const compressBack  = backFile ? compressFileToDataUrl(backFile) : Promise.resolve(null);
-      const compressLeft  = leftSideFile ? compressFileToDataUrl(leftSideFile) : Promise.resolve(null);
-      const compressRight = rightSideFile ? compressFileToDataUrl(rightSideFile) : Promise.resolve(null);
-      const [
-        multiResult, frontPersist, sidePersist,
-        backPersist, leftPersist, rightPersist,
-      ] = await Promise.all([
-        analyzePostureMultiView({
-          frontFile,
-          sideFile,
-          backFile: backFile ?? undefined,
-          leftSideFile: leftSideFile ?? undefined,
-          rightSideFile: rightSideFile ?? undefined,
-        }),
-        compressFront,
-        compressSide,
-        compressBack,
-        compressLeft,
-        compressRight,
+      // Thumbnails are kicked off alongside the analysis (they are the
+      // slow part on a big photo) but are NOT allowed to fail it.
+      // allSettled, not all: a rejected thumbnail here used to reject
+      // the whole batch and surface as "Analysis failed" even though
+      // the backend had analysed the photo perfectly well.
+      const thumbs = Promise.allSettled([
+        compressFileToDataUrl(frontFile),
+        compressFileToDataUrl(sideFile),
+        backFile ? compressFileToDataUrl(backFile) : Promise.resolve(null),
+        leftSideFile ? compressFileToDataUrl(leftSideFile) : Promise.resolve(null),
+        rightSideFile ? compressFileToDataUrl(rightSideFile) : Promise.resolve(null),
       ]);
-      persistedRef.current.front = frontPersist;
-      persistedRef.current.side = sidePersist;
-      persistedRef.current.back = backPersist;
-      persistedRef.current.left_side = leftPersist;
-      persistedRef.current.right_side = rightPersist;
+
+      // Only THIS await can reject the run.
+      const multiResult = await analyzePostureMultiView({
+        frontFile,
+        sideFile,
+        backFile: backFile ?? undefined,
+        leftSideFile: leftSideFile ?? undefined,
+        rightSideFile: rightSideFile ?? undefined,
+      });
+
+      const settled = await thumbs;
+      const pick = (i: number): PersistedView | null =>
+        settled[i].status === "fulfilled"
+          ? (settled[i] as PromiseFulfilledResult<PersistedView | null>).value
+          : null;
+      persistedRef.current.front = pick(0);
+      persistedRef.current.side = pick(1);
+      persistedRef.current.back = pick(2);
+      persistedRef.current.left_side = pick(3);
+      persistedRef.current.right_side = pick(4);
+
       setResult(multiResult);
       setPhase("done");
     } catch (e) {

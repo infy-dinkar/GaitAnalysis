@@ -74,7 +74,7 @@ from engines.posture_engine import (
     _grade_tilt,
     analyze_posture_image,
 )
-from engines.posture_silhouette import build_silhouette
+from engines.posture_silhouette import attach_silhouette
 
 log = logging.getLogger("motionlens.posture.multi_view")
 
@@ -313,28 +313,6 @@ def _build_back_findings(m: dict) -> list[dict]:
     return out
 
 
-def _attach_silhouette(
-    out: dict, mask, kps: list[dict], view_key: str,
-) -> None:
-    """Attach overlay geometry to a view result, in place, or do
-    nothing.
-
-    Best-effort by contract: a missing mask, geometry the mask and the
-    landmarks disagree on, or an outright exception all leave the key
-    absent — which is exactly what a response looked like before the
-    silhouette existed, and what the frontend's fallback path already
-    handles. A view is never failed over overlay decoration.
-    """
-    try:
-        sil = build_silhouette(mask, kps)
-    except Exception:  # pragma: no cover — defensive
-        log.warning("posture %s: silhouette build failed",
-                    view_key, exc_info=True)
-        return
-    if sil is not None:
-        out["silhouette"] = sil
-
-
 def analyze_posture_back(image_path: str) -> dict:
     """Back-view analysis wrapper. Loads the image via the shared
     loader, extracts keypoints via the shared extractor, applies the
@@ -384,7 +362,7 @@ def analyze_posture_back(image_path: str) -> dict:
     # from `kps` (post-swap). The swap only relabels array slots; the
     # coordinates are unchanged, and the midline scan reads midpoints,
     # so the geometry is identical either way.
-    _attach_silhouette(out, mask, kps, "back")
+    attach_silhouette(out, mask, kps, "back")
     return out
 
 
@@ -675,7 +653,7 @@ def _analyze_explicit_from_kps(
     # than the ankle landmark buried inside the leg. Built with the
     # same view-agnostic builder the auto-picked `side` view uses, so
     # the two profile paths cannot drift apart.
-    _attach_silhouette(out, mask, kps, view_key)
+    attach_silhouette(out, mask, kps, view_key)
     return out
 
 
