@@ -11,6 +11,7 @@ import type {
   FrontMeasurements,
   SideMeasurements,
 } from "@/lib/posture/measurements";
+import type { PostureSilhouette } from "@/lib/posture/analyzer";
 
 interface Props {
   view: "front" | "side";
@@ -20,7 +21,18 @@ interface Props {
   keypoints: Keypoint[];
   front?: FrontMeasurements;
   side?: SideMeasurements;
+  /** Body-relative reference geometry from the segmentation mask.
+   *  Absent on reports saved before it existed and whenever the mask
+   *  was unusable — every consumer below falls back to the previous
+   *  landmark-anchored geometry, so the overlay is unchanged in that
+   *  case. Nothing here affects a measurement. */
+  silhouette?: PostureSilhouette;
 }
+
+/** How far a body-relative horizontal overshoots the silhouette at
+ *  each end, as a fraction of that row's width. Enough that the line
+ *  visibly clears the body edge instead of dying exactly on it. */
+const EXTENT_OVERSHOOT = 0.06;
 
 const FRONT_DOTS = [
   LM.LEFT_EAR, LM.RIGHT_EAR,
@@ -46,6 +58,7 @@ export function PostureImageOverlay({
   keypoints,
   front,
   side,
+  silhouette,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -64,9 +77,14 @@ export function PostureImageOverlay({
     img.onload = () => {
       ctx.clearRect(0, 0, imageWidth, imageHeight);
       ctx.drawImage(img, 0, 0, imageWidth, imageHeight);
-      drawOverlay(ctx, view, keypoints, imageWidth, imageHeight, front, side);
+      drawOverlay(
+        ctx, view, keypoints, imageWidth, imageHeight, front, side, silhouette,
+      );
     };
-  }, [imageUrl, imageWidth, imageHeight, keypoints, view, front, side]);
+  }, [
+    imageUrl, imageWidth, imageHeight, keypoints, view, front, side,
+    silhouette,
+  ]);
 
   return (
     <div className="overflow-hidden rounded-card border border-border bg-black">
@@ -80,6 +98,23 @@ export function PostureImageOverlay({
 }
 
 // ── Drawing helpers ────────────────────────────────────────────────
+type ExtentKey = "ear" | "shoulder" | "hip" | "knee" | "ankle";
+
+/** Horizontal span for one reference line: the body's own extent at
+ *  that height plus a small overshoot, or the full frame width when
+ *  the silhouette is absent (old reports, unusable mask). */
+function extentSpan(
+  silhouette: PostureSilhouette | undefined,
+  key: ExtentKey,
+  w: number,
+): [number, number] {
+  const ext = silhouette?.extents?.[key];
+  if (!ext || ext.length < 2) return [0, w];
+  const [xL, xR] = ext;
+  const pad = Math.abs(xR - xL) * EXTENT_OVERSHOOT;
+  return [xL - pad, xR + pad];
+}
+
 function drawOverlay(
   ctx: CanvasRenderingContext2D,
   view: "front" | "side",
@@ -88,14 +123,15 @@ function drawOverlay(
   h: number,
   front?: FrontMeasurements,
   side?: SideMeasurements,
+  silhouette?: PostureSilhouette,
 ) {
   const dotR = Math.max(4, Math.min(w, h) * 0.006);
   const lineW = Math.max(2, Math.min(w, h) * 0.003);
 
   if (view === "front") {
-    drawFrontReferenceLines(ctx, kp, w, h, lineW);
+    drawFrontReferenceLines(ctx, kp, w, h, lineW, silhouette);
   } else {
-    drawSideReferenceLines(ctx, kp, w, h, lineW);
+    drawSideReferenceLines(ctx, kp, w, h, lineW, silhouette);
   }
 
   // Keypoint dots
@@ -126,45 +162,72 @@ function drawFrontReferenceLines(
   w: number,
   h: number,
   lineW: number,
+  silhouette?: PostureSilhouette,
 ) {
   ctx.strokeStyle = "rgba(34, 197, 94, 0.85)";
   ctx.lineWidth = lineW;
   ctx.setLineDash([8, 6]);
 
-  // Vertical plumb line through shoulder midpoint
+  // Vertical plumb line. Preferred anchor is the silhouette's median
+  // body centre; the shoulder midpoint is the fallback for reports
+  // saved before the mask existed. The old anchor was never a
+  // measurement axis — no front metric is taken against it — so this
+  // moves a purely visual reference and changes no number.
   const ls = kp[LM.LEFT_SHOULDER];
   const rs = kp[LM.RIGHT_SHOULDER];
-  if (ls && rs) {
-    const mx = (ls.x + rs.x) / 2;
+  const midlineX =
+    silhouette?.midline_x ?? (ls && rs ? (ls.x + rs.x) / 2 : null);
+  if (midlineX !== null) {
     ctx.beginPath();
-    ctx.moveTo(mx, 0);
-    ctx.lineTo(mx, h);
+    ctx.moveTo(midlineX, 0);
+    ctx.lineTo(midlineX, h);
     ctx.stroke();
   }
   ctx.setLineDash([]);
 
-  // Horizontal reference lines at ear / shoulder / hip / knee / ankle midpoints
+  // The measured body centre per row, drawn faintly against the plumb
+  // above: where the two separate is the lateral deviation, visible
+  // directly instead of inferred from the numbers.
+  const centerline = silhouette?.centerline;
+  if (centerline && centerline.length > 1) {
+    ctx.strokeStyle = "rgba(34, 197, 94, 0.5)";
+    ctx.lineWidth = Math.max(1, lineW * 0.5);
+    ctx.beginPath();
+    ctx.moveTo(centerline[0][0], centerline[0][1]);
+    for (let i = 1; i < centerline.length; i++) {
+      ctx.lineTo(centerline[i][0], centerline[i][1]);
+    }
+    ctx.stroke();
+  }
+
+  // Horizontal reference lines at ear / shoulder / hip / knee / ankle
+  // midpoints. Spanned to the BODY at that height (plus a small
+  // overshoot) rather than edge to edge, so each line reads as a
+  // measurement of this patient rather than a grid over the photo.
+  // Falls back to the full frame width when no extent is available.
   ctx.strokeStyle = "rgba(34, 197, 94, 0.6)";
   ctx.lineWidth = lineW * 0.7;
-  const pairs: Array<[number, number]> = [
-    [LM.LEFT_EAR, LM.RIGHT_EAR],
-    [LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER],
-    [LM.LEFT_HIP, LM.RIGHT_HIP],
-    [LM.LEFT_KNEE, LM.RIGHT_KNEE],
-    [LM.LEFT_ANKLE, LM.RIGHT_ANKLE],
+  const pairs: Array<[number, number, ExtentKey]> = [
+    [LM.LEFT_EAR, LM.RIGHT_EAR, "ear"],
+    [LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER, "shoulder"],
+    [LM.LEFT_HIP, LM.RIGHT_HIP, "hip"],
+    [LM.LEFT_KNEE, LM.RIGHT_KNEE, "knee"],
+    [LM.LEFT_ANKLE, LM.RIGHT_ANKLE, "ankle"],
   ];
-  for (const [a, b] of pairs) {
+  for (const [a, b, key] of pairs) {
     const pa = kp[a];
     const pb = kp[b];
     if (!pa || !pb) continue;
     const my = (pa.y + pb.y) / 2;
+    const [x0, x1] = extentSpan(silhouette, key, w);
     ctx.beginPath();
-    ctx.moveTo(0, my);
-    ctx.lineTo(w, my);
+    ctx.moveTo(x0, my);
+    ctx.lineTo(x1, my);
     ctx.stroke();
   }
 
-  // Actual joint-pair connecting lines (red)
+  // Actual joint-pair connecting lines (red) — untouched by the
+  // silhouette work; these mark the real landmarks.
   ctx.strokeStyle = "rgba(239, 68, 68, 0.95)";
   ctx.lineWidth = lineW;
   for (const [a, b] of pairs) {
@@ -184,14 +247,26 @@ function drawSideReferenceLines(
   w: number,
   h: number,
   lineW: number,
+  silhouette?: PostureSilhouette,
 ) {
-  // Plumb line through the visible ankle (best-side pick).
+  // Plumb line. Preferred anchor is the centre of the FOOT silhouette
+  // at ankle height: in profile the ankle landmark sits inside the leg
+  // while the foot extends forward, so a line on the landmark hangs
+  // off the front of the foot.
+  //
+  // ⚠️ The side-view % metrics (forwardHeadPct et al.) are computed on
+  // the backend against the LANDMARK ankle-mid and are NOT changed by
+  // this. Where the drawn line and the metric's origin differ, the
+  // numbers remain the authority.
   const la = kp[LM.LEFT_ANKLE];
   const ra = kp[LM.RIGHT_ANKLE];
   let plumbX: number | null = null;
   if (la && ra) plumbX = (la.x + ra.x) / 2;
   else if (la) plumbX = la.x;
   else if (ra) plumbX = ra.x;
+  if (silhouette?.plumb_x !== undefined && silhouette?.plumb_x !== null) {
+    plumbX = silhouette.plumb_x;
+  }
 
   if (plumbX !== null) {
     ctx.strokeStyle = "rgba(34, 197, 94, 0.85)";

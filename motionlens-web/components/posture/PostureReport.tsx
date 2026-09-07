@@ -315,6 +315,7 @@ function ViewBlock({
         keypoints={view.keypoints}
         front={view.front}
         side={view.side}
+        silhouette={view.silhouette}
       />
     </div>
   );

@@ -38,6 +38,76 @@ export interface PostureKeypoint {
   name: string;
 }
 
+/** Body-relative reference geometry derived from the segmentation
+ *  mask (backend: engines/posture_silhouette.py). OVERLAY ONLY — no
+ *  measurement, grading or finding reads it.
+ *
+ *  Optional at every level. Absent for reports saved before this
+ *  existed, and absent whenever the mask was missing or disagreed
+ *  with the landmarks; the overlay falls back to its landmark-
+ *  anchored lines in both cases. All values are source-image pixels,
+ *  the same space as `keypoints`. */
+export interface PostureSilhouette {
+  /** Median centre of the body silhouette, shoulder to ankle. */
+  midline_x: number | null;
+  /** Decimated [x, y] centres, every 6th scanned row. */
+  centerline: number[][];
+  /** [xLeft, xRight] of the body at each landmark row. */
+  extents: Partial<
+    Record<"ear" | "shoulder" | "hip" | "knee" | "ankle", number[]>
+  >;
+  /** Centre of the foot silhouette at ankle height (side view). */
+  plumb_x: number | null;
+}
+
+/** Rescale a silhouette from the ANALYSED image's pixel space into
+ *  another (the compressed photo persisted with a saved report).
+ *
+ *  Save paths compress the source photo and scale keypoints into that
+ *  smaller space (`scaleKp` in PostureCapture / PostureLiveCapture);
+ *  the silhouette is in the SAME original space and must travel through
+ *  the SAME factor, or the saved overlay draws its lines off the body
+ *  while the dots sit correctly.
+ *
+ *  Null-safe throughout: a missing piece stays missing rather than
+ *  becoming a zero, because the overlay treats null as "fall back to
+ *  the landmark-anchored line" and 0 as "draw at the left edge".
+ *  Returns undefined for a missing input so callers can omit the key
+ *  entirely instead of writing an empty object into the report. */
+export function scaleSilhouette(
+  s: PostureSilhouette | undefined | null,
+  sx: number,
+  sy: number,
+): PostureSilhouette | undefined {
+  if (!s) return undefined;
+  if (!Number.isFinite(sx) || !Number.isFinite(sy) || sx <= 0 || sy <= 0) {
+    return undefined;
+  }
+  const extents: PostureSilhouette["extents"] = {};
+  for (const [key, ext] of Object.entries(s.extents ?? {})) {
+    if (Array.isArray(ext) && ext.length >= 2) {
+      extents[key as keyof PostureSilhouette["extents"]] = [
+        ext[0] * sx,
+        ext[1] * sx,
+      ];
+    }
+  }
+  return {
+    midline_x: s.midline_x === null || s.midline_x === undefined
+      ? null
+      : s.midline_x * sx,
+    centerline: Array.isArray(s.centerline)
+      ? s.centerline
+          .filter((p) => Array.isArray(p) && p.length >= 2)
+          .map((p) => [p[0] * sx, p[1] * sy])
+      : [],
+    extents,
+    plumb_x: s.plumb_x === null || s.plumb_x === undefined
+      ? null
+      : s.plumb_x * sx,
+  };
+}
+
 export interface PostureAnalysisResult {
   view: "front" | "side";
   imageUrl: string;       // ObjectURL — caller is responsible for revoking
@@ -50,6 +120,8 @@ export interface PostureAnalysisResult {
    *  buildSideFindings in measurements.ts). Optional so older
    *  callers that re-grade locally still work. */
   findings?: PostureFinding[];
+  /** Overlay-only reference geometry. See PostureSilhouette. */
+  silhouette?: PostureSilhouette;
 }
 
 // ─── Additive multi-view types (4-view expansion) ─────────────
@@ -187,6 +259,7 @@ export async function analyzePostureCombined(
         keypoints: PostureKeypoint[];
         front?: FrontMeasurements;
         findings: PostureFinding[];
+        silhouette?: PostureSilhouette;
       };
       side: {
         view: "side";
@@ -195,6 +268,7 @@ export async function analyzePostureCombined(
         keypoints: PostureKeypoint[];
         side?: SideMeasurements;
         findings: PostureFinding[];
+        silhouette?: PostureSilhouette;
       };
       relative_units: boolean;
     } | null;
@@ -222,6 +296,7 @@ export async function analyzePostureCombined(
       keypoints:   data.front.keypoints,
       front:       data.front.front,
       findings:    data.front.findings,
+      silhouette:  data.front.silhouette,
     },
     side: {
       view: "side",
@@ -231,6 +306,7 @@ export async function analyzePostureCombined(
       keypoints:   data.side.keypoints,
       side:        data.side.side,
       findings:    data.side.findings,
+      silhouette:  data.side.silhouette,
     },
     relativeUnits: !!data.relative_units,
   };

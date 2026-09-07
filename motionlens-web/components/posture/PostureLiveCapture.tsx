@@ -43,6 +43,7 @@ import { usePatientContext } from "@/hooks/usePatientContext";
 import {
   analyzePostureMultiView,
   isPostureViewError,
+  scaleSilhouette,
   type PostureBackResult,
   type PostureExplicitSideResult,
   type PostureMultiViewResult,
@@ -599,6 +600,27 @@ function DoneView({
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const _sideView = sideView; // touched so lints don't nag on shape audit
 
+    // Same factor the keypoints above went through (scaleKp applies
+    // s = toW / fromW to both axes), so the reference lines land on the
+    // body the dots land on.
+    const silScale = (
+      fromW: number | undefined, toW: number | undefined,
+    ): number | null =>
+      fromW && toW && fromW !== 0 ? toW / fromW : null;
+
+    const fSilScale = silScale(
+      result.front.imageWidth, fCap?.persisted.width,
+    );
+    const sSilScale = silScale(
+      result.side.imageWidth, sCap?.persisted.width,
+    );
+    const frontSilhouette = fSilScale
+      ? scaleSilhouette(result.front.silhouette, fSilScale, fSilScale)
+      : result.front.silhouette;
+    const sideSilhouette = sSilScale
+      ? scaleSilhouette(result.side.silhouette, sSilScale, sSilScale)
+      : result.side.silhouette;
+
     const keypoints: Record<string, KeypointDTO[] | null> = {
       front: frontKpScaled,
       side: sideKpScaled,
@@ -639,6 +661,12 @@ function DoneView({
         // `backNotAssessed` + `backLrSwapApplied` props).
         back_not_assessed: backSuccess?.not_assessed ?? null,
         back_lr_swap_applied: backSuccess?.lr_swap_applied ?? null,
+        // Overlay-only reference geometry — sibling keys, matching the
+        // *_image convention, because `front` / `side` above ARE the
+        // measurement objects the saved report reads back. Omitted
+        // entirely when absent.
+        ...(frontSilhouette ? { front_silhouette: frontSilhouette } : {}),
+        ...(sideSilhouette ? { side_silhouette: sideSilhouette } : {}),
       } as Record<string, unknown>,
       observations: {
         // snake_case to match the dispatch page's PostureBody
