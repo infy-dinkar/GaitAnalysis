@@ -64,10 +64,13 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from typing import Optional
 
 import mediapipe as mp
 import numpy as np
+
+from engines.posture_silhouette import build_silhouette
 
 # Pillow imported lazily inside _load_image_rgb so a missing PIL
 # dependency only breaks the posture endpoint, not the whole
@@ -182,9 +185,20 @@ _KNEE_MILD_DEG = 10.0
 def _build_image_pose_options():
     """PoseLandmarker options for RunningMode.IMAGE — posture
     analyses still photos, not video, so VIDEO/LIVE_STREAM modes
-    would over-constrain the input. The pose model file is the
-    same BlazePose Full asset the gait pipeline loads (single
-    on-disk model file shared across all backend pose surfaces)."""
+    would over-constrain the input.
+
+    The model file is whatever `_ensure_pose_model_file()` defaults
+    to, which is the BlazePose HEAVY asset — every offline/upload
+    path takes the accurate model and only the realtime stream pool
+    asks for "full". (This docstring said "Full" until the default
+    flipped; it did not, and the code never did.)
+
+    Segmentation is ON. The mask is used for OVERLAY GEOMETRY ONLY
+    (engines/posture_silhouette.py) — no posture metric, grading or
+    finding reads it, so every number is unchanged. Measured cost on
+    Heavy at 1280x720 is ~+5 ms per photo against ~115 ms of
+    inference, i.e. under 5%.
+    """
     # Imported here so the constant is resolved at first call
     # (avoids touching the model path during module import — same
     # pattern api._build_gait_pose_options uses).
@@ -196,7 +210,39 @@ def _build_image_pose_options():
     return PoseLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=model_path),
         running_mode=VisionRunningMode.IMAGE,
+        output_segmentation_masks=True,
     )
+
+
+# ─── Landmarker singleton ──────────────────────────────────────
+# Constructing a PoseLandmarker costs ~700 ms (it loads and warms a
+# 29 MB Heavy .task). This used to happen once PER PHOTO, so a
+# five-view multi-view request spent ~3.5 s building models against
+# ~0.6 s of actual inference. One process-wide instance removes all
+# but the first.
+#
+# The lock guards construction AND detect(). MediaPipe Tasks does not
+# document a landmarker as safe for concurrent detect() calls, and the
+# cost of being wrong is a corrupted graph rather than a slow response,
+# so inference is serialised. That is not a regression: the endpoint
+# (api.analyze_posture) is an async def that calls this engine
+# synchronously, so it already blocks its worker for the whole
+# request.
+_landmarker = None
+_landmarker_lock = threading.Lock()
+
+
+def _get_landmarker():
+    """Process-wide PoseLandmarker, built on first use."""
+    global _landmarker
+    if _landmarker is None:
+        with _landmarker_lock:
+            if _landmarker is None:      # re-check inside the lock
+                PoseLandmarker = mp.tasks.vision.PoseLandmarker
+                _landmarker = PoseLandmarker.create_from_options(
+                    _build_image_pose_options(),
+                )
+    return _landmarker
 
 
 # ─── Image loading: EXIF-correct + RGB numpy ───────────────────
@@ -225,11 +271,19 @@ def _load_image_rgb(image_path: str) -> tuple[np.ndarray, int, int]:
 # ─── Pose extraction ──────────────────────────────────────────
 def _extract_posture_keypoints(
     rgb_array: np.ndarray, image_width: int, image_height: int,
-) -> list[dict]:
+) -> tuple[list[dict], Optional[np.ndarray]]:
     """Run the BlazePose IMAGE-mode landmarker on a single
-    RGB array and return a 17-element list of keypoint dicts
-    indexed in the MoveNet layout (so the frontend `LM` accessors
-    keep working unchanged).
+    RGB array and return `(keypoints, mask)`.
+
+    `mask` is the person-segmentation confidence map: float32,
+    shape (H, W) matching the input exactly, values in [0, 1].
+    It is None whenever no person was found or the model returned
+    no mask — a missing mask is NEVER an error, it just means the
+    overlay falls back to landmark-anchored reference lines.
+
+    `keypoints` is a 17-element list of keypoint dicts indexed in
+    the MoveNet layout (so the frontend `LM` accessors keep
+    working unchanged).
 
     The list ALWAYS has 17 entries with the same shape
       {"x": float (px), "y": float (px), "score": float,
@@ -241,11 +295,22 @@ def _extract_posture_keypoints(
     to do. This is what the saved-report viewer + KeypointDTO
     serialiser expect (the ReportCreatePayload schema declares
     KeypointDTO[] non-nullable per element)."""
-    pose_options = _build_image_pose_options()
-    PoseLandmarker = mp.tasks.vision.PoseLandmarker
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_array)
-    with PoseLandmarker.create_from_options(pose_options) as landmarker:
+    landmarker = _get_landmarker()
+    with _landmarker_lock:
         result = landmarker.detect(mp_image)
+
+    # numpy_view() is a VIEW onto memory the Image owns, and the
+    # singleton reuses its buffers between calls — so copy before the
+    # next detect() can overwrite it.
+    mask: Optional[np.ndarray] = None
+    masks = getattr(result, "segmentation_masks", None)
+    if masks:
+        try:
+            mask = np.array(masks[0].numpy_view(), dtype=np.float32, copy=True)
+        except Exception:  # pragma: no cover — never fail a view on this
+            log.warning("posture: segmentation mask unreadable", exc_info=True)
+            mask = None
 
     def _empty_kp(movenet_idx: int) -> dict:
         # Placeholder for an undetected / low-visibility keypoint.
@@ -265,7 +330,7 @@ def _extract_posture_keypoints(
         # downstream once the trunk-anchor gate runs. Return a
         # full 17-element placeholder array so callers that only
         # touch keypoints don't blow up.
-        return [_empty_kp(i) for i in range(17)]
+        return [_empty_kp(i) for i in range(17)], mask
 
     lms = result.pose_landmarks[0]
     out: list[dict] = []
@@ -288,7 +353,7 @@ def _extract_posture_keypoints(
                 "score": vis,
                 "name": _KP_NAMES_MOVENET[movenet_idx],
             })
-    return out
+    return out, mask
 
 
 def _is_visible(kp: dict) -> bool:
@@ -635,7 +700,7 @@ def analyze_posture_image(image_path: str, view: str) -> dict:
         raise ValueError(f"Unsupported posture view: {view!r}")
 
     rgb, img_w, img_h = _load_image_rgb(image_path)
-    kps = _extract_posture_keypoints(rgb, img_w, img_h)
+    kps, mask = _extract_posture_keypoints(rgb, img_w, img_h)
 
     # Need at least the trunk anchors (both shoulders + both hips)
     # for either view to be usable. Below that, the photo isn't
@@ -655,7 +720,7 @@ def analyze_posture_image(image_path: str, view: str) -> dict:
         side = _compute_side_measurements(kps)
         findings = _build_side_findings(side)
 
-    return {
+    out = {
         "view": view,
         "imageWidth": img_w,
         "imageHeight": img_h,
@@ -664,6 +729,20 @@ def analyze_posture_image(image_path: str, view: str) -> dict:
         "side": side,
         "findings": findings,
     }
+
+    # OVERLAY-ONLY addition. Attached only when the mask yielded usable
+    # geometry, so a response without the key is byte-identical to what
+    # this function returned before — which is also exactly what every
+    # already-saved report looks like, and what the frontend's fallback
+    # path expects. Never let overlay geometry fail an analysis.
+    try:
+        silhouette = build_silhouette(mask, kps)
+    except Exception:  # pragma: no cover — defensive
+        log.warning("posture: silhouette build failed", exc_info=True)
+        silhouette = None
+    if silhouette is not None:
+        out["silhouette"] = silhouette
+    return out
 
 
 def analyze_posture_combined(

@@ -322,7 +322,9 @@ def analyze_posture_back(image_path: str) -> dict:
       raises ValueError("poor_visibility") when trunk anchors missing.
     """
     rgb, img_w, img_h = _load_image_rgb(image_path)
-    raw_kps = _extract_posture_keypoints(rgb, img_w, img_h)
+    # Mask ignored here: the overlay silhouette is currently drawn for
+    # the front and side views only (analyze_posture_image attaches it).
+    raw_kps, _mask = _extract_posture_keypoints(rgb, img_w, img_h)
 
     trunk_anchors = [raw_kps[5], raw_kps[6], raw_kps[11], raw_kps[12]]
     if not all(_is_visible(k) for k in trunk_anchors):
@@ -640,7 +642,7 @@ def analyze_posture_side_explicit(image_path: str, side: str) -> dict:
         raise ValueError(f"Unsupported explicit side: {side!r}")
 
     rgb, img_w, img_h = _load_image_rgb(image_path)
-    kps = _extract_posture_keypoints(rgb, img_w, img_h)
+    kps, _mask = _extract_posture_keypoints(rgb, img_w, img_h)
     return _analyze_explicit_from_kps(kps, side, img_w, img_h)
 
 

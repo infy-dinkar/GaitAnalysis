@@ -38,6 +38,28 @@ export interface PostureKeypoint {
   name: string;
 }
 
+/** Body-relative reference geometry derived from the segmentation
+ *  mask (backend: engines/posture_silhouette.py). OVERLAY ONLY — no
+ *  measurement, grading or finding reads it.
+ *
+ *  Optional at every level. Absent for reports saved before this
+ *  existed, and absent whenever the mask was missing or disagreed
+ *  with the landmarks; the overlay falls back to its landmark-
+ *  anchored lines in both cases. All values are source-image pixels,
+ *  the same space as `keypoints`. */
+export interface PostureSilhouette {
+  /** Median centre of the body silhouette, shoulder to ankle. */
+  midline_x: number | null;
+  /** Decimated [x, y] centres, every 6th scanned row. */
+  centerline: number[][];
+  /** [xLeft, xRight] of the body at each landmark row. */
+  extents: Partial<
+    Record<"ear" | "shoulder" | "hip" | "knee" | "ankle", number[]>
+  >;
+  /** Centre of the foot silhouette at ankle height (side view). */
+  plumb_x: number | null;
+}
+
 export interface PostureAnalysisResult {
   view: "front" | "side";
   imageUrl: string;       // ObjectURL — caller is responsible for revoking
@@ -50,6 +72,8 @@ export interface PostureAnalysisResult {
    *  buildSideFindings in measurements.ts). Optional so older
    *  callers that re-grade locally still work. */
   findings?: PostureFinding[];
+  /** Overlay-only reference geometry. See PostureSilhouette. */
+  silhouette?: PostureSilhouette;
 }
 
 // ─── Additive multi-view types (4-view expansion) ─────────────
@@ -187,6 +211,7 @@ export async function analyzePostureCombined(
         keypoints: PostureKeypoint[];
         front?: FrontMeasurements;
         findings: PostureFinding[];
+        silhouette?: PostureSilhouette;
       };
       side: {
         view: "side";
@@ -195,6 +220,7 @@ export async function analyzePostureCombined(
         keypoints: PostureKeypoint[];
         side?: SideMeasurements;
         findings: PostureFinding[];
+        silhouette?: PostureSilhouette;
       };
       relative_units: boolean;
     } | null;
@@ -222,6 +248,7 @@ export async function analyzePostureCombined(
       keypoints:   data.front.keypoints,
       front:       data.front.front,
       findings:    data.front.findings,
+      silhouette:  data.front.silhouette,
     },
     side: {
       view: "side",
@@ -231,6 +258,7 @@ export async function analyzePostureCombined(
       keypoints:   data.side.keypoints,
       side:        data.side.side,
       findings:    data.side.findings,
+      silhouette:  data.side.silhouette,
     },
     relativeUnits: !!data.relative_units,
   };
