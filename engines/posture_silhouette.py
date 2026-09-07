@@ -162,9 +162,14 @@ def body_midline_x(
     shoulder_w = abs(kps[_L_SH]["x"] - kps[_R_SH]["x"])
     hip_w = abs(kps[_L_HIP]["x"] - kps[_R_HIP]["x"])
 
-    centres: list[float] = []
-    centerline: list[list[float]] = []
+    l_ank_x = float(kps[_L_ANK]["x"])
+    r_ank_x = float(kps[_R_ANK]["x"])
+
+    centres: list[float] = []          # midline voters (primary seed only)
+    centerline: list[list[float]] = []  # everything, for display
     scanned = 0
+    accepted = 0
+    last_centre: Optional[float] = None
 
     for y in range(y_top, y_bot + 1):
         scanned += 1
@@ -186,6 +191,27 @@ def body_midline_x(
         if row is None:
             continue
         bounds = _run_bounds(row, int(round(seed)))
+
+        # FEET APART. Below the hips the seed follows the ankle MIDPOINT,
+        # which lands in the gap between the legs as soon as the patient
+        # stands with any stance width -- every such row was skipped, and
+        # enough of them tripped the >50% guard and killed the midline
+        # outright. Retry once at the nearer ankle: "nearer" is measured
+        # against the last accepted centre so the scan keeps following
+        # the same leg down instead of alternating between them.
+        via_retry = False
+        if bounds is None and y > hip_y:
+            ref = last_centre if last_centre is not None else l_ank_x
+            near_ank_x = min(
+                (l_ank_x, r_ank_x), key=lambda ax: abs(ax - ref),
+            )
+            t_leg = _clamp01((y - hip_y) / ((ank_y - hip_y) or 1.0))
+            retry_seed = _lerp(hip_x, near_ank_x, t_leg)
+            bounds = _run_bounds(row, int(round(retry_seed)))
+            if bounds is not None:
+                seed = retry_seed         # the cap below re-centres here
+                via_retry = True
+
         if bounds is None:
             continue                      # seed sits off the silhouette
         x_left, x_right = float(bounds[0]), float(bounds[1])
@@ -201,13 +227,26 @@ def body_midline_x(
                 continue
 
         cx = (x_left + x_right) / 2.0
-        centres.append(cx)
+        accepted += 1
+        last_centre = cx
+
+        # A retry row measured ONE LEG, not the body -- its centre is
+        # half a stance width off the trunk axis. It counts as accepted
+        # (the scan is alive, the guard should not fire) and it is drawn
+        # on the centreline, but it must not vote on midline_x: with
+        # legs typically two thirds of the scanned height, letting them
+        # vote drags the median onto whichever leg the scan followed.
+        # Measured on synthetic stances, feeding retry rows into the
+        # median put the midline 23-59 px off centre as stance widened
+        # -- a confidently wrong plumb, worse than the None it replaced.
+        if not via_retry:
+            centres.append(cx)
         if (y - y_top) % CENTERLINE_ROW_STRIDE == 0:
             centerline.append([round(cx, 2), float(y)])
 
     if not centres or scanned == 0:
         return None
-    if len(centres) < MIN_ACCEPTED_ROW_FRAC * scanned:
+    if accepted < MIN_ACCEPTED_ROW_FRAC * scanned:
         return None                       # mask and landmarks disagree
     midline = float(np.median(np.asarray(centres, dtype=np.float64)))
     if not (0.0 <= midline < w):

@@ -386,12 +386,33 @@ function buildSavePayload(
   const sideSilScale = silScale(
     result.side.imageWidth, persisted.side?.width,
   );
+  const scaled = (
+    sil: Parameters<typeof scaleSilhouette>[0],
+    fromW: number | undefined,
+    toW: number | undefined,
+  ) => {
+    const f = silScale(fromW, toW);
+    return f ? scaleSilhouette(sil, f, f) : sil ?? undefined;
+  };
+
   const frontSilhouette = frontSilScale
     ? scaleSilhouette(result.front.silhouette, frontSilScale, frontSilScale)
     : result.front.silhouette;
   const sideSilhouette = sideSilScale
     ? scaleSilhouette(result.side.silhouette, sideSilScale, sideSilScale)
     : result.side.silhouette;
+  const backSilhouette = backSuccess
+    ? scaled(backSuccess.silhouette, backSuccess.imageWidth,
+             persisted.back?.width)
+    : undefined;
+  const leftSilhouette = leftSideSuccess
+    ? scaled(leftSideSuccess.silhouette, leftSideSuccess.imageWidth,
+             persisted.left_side?.width)
+    : undefined;
+  const rightSilhouette = rightSideSuccess
+    ? scaled(rightSideSuccess.silhouette, rightSideSuccess.imageWidth,
+             persisted.right_side?.width)
+    : undefined;
 
   const keypoints: Record<string, KeypointDTO[] | null> = {
     front: frontKp,
@@ -429,6 +450,9 @@ function buildSavePayload(
       // report saved before this existed.
       ...(frontSilhouette ? { front_silhouette: frontSilhouette } : {}),
       ...(sideSilhouette ? { side_silhouette: sideSilhouette } : {}),
+      ...(backSilhouette ? { back_silhouette: backSilhouette } : {}),
+      ...(leftSilhouette ? { left_side_silhouette: leftSilhouette } : {}),
+      ...(rightSilhouette ? { right_side_silhouette: rightSilhouette } : {}),
     } as Record<string, unknown>,
     observations: {
       // snake_case matches PostureBody at reports/[id]/page.tsx.

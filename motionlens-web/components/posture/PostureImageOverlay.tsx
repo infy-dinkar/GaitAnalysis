@@ -21,6 +21,11 @@ interface Props {
   keypoints: Keypoint[];
   front?: FrontMeasurements;
   side?: SideMeasurements;
+  /** Names this view in the ?posturedebug=1 log. The `view` prop above
+   *  only selects WHICH renderer runs — back reuses "front" and the
+   *  explicit sides reuse "side" — so without this the log could not
+   *  tell the five views apart. Defaults to `view`. */
+  viewLabel?: string;
   /** Body-relative reference geometry from the segmentation mask.
    *  Absent on reports saved before it existed and whenever the mask
    *  was unusable — every consumer below falls back to the previous
@@ -33,6 +38,54 @@ interface Props {
  *  each end, as a fraction of that row's width. Enough that the line
  *  visibly clears the body edge instead of dying exactly on it. */
 const EXTENT_OVERSHOOT = 0.06;
+
+/** Matches posture_engine._POSTURE_VIS_THRESHOLD and the dot loops
+ *  below. */
+const VIS_THRESHOLD = 0.2;
+
+/** A landmark is usable only above the visibility floor.
+ *
+ *  ⚠️ Object truthiness is NOT enough. The keypoint array always has
+ *  17 entries; an undetected landmark is a PLACEHOLDER at (0, 0) with
+ *  score 0, not a hole (posture_engine._empty_kp). `if (a && b)`
+ *  therefore passes for an occluded ankle and averages in x = 0 —
+ *  which is exactly how the side plumb ended up at half the body's x
+ *  in profile views, where the far ankle drops out. */
+function usable(p: Keypoint | undefined): p is Keypoint {
+  return !!p && (p.score ?? 0) >= VIS_THRESHOLD;
+}
+
+/** Mean x of whichever of the two landmarks are actually visible;
+ *  null when neither is, so the caller draws nothing rather than a
+ *  confident line through a placeholder. */
+function meanVisibleX(
+  a: Keypoint | undefined, b: Keypoint | undefined,
+): number | null {
+  const av = usable(a);
+  const bv = usable(b);
+  if (av && bv) return (a.x + b.x) / 2;
+  if (av) return a.x;
+  if (bv) return b.x;
+  return null;
+}
+
+/** One-shot per-view diagnostic, opt-in via ?posturedebug=1. Says
+ *  whether the drawn vertical came from the mask or from the landmark
+ *  fallback — the question that is otherwise unanswerable from a
+ *  screenshot. */
+function logVerticalSource(
+  view: string, source: "silhouette" | "fallback",
+): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (new URLSearchParams(window.location.search).get("posturedebug") !== "1") {
+      return;
+    }
+  } catch {
+    return;
+  }
+  console.log(`[POSTURE] ${view} vertical source = ${source}`);
+}
 
 const FRONT_DOTS = [
   LM.LEFT_EAR, LM.RIGHT_EAR,
@@ -59,6 +112,7 @@ export function PostureImageOverlay({
   front,
   side,
   silhouette,
+  viewLabel,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -79,11 +133,12 @@ export function PostureImageOverlay({
       ctx.drawImage(img, 0, 0, imageWidth, imageHeight);
       drawOverlay(
         ctx, view, keypoints, imageWidth, imageHeight, front, side, silhouette,
+        viewLabel ?? view,
       );
     };
   }, [
     imageUrl, imageWidth, imageHeight, keypoints, view, front, side,
-    silhouette,
+    silhouette, viewLabel,
   ]);
 
   return (
@@ -124,14 +179,15 @@ function drawOverlay(
   front?: FrontMeasurements,
   side?: SideMeasurements,
   silhouette?: PostureSilhouette,
+  label = "front",
 ) {
   const dotR = Math.max(4, Math.min(w, h) * 0.006);
   const lineW = Math.max(2, Math.min(w, h) * 0.003);
 
   if (view === "front") {
-    drawFrontReferenceLines(ctx, kp, w, h, lineW, silhouette);
+    drawFrontReferenceLines(ctx, kp, w, h, lineW, silhouette, label);
   } else {
-    drawSideReferenceLines(ctx, kp, w, h, lineW, silhouette);
+    drawSideReferenceLines(ctx, kp, w, h, lineW, silhouette, label);
   }
 
   // Keypoint dots
@@ -163,6 +219,7 @@ function drawFrontReferenceLines(
   h: number,
   lineW: number,
   silhouette?: PostureSilhouette,
+  label = "",
 ) {
   ctx.strokeStyle = "rgba(34, 197, 94, 0.85)";
   ctx.lineWidth = lineW;
@@ -175,8 +232,11 @@ function drawFrontReferenceLines(
   // moves a purely visual reference and changes no number.
   const ls = kp[LM.LEFT_SHOULDER];
   const rs = kp[LM.RIGHT_SHOULDER];
-  const midlineX =
-    silhouette?.midline_x ?? (ls && rs ? (ls.x + rs.x) / 2 : null);
+  const midlineX = silhouette?.midline_x ?? meanVisibleX(ls, rs);
+  logVerticalSource(
+    label,
+    silhouette?.midline_x != null ? "silhouette" : "fallback",
+  );
   if (midlineX !== null) {
     ctx.beginPath();
     ctx.moveTo(midlineX, 0);
@@ -217,7 +277,10 @@ function drawFrontReferenceLines(
   for (const [a, b, key] of pairs) {
     const pa = kp[a];
     const pb = kp[b];
-    if (!pa || !pb) continue;
+    // Both ends must clear the visibility floor: a placeholder at
+    // (0, 0) would otherwise drag the line's height to half the real
+    // joint height, the same failure as the side plumb.
+    if (!usable(pa) || !usable(pb)) continue;
     const my = (pa.y + pb.y) / 2;
     const [x0, x1] = extentSpan(silhouette, key, w);
     ctx.beginPath();
@@ -233,7 +296,7 @@ function drawFrontReferenceLines(
   for (const [a, b] of pairs) {
     const pa = kp[a];
     const pb = kp[b];
-    if (!pa || !pb) continue;
+    if (!usable(pa) || !usable(pb)) continue;
     ctx.beginPath();
     ctx.moveTo(pa.x, pa.y);
     ctx.lineTo(pb.x, pb.y);
@@ -248,6 +311,7 @@ function drawSideReferenceLines(
   h: number,
   lineW: number,
   silhouette?: PostureSilhouette,
+  label = "",
 ) {
   // Plumb line. Preferred anchor is the centre of the FOOT silhouette
   // at ankle height: in profile the ankle landmark sits inside the leg
@@ -258,15 +322,12 @@ function drawSideReferenceLines(
   // the backend against the LANDMARK ankle-mid and are NOT changed by
   // this. Where the drawn line and the metric's origin differ, the
   // numbers remain the authority.
-  const la = kp[LM.LEFT_ANKLE];
-  const ra = kp[LM.RIGHT_ANKLE];
-  let plumbX: number | null = null;
-  if (la && ra) plumbX = (la.x + ra.x) / 2;
-  else if (la) plumbX = la.x;
-  else if (ra) plumbX = ra.x;
-  if (silhouette?.plumb_x !== undefined && silhouette?.plumb_x !== null) {
-    plumbX = silhouette.plumb_x;
-  }
+  // Mean of the visible ankles, the single visible one, or nothing —
+  // never an average that includes an occluded placeholder.
+  let plumbX = meanVisibleX(kp[LM.LEFT_ANKLE], kp[LM.RIGHT_ANKLE]);
+  const fromMask = silhouette?.plumb_x != null;
+  if (fromMask) plumbX = silhouette!.plumb_x as number;
+  logVerticalSource(label, fromMask ? "silhouette" : "fallback");
 
   if (plumbX !== null) {
     ctx.strokeStyle = "rgba(34, 197, 94, 0.85)";

@@ -159,10 +159,12 @@ function BackViewBlock({
         <div className="space-y-3">
           <PostureImageOverlay
             view="front"
+            viewLabel="back"
             imageUrl={back.imageUrl}
             imageWidth={back.imageWidth}
             imageHeight={back.imageHeight}
             keypoints={back.keypoints}
+            silhouette={back.silhouette}
           />
           {back.lr_swap_applied && (
             <p className="rounded-md border border-border bg-surface px-3 py-2 text-[11px] text-muted">
@@ -268,11 +270,13 @@ function ExplicitSideBlock({
       <div className="grid gap-6 md:grid-cols-2">
         <PostureImageOverlay
           view="side"
+          viewLabel={side.view}
           imageUrl={side.imageUrl}
           imageWidth={side.imageWidth}
           imageHeight={side.imageHeight}
           keypoints={side.keypoints}
           side={side.side}
+          silhouette={side.silhouette}
         />
       </div>
       {findings.length > 0 && (
@@ -309,6 +313,7 @@ function ViewBlock({
       </p>
       <PostureImageOverlay
         view={view.view}
+        viewLabel={view.view}
         imageUrl={view.imageUrl}
         imageWidth={view.imageWidth}
         imageHeight={view.imageHeight}

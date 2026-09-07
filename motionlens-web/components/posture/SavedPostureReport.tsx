@@ -55,6 +55,9 @@ interface Props {
    *  exactly how those reports rendered before. */
   frontSilhouette?: PostureSilhouette | null;
   sideSilhouette?: PostureSilhouette | null;
+  backSilhouette?: PostureSilhouette | null;
+  leftSideSilhouette?: PostureSilhouette | null;
+  rightSideSilhouette?: PostureSilhouette | null;
   patient?: PatientDTO | null;
   patientName?: string | null;
   // ── Additive multi-view (4-view expansion). All optional — old
@@ -86,6 +89,9 @@ export function SavedPostureReport({
   sideKeypoints,
   frontSilhouette,
   sideSilhouette,
+  backSilhouette,
+  leftSideSilhouette,
+  rightSideSilhouette,
   patient,
   patientName,
   back,
@@ -151,6 +157,7 @@ export function SavedPostureReport({
               </p>
               <PostureImageOverlay
                 view="front"
+                viewLabel="front"
                 imageUrl={frontImage.data_url}
                 imageWidth={frontImage.width}
                 imageHeight={frontImage.height}
@@ -167,6 +174,7 @@ export function SavedPostureReport({
               </p>
               <PostureImageOverlay
                 view="side"
+                viewLabel="side"
                 imageUrl={sideImage.data_url}
                 imageWidth={sideImage.width}
                 imageHeight={sideImage.height}
@@ -198,6 +206,7 @@ export function SavedPostureReport({
           backKeypoints={backKeypoints ?? null}
           backNotAssessed={backNotAssessed ?? null}
           backLrSwapApplied={backLrSwapApplied ?? null}
+          backSilhouette={backSilhouette}
         />
       )}
       {(leftSide || leftSideImage
@@ -208,6 +217,8 @@ export function SavedPostureReport({
           findings={leftSideFindings ?? null}
           image={leftSideImage ?? null}
           keypoints={leftSideKeypoints ?? null}
+          silhouette={leftSideSilhouette}
+          viewLabel="left_side"
         />
       )}
       {(rightSide || rightSideImage
@@ -218,6 +229,8 @@ export function SavedPostureReport({
           findings={rightSideFindings ?? null}
           image={rightSideImage ?? null}
           keypoints={rightSideKeypoints ?? null}
+          silhouette={rightSideSilhouette}
+          viewLabel="right_side"
         />
       )}
 
@@ -240,6 +253,7 @@ function SavedBackBlock({
   backKeypoints,
   backNotAssessed,
   backLrSwapApplied,
+  backSilhouette,
 }: {
   back: BackMeasurements | null;
   backFindings: PostureFinding[] | null;
@@ -247,6 +261,7 @@ function SavedBackBlock({
   backKeypoints: Keypoint[] | null;
   backNotAssessed: PostureNotAssessed[] | null;
   backLrSwapApplied: boolean | null;
+  backSilhouette?: PostureSilhouette | null;
 }) {
   return (
     <section className="space-y-4">
@@ -263,10 +278,12 @@ function SavedBackBlock({
           <div className="space-y-3">
             <PostureImageOverlay
               view="front"
+              viewLabel="back"
               imageUrl={backImage.data_url}
               imageWidth={backImage.width}
               imageHeight={backImage.height}
               keypoints={backKeypoints}
+              silhouette={backSilhouette ?? undefined}
             />
             {backLrSwapApplied && (
               <p className="rounded-md border border-border bg-surface px-3 py-2 text-[11px] text-muted">
@@ -343,12 +360,16 @@ function SavedExplicitSideBlock({
   findings,
   image,
   keypoints,
+  silhouette,
+  viewLabel,
 }: {
   title: string;
   side: SideMeasurements | null;
   findings: PostureFinding[] | null;
   image: SavedPostureImage | null;
   keypoints: Keypoint[] | null;
+  silhouette?: PostureSilhouette | null;
+  viewLabel: string;
 }) {
   return (
     <section className="space-y-4">
@@ -361,11 +382,13 @@ function SavedExplicitSideBlock({
         <div className="grid gap-6 md:grid-cols-2">
           <PostureImageOverlay
             view="side"
+            viewLabel={viewLabel}
             imageUrl={image.data_url}
             imageWidth={image.width}
             imageHeight={image.height}
             keypoints={keypoints}
             side={side ?? undefined}
+            silhouette={silhouette ?? undefined}
           />
         </div>
       )}
