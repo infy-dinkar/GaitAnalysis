@@ -809,6 +809,9 @@ function PostureBody({
   type SilProp = Parameters<typeof SavedPostureReport>[0]["frontSilhouette"];
   const frontSilhouette = (m.front_silhouette as SilProp) ?? null;
   const sideSilhouette = (m.side_silhouette as SilProp) ?? null;
+  const backSilhouette = (m.back_silhouette as SilProp) ?? null;
+  const leftSideSilhouette = (m.left_side_silhouette as SilProp) ?? null;
+  const rightSideSilhouette = (m.right_side_silhouette as SilProp) ?? null;
 
   // Keypoint arrays live on report.keypoints, separated by view.
   const kpRoot = (report.keypoints ?? {}) as Record<string, unknown>;
@@ -858,6 +861,9 @@ function PostureBody({
         sideKeypoints={sideKeypoints}
         frontSilhouette={frontSilhouette}
         sideSilhouette={sideSilhouette}
+        backSilhouette={backSilhouette}
+        leftSideSilhouette={leftSideSilhouette}
+        rightSideSilhouette={rightSideSilhouette}
         back={back}
         backFindings={backFindings}
         backImage={backImage}

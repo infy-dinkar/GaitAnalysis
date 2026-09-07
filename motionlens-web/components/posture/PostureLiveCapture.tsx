@@ -614,12 +614,33 @@ function DoneView({
     const sSilScale = silScale(
       result.side.imageWidth, sCap?.persisted.width,
     );
+    const scaled = (
+      sil: Parameters<typeof scaleSilhouette>[0],
+      fromW: number | undefined,
+      toW: number | undefined,
+    ) => {
+      const f = silScale(fromW, toW);
+      return f ? scaleSilhouette(sil, f, f) : sil ?? undefined;
+    };
+
     const frontSilhouette = fSilScale
       ? scaleSilhouette(result.front.silhouette, fSilScale, fSilScale)
       : result.front.silhouette;
     const sideSilhouette = sSilScale
       ? scaleSilhouette(result.side.silhouette, sSilScale, sSilScale)
       : result.side.silhouette;
+    const backSilhouette = backSuccess
+      ? scaled(backSuccess.silhouette, backSuccess.imageWidth,
+               bCap?.persisted.width)
+      : undefined;
+    const leftSilhouette = leftSideSuccess
+      ? scaled(leftSideSuccess.silhouette, leftSideSuccess.imageWidth,
+               lCap?.persisted.width)
+      : undefined;
+    const rightSilhouette = rightSideSuccess
+      ? scaled(rightSideSuccess.silhouette, rightSideSuccess.imageWidth,
+               rCap?.persisted.width)
+      : undefined;
 
     const keypoints: Record<string, KeypointDTO[] | null> = {
       front: frontKpScaled,
@@ -667,6 +688,9 @@ function DoneView({
         // entirely when absent.
         ...(frontSilhouette ? { front_silhouette: frontSilhouette } : {}),
         ...(sideSilhouette ? { side_silhouette: sideSilhouette } : {}),
+        ...(backSilhouette ? { back_silhouette: backSilhouette } : {}),
+        ...(leftSilhouette ? { left_side_silhouette: leftSilhouette } : {}),
+        ...(rightSilhouette ? { right_side_silhouette: rightSilhouette } : {}),
       } as Record<string, unknown>,
       observations: {
         // snake_case to match the dispatch page's PostureBody

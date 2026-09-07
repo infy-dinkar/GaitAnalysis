@@ -74,6 +74,7 @@ from engines.posture_engine import (
     _grade_tilt,
     analyze_posture_image,
 )
+from engines.posture_silhouette import build_silhouette
 
 log = logging.getLogger("motionlens.posture.multi_view")
 
@@ -312,6 +313,28 @@ def _build_back_findings(m: dict) -> list[dict]:
     return out
 
 
+def _attach_silhouette(
+    out: dict, mask, kps: list[dict], view_key: str,
+) -> None:
+    """Attach overlay geometry to a view result, in place, or do
+    nothing.
+
+    Best-effort by contract: a missing mask, geometry the mask and the
+    landmarks disagree on, or an outright exception all leave the key
+    absent — which is exactly what a response looked like before the
+    silhouette existed, and what the frontend's fallback path already
+    handles. A view is never failed over overlay decoration.
+    """
+    try:
+        sil = build_silhouette(mask, kps)
+    except Exception:  # pragma: no cover — defensive
+        log.warning("posture %s: silhouette build failed",
+                    view_key, exc_info=True)
+        return
+    if sil is not None:
+        out["silhouette"] = sil
+
+
 def analyze_posture_back(image_path: str) -> dict:
     """Back-view analysis wrapper. Loads the image via the shared
     loader, extracts keypoints via the shared extractor, applies the
@@ -322,9 +345,7 @@ def analyze_posture_back(image_path: str) -> dict:
       raises ValueError("poor_visibility") when trunk anchors missing.
     """
     rgb, img_w, img_h = _load_image_rgb(image_path)
-    # Mask ignored here: the overlay silhouette is currently drawn for
-    # the front and side views only (analyze_posture_image attaches it).
-    raw_kps, _mask = _extract_posture_keypoints(rgb, img_w, img_h)
+    raw_kps, mask = _extract_posture_keypoints(rgb, img_w, img_h)
 
     trunk_anchors = [raw_kps[5], raw_kps[6], raw_kps[11], raw_kps[12]]
     if not all(_is_visible(k) for k in trunk_anchors):
@@ -337,7 +358,7 @@ def analyze_posture_back(image_path: str) -> dict:
     back = _compute_back_measurements(kps)
     findings = _build_back_findings(back)
 
-    return {
+    out = {
         "view": "back",
         "imageWidth": img_w,
         "imageHeight": img_h,
@@ -348,6 +369,23 @@ def analyze_posture_back(image_path: str) -> dict:
         # Honest disclosure of whether the swap ran on this response.
         "lr_swap_applied": bool(_BACK_VIEW_SWAP_LR_LABELS),
     }
+    # Overlay-only geometry. The back is a frontal-plane view, so the
+    # same midline + extents the front uses apply unchanged.
+    #
+    # Everything in the block is L/R-AGNOSTIC by construction:
+    # midline_x and centerline are positions on a symmetric axis, and
+    # extents are [xLeft, xRight] in SCREEN space. That matters because
+    # back-view left/right labelling is still unverified (see
+    # _BACK_VIEW_SWAP_LR_LABELS above) — a left/right-SIGNED silhouette
+    # metric here would inherit that unresolved question and must not
+    # be added until a real back photo settles it.
+    #
+    # Note the mask is built from the RAW keypoints' image, but seeded
+    # from `kps` (post-swap). The swap only relabels array slots; the
+    # coordinates are unchanged, and the midline scan reads midpoints,
+    # so the geometry is identical either way.
+    _attach_silhouette(out, mask, kps, "back")
+    return out
 
 
 # ─── Explicit-side (left_side / right_side) analysis ───────────
@@ -571,10 +609,12 @@ def _build_explicit_side_findings(
 
 def _analyze_explicit_from_kps(
     kps: list[dict], side: str, img_w: int, img_h: int,
+    mask=None,
 ) -> dict:
     """Everything after keypoint extraction for an explicit side view.
     Split out of analyze_posture_side_explicit so it can be exercised
-    with synthetic keypoints (no image / model needed).
+    with synthetic keypoints (no image / model needed) — which is why
+    `mask` defaults to None and is optional.
     """
     trunk_anchors = [kps[5], kps[6], kps[11], kps[12]]
     if not all(_is_visible(k) for k in trunk_anchors):
@@ -616,7 +656,7 @@ def _analyze_explicit_from_kps(
     # B2 — findings from the declared block only, view-name tags.
     findings = _build_explicit_side_findings(side_block, side, shifts_available)
 
-    return {
+    out = {
         "view": view_key,
         "imageWidth": img_w,
         "imageHeight": img_h,
@@ -629,6 +669,14 @@ def _analyze_explicit_from_kps(
         "facing_caveat": facing_caveat,
         "shifts_insufficient_data": not shifts_available,
     }
+    # Overlay-only geometry. What the side overlay actually draws from
+    # this is plumb_x — the centre of the FOOT run at ankle height,
+    # which is where a clinician drops a physical plumb line, rather
+    # than the ankle landmark buried inside the leg. Built with the
+    # same view-agnostic builder the auto-picked `side` view uses, so
+    # the two profile paths cannot drift apart.
+    _attach_silhouette(out, mask, kps, view_key)
+    return out
 
 
 def analyze_posture_side_explicit(image_path: str, side: str) -> dict:
@@ -642,8 +690,8 @@ def analyze_posture_side_explicit(image_path: str, side: str) -> dict:
         raise ValueError(f"Unsupported explicit side: {side!r}")
 
     rgb, img_w, img_h = _load_image_rgb(image_path)
-    kps, _mask = _extract_posture_keypoints(rgb, img_w, img_h)
-    return _analyze_explicit_from_kps(kps, side, img_w, img_h)
+    kps, mask = _extract_posture_keypoints(rgb, img_w, img_h)
+    return _analyze_explicit_from_kps(kps, side, img_w, img_h, mask)
 
 
 def apply_side_facing_correction(side_result: dict) -> dict:
