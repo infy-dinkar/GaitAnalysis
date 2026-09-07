@@ -1951,7 +1951,14 @@ export function LiveAssessment({
       frame_index: number;
       image_data_url: string;
     }> = [];
-    if (keyFramesRef.current.neutralUrl) {
+    // Merged tests show PEAK FRAMES ONLY. Both ends of the arc are
+    // already on screen, so the near-zero "neutral" frame was a third
+    // near-identical image carrying no extra clinical information.
+    // Single-direction tests keep it: with one peak, the starting pose
+    // is the operator's only reference. The neutral screenshot is still
+    // captured either way — nothing else depends on it, but dropping
+    // the capture would change the rAF path for no gain.
+    if (!isMergedMovement && keyFramesRef.current.neutralUrl) {
       liveKeyFrames.push({
         label: "Neutral — start",
         frame_index: 0,

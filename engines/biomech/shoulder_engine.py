@@ -1480,8 +1480,6 @@ def analyze_shoulder(
         primary_peak_idx = -1
         secondary_peak_mag = 0.0     # adduction (positive magnitude)
         secondary_peak_idx = -1
-        ab_neutral_idx = -1
-        ab_neutral_abs = math.inf
 
         # Direction-detection diagnostics. Track per-frame stats so
         # the HF Space log shows exactly why a given test's
@@ -1560,9 +1558,6 @@ def analyze_shoulder(
                 sample_logged += 1
             if direction is None:
                 n_deadband += 1
-                if abs(a) < ab_neutral_abs:
-                    ab_neutral_abs = abs(a)
-                    ab_neutral_idx = i
                 continue
             if direction == "abduction":
                 n_classified_ab += 1
@@ -1687,14 +1682,9 @@ def analyze_shoulder(
     primary_peak_idx = -1
     secondary_peak_signed: float | None = None   # extension (negative)
     secondary_peak_idx = -1
-    neutral_idx = -1
-    neutral_abs = math.inf
     for i, a in enumerate(angles):
         if a is None:
             continue
-        if abs(a) < neutral_abs:
-            neutral_abs = abs(a)
-            neutral_idx = i
         if a >= 0:
             if primary_peak_signed is None or a > primary_peak_signed:
                 primary_peak_signed = a
@@ -1740,13 +1730,15 @@ def analyze_shoulder(
         )
     interpretation = f"{interpretation_primary} {interpretation_secondary}"
 
+    # PEAK FRAMES ONLY. A merged test already shows both ends of the
+    # arc, so the near-zero "neutral" frame added a third near-identical
+    # image without adding clinical information. It was never used for
+    # anything but this thumbnail — the compensation baseline comes from
+    # the first _COMP_BASELINE_FRAME_COUNT frames, not from this index —
+    # so nothing measured changes. Single-direction shoulder tests keep
+    # their neutral frame: with one peak, the starting pose is the only
+    # reference the operator has.
     key_frames: list[dict] = []
-    if neutral_idx >= 0:
-        kf = _grab_shoulder_key_frame(
-            video_path, neutral_idx, raw, "Neutral — start", side,
-        )
-        if kf:
-            key_frames.append(kf)
     if primary_peak_idx >= 0 and primary_mag > 0:
         kf = _grab_shoulder_key_frame(
             video_path, primary_peak_idx, raw,
