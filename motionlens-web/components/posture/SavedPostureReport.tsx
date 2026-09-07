@@ -23,6 +23,7 @@ import type { PatientDTO } from "@/lib/patients";
 import type {
   BackMeasurements,
   PostureNotAssessed,
+  PostureSilhouette,
 } from "@/lib/posture/analyzer";
 
 /** Compressed source-photo blob persisted into the report's `metrics`
@@ -47,6 +48,13 @@ interface Props {
   sideImage?: SavedPostureImage | null;
   frontKeypoints?: Keypoint[] | null;
   sideKeypoints?: Keypoint[] | null;
+  /** Overlay-only reference geometry, already scaled into the saved
+   *  photo's coordinate space at save time. Absent on reports saved
+   *  before it existed and whenever the mask was unusable — the
+   *  overlay then falls back to its landmark-anchored lines, which is
+   *  exactly how those reports rendered before. */
+  frontSilhouette?: PostureSilhouette | null;
+  sideSilhouette?: PostureSilhouette | null;
   patient?: PatientDTO | null;
   patientName?: string | null;
   // ── Additive multi-view (4-view expansion). All optional — old
@@ -76,6 +84,8 @@ export function SavedPostureReport({
   sideImage,
   frontKeypoints,
   sideKeypoints,
+  frontSilhouette,
+  sideSilhouette,
   patient,
   patientName,
   back,
@@ -146,6 +156,7 @@ export function SavedPostureReport({
                 imageHeight={frontImage.height}
                 keypoints={frontKeypoints}
                 front={front ?? undefined}
+                silhouette={frontSilhouette ?? undefined}
               />
             </div>
           )}
@@ -161,6 +172,7 @@ export function SavedPostureReport({
                 imageHeight={sideImage.height}
                 keypoints={sideKeypoints}
                 side={side ?? undefined}
+                silhouette={sideSilhouette ?? undefined}
               />
             </div>
           )}

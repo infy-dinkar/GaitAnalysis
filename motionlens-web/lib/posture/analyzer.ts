@@ -60,6 +60,54 @@ export interface PostureSilhouette {
   plumb_x: number | null;
 }
 
+/** Rescale a silhouette from the ANALYSED image's pixel space into
+ *  another (the compressed photo persisted with a saved report).
+ *
+ *  Save paths compress the source photo and scale keypoints into that
+ *  smaller space (`scaleKp` in PostureCapture / PostureLiveCapture);
+ *  the silhouette is in the SAME original space and must travel through
+ *  the SAME factor, or the saved overlay draws its lines off the body
+ *  while the dots sit correctly.
+ *
+ *  Null-safe throughout: a missing piece stays missing rather than
+ *  becoming a zero, because the overlay treats null as "fall back to
+ *  the landmark-anchored line" and 0 as "draw at the left edge".
+ *  Returns undefined for a missing input so callers can omit the key
+ *  entirely instead of writing an empty object into the report. */
+export function scaleSilhouette(
+  s: PostureSilhouette | undefined | null,
+  sx: number,
+  sy: number,
+): PostureSilhouette | undefined {
+  if (!s) return undefined;
+  if (!Number.isFinite(sx) || !Number.isFinite(sy) || sx <= 0 || sy <= 0) {
+    return undefined;
+  }
+  const extents: PostureSilhouette["extents"] = {};
+  for (const [key, ext] of Object.entries(s.extents ?? {})) {
+    if (Array.isArray(ext) && ext.length >= 2) {
+      extents[key as keyof PostureSilhouette["extents"]] = [
+        ext[0] * sx,
+        ext[1] * sx,
+      ];
+    }
+  }
+  return {
+    midline_x: s.midline_x === null || s.midline_x === undefined
+      ? null
+      : s.midline_x * sx,
+    centerline: Array.isArray(s.centerline)
+      ? s.centerline
+          .filter((p) => Array.isArray(p) && p.length >= 2)
+          .map((p) => [p[0] * sx, p[1] * sy])
+      : [],
+    extents,
+    plumb_x: s.plumb_x === null || s.plumb_x === undefined
+      ? null
+      : s.plumb_x * sx,
+  };
+}
+
 export interface PostureAnalysisResult {
   view: "front" | "side";
   imageUrl: string;       // ObjectURL — caller is responsible for revoking

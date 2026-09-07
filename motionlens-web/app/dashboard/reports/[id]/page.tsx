@@ -802,6 +802,14 @@ function PostureBody({
   const frontImage = (m.front_image as SavedImg | null | undefined) ?? null;
   const sideImage = (m.side_image as SavedImg | null | undefined) ?? null;
 
+  // Overlay-only reference geometry, saved already scaled into the
+  // compressed photo's space. Absent on every report saved before this
+  // existed; SavedPostureReport passes undefined straight through and
+  // the overlay falls back to its landmark-anchored lines.
+  type SilProp = Parameters<typeof SavedPostureReport>[0]["frontSilhouette"];
+  const frontSilhouette = (m.front_silhouette as SilProp) ?? null;
+  const sideSilhouette = (m.side_silhouette as SilProp) ?? null;
+
   // Keypoint arrays live on report.keypoints, separated by view.
   const kpRoot = (report.keypoints ?? {}) as Record<string, unknown>;
   const frontKeypoints =
@@ -848,6 +856,8 @@ function PostureBody({
         sideImage={sideImage}
         frontKeypoints={frontKeypoints}
         sideKeypoints={sideKeypoints}
+        frontSilhouette={frontSilhouette}
+        sideSilhouette={sideSilhouette}
         back={back}
         backFindings={backFindings}
         backImage={backImage}

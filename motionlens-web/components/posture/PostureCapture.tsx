@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/Button";
 import {
   analyzePostureMultiView,
   isPostureViewError,
+  scaleSilhouette,
   type PostureAnalysisResult,
   type PostureBackResult,
   type PostureExplicitSideResult,
@@ -369,6 +370,29 @@ function buildSavePayload(
     ? scaleKp(rightSideSuccess.keypoints, rightSideSuccess.imageWidth, persisted.right_side?.width)
     : null;
 
+  // Overlay silhouettes travel through the SAME factor as the
+  // keypoints above (scaleKp derives s = toW / fromW and applies it to
+  // both axes, so one ratio is passed for sx and sy). Anything else
+  // and the reference lines would drift off a body whose dots are
+  // still correct.
+  const silScale = (
+    fromW: number | undefined, toW: number | undefined,
+  ): number | null =>
+    fromW && toW && fromW !== 0 ? toW / fromW : null;
+
+  const frontSilScale = silScale(
+    result.front.imageWidth, persisted.front?.width,
+  );
+  const sideSilScale = silScale(
+    result.side.imageWidth, persisted.side?.width,
+  );
+  const frontSilhouette = frontSilScale
+    ? scaleSilhouette(result.front.silhouette, frontSilScale, frontSilScale)
+    : result.front.silhouette;
+  const sideSilhouette = sideSilScale
+    ? scaleSilhouette(result.side.silhouette, sideSilScale, sideSilScale)
+    : result.side.silhouette;
+
   const keypoints: Record<string, KeypointDTO[] | null> = {
     front: frontKp,
     side: sideKp,
@@ -396,6 +420,15 @@ function buildSavePayload(
       // honest not_assessed list + the L/R swap chip.
       back_not_assessed: backSuccess?.not_assessed ?? null,
       back_lr_swap_applied: backSuccess?.lr_swap_applied ?? null,
+      // Overlay-only reference geometry, sibling keys matching the
+      // *_image convention above rather than nested inside `front` /
+      // `side` — those two ARE the measurement objects and the saved
+      // report reads them straight back as FrontMeasurements /
+      // SideMeasurements. Spread last and only when present, so a view
+      // without one leaves no key at all and stays byte-identical to a
+      // report saved before this existed.
+      ...(frontSilhouette ? { front_silhouette: frontSilhouette } : {}),
+      ...(sideSilhouette ? { side_silhouette: sideSilhouette } : {}),
     } as Record<string, unknown>,
     observations: {
       // snake_case matches PostureBody at reports/[id]/page.tsx.
