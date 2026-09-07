@@ -66,9 +66,26 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD wget -qO- http://localhost:${PORT:-8000}/api/health || exit 1
 
+# --timeout 900: a gait upload is CPU-bound Heavy inference at roughly
+# 65-140 ms per frame (measured in prod: mean_ms_per_frame 65.6 / 74.2 /
+# 137.7 across recent clips; the spread is contention between the 2
+# workers on 2 vCPUs). A 30-40 s clip at 30 fps is 900-1200 frames, so
+# 60-170 s of work -- past the old 120 s ceiling, which killed the worker
+# mid-request and surfaced to the browser as a 502.
+#
+# The clock is worse than it looks: the analysis runs synchronously
+# inside an async def, so the event loop is blocked and UvicornWorker's
+# heartbeat stops. Gunicorn measures from the last heartbeat, not from
+# the start of the request, so a worker can be killed sooner than the
+# nominal timeout when requests queue behind each other.
+#
+# graceful-timeout matches so a reload does not sever an in-flight
+# analysis; keep-alive 75 outlives the upstream idle timeout so the
+# connection is not recycled underneath a long request.
 CMD gunicorn api:app \
     --worker-class uvicorn.workers.UvicornWorker \
     --workers 2 \
     --bind 0.0.0.0:${PORT:-8000} \
-    --timeout 120 \
-    --keep-alive 5
+    --timeout 900 \
+    --graceful-timeout 900 \
+    --keep-alive 75
