@@ -1,13 +1,13 @@
 "use client";
-// Four-slot posture upload flow: front + side (both REQUIRED) plus
-// back + left-side + right-side (all OPTIONAL). All uploaded photos
-// are analysed in ONE POST to /api/analyze-posture via the
-// analyzePostureMultiView client — the endpoint is 4-view-aware.
+// Four-slot posture upload flow: front, back, left-side and
+// right-side, ALL REQUIRED. All four are analysed in ONE POST to
+// /api/analyze-posture via the analyzePostureMultiView client.
 //
-// Backwards-compatible: leave the 3 optional slots empty and the
-// endpoint / response / save payload behave EXACTLY like the old
-// 2-view flow. Only when the operator picks the extra photos do the
-// new views populate.
+// The legacy auto "side" slot is gone: it was a second photo of the
+// same sagittal plane the explicit left/right views already cover, and
+// it produced a duplicate report section with its own picked-side
+// convention. The endpoint still ACCEPTS side_image so older clients
+// and already-saved reports keep working; this UI never sends it.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Image as ImageIcon, Play, RotateCcw, AlertCircle } from "lucide-react";
@@ -47,6 +47,13 @@ interface PersistedView {
 // that slot: persistedRef and the saved-report metric keys are still
 // keyed by it, so a legacy report round-trips unchanged.
 type SlotKey = "front" | "side" | "back" | "left_side" | "right_side";
+
+/** Thumbnail order. The pick() below indexes THIS list by name, so a
+ *  slot can be added or removed without silently reassigning the
+ *  others. */
+const THUMB_SLOTS: SlotKey[] = [
+  "front", "side", "back", "left_side", "right_side",
+];
 
 // Resize-and-encode a source image File to a JPEG data URL at most
 // `maxWidth` pixels wide. Keeps the saved-report payload manageable
@@ -197,11 +204,8 @@ export function PostureCapture() {
   }, []);
 
   async function run() {
-    if (!frontFile || !(leftSideFile || rightSideFile)) {
-      setError(
-        "A front-view photo and at least one side view (left or "
-        + "right) are required.",
-      );
+    if (!frontFile || !backFile || !leftSideFile || !rightSideFile) {
+      setError("All four views (front, back, left, right) are required.");
       return;
     }
     setBusy(true);
@@ -218,12 +222,18 @@ export function PostureCapture() {
       // allSettled, not all: a rejected thumbnail here used to reject
       // the whole batch and surface as "Analysis failed" even though
       // the backend had analysed the photo perfectly well.
-      const thumbs = Promise.allSettled([
-        compressFileToDataUrl(frontFile),
-        backFile ? compressFileToDataUrl(backFile) : Promise.resolve(null),
-        leftSideFile ? compressFileToDataUrl(leftSideFile) : Promise.resolve(null),
-        rightSideFile ? compressFileToDataUrl(rightSideFile) : Promise.resolve(null),
-      ]);
+      const thumbs = Promise.allSettled(
+        THUMB_SLOTS.map((slot) => {
+          const f = {
+            front: frontFile,
+            side: null,          // no side slot in the upload UI any more
+            back: backFile,
+            left_side: leftSideFile,
+            right_side: rightSideFile,
+          }[slot];
+          return f ? compressFileToDataUrl(f) : Promise.resolve(null);
+        }),
+      );
 
       // Only THIS await can reject the run.
       const multiResult = await analyzePostureMultiView({
@@ -233,16 +243,24 @@ export function PostureCapture() {
         rightSideFile: rightSideFile ?? undefined,
       });
 
+      // Indexed by NAME, not by position. Positional pick(0..4) survived
+      // the removal of the side compressor from the array above: the
+      // slots silently shifted by one (pick(1), labelled `side`, was
+      // reading the BACK thumbnail) and pick(4) ran off the end, which
+      // is the "Cannot read properties of undefined (reading 'status')"
+      // the operator saw. Naming the slots makes the two lists impossible
+      // to desynchronise.
       const settled = await thumbs;
-      const pick = (i: number): PersistedView | null =>
-        settled[i].status === "fulfilled"
-          ? (settled[i] as PromiseFulfilledResult<PersistedView | null>).value
-          : null;
-      persistedRef.current.front = pick(0);
-      persistedRef.current.side = pick(1);
-      persistedRef.current.back = pick(2);
-      persistedRef.current.left_side = pick(3);
-      persistedRef.current.right_side = pick(4);
+      const pick = (slot: SlotKey): PersistedView | null => {
+        const i = THUMB_SLOTS.indexOf(slot);
+        const r = i >= 0 ? settled[i] : undefined;
+        return r && r.status === "fulfilled" ? r.value : null;
+      };
+      persistedRef.current.front = pick("front");
+      persistedRef.current.side = pick("side");
+      persistedRef.current.back = pick("back");
+      persistedRef.current.left_side = pick("left_side");
+      persistedRef.current.right_side = pick("right_side");
 
       setResult(multiResult);
       setPhase("done");
@@ -323,19 +341,22 @@ export function PostureCapture() {
           label="Back view"
           file={backFile}
           onPick={(f) => onPick("back", f)}
-          hint="Optional. Patient turns around — back to camera, full body in frame."
+          required
+          hint="Patient turns around — back to camera, full body in frame."
         />
         <PhotoSlot
           label="Left-side view"
           file={leftSideFile}
           onPick={(f) => onPick("left_side", f)}
-          hint="Optional. Patient turns so LEFT side faces the camera. Analysed with pickedSide forced left."
+          required
+          hint="Patient turns so LEFT side faces the camera. Analysed with pickedSide forced left."
         />
         <PhotoSlot
           label="Right-side view"
           file={rightSideFile}
           onPick={(f) => onPick("right_side", f)}
-          hint="Optional. Patient turns so RIGHT side faces the camera. Analysed with pickedSide forced right."
+          required
+          hint="Patient turns so RIGHT side faces the camera. Analysed with pickedSide forced right."
         />
       </div>
 
@@ -365,18 +386,18 @@ export function PostureCapture() {
       <div className="flex flex-col gap-2 md:flex-row md:items-center">
         <Button
           onClick={run}
-          disabled={busy || !frontFile || !(leftSideFile || rightSideFile)}
+          disabled={
+            busy || !frontFile || !backFile || !leftSideFile || !rightSideFile
+          }
           loading={busy}
           className="w-full md:w-auto"
         >
           <Play className="h-4 w-4" />
           Run analysis
         </Button>
-        {(!frontFile || !(leftSideFile || rightSideFile)) && (
+        {(!frontFile || !backFile || !leftSideFile || !rightSideFile) && (
           <p className="text-xs text-subtle">
-            A front-view photo and at least one side view (left or right)
-            are required to run analysis.
-            Back / left / right views are optional.
+            All four views (front, back, left, right) are required.
           </p>
         )}
       </div>

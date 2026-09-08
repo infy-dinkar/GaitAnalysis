@@ -5450,20 +5450,24 @@ async def analyze_posture(
         if not front_bytes:
             raise HTTPException(
                 status_code=400,
-                detail="A front-view photo is required.",
+                detail=(
+                    "All four views (front, back, left, right) are "
+                    "required."
+                ),
             )
         side_bytes = await side_image.read() if side_image is not None else b""
 
-        # A posture assessment needs the frontal plane AND the sagittal
-        # plane. Sagittal can now arrive as the legacy auto `side` OR as
-        # either explicit view, so require front plus at least one of
-        # the three rather than front plus `side` specifically.
-        if not side_bytes and left_side_image is None and right_side_image is None:
+        # A posture assessment needs the frontal plane from BOTH
+        # directions and the sagittal plane from BOTH sides, so all four
+        # are required. The legacy auto `side` photo is still accepted
+        # for older clients, but it is never required and neither
+        # capture UI sends it.
+        if back_image is None or left_side_image is None or right_side_image is None:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "A front-view photo and at least one side view "
-                    "(left or right) are required."
+                    "All four views (front, back, left, right) are "
+                    "required."
                 ),
             )
 
