@@ -527,6 +527,19 @@ def _compute_side_measurements(kps: list[dict]) -> dict:
         elif picked_side == "right":
             trunk_lean = -raw_tilt
 
+    # Near/far confidence telemetry. A profile camera sees one ear and
+    # one hip; BlazePose still emits the occluded pair, often above the
+    # 0.2 visibility floor, which is why the far-side block survives the
+    # gate at all. One line per side-view analysis (not per request —
+    # the engine has no request context) so Batch 2 can size a proper
+    # near/far threshold from real captures instead of guessing one.
+    log.info(
+        "posture side: ear L/R=%.2f/%.2f hip L/R=%.2f/%.2f picked=%s",
+        kps[3].get("score") or 0.0, kps[4].get("score") or 0.0,
+        kps[11].get("score") or 0.0, kps[12].get("score") or 0.0,
+        picked_side,
+    )
+
     body_h = _body_height_px(kps)
     return {
         "pickedSide": picked_side,

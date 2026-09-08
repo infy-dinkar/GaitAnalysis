@@ -58,6 +58,9 @@ interface Props {
   backSilhouette?: PostureSilhouette | null;
   leftSideSilhouette?: PostureSilhouette | null;
   rightSideSilhouette?: PostureSilhouette | null;
+  /** Declared-vs-detected side mismatch warnings, saved at capture. */
+  leftSideFacingCaveat?: string | null;
+  rightSideFacingCaveat?: string | null;
   patient?: PatientDTO | null;
   patientName?: string | null;
   // ── Additive multi-view (4-view expansion). All optional — old
@@ -92,6 +95,8 @@ export function SavedPostureReport({
   backSilhouette,
   leftSideSilhouette,
   rightSideSilhouette,
+  leftSideFacingCaveat,
+  rightSideFacingCaveat,
   patient,
   patientName,
   back,
@@ -114,6 +119,10 @@ export function SavedPostureReport({
     return front ? buildFrontFindings(front) : [];
   }, [front, frontFindings]);
 
+  // Saved server findings win; the local build is the pre-server-findings
+  // fallback and is pinned to one side (buildSideFindings resolves
+  // pickedSide itself) so a saved report can never show the two
+  // contradictory rows the live report used to.
   const sFindings = useMemo<PostureFinding[]>(() => {
     if (sideFindings && sideFindings.length > 0) return sideFindings;
     return side ? buildSideFindings(side) : [];
@@ -219,6 +228,7 @@ export function SavedPostureReport({
           keypoints={leftSideKeypoints ?? null}
           silhouette={leftSideSilhouette}
           viewLabel="left_side"
+          facingCaveat={leftSideFacingCaveat}
         />
       )}
       {(rightSide || rightSideImage
@@ -231,6 +241,7 @@ export function SavedPostureReport({
           keypoints={rightSideKeypoints ?? null}
           silhouette={rightSideSilhouette}
           viewLabel="right_side"
+          facingCaveat={rightSideFacingCaveat}
         />
       )}
 
@@ -362,6 +373,7 @@ function SavedExplicitSideBlock({
   keypoints,
   silhouette,
   viewLabel,
+  facingCaveat,
 }: {
   title: string;
   side: SideMeasurements | null;
@@ -370,6 +382,7 @@ function SavedExplicitSideBlock({
   keypoints: Keypoint[] | null;
   silhouette?: PostureSilhouette | null;
   viewLabel: string;
+  facingCaveat?: string | null;
 }) {
   return (
     <section className="space-y-4">
@@ -391,6 +404,11 @@ function SavedExplicitSideBlock({
             silhouette={silhouette ?? undefined}
           />
         </div>
+      )}
+      {facingCaveat && (
+        <p className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-[11px] text-warning">
+          ⚠ {facingCaveat}
+        </p>
       )}
       {findings && findings.length > 0 && (
         <FindingsTable

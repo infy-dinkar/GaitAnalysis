@@ -122,6 +122,13 @@ export interface PostureAnalysisResult {
   findings?: PostureFinding[];
   /** Overlay-only reference geometry. See PostureSilhouette. */
   silhouette?: PostureSilhouette;
+  /** Which way the patient faces on screen, from keypoint geometry.
+   *  null when it could not be determined — the sagittal shift signs
+   *  are then unreliable and the server suppresses them. */
+  facing?: "left" | "right" | null;
+  /** True when facing could not be resolved, so no signed shifts were
+   *  published for this view. */
+  shifts_insufficient_data?: boolean;
 }
 
 // ─── Additive multi-view types (4-view expansion) ─────────────
@@ -168,6 +175,15 @@ export interface PostureExplicitSideResult {
   view: "left_side" | "right_side";
   /** Overlay-only reference geometry. See PostureSilhouette. */
   silhouette?: PostureSilhouette;
+  /** Which way the patient faces on screen, from keypoint geometry. */
+  facing?: "left" | "right" | null;
+  /** Set when the DECLARED side and the detected facing disagree —
+   *  a mirrored capture or a side mix-up. The keypoints win; this is
+   *  the operator-facing warning that the label may be wrong. */
+  facingCaveat?: string;
+  /** True when facing could not be resolved, so no signed shifts were
+   *  published for this view. */
+  shifts_insufficient_data?: boolean;
   imageUrl: string;
   imageWidth: number;
   imageHeight: number;
@@ -320,6 +336,8 @@ export async function analyzePostureMultiView(
         side?: SideMeasurements;
         findings: PostureFinding[];
         silhouette?: PostureSilhouette;
+        facing?: "left" | "right" | null;
+        shifts_insufficient_data?: boolean;
       };
       back?: {
         view: "back";
@@ -341,6 +359,9 @@ export async function analyzePostureMultiView(
         findings: PostureFinding[];
         explicit_side?: "left";
         silhouette?: PostureSilhouette;
+        facing?: "left" | "right" | null;
+        facing_caveat?: string | null;
+        shifts_insufficient_data?: boolean;
       } | PostureViewError;
       right_side?: {
         view: "right_side";
@@ -351,6 +372,9 @@ export async function analyzePostureMultiView(
         findings: PostureFinding[];
         explicit_side?: "right";
         silhouette?: PostureSilhouette;
+        facing?: "left" | "right" | null;
+        facing_caveat?: string | null;
+        shifts_insufficient_data?: boolean;
       } | PostureViewError;
       relative_units: boolean;
     } | null;
@@ -389,6 +413,8 @@ export async function analyzePostureMultiView(
       side: data.side.side,
       findings: data.side.findings,
       silhouette: data.side.silhouette,
+      facing: data.side.facing,
+      shifts_insufficient_data: data.side.shifts_insufficient_data,
     },
     relativeUnits: !!data.relative_units,
   };
@@ -425,6 +451,9 @@ export async function analyzePostureMultiView(
         findings: data.left_side.findings,
         explicit_side: data.left_side.explicit_side,
         silhouette: data.left_side.silhouette,
+        facing: data.left_side.facing,
+        facingCaveat: data.left_side.facing_caveat ?? undefined,
+        shifts_insufficient_data: data.left_side.shifts_insufficient_data,
       };
     }
   }
@@ -442,6 +471,9 @@ export async function analyzePostureMultiView(
         findings: data.right_side.findings,
         explicit_side: data.right_side.explicit_side,
         silhouette: data.right_side.silhouette,
+        facing: data.right_side.facing,
+        facingCaveat: data.right_side.facing_caveat ?? undefined,
+        shifts_insufficient_data: data.right_side.shifts_insufficient_data,
       };
     }
   }

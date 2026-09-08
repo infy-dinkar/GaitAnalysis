@@ -616,6 +616,21 @@ def _analyze_explicit_from_kps(
         side_block = dict(side_block)
         side_block[side] = forced_block
 
+    # FAR-SIDE BLOCK DROPPED. A profile camera sees one side of the
+    # body; the other block is BlazePose inferring occluded joints, and
+    # publishing it produced two contradictory rows for one photo. Only
+    # the declared block carries the facing-corrected sign, so the two
+    # did not even share a convention.
+    #
+    # Dropped only when facing WAS resolved (the declared block is then
+    # trustworthy) and only when that block actually exists — otherwise
+    # nulling the other one would take the trunk-lean fallback below
+    # with it.
+    if shifts_available and isinstance(side_block.get(side), dict):
+        other_side = "right" if side == "left" else "left"
+        side_block = dict(side_block)
+        side_block[other_side] = None
+
     # Non-mirrored profile geometry: the patient's LEFT side toward
     # the camera means the patient faces image-LEFT (and vice versa).
     # (An older comment claimed the opposite; real capture photos
@@ -711,6 +726,10 @@ def apply_side_facing_correction(side_result: dict) -> dict:
             for key in _EXPLICIT_SHIFT_KEYS:
                 picked_block[key] = None
         new_side_block[picked] = picked_block
+
+    if shifts_available and isinstance(new_side_block.get(picked), dict):
+        other = "right" if picked == "left" else "left"
+        new_side_block[other] = None
 
     out = dict(side_result)
     out["side"] = new_side_block

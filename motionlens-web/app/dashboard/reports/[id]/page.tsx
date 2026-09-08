@@ -809,6 +809,10 @@ function PostureBody({
   type SilProp = Parameters<typeof SavedPostureReport>[0]["frontSilhouette"];
   const frontSilhouette = (m.front_silhouette as SilProp) ?? null;
   const sideSilhouette = (m.side_silhouette as SilProp) ?? null;
+  const leftSideFacingCaveat =
+    (m.left_side_facing_caveat as string | null | undefined) ?? null;
+  const rightSideFacingCaveat =
+    (m.right_side_facing_caveat as string | null | undefined) ?? null;
   const backSilhouette = (m.back_silhouette as SilProp) ?? null;
   const leftSideSilhouette = (m.left_side_silhouette as SilProp) ?? null;
   const rightSideSilhouette = (m.right_side_silhouette as SilProp) ?? null;
@@ -864,6 +868,8 @@ function PostureBody({
         backSilhouette={backSilhouette}
         leftSideSilhouette={leftSideSilhouette}
         rightSideSilhouette={rightSideSilhouette}
+        leftSideFacingCaveat={leftSideFacingCaveat}
+        rightSideFacingCaveat={rightSideFacingCaveat}
         back={back}
         backFindings={backFindings}
         backImage={backImage}

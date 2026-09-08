@@ -437,7 +437,25 @@ export function buildFrontFindings(m: FrontMeasurements): PostureFinding[] {
 // findings row per metric per visible side, with the view labelled.
 // Trunk lean is bilateral (same value on both sides) so it's
 // emitted once, not duplicated per side.
-export function buildSideFindings(m: SideMeasurements): PostureFinding[] {
+/** Side-view findings for ONE side only.
+ *
+ *  `side` picks the block. Omit it and the picked side is resolved from
+ *  `m.pickedSide`, then from whichever block is non-null.
+ *
+ *  ⚠️ It NEVER emits both blocks any more. A profile photo sees one
+ *  side of the body; the far-side block is BlazePose inferring occluded
+ *  joints, and emitting it produced two contradictory rows for one
+ *  photo ("Head (left side view) 7.5%" beside "Head (right side view)
+ *  9.7%"). Worse, only the picked block carries the facing-corrected
+ *  sign — the far block keeps raw "positive = image-right" values — so
+ *  the two rows did not even share a convention.
+ *
+ *  Prefer the server's `findings` where they exist; this remains for
+ *  reports saved before the server sent them. */
+export function buildSideFindings(
+  m: SideMeasurements,
+  side?: "left" | "right",
+): PostureFinding[] {
   // Backwards compatibility: saved reports written before Fix 4
   // stored the flat shape `{ forwardHeadPct, shoulderShiftPct, ... }`.
   // If we see that, fall through to the legacy renderer rather than
@@ -461,9 +479,21 @@ export function buildSideFindings(m: SideMeasurements): PostureFinding[] {
   }
 
   const out: PostureFinding[] = [];
-  for (const view of ["left", "right"] as const) {
-    const block = view === "left" ? m.left : m.right;
-    if (!block) continue;
+  // Resolve exactly one side. The last branch (both blocks present, no
+  // pickedSide) is only reachable for data saved before pickedSide
+  // existed; "left" is arbitrary there, but one arbitrary row beats two
+  // contradictory ones.
+  const view: "left" | "right" =
+    side
+    ?? (m.pickedSide === "left" || m.pickedSide === "right"
+      ? m.pickedSide
+      : m.left && !m.right
+        ? "left"
+        : m.right && !m.left
+          ? "right"
+          : "left");
+  const block = view === "left" ? m.left : m.right;
+  if (block) {
     const tag = `(${view} side view)`;
     if (block.forwardHeadPct !== null)
       out.push(labelTag(gradeShift(block.forwardHeadPct, "Head"), tag));

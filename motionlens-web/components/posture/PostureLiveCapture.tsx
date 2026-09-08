@@ -515,9 +515,15 @@ function DoneView({
     const frontFindings = result.front.front
       ? buildFrontFindings(result.front.front)
       : [];
-    const sideFindings = result.side.side
-      ? buildSideFindings(result.side.side)
-      : [];
+    // Persist what the report DISPLAYED: the server's facing-corrected,
+    // picked-side-only rows. Rebuilding locally would save a different
+    // set from the one the clinician signed off on.
+    const sideFindings =
+      result.side.findings && result.side.findings.length > 0
+        ? result.side.findings
+        : result.side.side
+          ? buildSideFindings(result.side.side)
+          : [];
 
     type ScaledKp = { x: number; y: number; score?: number; name?: string };
     const scaleKp = (
@@ -686,6 +692,15 @@ function DoneView({
         // *_image convention, because `front` / `side` above ARE the
         // measurement objects the saved report reads back. Omitted
         // entirely when absent.
+        // Facing caveats — the declared/detected side mismatch warning,
+        // persisted so reopening a saved report shows the same notice the
+        // clinician saw at capture time.
+        ...(leftSideSuccess?.facingCaveat
+          ? { left_side_facing_caveat: leftSideSuccess.facingCaveat }
+          : {}),
+        ...(rightSideSuccess?.facingCaveat
+          ? { right_side_facing_caveat: rightSideSuccess.facingCaveat }
+          : {}),
         ...(frontSilhouette ? { front_silhouette: frontSilhouette } : {}),
         ...(sideSilhouette ? { side_silhouette: sideSilhouette } : {}),
         ...(backSilhouette ? { back_silhouette: backSilhouette } : {}),

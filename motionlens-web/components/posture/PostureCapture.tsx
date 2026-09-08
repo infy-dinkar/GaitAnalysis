@@ -404,9 +404,15 @@ function buildSavePayload(
   const frontFindings = result.front.front
     ? buildFrontFindings(result.front.front)
     : [];
-  const sideFindings = result.side.side
-    ? buildSideFindings(result.side.side)
-    : [];
+  // Persist what the report DISPLAYED: the server's facing-corrected,
+  // picked-side-only rows. Rebuilding locally would save a different
+  // set from the one the clinician signed off on.
+  const sideFindings =
+    result.side.findings && result.side.findings.length > 0
+      ? result.side.findings
+      : result.side.side
+        ? buildSideFindings(result.side.side)
+        : [];
 
   const scaleKp = (
     kps: unknown,
@@ -530,6 +536,15 @@ function buildSavePayload(
       // SideMeasurements. Spread last and only when present, so a view
       // without one leaves no key at all and stays byte-identical to a
       // report saved before this existed.
+      // Facing caveats — the declared/detected side mismatch warning,
+      // persisted so reopening a saved report shows the same notice the
+      // clinician saw at capture time.
+      ...(leftSideSuccess?.facingCaveat
+        ? { left_side_facing_caveat: leftSideSuccess.facingCaveat }
+        : {}),
+      ...(rightSideSuccess?.facingCaveat
+        ? { right_side_facing_caveat: rightSideSuccess.facingCaveat }
+        : {}),
       ...(frontSilhouette ? { front_silhouette: frontSilhouette } : {}),
       ...(sideSilhouette ? { side_silhouette: sideSilhouette } : {}),
       ...(backSilhouette ? { back_silhouette: backSilhouette } : {}),
