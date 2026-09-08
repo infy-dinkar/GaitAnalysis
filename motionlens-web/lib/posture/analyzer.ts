@@ -122,6 +122,13 @@ export interface PostureAnalysisResult {
   findings?: PostureFinding[];
   /** Overlay-only reference geometry. See PostureSilhouette. */
   silhouette?: PostureSilhouette;
+  /** Which way the patient faces on screen, from keypoint geometry.
+   *  null when it could not be determined — the sagittal shift signs
+   *  are then unreliable and the server suppresses them. */
+  facing?: "left" | "right" | null;
+  /** True when facing could not be resolved, so no signed shifts were
+   *  published for this view. */
+  shifts_insufficient_data?: boolean;
 }
 
 // ─── Additive multi-view types (4-view expansion) ─────────────
@@ -168,6 +175,15 @@ export interface PostureExplicitSideResult {
   view: "left_side" | "right_side";
   /** Overlay-only reference geometry. See PostureSilhouette. */
   silhouette?: PostureSilhouette;
+  /** Which way the patient faces on screen, from keypoint geometry. */
+  facing?: "left" | "right" | null;
+  /** Set when the DECLARED side and the detected facing disagree —
+   *  a mirrored capture or a side mix-up. The keypoints win; this is
+   *  the operator-facing warning that the label may be wrong. */
+  facingCaveat?: string;
+  /** True when facing could not be resolved, so no signed shifts were
+   *  published for this view. */
+  shifts_insufficient_data?: boolean;
   imageUrl: string;
   imageWidth: number;
   imageHeight: number;
@@ -188,7 +204,11 @@ export type PostureViewResult =
  *  contract; the three new views are OPTIONAL. */
 export interface PostureMultiViewInput {
   frontFile: File;
-  sideFile: File;
+  /** The legacy auto side view. Optional since the capture UIs stopped
+   *  sending it — the sagittal plane now comes from the explicit
+   *  left/right views. Still accepted so an older client keeps
+   *  working. */
+  sideFile?: File;
   backFile?: File;
   leftSideFile?: File;
   rightSideFile?: File;
@@ -202,7 +222,9 @@ export interface PostureMultiViewInput {
  *  so one bad view doesn't break the rest. */
 export interface PostureMultiViewResult {
   front: PostureAnalysisResult;
-  side: PostureAnalysisResult;
+  /** Legacy auto side view. Present only for older clients / saved
+   *  reports that still send a side photo. */
+  side?: PostureAnalysisResult;
   back?: PostureBackResult | PostureViewError;
   left_side?: PostureExplicitSideResult | PostureViewError;
   right_side?: PostureExplicitSideResult | PostureViewError;
@@ -271,9 +293,11 @@ export async function analyzePostureMultiView(
   form.append(
     "front_image", frontFile, frontFile.name || "posture_front.jpg",
   );
-  form.append(
-    "side_image", sideFile, sideFile.name || "posture_side.jpg",
-  );
+  if (sideFile) {
+    form.append(
+      "side_image", sideFile, sideFile.name || "posture_side.jpg",
+    );
+  }
   if (backFile) {
     form.append(
       "back_image", backFile, backFile.name || "posture_back.jpg",
@@ -312,7 +336,7 @@ export async function analyzePostureMultiView(
         findings: PostureFinding[];
         silhouette?: PostureSilhouette;
       };
-      side: {
+      side?: {
         view: "side";
         imageWidth: number;
         imageHeight: number;
@@ -320,6 +344,8 @@ export async function analyzePostureMultiView(
         side?: SideMeasurements;
         findings: PostureFinding[];
         silhouette?: PostureSilhouette;
+        facing?: "left" | "right" | null;
+        shifts_insufficient_data?: boolean;
       };
       back?: {
         view: "back";
@@ -341,6 +367,9 @@ export async function analyzePostureMultiView(
         findings: PostureFinding[];
         explicit_side?: "left";
         silhouette?: PostureSilhouette;
+        facing?: "left" | "right" | null;
+        facing_caveat?: string | null;
+        shifts_insufficient_data?: boolean;
       } | PostureViewError;
       right_side?: {
         view: "right_side";
@@ -351,6 +380,9 @@ export async function analyzePostureMultiView(
         findings: PostureFinding[];
         explicit_side?: "right";
         silhouette?: PostureSilhouette;
+        facing?: "left" | "right" | null;
+        facing_caveat?: string | null;
+        shifts_insufficient_data?: boolean;
       } | PostureViewError;
       relative_units: boolean;
     } | null;
@@ -364,7 +396,7 @@ export async function analyzePostureMultiView(
   const data = wrapper.data;
 
   const frontUrl = URL.createObjectURL(frontFile);
-  const sideUrl  = URL.createObjectURL(sideFile);
+  const sideUrl  = sideFile ? URL.createObjectURL(sideFile) : null;
   const backUrl = backFile ? URL.createObjectURL(backFile) : null;
   const leftUrl = leftSideFile ? URL.createObjectURL(leftSideFile) : null;
   const rightUrl = rightSideFile ? URL.createObjectURL(rightSideFile) : null;
@@ -380,7 +412,13 @@ export async function analyzePostureMultiView(
       findings: data.front.findings,
       silhouette: data.front.silhouette,
     },
-    side: {
+    relativeUnits: !!data.relative_units,
+  };
+
+  // `side` only exists when a side photo was sent. Absent, the key is
+  // simply missing — same as back / left_side / right_side.
+  if (data.side && sideUrl) {
+    out.side = {
       view: "side",
       imageUrl: sideUrl,
       imageWidth: data.side.imageWidth,
@@ -389,9 +427,10 @@ export async function analyzePostureMultiView(
       side: data.side.side,
       findings: data.side.findings,
       silhouette: data.side.silhouette,
-    },
-    relativeUnits: !!data.relative_units,
-  };
+      facing: data.side.facing,
+      shifts_insufficient_data: data.side.shifts_insufficient_data,
+    };
+  }
 
   if (data.back && backUrl) {
     if (isPostureViewError(data.back)) {
@@ -425,6 +464,9 @@ export async function analyzePostureMultiView(
         findings: data.left_side.findings,
         explicit_side: data.left_side.explicit_side,
         silhouette: data.left_side.silhouette,
+        facing: data.left_side.facing,
+        facingCaveat: data.left_side.facing_caveat ?? undefined,
+        shifts_insufficient_data: data.left_side.shifts_insufficient_data,
       };
     }
   }
@@ -442,6 +484,9 @@ export async function analyzePostureMultiView(
         findings: data.right_side.findings,
         explicit_side: data.right_side.explicit_side,
         silhouette: data.right_side.silhouette,
+        facing: data.right_side.facing,
+        facingCaveat: data.right_side.facing_caveat ?? undefined,
+        shifts_insufficient_data: data.right_side.shifts_insufficient_data,
       };
     }
   }

@@ -1,11 +1,12 @@
 "use client";
 // PostureLiveCapture — 4-view still-image capture flow.
 //
-// Wizard: front → back → left_side → right_side. Front is required
-// (endpoint contract); the other three are optional. Each step
-// shows the AssessmentCameraShell (video + skeleton overlay), a
-// stance instruction, a "Capture" button, a preview thumb, and
-// Retake / Skip controls.
+// Wizard: front → back → left_side → right_side. ALL FOUR are
+// required — a posture assessment needs the frontal plane from two
+// directions and the sagittal plane from both sides, so there is no
+// Skip. Each step shows the AssessmentCameraShell (video + skeleton
+// overlay), a stance instruction, a "Capture" button, a preview thumb
+// and a Retake control.
 //
 // IMPORTANT — MIRROR TRAP (do NOT "fix" this):
 //   AssessmentCameraShell applies CSS `-scale-x-100` to the <video>
@@ -30,7 +31,6 @@ import {
   Loader2,
   Play,
   RotateCcw,
-  SkipForward,
 } from "lucide-react";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 
@@ -84,7 +84,7 @@ const STEPS: StepDef[] = [
     title: "Back view",
     stance:
       "Patient turns around, back to the camera. Same relaxed stance. Full body in frame.",
-    required: false,
+    required: true,
     fileFieldName: "backFile",
   },
   {
@@ -92,7 +92,7 @@ const STEPS: StepDef[] = [
     title: "Left-side view",
     stance:
       "Patient turns 90° so the LEFT side faces the camera. Arms relaxed. Full body in frame.",
-    required: false,
+    required: true,
     fileFieldName: "leftSideFile",
   },
   {
@@ -100,16 +100,15 @@ const STEPS: StepDef[] = [
     title: "Right-side view",
     stance:
       "Patient turns 90° again so the RIGHT side faces the camera. Arms relaxed. Full body in frame.",
-    required: false,
+    required: true,
     fileFieldName: "rightSideFile",
   },
 ];
 
-// Endpoint's boxed "side" field maps to whichever of left_side /
-// right_side the operator captured first. If both are captured, we
-// use the LEFT clip for the boxed `side` field so the existing
-// front+side pipeline still fires; the explicit left_side/right_side
-// keys carry the same data with pickedSide forced.
+// The sagittal plane comes from the explicit left_side / right_side
+// steps. There is no "side" step and nothing is re-sent under the
+// legacy `side_image` key — the backend now accepts front plus at
+// least one side view.
 async function captureFrameFromVideo(
   video: HTMLVideoElement,
   fileName: string,
@@ -216,7 +215,12 @@ export function PostureLiveCapture() {
   const currentStep = STEPS[stepIndex];
   const currentCapture = currentStep ? captures[currentStep.key] : null;
 
-  const canAnalyse = Boolean(captures.front);
+  // Every view is mandatory — a posture assessment needs the frontal
+  // plane from two directions and the sagittal plane from both sides.
+  const canAnalyse = Boolean(
+    captures.front && captures.back
+    && captures.left_side && captures.right_side,
+  );
 
   const handleFrame = useCallback(
     (_kp: Keypoint[], _video: HTMLVideoElement) => {
@@ -288,28 +292,16 @@ export function PostureLiveCapture() {
   function onPrev() {
     if (stepIndex > 0) setStepIndex(stepIndex - 1);
   }
-  function onSkip() {
-    if (!currentStep) return;
-    if (currentStep.required) return;
-    if (stepIndex < STEPS.length - 1) setStepIndex(stepIndex + 1);
-  }
 
   async function onAnalyse() {
-    if (!captures.front) {
-      setError("Front-view capture is required to start analysis.");
-      return;
-    }
-    // The endpoint requires BOTH front + side. If the operator didn't
-    // capture a "side" via the explicit L/R steps, we fall back to
-    // reusing the left_side (if present) or right_side (if present)
-    // as the boxed `side` field. If neither exists we refuse.
-    const sideCandidate = captures.left_side || captures.right_side;
-    if (!sideCandidate) {
-      setError(
-        "At least one side view (left or right) is required — the "
-        + "endpoint's boxed 'side' field falls back to whichever was "
-        + "captured first.",
-      );
+    // Nothing is re-sent under the legacy `side_image` key any more.
+    // The left-side clip used to be, so the old front+side contract
+    // would fire — which meant ONE photo was analysed TWICE and
+    // appeared in two report sections under two different picked-side
+    // conventions, with different numbers.
+    if (!captures.front || !captures.back
+        || !captures.left_side || !captures.right_side) {
+      setError("All four views (front, back, left, right) are required.");
       return;
     }
     setPhase("analyzing");
@@ -317,7 +309,6 @@ export function PostureLiveCapture() {
     try {
       const r = await analyzePostureMultiView({
         frontFile: captures.front.file,
-        sideFile: sideCandidate.file,
         backFile: captures.back?.file,
         leftSideFile: captures.left_side?.file,
         rightSideFile: captures.right_side?.file,
@@ -440,12 +431,6 @@ export function PostureLiveCapture() {
                   Capture
                 </Button>
               )}
-              {currentStep && !currentStep.required && !currentCapture && (
-                <Button variant="ghost" onClick={onSkip} disabled={busy}>
-                  <SkipForward className="h-4 w-4" />
-                  Skip
-                </Button>
-              )}
             </div>
           </div>
 
@@ -515,9 +500,16 @@ function DoneView({
     const frontFindings = result.front.front
       ? buildFrontFindings(result.front.front)
       : [];
-    const sideFindings = result.side.side
-      ? buildSideFindings(result.side.side)
-      : [];
+    // Persist what the report DISPLAYED: the server's facing-corrected,
+    // picked-side-only rows. Rebuilding locally would save a different
+    // set from the one the clinician signed off on.
+    const sideFindings = !result.side
+      ? []
+      : result.side.findings && result.side.findings.length > 0
+        ? result.side.findings
+        : result.side?.side
+          ? buildSideFindings(result.side?.side)
+          : [];
 
     type ScaledKp = { x: number; y: number; score?: number; name?: string };
     const scaleKp = (
@@ -557,8 +549,8 @@ function DoneView({
         ? result.right_side
         : null;
     const sideKpScaled = scaleKp(
-      result.side.keypoints,
-      result.side.imageWidth,
+      result.side?.keypoints,
+      result.side?.imageWidth,
       sCap?.persisted.width,
     );
 
@@ -612,7 +604,7 @@ function DoneView({
       result.front.imageWidth, fCap?.persisted.width,
     );
     const sSilScale = silScale(
-      result.side.imageWidth, sCap?.persisted.width,
+      result.side?.imageWidth, sCap?.persisted.width,
     );
     const scaled = (
       sil: Parameters<typeof scaleSilhouette>[0],
@@ -627,8 +619,8 @@ function DoneView({
       ? scaleSilhouette(result.front.silhouette, fSilScale, fSilScale)
       : result.front.silhouette;
     const sideSilhouette = sSilScale
-      ? scaleSilhouette(result.side.silhouette, sSilScale, sSilScale)
-      : result.side.silhouette;
+      ? scaleSilhouette(result.side?.silhouette, sSilScale, sSilScale)
+      : result.side?.silhouette;
     const backSilhouette = backSuccess
       ? scaled(backSuccess.silhouette, backSuccess.imageWidth,
                bCap?.persisted.width)
@@ -665,7 +657,7 @@ function DoneView({
       module: "posture" as const,
       metrics: {
         front: result.front.front,
-        side: result.side.side,
+        side: result.side?.side,
         // ── Existing PostureCapture image keys — used by the
         // dispatch page's PostureBody at reports/[id]/page.tsx.
         front_image: asImg(fCap),
@@ -686,6 +678,15 @@ function DoneView({
         // *_image convention, because `front` / `side` above ARE the
         // measurement objects the saved report reads back. Omitted
         // entirely when absent.
+        // Facing caveats — the declared/detected side mismatch warning,
+        // persisted so reopening a saved report shows the same notice the
+        // clinician saw at capture time.
+        ...(leftSideSuccess?.facingCaveat
+          ? { left_side_facing_caveat: leftSideSuccess.facingCaveat }
+          : {}),
+        ...(rightSideSuccess?.facingCaveat
+          ? { right_side_facing_caveat: rightSideSuccess.facingCaveat }
+          : {}),
         ...(frontSilhouette ? { front_silhouette: frontSilhouette } : {}),
         ...(sideSilhouette ? { side_silhouette: sideSilhouette } : {}),
         ...(backSilhouette ? { back_silhouette: backSilhouette } : {}),
@@ -710,7 +711,7 @@ function DoneView({
     <div className="space-y-8">
       <PostureReport
         front={result.front}
-        side={result.side}
+        side={result.side ?? null}
         patient={patient ?? null}
         patientName={patientName}
         back={result.back ?? null}

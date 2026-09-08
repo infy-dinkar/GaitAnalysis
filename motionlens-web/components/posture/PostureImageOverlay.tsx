@@ -74,7 +74,12 @@ function meanVisibleX(
  *  fallback — the question that is otherwise unanswerable from a
  *  screenshot. */
 function logVerticalSource(
-  view: string, source: "silhouette" | "fallback",
+  view: string,
+  source: "silhouette" | "fallback",
+  /** What the BACKEND referenced its shifts to — "silhouette" or
+   *  "ankle". It should agree with `source`; a disagreement means the
+   *  line and the numbers measure from different x again. */
+  shiftReference?: string,
 ): void {
   if (typeof window === "undefined") return;
   try {
@@ -84,7 +89,14 @@ function logVerticalSource(
   } catch {
     return;
   }
-  console.log(`[POSTURE] ${view} vertical source = ${source}`);
+  console.log(
+    `[POSTURE] ${view} vertical source = ${source}`
+    + (shiftReference ? ` | metric shiftReference = ${shiftReference}` : "")
+    + (shiftReference
+      && ((source === "silhouette") !== (shiftReference === "silhouette"))
+      ? "  ⚠ MISMATCH — line and numbers use different references"
+      : ""),
+  );
 }
 
 const FRONT_DOTS = [
@@ -187,7 +199,16 @@ function drawOverlay(
   if (view === "front") {
     drawFrontReferenceLines(ctx, kp, w, h, lineW, silhouette, label);
   } else {
-    drawSideReferenceLines(ctx, kp, w, h, lineW, silhouette, label);
+    const pickedBlock = side?.pickedSide === "left"
+      ? side.left
+      : side?.pickedSide === "right"
+        ? side.right
+        : null;
+    drawSideReferenceLines(
+      ctx, kp, w, h, lineW, silhouette, label, side?.pickedSide ?? null,
+      (pickedBlock as { shiftReference?: string } | null | undefined)
+        ?.shiftReference,
+    );
   }
 
   // Keypoint dots
@@ -312,22 +333,37 @@ function drawSideReferenceLines(
   lineW: number,
   silhouette?: PostureSilhouette,
   label = "",
+  pickedSide: "left" | "right" | null = null,
+  shiftReference?: string,
 ) {
   // Plumb line. Preferred anchor is the centre of the FOOT silhouette
   // at ankle height: in profile the ankle landmark sits inside the leg
   // while the foot extends forward, so a line on the landmark hangs
   // off the front of the foot.
   //
-  // ⚠️ The side-view % metrics (forwardHeadPct et al.) are computed on
-  // the backend against the LANDMARK ankle-mid and are NOT changed by
-  // this. Where the drawn line and the metric's origin differ, the
-  // numbers remain the authority.
-  // Mean of the visible ankles, the single visible one, or nothing —
-  // never an average that includes an occluded placeholder.
-  let plumbX = meanVisibleX(kp[LM.LEFT_ANKLE], kp[LM.RIGHT_ANKLE]);
+  // The BACKEND METRICS NOW USE THIS SAME RULE — silhouette.plumb_x
+  // when the mask gave one, else the PICKED SIDE's own ankle landmark
+  // (posture_engine._compute_one_side). The fallback here used to be
+  // the MEAN of both ankles, so on a maskless photo the drawn line and
+  // the numbers referenced different x values. Line and number must
+  // share one reference.
+  //
+  // meanVisibleX stays as the last resort for a view with no
+  // pickedSide (legacy saved data); it never averages in an occluded
+  // placeholder.
+  const pickedAnkle = pickedSide === "left"
+    ? kp[LM.LEFT_ANKLE]
+    : pickedSide === "right"
+      ? kp[LM.RIGHT_ANKLE]
+      : undefined;
+  let plumbX = usable(pickedAnkle)
+    ? pickedAnkle.x
+    : meanVisibleX(kp[LM.LEFT_ANKLE], kp[LM.RIGHT_ANKLE]);
   const fromMask = silhouette?.plumb_x != null;
   if (fromMask) plumbX = silhouette!.plumb_x as number;
-  logVerticalSource(label, fromMask ? "silhouette" : "fallback");
+  logVerticalSource(
+    label, fromMask ? "silhouette" : "fallback", shiftReference,
+  );
 
   if (plumbX !== null) {
     ctx.strokeStyle = "rgba(34, 197, 94, 0.85)";

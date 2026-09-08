@@ -2,7 +2,7 @@
 // Combined posture analysis report — annotated front/side images +
 // finding tables with severity color coding + summary interpretation.
 
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { PostureImageOverlay } from "@/components/posture/PostureImageOverlay";
 import { ReportDisclaimer } from "@/components/ui/ReportDisclaimer";
 import { RelativeUnitsCaveat } from "@/components/posture/RelativeUnitsCaveat";
@@ -46,15 +46,53 @@ export function PostureReport({
     () => (front?.front ? buildFrontFindings(front.front) : []),
     [front],
   );
-  const sideFindings = useMemo<PostureFinding[]>(
-    () => (side?.side ? buildSideFindings(side.side) : []),
-    [side],
-  );
+  // Prefer the SERVER's findings, exactly as the explicit side blocks
+  // already do below. The server has already dropped the far side and
+  // re-signed the picked block for facing; recomputing here threw all
+  // of that away and re-emitted both sides from the raw measurements.
+  // The local build is now only a fallback for reports that predate
+  // server findings, and it is pinned to the picked side.
+  const sideFindings = useMemo<PostureFinding[]>(() => {
+    if (side?.findings && side.findings.length > 0) return side.findings;
+    return side?.side ? buildSideFindings(side.side) : [];
+  }, [side]);
 
-  const hasNotable =
-    [...frontFindings, ...sideFindings].some((f) => f.severity === "notable");
-  const hasMild =
-    [...frontFindings, ...sideFindings].some((f) => f.severity === "mild");
+  useEffect(() => {
+    if (!side || typeof window === "undefined") return;
+    try {
+      if (new URLSearchParams(window.location.search).get("posturedebug") !== "1") {
+        return;
+      }
+    } catch {
+      return;
+    }
+    console.log(
+      "[POSTURE] side view — picked =", side.side?.pickedSide ?? "none",
+      "| facing =", side.facing ?? "undetermined",
+      "| findings source =",
+      side.findings && side.findings.length > 0
+        ? "server"
+        : "fallback-picked-only",
+    );
+  }, [side]);
+
+  // Severity roll-up across EVERY assessed view. It used to read front
+  // + the auto side only, which was fine while `side` was mandatory —
+  // now that the sagittal plane comes from the explicit views, that
+  // would summarise a report as "well aligned" while a notable
+  // left-side finding sat further down the page. Deliberately a union,
+  // not a pick: the sentence claims "across the assessed views", so
+  // dropping any of them could hide a notable finding.
+  const allFindings = useMemo<PostureFinding[]>(() => {
+    const explicit = [leftSide, rightSide].flatMap((v) =>
+      v && !isPostureViewError(v) ? v.findings ?? [] : [],
+    );
+    const backRows = back && !isPostureViewError(back) ? back.findings ?? [] : [];
+    return [...frontFindings, ...sideFindings, ...backRows, ...explicit];
+  }, [frontFindings, sideFindings, back, leftSide, rightSide]);
+
+  const hasNotable = allFindings.some((f) => f.severity === "notable");
+  const hasMild = allFindings.some((f) => f.severity === "mild");
 
   const summary = hasNotable
     ? "One or more notable postural deviations were detected. Review the findings below and consider further evaluation."
@@ -95,13 +133,16 @@ export function PostureReport({
         />
       )}
       {sideFindings.length > 0 && (
-        <div>
-          <FindingsTable
-            title="Side view findings"
-            findings={sideFindings}
-          />
-          <RelativeUnitsCaveat />
-        </div>
+        <FindingsTable
+          title="Side view findings"
+          findings={sideFindings}
+        />
+      )}
+      {/* Shifts are % of body height in pixels for EVERY sagittal view,
+          not just the legacy auto one — this used to hang off the side
+          findings block and vanished with it. */}
+      {(sideFindings.length > 0 || leftSide || rightSide) && (
+        <RelativeUnitsCaveat />
       )}
 
       {/* ── Additive multi-view blocks (only render when present) ── */}
@@ -279,6 +320,7 @@ function ExplicitSideBlock({
           silhouette={side.silhouette}
         />
       </div>
+      {side.facingCaveat && <FacingCaveat text={side.facingCaveat} />}
       {findings.length > 0 && (
         <FindingsTable
           title={`${title} findings`}
@@ -286,6 +328,19 @@ function ExplicitSideBlock({
         />
       )}
     </section>
+  );
+}
+
+/** Amber notice under a view's image: the declared side and the side
+ *  the keypoints actually show disagree. The measurement still follows
+ *  the keypoints, so the numbers are right and the LABEL may not be —
+ *  which is exactly the thing an operator has to be told rather than
+ *  left to infer. */
+function FacingCaveat({ text }: { text: string }) {
+  return (
+    <p className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-[11px] text-warning">
+      ⚠ {text}
+    </p>
   );
 }
 

@@ -74,7 +74,11 @@ from engines.posture_engine import (
     _grade_tilt,
     analyze_posture_image,
 )
-from engines.posture_silhouette import attach_silhouette
+from engines.posture_silhouette import (
+    attach_silhouette,
+    build_silhouette_logged,
+    plumb_reference_x,
+)
 
 log = logging.getLogger("motionlens.posture.multi_view")
 
@@ -368,7 +372,7 @@ def analyze_posture_back(image_path: str) -> dict:
 
 # ─── Explicit-side (left_side / right_side) analysis ───────────
 def _compute_side_measurements_forced(
-    kps: list[dict], forced_side: str,
+    kps: list[dict], forced_side: str, plumb_x: Optional[float] = None,
 ) -> dict:
     """Wrap _compute_side_measurements and override pickedSide to
     the declared side. Recomputes trunk_lean sign against the forced
@@ -381,7 +385,7 @@ def _compute_side_measurements_forced(
     if forced_side not in ("left", "right"):
         raise ValueError(f"Unsupported forced side: {forced_side!r}")
 
-    base = _compute_side_measurements(kps)
+    base = _compute_side_measurements(kps, plumb_x)
 
     # Recompute trunk_lean sign for the forced side. Uses the same
     # helpers + convention as posture_engine._compute_side_measurements.
@@ -502,10 +506,14 @@ def _correct_shifts_for_facing(block: dict, facing: str) -> dict:
     """
     out = dict(block)
     if facing == "left":
+        # The *_ankleRef twins are negated too: they exist to be compared
+        # against the live values, which only works if both carry the
+        # same forward-positive convention.
         for key in _EXPLICIT_SHIFT_KEYS:
-            val = out.get(key)
-            if val is not None:
-                out[key] = -val
+            for k in (key, f"{key}_ankleRef"):
+                val = out.get(k)
+                if val is not None:
+                    out[k] = -val
     return out
 
 
@@ -598,7 +606,12 @@ def _analyze_explicit_from_kps(
     if not all(_is_visible(k) for k in trunk_anchors):
         raise ValueError("poor_visibility")
 
-    side_block = _compute_side_measurements_forced(kps, side)
+    # Built first: the shifts below reference the same plumb the overlay
+    # draws for this view.
+    silhouette = build_silhouette_logged(mask, kps, f"{side}_side")
+    side_block = _compute_side_measurements_forced(
+        kps, side, plumb_reference_x(silhouette),
+    )
 
     # B1 — facing-derived sign correction on the DECLARED block only.
     facing = _derive_facing(kps, side)
@@ -613,8 +626,24 @@ def _analyze_explicit_from_kps(
             forced_block = dict(forced_block)
             for key in _EXPLICIT_SHIFT_KEYS:
                 forced_block[key] = None
+                forced_block[f"{key}_ankleRef"] = None
         side_block = dict(side_block)
         side_block[side] = forced_block
+
+    # FAR-SIDE BLOCK DROPPED. A profile camera sees one side of the
+    # body; the other block is BlazePose inferring occluded joints, and
+    # publishing it produced two contradictory rows for one photo. Only
+    # the declared block carries the facing-corrected sign, so the two
+    # did not even share a convention.
+    #
+    # Dropped only when facing WAS resolved (the declared block is then
+    # trustworthy) and only when that block actually exists — otherwise
+    # nulling the other one would take the trunk-lean fallback below
+    # with it.
+    if shifts_available and isinstance(side_block.get(side), dict):
+        other_side = "right" if side == "left" else "left"
+        side_block = dict(side_block)
+        side_block[other_side] = None
 
     # Non-mirrored profile geometry: the patient's LEFT side toward
     # the camera means the patient faces image-LEFT (and vice versa).
@@ -653,7 +682,8 @@ def _analyze_explicit_from_kps(
     # than the ankle landmark buried inside the leg. Built with the
     # same view-agnostic builder the auto-picked `side` view uses, so
     # the two profile paths cannot drift apart.
-    attach_silhouette(out, mask, kps, view_key)
+    if silhouette is not None:
+        out["silhouette"] = silhouette
     return out
 
 
@@ -710,7 +740,12 @@ def apply_side_facing_correction(side_result: dict) -> dict:
             picked_block = dict(picked_block)
             for key in _EXPLICIT_SHIFT_KEYS:
                 picked_block[key] = None
+                picked_block[f"{key}_ankleRef"] = None
         new_side_block[picked] = picked_block
+
+    if shifts_available and isinstance(new_side_block.get(picked), dict):
+        other = "right" if picked == "left" else "left"
+        new_side_block[other] = None
 
     out = dict(side_result)
     out["side"] = new_side_block

@@ -70,7 +70,10 @@ from typing import Optional
 import mediapipe as mp
 import numpy as np
 
-from engines.posture_silhouette import attach_silhouette
+from engines.posture_silhouette import (
+    build_silhouette_logged,
+    plumb_reference_x,
+)
 
 # Pillow imported lazily inside _load_image_rgb so a missing PIL
 # dependency only breaks the posture endpoint, not the whole
@@ -467,6 +470,7 @@ def _compute_one_side(
     idx: dict,
     body_h: Optional[float],
     trunk_lean: Optional[float],
+    plumb_x: Optional[float] = None,
 ) -> Optional[dict]:
     ear   = kps[idx["ear"]]
     sh    = kps[idx["sh"]]
@@ -482,15 +486,36 @@ def _compute_one_side(
         "kneeShiftPct": None,
         "trunkLeanDeg": trunk_lean,
     }
+    # REFERENCE X. The plumb the overlay draws, when the segmentation
+    # mask gave one; the same-side ankle landmark otherwise (the
+    # historical behaviour, and still what a maskless photo gets).
+    #
+    # They are not the same point: in profile the ankle landmark sits
+    # INSIDE the leg while the foot extends forward of it, so the drawn
+    # line hung roughly half a foot length ahead of the x the numbers
+    # were measured from. A clinician dropping a physical plumb line
+    # uses the foot, which is what plumb_x is.
+    ref_x = plumb_x if plumb_x is not None else ankle["x"]
+    out["shiftReference"] = "silhouette" if plumb_x is not None else "ankle"
+
     if body_h is not None and body_h > 0:
-        out["forwardHeadPct"]   = ((ear["x"]   - ankle["x"]) / body_h) * 100.0
-        out["shoulderShiftPct"] = ((sh["x"]    - ankle["x"]) / body_h) * 100.0
-        out["hipShiftPct"]      = ((hip["x"]   - ankle["x"]) / body_h) * 100.0
-        out["kneeShiftPct"]     = ((knee["x"]  - ankle["x"]) / body_h) * 100.0
+        out["forwardHeadPct"]   = ((ear["x"]   - ref_x) / body_h) * 100.0
+        out["shoulderShiftPct"] = ((sh["x"]    - ref_x) / body_h) * 100.0
+        out["hipShiftPct"]      = ((hip["x"]   - ref_x) / body_h) * 100.0
+        out["kneeShiftPct"]     = ((knee["x"]  - ref_x) / body_h) * 100.0
+        # TEMPORARY, for the review comparison: the same four measured
+        # the old way, so the shift can be quantified per photo. API +
+        # debug only — nothing renders these. Remove once signed off.
+        out["forwardHeadPct_ankleRef"]   = ((ear["x"]  - ankle["x"]) / body_h) * 100.0
+        out["shoulderShiftPct_ankleRef"] = ((sh["x"]   - ankle["x"]) / body_h) * 100.0
+        out["hipShiftPct_ankleRef"]      = ((hip["x"]  - ankle["x"]) / body_h) * 100.0
+        out["kneeShiftPct_ankleRef"]     = ((knee["x"] - ankle["x"]) / body_h) * 100.0
     return out
 
 
-def _compute_side_measurements(kps: list[dict]) -> dict:
+def _compute_side_measurements(
+    kps: list[dict], plumb_x: Optional[float] = None,
+) -> dict:
     # pickedSide = side with the highest min-confidence across
     # its 5 anchor keypoints. Used to anchor the bilateral
     # trunk-lean sign so positive consistently means "anatomical
@@ -527,11 +552,43 @@ def _compute_side_measurements(kps: list[dict]) -> dict:
         elif picked_side == "right":
             trunk_lean = -raw_tilt
 
+    # Near/far confidence telemetry. A profile camera sees one ear and
+    # one hip; BlazePose still emits the occluded pair, often above the
+    # 0.2 visibility floor, which is why the far-side block survives the
+    # gate at all. One line per side-view analysis (not per request —
+    # the engine has no request context) so Batch 2 can size a proper
+    # near/far threshold from real captures instead of guessing one.
+    log.info(
+        "posture side: ear L/R=%.2f/%.2f hip L/R=%.2f/%.2f picked=%s",
+        kps[3].get("score") or 0.0, kps[4].get("score") or 0.0,
+        kps[11].get("score") or 0.0, kps[12].get("score") or 0.0,
+        picked_side,
+    )
+
     body_h = _body_height_px(kps)
+
+    # How far the drawn plumb sits from the ankle landmark the numbers
+    # used to reference — i.e. exactly how much this moved the metrics,
+    # in pixels and as a fraction of body height.
+    if plumb_x is not None and picked_side is not None:
+        ank = kps[_SIDE_INDICES[picked_side]["ank"]]
+        delta = plumb_x - ank["x"]
+        log.info(
+            "posture side: shift reference = silhouette plumb_x=%.1f "
+            "ankle_x=%.1f delta=%+.1f px (%+.2f%% of body height)",
+            plumb_x, ank["x"], delta,
+            (delta / body_h * 100.0) if body_h else 0.0,
+        )
+    else:
+        log.info("posture side: shift reference = ankle landmark "
+                 "(no silhouette plumb available)")
+
     return {
         "pickedSide": picked_side,
-        "left":  _compute_one_side(kps, _SIDE_INDICES["left"],  body_h, trunk_lean),
-        "right": _compute_one_side(kps, _SIDE_INDICES["right"], body_h, trunk_lean),
+        "left":  _compute_one_side(
+            kps, _SIDE_INDICES["left"], body_h, trunk_lean, plumb_x),
+        "right": _compute_one_side(
+            kps, _SIDE_INDICES["right"], body_h, trunk_lean, plumb_x),
     }
 
 
@@ -725,6 +782,10 @@ def analyze_posture_image(image_path: str, view: str) -> dict:
     if not all(_is_visible(k) for k in trunk_anchors):
         raise ValueError("poor_visibility")
 
+    # Built BEFORE the metrics: the side shifts are referenced to the
+    # same plumb the overlay draws, so the geometry has to exist first.
+    silhouette = build_silhouette_logged(mask, kps, view)
+
     front: Optional[dict] = None
     side: Optional[dict] = None
     findings: list[dict] = []
@@ -733,7 +794,7 @@ def analyze_posture_image(image_path: str, view: str) -> dict:
         front = _compute_front_measurements(kps)
         findings = _build_front_findings(front)
     else:
-        side = _compute_side_measurements(kps)
+        side = _compute_side_measurements(kps, plumb_reference_x(silhouette))
         findings = _build_side_findings(side)
 
     out = {
@@ -751,7 +812,8 @@ def analyze_posture_image(image_path: str, view: str) -> dict:
     # this function returned before — which is also exactly what every
     # already-saved report looks like, and what the frontend's fallback
     # path expects. Never let overlay geometry fail an analysis.
-    attach_silhouette(out, mask, kps, view)
+    if silhouette is not None:
+        out["silhouette"] = silhouette
     return out
 
 
