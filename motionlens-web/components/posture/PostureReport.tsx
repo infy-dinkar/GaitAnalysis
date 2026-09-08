@@ -76,10 +76,23 @@ export function PostureReport({
     );
   }, [side]);
 
-  const hasNotable =
-    [...frontFindings, ...sideFindings].some((f) => f.severity === "notable");
-  const hasMild =
-    [...frontFindings, ...sideFindings].some((f) => f.severity === "mild");
+  // Severity roll-up across EVERY assessed view. It used to read front
+  // + the auto side only, which was fine while `side` was mandatory —
+  // now that the sagittal plane comes from the explicit views, that
+  // would summarise a report as "well aligned" while a notable
+  // left-side finding sat further down the page. Deliberately a union,
+  // not a pick: the sentence claims "across the assessed views", so
+  // dropping any of them could hide a notable finding.
+  const allFindings = useMemo<PostureFinding[]>(() => {
+    const explicit = [leftSide, rightSide].flatMap((v) =>
+      v && !isPostureViewError(v) ? v.findings ?? [] : [],
+    );
+    const backRows = back && !isPostureViewError(back) ? back.findings ?? [] : [];
+    return [...frontFindings, ...sideFindings, ...backRows, ...explicit];
+  }, [frontFindings, sideFindings, back, leftSide, rightSide]);
+
+  const hasNotable = allFindings.some((f) => f.severity === "notable");
+  const hasMild = allFindings.some((f) => f.severity === "mild");
 
   const summary = hasNotable
     ? "One or more notable postural deviations were detected. Review the findings below and consider further evaluation."
@@ -120,13 +133,16 @@ export function PostureReport({
         />
       )}
       {sideFindings.length > 0 && (
-        <div>
-          <FindingsTable
-            title="Side view findings"
-            findings={sideFindings}
-          />
-          <RelativeUnitsCaveat />
-        </div>
+        <FindingsTable
+          title="Side view findings"
+          findings={sideFindings}
+        />
+      )}
+      {/* Shifts are % of body height in pixels for EVERY sagittal view,
+          not just the legacy auto one — this used to hang off the side
+          findings block and vanished with it. */}
+      {(sideFindings.length > 0 || leftSide || rightSide) && (
+        <RelativeUnitsCaveat />
       )}
 
       {/* ── Additive multi-view blocks (only render when present) ── */}

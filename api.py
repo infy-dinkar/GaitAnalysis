@@ -145,6 +145,7 @@ from engines.biomech.hip_engine import analyze_hip as analyze_hip_engine
 # ─── Posture — IMAGE-mode MediaPipe (separate pipeline) ─────────
 from engines.posture_engine import (
     analyze_posture_combined as analyze_posture_combined_engine,
+    analyze_posture_image as analyze_posture_image_engine,
 )
 from engines.posture_engine_multi_view import (
     analyze_posture_back,
@@ -5379,7 +5380,14 @@ _MAX_POSTURE_PHOTO_MB = 10
 @app.post("/api/analyze-posture")
 async def analyze_posture(
     front_image: UploadFile = File(...),
-    side_image:  UploadFile = File(...),
+    # OPTIONAL since the capture UIs stopped sending it. Live mode used
+    # to re-send the left-side photo under this key so the old
+    # front+side contract would fire, which meant one photo was
+    # analysed twice and appeared in two report sections with different
+    # numbers. Both UIs now send only what was actually captured; this
+    # stays accepted so older clients and saved-report round-trips keep
+    # working. See the front/side validation gate below.
+    side_image:  Optional[UploadFile] = File(None),
     patient_name: Optional[str] = Form(None),
     # ── Additive multi-view fields (Phase 4-view expansion) ────
     # Each is optional. Absence = the corresponding response key
@@ -5439,13 +5447,30 @@ async def analyze_posture(
     right_side_path: Optional[str] = None
     try:
         front_bytes = await front_image.read()
-        side_bytes  = await side_image.read()
-        if not front_bytes or not side_bytes:
+        if not front_bytes:
             raise HTTPException(
                 status_code=400,
-                detail="Both front and side photos are required.",
+                detail="A front-view photo is required.",
             )
-        for tag, payload in (("front", front_bytes), ("side", side_bytes)):
+        side_bytes = await side_image.read() if side_image is not None else b""
+
+        # A posture assessment needs the frontal plane AND the sagittal
+        # plane. Sagittal can now arrive as the legacy auto `side` OR as
+        # either explicit view, so require front plus at least one of
+        # the three rather than front plus `side` specifically.
+        if not side_bytes and left_side_image is None and right_side_image is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "A front-view photo and at least one side view "
+                    "(left or right) are required."
+                ),
+            )
+
+        size_checks = [("front", front_bytes)]
+        if side_bytes:
+            size_checks.append(("side", side_bytes))
+        for tag, payload in size_checks:
             size_mb = len(payload) / (1024 * 1024)
             if size_mb > _MAX_POSTURE_PHOTO_MB:
                 raise HTTPException(
@@ -5489,8 +5514,12 @@ async def analyze_posture(
         front_path = _save_image(
             front_bytes, front_image.filename or "", "posture_front.jpg",
         )
-        side_path = _save_image(
-            side_bytes, side_image.filename or "", "posture_side.jpg",
+        side_path = (
+            _save_image(
+                side_bytes, side_image.filename or "", "posture_side.jpg",
+            )
+            if side_bytes and side_image is not None
+            else None
         )
 
         # ── Additive: save the optional 3 new views if provided ───
@@ -5526,7 +5555,7 @@ async def analyze_posture(
             "back=%s left_side=%s right_side=%s",
             front_image.filename,
             len(front_bytes) / 1024 / 1024,
-            side_image.filename,
+            side_image.filename if side_image is not None else "none",
             len(side_bytes) / 1024 / 1024,
             "yes" if back_path else "no",
             "yes" if left_side_path else "no",
@@ -5539,10 +5568,20 @@ async def analyze_posture(
         # the historical combined function so the existing response
         # shape is preserved byte-for-byte when the new views are
         # absent.
-        result = analyze_posture_combined_engine(
-            front_image_path=front_path,
-            side_image_path=side_path,
-        )
+        # `side` is analysed ONLY when a side photo was actually sent.
+        # Absent, the key is simply missing — the same convention the
+        # back / left_side / right_side keys already use, which every
+        # consumer already handles.
+        if side_path:
+            result = analyze_posture_combined_engine(
+                front_image_path=front_path,
+                side_image_path=side_path,
+            )
+        else:
+            result = {
+                "front": analyze_posture_image_engine(front_path, "front"),
+                "relative_units": True,
+            }
 
         # Facing-corrected sagittal signs for the legacy side view —
         # same FORWARD = POSITIVE convention + picked-block-only

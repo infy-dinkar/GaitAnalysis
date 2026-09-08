@@ -204,7 +204,11 @@ export type PostureViewResult =
  *  contract; the three new views are OPTIONAL. */
 export interface PostureMultiViewInput {
   frontFile: File;
-  sideFile: File;
+  /** The legacy auto side view. Optional since the capture UIs stopped
+   *  sending it — the sagittal plane now comes from the explicit
+   *  left/right views. Still accepted so an older client keeps
+   *  working. */
+  sideFile?: File;
   backFile?: File;
   leftSideFile?: File;
   rightSideFile?: File;
@@ -218,7 +222,9 @@ export interface PostureMultiViewInput {
  *  so one bad view doesn't break the rest. */
 export interface PostureMultiViewResult {
   front: PostureAnalysisResult;
-  side: PostureAnalysisResult;
+  /** Legacy auto side view. Present only for older clients / saved
+   *  reports that still send a side photo. */
+  side?: PostureAnalysisResult;
   back?: PostureBackResult | PostureViewError;
   left_side?: PostureExplicitSideResult | PostureViewError;
   right_side?: PostureExplicitSideResult | PostureViewError;
@@ -287,9 +293,11 @@ export async function analyzePostureMultiView(
   form.append(
     "front_image", frontFile, frontFile.name || "posture_front.jpg",
   );
-  form.append(
-    "side_image", sideFile, sideFile.name || "posture_side.jpg",
-  );
+  if (sideFile) {
+    form.append(
+      "side_image", sideFile, sideFile.name || "posture_side.jpg",
+    );
+  }
   if (backFile) {
     form.append(
       "back_image", backFile, backFile.name || "posture_back.jpg",
@@ -328,7 +336,7 @@ export async function analyzePostureMultiView(
         findings: PostureFinding[];
         silhouette?: PostureSilhouette;
       };
-      side: {
+      side?: {
         view: "side";
         imageWidth: number;
         imageHeight: number;
@@ -388,7 +396,7 @@ export async function analyzePostureMultiView(
   const data = wrapper.data;
 
   const frontUrl = URL.createObjectURL(frontFile);
-  const sideUrl  = URL.createObjectURL(sideFile);
+  const sideUrl  = sideFile ? URL.createObjectURL(sideFile) : null;
   const backUrl = backFile ? URL.createObjectURL(backFile) : null;
   const leftUrl = leftSideFile ? URL.createObjectURL(leftSideFile) : null;
   const rightUrl = rightSideFile ? URL.createObjectURL(rightSideFile) : null;
@@ -404,7 +412,13 @@ export async function analyzePostureMultiView(
       findings: data.front.findings,
       silhouette: data.front.silhouette,
     },
-    side: {
+    relativeUnits: !!data.relative_units,
+  };
+
+  // `side` only exists when a side photo was sent. Absent, the key is
+  // simply missing — same as back / left_side / right_side.
+  if (data.side && sideUrl) {
+    out.side = {
       view: "side",
       imageUrl: sideUrl,
       imageWidth: data.side.imageWidth,
@@ -415,9 +429,8 @@ export async function analyzePostureMultiView(
       silhouette: data.side.silhouette,
       facing: data.side.facing,
       shifts_insufficient_data: data.side.shifts_insufficient_data,
-    },
-    relativeUnits: !!data.relative_units,
-  };
+    };
+  }
 
   if (data.back && backUrl) {
     if (isPostureViewError(data.back)) {

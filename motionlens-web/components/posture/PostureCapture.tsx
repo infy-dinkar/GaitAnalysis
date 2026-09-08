@@ -43,6 +43,9 @@ interface PersistedView {
 
 // Slot identity — matches the FormData field names + save-payload
 // keys the backend/dispatch page already understands.
+// "side" stays in the union even though the upload UI no longer offers
+// that slot: persistedRef and the saved-report metric keys are still
+// keyed by it, so a legacy report round-trips unchanged.
 type SlotKey = "front" | "side" | "back" | "left_side" | "right_side";
 
 // Resize-and-encode a source image File to a JPEG data URL at most
@@ -146,7 +149,6 @@ function isHeic(f: File): boolean {
 
 export function PostureCapture() {
   const [frontFile, setFrontFile] = useState<File | null>(null);
-  const [sideFile, setSideFile] = useState<File | null>(null);
   const [backFile, setBackFile] = useState<File | null>(null);
   const [leftSideFile, setLeftSideFile] = useState<File | null>(null);
   const [rightSideFile, setRightSideFile] = useState<File | null>(null);
@@ -169,11 +171,10 @@ export function PostureCapture() {
   useEffect(() => {
     // Reset cached payload images whenever a file is removed / swapped.
     if (!frontFile) persistedRef.current.front = null;
-    if (!sideFile) persistedRef.current.side = null;
     if (!backFile) persistedRef.current.back = null;
     if (!leftSideFile) persistedRef.current.left_side = null;
     if (!rightSideFile) persistedRef.current.right_side = null;
-  }, [frontFile, sideFile, backFile, leftSideFile, rightSideFile]);
+  }, [frontFile, backFile, leftSideFile, rightSideFile]);
 
   const onPick = useCallback((which: SlotKey, f: File | null) => {
     setError(null);
@@ -189,7 +190,6 @@ export function PostureCapture() {
     }
     switch (which) {
       case "front":      setFrontFile(f); break;
-      case "side":       setSideFile(f); break;
       case "back":       setBackFile(f); break;
       case "left_side":  setLeftSideFile(f); break;
       case "right_side": setRightSideFile(f); break;
@@ -197,8 +197,11 @@ export function PostureCapture() {
   }, []);
 
   async function run() {
-    if (!frontFile || !sideFile) {
-      setError("Both a front-view and a side-view photo are required.");
+    if (!frontFile || !(leftSideFile || rightSideFile)) {
+      setError(
+        "A front-view photo and at least one side view (left or "
+        + "right) are required.",
+      );
       return;
     }
     setBusy(true);
@@ -217,7 +220,6 @@ export function PostureCapture() {
       // the backend had analysed the photo perfectly well.
       const thumbs = Promise.allSettled([
         compressFileToDataUrl(frontFile),
-        compressFileToDataUrl(sideFile),
         backFile ? compressFileToDataUrl(backFile) : Promise.resolve(null),
         leftSideFile ? compressFileToDataUrl(leftSideFile) : Promise.resolve(null),
         rightSideFile ? compressFileToDataUrl(rightSideFile) : Promise.resolve(null),
@@ -226,7 +228,6 @@ export function PostureCapture() {
       // Only THIS await can reject the run.
       const multiResult = await analyzePostureMultiView({
         frontFile,
-        sideFile,
         backFile: backFile ?? undefined,
         leftSideFile: leftSideFile ?? undefined,
         rightSideFile: rightSideFile ?? undefined,
@@ -256,7 +257,7 @@ export function PostureCapture() {
   function reset() {
     if (result) {
       URL.revokeObjectURL(result.front.imageUrl);
-      URL.revokeObjectURL(result.side.imageUrl);
+      if (result.side) URL.revokeObjectURL(result.side.imageUrl);
       if (result.back && !isPostureViewError(result.back)) {
         URL.revokeObjectURL(result.back.imageUrl);
       }
@@ -268,7 +269,6 @@ export function PostureCapture() {
       }
     }
     setFrontFile(null);
-    setSideFile(null);
     setBackFile(null);
     setLeftSideFile(null);
     setRightSideFile(null);
@@ -282,7 +282,7 @@ export function PostureCapture() {
       <div className="space-y-8">
         <PostureReport
           front={result.front}
-          side={result.side}
+          side={result.side ?? null}
           patient={patient ?? null}
           patientName={patient?.name ?? null}
           back={result.back ?? null}
@@ -319,14 +319,7 @@ export function PostureCapture() {
           onPick={(f) => onPick("front", f)}
           hint="Patient stands facing the camera, full body in frame, arms relaxed at sides."
         />
-        <PhotoSlot
-          label="Side view"
-          required
-          file={sideFile}
-          onPick={(f) => onPick("side", f)}
-          hint="Patient stands sideways to the camera (left or right side), full body in frame."
-        />
-        <PhotoSlot
+<PhotoSlot
           label="Back view"
           file={backFile}
           onPick={(f) => onPick("back", f)}
@@ -372,16 +365,17 @@ export function PostureCapture() {
       <div className="flex flex-col gap-2 md:flex-row md:items-center">
         <Button
           onClick={run}
-          disabled={busy || !frontFile || !sideFile}
+          disabled={busy || !frontFile || !(leftSideFile || rightSideFile)}
           loading={busy}
           className="w-full md:w-auto"
         >
           <Play className="h-4 w-4" />
           Run analysis
         </Button>
-        {(!frontFile || !sideFile) && (
+        {(!frontFile || !(leftSideFile || rightSideFile)) && (
           <p className="text-xs text-subtle">
-            Both front-view and side-view photos are required to run analysis.
+            A front-view photo and at least one side view (left or right)
+            are required to run analysis.
             Back / left / right views are optional.
           </p>
         )}
@@ -407,11 +401,12 @@ function buildSavePayload(
   // Persist what the report DISPLAYED: the server's facing-corrected,
   // picked-side-only rows. Rebuilding locally would save a different
   // set from the one the clinician signed off on.
-  const sideFindings =
-    result.side.findings && result.side.findings.length > 0
+  const sideFindings = !result.side
+    ? []
+    : result.side.findings && result.side.findings.length > 0
       ? result.side.findings
-      : result.side.side
-        ? buildSideFindings(result.side.side)
+      : result.side?.side
+        ? buildSideFindings(result.side?.side)
         : [];
 
   const scaleKp = (
@@ -445,7 +440,7 @@ function buildSavePayload(
     persisted.front?.width,
   );
   const sideKp = scaleKp(
-    result.side.keypoints, result.side.imageWidth,
+    result.side?.keypoints, result.side?.imageWidth,
     persisted.side?.width,
   );
   const backKp = backSuccess
@@ -472,7 +467,7 @@ function buildSavePayload(
     result.front.imageWidth, persisted.front?.width,
   );
   const sideSilScale = silScale(
-    result.side.imageWidth, persisted.side?.width,
+    result.side?.imageWidth, persisted.side?.width,
   );
   const scaled = (
     sil: Parameters<typeof scaleSilhouette>[0],
@@ -487,8 +482,8 @@ function buildSavePayload(
     ? scaleSilhouette(result.front.silhouette, frontSilScale, frontSilScale)
     : result.front.silhouette;
   const sideSilhouette = sideSilScale
-    ? scaleSilhouette(result.side.silhouette, sideSilScale, sideSilScale)
-    : result.side.silhouette;
+    ? scaleSilhouette(result.side?.silhouette, sideSilScale, sideSilScale)
+    : result.side?.silhouette;
   const backSilhouette = backSuccess
     ? scaled(backSuccess.silhouette, backSuccess.imageWidth,
              persisted.back?.width)
@@ -514,7 +509,7 @@ function buildSavePayload(
     module: "posture" as const,
     metrics: {
       front: result.front.front ?? {},
-      side: result.side.side ?? {},
+      side: result.side?.side ?? {},
       // Existing image keys — read by the dispatch page PostureBody.
       front_image: asImg(persisted.front),
       side_image: asImg(persisted.side),

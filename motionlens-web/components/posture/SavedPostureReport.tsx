@@ -128,7 +128,15 @@ export function SavedPostureReport({
     return side ? buildSideFindings(side) : [];
   }, [side, sideFindings]);
 
-  const all = [...fFindings, ...sFindings];
+  // Same union as the live report: with the auto side view gone, a
+  // summary built from front + side alone would ignore every sagittal
+  // finding the explicit views produced.
+  const all = [
+    ...fFindings, ...sFindings,
+    ...(backFindings ?? []),
+    ...(leftSideFindings ?? []),
+    ...(rightSideFindings ?? []),
+  ];
   const hasNotable = all.some((f) => f.severity === "notable");
   const hasMild = all.some((f) => f.severity === "mild");
 
