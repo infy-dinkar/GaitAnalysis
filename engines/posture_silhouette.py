@@ -345,6 +345,44 @@ def build_silhouette(
     return out
 
 
+def build_silhouette_logged(
+    mask: Optional[np.ndarray], kps: list[dict], view: str,
+) -> Optional[dict]:
+    """build_silhouette + the one-line diagnostic, returning the block.
+
+    Split out from attach_silhouette because the MEASUREMENTS now need
+    plumb_x, so the silhouette has to exist before the metric block is
+    computed rather than being bolted onto the finished result.
+    """
+    try:
+        sil = build_silhouette(mask, kps)
+    except Exception:  # pragma: no cover — defensive
+        log.warning("posture: silhouette build failed for %s",
+                    view, exc_info=True)
+        return None
+    if sil is None:
+        log.info(
+            "posture: silhouette None for %s — mask=%s", view,
+            "absent" if mask is None
+            else f"shape={mask.shape} ndim={mask.ndim}",
+        )
+    return sil
+
+
+def plumb_reference_x(silhouette: Optional[dict]) -> Optional[float]:
+    """The x the side overlay DRAWS its plumb at, or None.
+
+    The single definition of "the reference", so the measurement and the
+    drawn line cannot diverge — they used to: the line sat on the foot
+    silhouette while the numbers measured from the ankle landmark buried
+    inside the leg, roughly half a foot length apart.
+    """
+    if not silhouette:
+        return None
+    px = silhouette.get("plumb_x")
+    return float(px) if px is not None else None
+
+
 def attach_silhouette(
     out: dict, mask: Optional[np.ndarray], kps: list[dict], view: str,
 ) -> None:
@@ -385,6 +423,8 @@ __all__ = (
     "MASK_THRESHOLD",
     "attach_silhouette",
     "body_midline_x",
+    "build_silhouette_logged",
+    "plumb_reference_x",
     "build_silhouette",
     "plumb_x_side",
     "row_extent",
