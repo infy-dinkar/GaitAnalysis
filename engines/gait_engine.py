@@ -1306,6 +1306,26 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
     R_idx    = _filter(strikes["right"])
     combined = np.sort(np.concatenate([L_idx, R_idx])) if (len(L_idx) or len(R_idx)) else np.array([], dtype=int)
 
+    # ── Landmark reliability per metric (ADDITIVE, no value changes) ──
+    # For every metric the report shows: the per-frame MIN visibility
+    # over exactly the joints that metric reads, on that metric's own
+    # side, over exactly the frames that fed the number. Interpolated
+    # frames (vis 0.0 — dropped at extraction and reconstructed by
+    # _interp_nans) are INCLUDED on purpose: they fed the value, so
+    # they must count against it. Median gives the tier; the share of
+    # frames >= 0.7 is the second number in the note.
+    #
+    # Frame sets mirror the computations below one-for-one:
+    #   masked means (torso)            -> the mask
+    #   strike-based (count, cadence, symmetry, CV, step length, time)
+    #                                   -> strike frames +/-1
+    #   Knee peak (single-frame nanmax) -> the argmax frame, mask median
+    #                                      kept as context
+    #   cycle % (stance / swing / DS)   -> the stride windows
+    reliability = _build_reliability(
+        ts, mask, L_idx, R_idx, knee_full, n_total,
+    )
+
     # Each detected heel strike = 1 step
     total_steps = len(combined)
     step_data = {
@@ -1490,7 +1510,198 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         "swing_pct_left":     _cycle_pct["swing_pct_left"],
         "swing_pct_right":    _cycle_pct["swing_pct_right"],
         "double_support_pct": _cycle_pct["double_support_pct"],
+        # Additive — per-metric landmark reliability. Never read by
+        # interpret() or any grading; display + audit only.
+        "reliability":        reliability,
     }
+
+
+# ──────────────────────────────────────────────
+# Landmark reliability (ADDITIVE — display only)
+# ──────────────────────────────────────────────
+# Tier cut-offs. >=0.7 the joints were seen clearly; 0.4–0.7 seen but
+# unreliably (typically the far-side leg, or a hand crossing the hip);
+# <0.4 is below the extraction floor, i.e. the position was mostly
+# INTERPOLATED and the number is not a measurement.
+RELIABILITY_HI = 0.7
+RELIABILITY_LO = 0.4
+
+_JOINT_LABEL = {
+    "hip": "hip", "knee": "knee", "ankle": "ankle", "heel": "heel",
+    "foot_index": "toe", "shoulder": "shoulder",
+}
+
+
+def _tier(score: float) -> str:
+    if score >= RELIABILITY_HI:
+        return "reliable"
+    if score >= RELIABILITY_LO:
+        return "caution"
+    return "not_assessed"
+
+
+def _reliability_entry(
+    ts: dict, joints: list, frames, context_frames=None,
+):
+    """One metric's reliability. `joints` = [(side, joint), ...];
+    `frames` = the exact frame set that fed the metric. Returns None
+    when there is nothing to score."""
+    if not joints or frames is None or len(frames) == 0:
+        return None
+    n = len(ts["left_hip"]["vis"])
+    frames = np.asarray(frames, dtype=int)
+    frames = frames[(frames >= 0) & (frames < n)]
+    if len(frames) == 0:
+        return None
+    per_joint = {
+        (side, j): np.asarray(ts[f"{side}_{j}"]["vis"], dtype=float)[frames]
+        for side, j in joints
+    }
+    stack = np.vstack(list(per_joint.values()))
+    frame_score = stack.min(axis=0)
+    score = float(np.median(frame_score))
+    pct = float(np.mean(frame_score >= RELIABILITY_HI) * 100.0)
+    worst_key = min(per_joint, key=lambda k: float(np.median(per_joint[k])))
+    worst_side, worst_joint = worst_key
+    worst_med = float(np.median(per_joint[worst_key]))
+    sides = {side for side, _ in joints}
+    side_label = "bilateral" if len(sides) > 1 else next(iter(sides))
+    tier = _tier(score)
+    jl = _JOINT_LABEL.get(worst_joint, worst_joint)
+    who = f"{worst_side.capitalize()} {jl} visibility {worst_med:.2f}"
+    if tier == "reliable":
+        note = f"{who} — landmarks clearly seen."
+    elif tier == "caution":
+        note = f"{who} — partly occluded; consider re-capture."
+    else:
+        note = (f"{who} — below the tracking floor; position was "
+                f"interpolated, not measured.")
+    out = {
+        "tier": tier,
+        "score": round(score, 3),
+        "pct_ge_07": round(pct, 1),
+        "joints": [f"{side}_{j}" for side, j in joints],
+        "side": side_label,
+        "worst_joint": f"{worst_side}_{worst_joint}",
+        "n_frames": int(len(frames)),
+        "note": note,
+    }
+    if context_frames is not None and len(context_frames) > 0:
+        ctx = np.asarray(context_frames, dtype=int)
+        ctx = ctx[(ctx >= 0) & (ctx < n)]
+        if len(ctx):
+            cstack = np.vstack([
+                np.asarray(ts[f"{side}_{j}"]["vis"], dtype=float)[ctx]
+                for side, j in joints
+            ])
+            out["context_score"] = round(float(np.median(cstack.min(axis=0))), 3)
+    return out
+
+
+def _strike_frames(idx, n_total: int) -> np.ndarray:
+    """Strike frames +/-1 — what a strike-based metric actually read."""
+    if idx is None or len(idx) == 0:
+        return np.array([], dtype=int)
+    idx = np.asarray(idx, dtype=int)
+    fr = np.concatenate([idx - 1, idx, idx + 1])
+    fr = fr[(fr >= 0) & (fr < n_total)]
+    return np.unique(fr)
+
+
+def _stride_windows(idx, n_total: int) -> np.ndarray:
+    """Every frame inside consecutive same-leg strike pairs."""
+    if idx is None or len(idx) < 2:
+        return np.array([], dtype=int)
+    idx = np.asarray(idx, dtype=int)
+    parts = [np.arange(max(0, a), min(n_total, b))
+             for a, b in zip(idx[:-1], idx[1:]) if b > a]
+    return np.concatenate(parts) if parts else np.array([], dtype=int)
+
+
+def _build_reliability(ts: dict, mask: np.ndarray, L_idx, R_idx,
+                       knee_full: dict, n_total: int) -> dict:
+    """Per-metric reliability keyed by the MetricsBlock field names the
+    report renders. Pure function of ts[*]["vis"] + the same frame sets
+    compute_metrics uses; it changes no metric."""
+    mask_frames = np.where(mask)[0]
+    both = (np.concatenate([L_idx, R_idx]) if (len(L_idx) or len(R_idx))
+            else np.array([], dtype=int))
+    strikes_both = _strike_frames(both, n_total)
+    heels = [("left", "heel"), ("right", "heel")]
+    out: dict = {}
+
+    for key in ("step_count", "cadence", "symmetry", "stride_cv", "step_time"):
+        out[key] = _reliability_entry(ts, heels, strikes_both)
+
+    out["step_length"] = _reliability_entry(
+        ts,
+        heels + [("left", "hip"), ("right", "hip"),
+                 ("left", "ankle"), ("right", "ankle")],
+        strikes_both, context_frames=mask_frames,
+    )
+
+    out["torso_lean"] = _reliability_entry(
+        ts,
+        [("left", "shoulder"), ("right", "shoulder"),
+         ("left", "hip"), ("right", "hip")],
+        mask_frames,
+    )
+
+    # Knee peak: the single argmax frame ON THE SIDE THAT WON
+    # (overall_peak = max(peak_left, peak_right)), mask as context.
+    best_side, best_frame, best_val = None, None, -np.inf
+    for side in ("left", "right"):
+        if len(mask_frames) == 0:
+            continue
+        seg = np.asarray(knee_full[side], dtype=float)[mask_frames]
+        if np.all(np.isnan(seg)):
+            continue
+        i = int(np.nanargmax(seg))
+        if seg[i] > best_val:
+            best_val, best_side, best_frame = float(seg[i]), side, int(mask_frames[i])
+    if best_side is not None:
+        out["knee_peak"] = _reliability_entry(
+            ts,
+            [(best_side, "hip"), (best_side, "knee"), (best_side, "ankle")],
+            np.array([best_frame], dtype=int), context_frames=mask_frames,
+        )
+    else:
+        out["knee_peak"] = None
+
+    win_L = _stride_windows(L_idx, n_total)
+    win_R = _stride_windows(R_idx, n_total)
+    for side, win in (("left", win_L), ("right", win_R)):
+        e = _reliability_entry(
+            ts, [(side, "foot_index"), (side, "ankle"), (side, "heel")], win,
+        )
+        out[f"stance_pct_{side}"] = e
+        out[f"swing_pct_{side}"] = e
+    out["double_support_pct"] = _reliability_entry(
+        ts,
+        [("left", "foot_index"), ("left", "ankle"), ("left", "heel"),
+         ("right", "foot_index"), ("right", "ankle"), ("right", "heel")],
+        (np.union1d(win_L, win_R) if (len(win_L) or len(win_R))
+         else np.array([], dtype=int)),
+    )
+    return out
+
+
+def joint_series_reliability(ts: dict, side: str, joint: str):
+    """Reliability of a per-joint angle series over the WHOLE video —
+    the frame set _summarise_joint_arr actually reduces. Joints mirror
+    the angle helpers exactly."""
+    n = len(ts["left_hip"]["vis"])
+    if joint == "knee":
+        joints = [(side, "hip"), (side, "knee"), (side, "ankle")]
+    elif joint == "hip":
+        joints = [("left", "shoulder"), ("right", "shoulder"),
+                  ("left", "hip"), ("right", "hip"), (side, "knee")]
+    elif joint == "ankle":
+        joints = [(side, "knee"), (side, "ankle"),
+                  (side, "foot_index"), (side, "heel")]
+    else:
+        return None
+    return _reliability_entry(ts, joints, np.arange(n))
 
 
 # ══════════════════════════════════════════════

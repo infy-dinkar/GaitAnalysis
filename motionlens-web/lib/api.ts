@@ -28,6 +28,26 @@ export interface VideoInfoDTO {
   ankle_baseline_n_frames: number;
 }
 
+/** Per-metric landmark reliability (additive, gait only). Keyed by
+ *  the MetricsBlockDTO field the entry describes. Absent on reports
+ *  saved before it existed — every consumer must treat it as optional. */
+export interface ReliabilityEntryDTO {
+  tier: "reliable" | "caution" | "not_assessed";
+  /** median over the metric's frames of min-joint visibility */
+  score: number;
+  /** % of those frames with min-joint visibility >= 0.7 */
+  pct_ge_07: number;
+  joints: string[];
+  side: "left" | "right" | "bilateral";
+  worst_joint: string;
+  n_frames: number;
+  note: string;
+  /** Knee peak / step length: median over the wider window, for context. */
+  context_score?: number;
+}
+
+export type ReliabilityMap = Partial<Record<string, ReliabilityEntryDTO | null>>;
+
 export interface MetricsBlockDTO {
   step_count: number;
   cadence: number | null;
@@ -50,6 +70,8 @@ export interface MetricsBlockDTO {
   swing_pct_left?: number | null;
   swing_pct_right?: number | null;
   double_support_pct?: number | null;
+  /** Additive — see ReliabilityMap. */
+  reliability?: ReliabilityMap | null;
 }
 
 export interface JointDetailDTO {
@@ -58,6 +80,8 @@ export interface JointDetailDTO {
   rom: number | null;
   mean: number | null;
   time_series: (number | null)[];
+  /** Additive — reliability of the landmarks behind this series. */
+  reliability?: ReliabilityEntryDTO | null;
 }
 
 export interface JointAnglesBlockDTO {

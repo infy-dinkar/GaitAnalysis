@@ -2,7 +2,7 @@ import { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { MetricTile, Status } from "@/components/gait/MetricTile";
 import { fmt } from "@/lib/utils";
-import type { MetricsBlockDTO } from "@/lib/api";
+import type { MetricsBlockDTO, ReliabilityEntryDTO } from "@/lib/api";
 
 const NORMAL = {
   cadence: [100, 120] as [number, number],
@@ -63,18 +63,28 @@ export function MetricsSection({
 }: MetricsSectionProps) {
   const isClean = variant === "clean";
 
-  const tiles: { label: string; value: string; hint?: string; status: Status }[] = [
+  // Reliability lookup — absent on reports saved before it existed, in
+  // which case every tile renders exactly as it did.
+  const rel = (key: string): ReliabilityEntryDTO | null =>
+    metrics.reliability?.[key] ?? null;
+
+  const tiles: {
+    label: string; value: string; hint?: string; status: Status;
+    reliability: ReliabilityEntryDTO | null;
+  }[] = [
     {
       label: "Step count",
       value: String(metrics.step_count),
       hint: "strikes",
       status: "neutral",
+      reliability: rel("step_count"),
     },
     {
       label: "Cadence",
       value: metrics.cadence !== null ? fmt(metrics.cadence, 0) : "—",
       hint: "steps/min",
       status: classify(metrics.cadence, NORMAL.cadence),
+      reliability: rel("cadence"),
     },
     {
       label: "Symmetry",
@@ -84,18 +94,21 @@ export function MetricsSection({
         metrics.symmetry !== null
           ? classify(metrics.symmetry * 100, NORMAL.symmetryPct)
           : "neutral",
+      reliability: rel("symmetry"),
     },
     {
       label: "Knee peak",
       value: metrics.knee_peak !== null ? `${fmt(metrics.knee_peak, 1)}°` : "—",
       hint: "swing flexion",
       status: classify(metrics.knee_peak, NORMAL.kneePeak),
+      reliability: rel("knee_peak"),
     },
     {
       label: "Stride CV",
       value: metrics.stride_cv !== null ? `${fmt(metrics.stride_cv, 1)}%` : "—",
       hint: "lower = better",
       status: classify(metrics.stride_cv, NORMAL.strideCv, true),
+      reliability: rel("stride_cv"),
     },
     {
       label: "Step length",
@@ -108,6 +121,7 @@ export function MetricsSection({
         metrics.step_length_unit === "m"
           ? classify(metrics.step_length, NORMAL.stepLength)
           : "neutral",
+      reliability: rel("step_length"),
     },
     {
       label: "Torso lean",
@@ -118,12 +132,14 @@ export function MetricsSection({
         metrics.torso_lean !== null
           ? classify(Math.abs(metrics.torso_lean), NORMAL.torsoLeanAbs, true)
           : "neutral",
+      reliability: rel("torso_lean"),
     },
     {
       label: "Step time",
       value: metrics.step_time !== null ? `${fmt(metrics.step_time, 2)}s` : "—",
       hint: "avg interval",
       status: classify(metrics.step_time, NORMAL.stepTime),
+      reliability: rel("step_time"),
     },
   ];
 
@@ -152,6 +168,7 @@ export function MetricsSection({
             value={t.value}
             hint={t.hint}
             status={t.status}
+            reliability={t.reliability}
           />
         ))}
       </div>
