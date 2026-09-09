@@ -76,10 +76,6 @@ class MetricsBlock(BaseModel):
     # names above ({tier, score, pct_ge_07, joints, side, worst_joint,
     # note}). None on reports that predate it.
     reliability: Optional[dict] = None
-    # Additive — camera-side context: {mode: single|bidirectional|
-    # unknown, near_side, far_side, passes:[{start,end,direction,
-    # near_side,far_side}]}. Read only by the report summary line.
-    reliability_context: Optional[dict] = None
 
 
 class JointDetail(BaseModel):

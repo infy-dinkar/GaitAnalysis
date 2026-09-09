@@ -1324,11 +1324,7 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
     #   cycle % (stance / swing / DS)   -> the stride windows
     reliability = _build_reliability(
         ts, mask, L_idx, R_idx, knee_full, n_total,
-        pass_segments=pass_segments,
     )
-    # Camera-side context (passes, near/far legs) split out so the
-    # frontend summary sentence can read it without scanning entries.
-    reliability_context = reliability.pop("_context", None)
 
     # Each detected heel strike = 1 step
     total_steps = len(combined)
@@ -1517,7 +1513,6 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         # Additive — per-metric landmark reliability. Never read by
         # interpret() or any grading; display + audit only.
         "reliability":        reliability,
-        "reliability_context": reliability_context,
     }
 
 
@@ -1545,53 +1540,12 @@ def _tier(score: float) -> str:
     return "not_assessed"
 
 
-# Far-side classification bands on far_frac (share of a metric's
-# frames in which that side was the leg AWAY from the camera).
-FAR_FRAC_FAR = 0.8      # >= : that side was the far leg -> cap at caution
-FAR_FRAC_NEAR = 0.2     # <= : near leg -> score-based tier stands
-
-_TIER_RANK = {"reliable": 2, "caution": 1, "not_assessed": 0}
-
-
-def _near_far_masks(pass_segments, n_total: int):
-    """Per-frame direction READ from segment_passes (never recomputed):
-    +1 inside an L->R pass, -1 inside R->L, 0 outside any pass.
-
-    Camera geometry for a sagittal walk: walking L->R means the
-    patient's RIGHT side faces the camera, so the right leg is near
-    and the left leg is far; R->L is the mirror. Frames outside any
-    pass are UNKNOWN, not far."""
-    d = np.zeros(n_total, dtype=int)
-    if pass_segments:
-        for p in pass_segments:
-            d[p["start"]:p["end"]] = p["direction"]
-    known = d != 0
-    far = {
-        "left":  d == 1,     # L->R: left leg away from camera
-        "right": d == -1,    # R->L: right leg away from camera
-    }
-    return d, known, far
-
-
-def _cap(tier: str, cap: str) -> str:
-    return tier if _TIER_RANK[tier] <= _TIER_RANK[cap] else cap
-
-
 def _reliability_entry(
     ts: dict, joints: list, frames, context_frames=None,
-    far_info=None, exempt_far_cap: bool = False,
 ):
     """One metric's reliability. `joints` = [(side, joint), ...];
     `frames` = the exact frame set that fed the metric. Returns None
-    when there is nothing to score.
-
-    `far_info` = (known_mask, far_masks) from _near_far_masks. When
-    given, each side's share of frames spent as the FAR leg is measured
-    over the metric's own frames; a side that was far >= FAR_FRAC_FAR of
-    the time caps the tier at caution regardless of visibility, because
-    BlazePose stays confident on occluded far-side joints and score
-    alone cannot flag them. `exempt_far_cap` keeps the score-based tier
-    (torso lean: midpoints of both sides, so "far" is not meaningful)."""
+    when there is nothing to score."""
     if not joints or frames is None or len(frames) == 0:
         return None
     n = len(ts["left_hip"]["vis"])
@@ -1641,59 +1595,6 @@ def _reliability_entry(
                 for side, j in joints
             ])
             out["context_score"] = round(float(np.median(cstack.min(axis=0))), 3)
-
-    # ── Camera side (near / far / mixed / unknown) ────────────────
-    out["far_frac"] = None
-    out["camera_side"] = "unknown"
-    out["far_side"] = None
-    out["side_far_frac"] = {}
-    out["cap_applied"] = False
-    if far_info is not None:
-        known, far_masks = far_info
-        k = known[frames]
-        n_known = int(k.sum())
-        side_ff = {}
-        for s in sorted(sides):
-            if n_known == 0:
-                side_ff[s] = None
-            else:
-                side_ff[s] = float((far_masks[s][frames] & k).sum()) / n_known
-        out["side_far_frac"] = {s: (round(v, 3) if v is not None else None)
-                                for s, v in side_ff.items()}
-        if n_known == 0:
-            out["camera_side"] = "unknown"
-        else:
-            # For a single-side metric this is that side's share; for a
-            # bilateral one it is the WORST side (rule d: cap if either
-            # side was far).
-            worst_ff_side = max(side_ff, key=lambda s: side_ff[s])
-            ff = side_ff[worst_ff_side]
-            out["far_frac"] = round(ff, 3)
-            if ff >= FAR_FRAC_FAR:
-                out["camera_side"] = "far"
-                out["far_side"] = worst_ff_side
-            elif ff <= FAR_FRAC_NEAR:
-                out["camera_side"] = "near"
-            else:
-                out["camera_side"] = "mixed"
-            # Coverage note: a known-direction share below half means most
-            # of the metric's frames sit outside any pass.
-            out["known_frac"] = round(n_known / len(frames), 3)
-
-        if out["camera_side"] == "far" and not exempt_far_cap:
-            capped = _cap(out["tier"], "caution")
-            out["cap_applied"] = capped != out["tier"] or out["tier"] == "caution"
-            out["tier"] = capped
-            fs = out["far_side"]
-            # Name the far-side joint with the lowest median on that side.
-            far_joints = [(s, j) for s, j in joints if s == fs] or joints
-            fj = min(far_joints, key=lambda sj: float(np.median(per_joint[sj])))
-            out["note"] = (
-                f"Far-side leg — {fs} {_JOINT_LABEL.get(fj[1], fj[1])} partly "
-                f"occluded by the near leg; values indicative only."
-            )
-        elif out["camera_side"] == "mixed":
-            out["note"] = out["note"] + " (bidirectional walk — leg alternates near/far)"
     return out
 
 
@@ -1718,18 +1619,11 @@ def _stride_windows(idx, n_total: int) -> np.ndarray:
 
 
 def _build_reliability(ts: dict, mask: np.ndarray, L_idx, R_idx,
-                       knee_full: dict, n_total: int,
-                       pass_segments=None) -> dict:
+                       knee_full: dict, n_total: int) -> dict:
     """Per-metric reliability keyed by the MetricsBlock field names the
     report renders. Pure function of ts[*]["vis"] + the same frame sets
-    compute_metrics uses + the walking direction READ from
-    pass_segments; it changes no metric.
-
-    Also returns a "_context" key (popped by the caller into
-    reliability_context) describing each pass's near/far leg."""
+    compute_metrics uses; it changes no metric."""
     mask_frames = np.where(mask)[0]
-    d, known, far_masks = _near_far_masks(pass_segments, n_total)
-    far_info = (known, far_masks)
     both = (np.concatenate([L_idx, R_idx]) if (len(L_idx) or len(R_idx))
             else np.array([], dtype=int))
     strikes_both = _strike_frames(both, n_total)
@@ -1737,22 +1631,20 @@ def _build_reliability(ts: dict, mask: np.ndarray, L_idx, R_idx,
     out: dict = {}
 
     for key in ("step_count", "cadence", "symmetry", "stride_cv", "step_time"):
-        out[key] = _reliability_entry(ts, heels, strikes_both, far_info=far_info)
+        out[key] = _reliability_entry(ts, heels, strikes_both)
 
     out["step_length"] = _reliability_entry(
         ts,
         heels + [("left", "hip"), ("right", "hip"),
                  ("left", "ankle"), ("right", "ankle")],
-        strikes_both, context_frames=mask_frames, far_info=far_info,
+        strikes_both, context_frames=mask_frames,
     )
 
-    # Torso lean uses shoulder/hip MIDPOINTS of both sides, so one side is
-    # always near: score-based tier only (rule d exemption).
     out["torso_lean"] = _reliability_entry(
         ts,
         [("left", "shoulder"), ("right", "shoulder"),
          ("left", "hip"), ("right", "hip")],
-        mask_frames, far_info=far_info, exempt_far_cap=True,
+        mask_frames,
     )
 
     # Knee peak: the single argmax frame ON THE SIDE THAT WON
@@ -1768,28 +1660,11 @@ def _build_reliability(ts: dict, mask: np.ndarray, L_idx, R_idx,
         if seg[i] > best_val:
             best_val, best_side, best_frame = float(seg[i]), side, int(mask_frames[i])
     if best_side is not None:
-        kp = _reliability_entry(
+        out["knee_peak"] = _reliability_entry(
             ts,
             [(best_side, "hip"), (best_side, "knee"), (best_side, "ankle")],
             np.array([best_frame], dtype=int), context_frames=mask_frames,
-            far_info=far_info,
         )
-        if kp is not None:
-            kp["peak_side"] = best_side
-            # The losing side, scored over its own masked frames, so the
-            # UI can say "peak from near leg" / "peak from far leg".
-            other = "right" if best_side == "left" else "left"
-            oe = _reliability_entry(
-                ts, [(other, "hip"), (other, "knee"), (other, "ankle")],
-                mask_frames, far_info=far_info,
-            )
-            kp["other_side"] = (
-                {"side": other, "tier": oe["tier"], "score": oe["score"],
-                 "camera_side": oe["camera_side"]} if oe else None
-            )
-            if kp["camera_side"] in ("near", "far"):
-                kp["note"] = f"Peak from {kp['camera_side']} leg ({best_side}). " + kp["note"]
-        out["knee_peak"] = kp
     else:
         out["knee_peak"] = None
 
@@ -1798,7 +1673,6 @@ def _build_reliability(ts: dict, mask: np.ndarray, L_idx, R_idx,
     for side, win in (("left", win_L), ("right", win_R)):
         e = _reliability_entry(
             ts, [(side, "foot_index"), (side, "ankle"), (side, "heel")], win,
-            far_info=far_info,
         )
         out[f"stance_pct_{side}"] = e
         out[f"swing_pct_{side}"] = e
@@ -1808,44 +1682,15 @@ def _build_reliability(ts: dict, mask: np.ndarray, L_idx, R_idx,
          ("right", "foot_index"), ("right", "ankle"), ("right", "heel")],
         (np.union1d(win_L, win_R) if (len(win_L) or len(win_R))
          else np.array([], dtype=int)),
-        far_info=far_info,
     )
-
-    # ── Camera-side context for the report summary ────────────────
-    passes = []
-    for p in (pass_segments or []):
-        sign = int(p["direction"])
-        passes.append({
-            "start": int(p["start"]), "end": int(p["end"]),
-            "direction": sign,
-            "near_side": "right" if sign > 0 else "left",
-            "far_side": "left" if sign > 0 else "right",
-        })
-    n_lr = sum(1 for p in passes if p["direction"] > 0)
-    n_rl = sum(1 for p in passes if p["direction"] < 0)
-    if not passes:
-        mode, near, far = "unknown", None, None
-    elif n_lr and n_rl:
-        mode, near, far = "bidirectional", None, None
-    else:
-        mode = "single"
-        near = "right" if n_lr else "left"
-        far = "left" if n_lr else "right"
-    out["_context"] = {
-        "mode": mode, "near_side": near, "far_side": far,
-        "passes": passes,
-    }
     return out
 
 
-def joint_series_reliability(ts: dict, side: str, joint: str,
-                             pass_segments=None):
+def joint_series_reliability(ts: dict, side: str, joint: str):
     """Reliability of a per-joint angle series over the WHOLE video —
     the frame set _summarise_joint_arr actually reduces. Joints mirror
-    the angle helpers exactly. Camera side is read from pass_segments
-    like everything else."""
+    the angle helpers exactly."""
     n = len(ts["left_hip"]["vis"])
-    _, known, far_masks = _near_far_masks(pass_segments, n)
     if joint == "knee":
         joints = [(side, "hip"), (side, "knee"), (side, "ankle")]
     elif joint == "hip":
@@ -1856,8 +1701,7 @@ def joint_series_reliability(ts: dict, side: str, joint: str,
                   (side, "foot_index"), (side, "heel")]
     else:
         return None
-    return _reliability_entry(ts, joints, np.arange(n),
-                              far_info=(known, far_masks))
+    return _reliability_entry(ts, joints, np.arange(n))
 
 
 # ══════════════════════════════════════════════
