@@ -1579,7 +1579,7 @@ def _cap(tier: str, cap: str) -> str:
 
 def _reliability_entry(
     ts: dict, joints: list, frames, context_frames=None,
-    far_info=None, exempt_far_cap: bool = False, exempt_note=None,
+    far_info=None, exempt_far_cap: bool = False,
 ):
     """One metric's reliability. `joints` = [(side, joint), ...];
     `frames` = the exact frame set that fed the metric. Returns None
@@ -1692,10 +1692,6 @@ def _reliability_entry(
                 f"Far-side leg — {fs} {_JOINT_LABEL.get(fj[1], fj[1])} partly "
                 f"occluded by the near leg; values indicative only."
             )
-        elif out["camera_side"] == "far" and exempt_far_cap and exempt_note:
-            # Exempt metric whose side WAS far: no cap, but say why the
-            # row is not capped instead of leaving the score note.
-            out["note"] = exempt_note
         elif out["camera_side"] == "mixed":
             out["note"] = out["note"] + " (bidirectional walk — leg alternates near/far)"
     return out
@@ -1740,18 +1736,8 @@ def _build_reliability(ts: dict, mask: np.ndarray, L_idx, R_idx,
     heels = [("left", "heel"), ("right", "heel")]
     out: dict = {}
 
-    # Strike-TIMING metrics are exempt from the far-side cap: they read
-    # WHEN a heel struck (a peak in heel-to-heel separation), not WHERE
-    # the far heel was, and that event survives occlusion. The score
-    # tier still applies; only the geometry cap is skipped. Position-
-    # based metrics (step length, stance/swing, joint angles, knee
-    # peak) keep the cap.
     for key in ("step_count", "cadence", "symmetry", "stride_cv", "step_time"):
-        out[key] = _reliability_entry(
-            ts, heels, strikes_both, far_info=far_info,
-            exempt_far_cap=True,
-            exempt_note="Timing from both heels — far heel strikes still detectable.",
-        )
+        out[key] = _reliability_entry(ts, heels, strikes_both, far_info=far_info)
 
     out["step_length"] = _reliability_entry(
         ts,
