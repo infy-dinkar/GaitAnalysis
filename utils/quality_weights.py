@@ -39,7 +39,7 @@ from typing import Callable, Optional
 import numpy as np
 
 QUALITY_FLOOR: float = 0.4   # below: weight 0 (extraction floor / interpolated)
-QUALITY_FULL: float = 0.85   # at/above: weight 1 (clearly seen)
+QUALITY_FULL: float = 0.7    # at/above: weight 1 (clearly seen)
 
 
 def frame_weights(
