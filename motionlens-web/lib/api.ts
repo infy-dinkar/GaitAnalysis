@@ -44,9 +44,48 @@ export interface ReliabilityEntryDTO {
   note: string;
   /** Knee peak / step length: median over the wider window, for context. */
   context_score?: number;
+  // ── Camera side (Phase 1b). Walking L->R puts the patient's RIGHT
+  //    side toward the camera, so the left leg is the FAR leg, and vice
+  //    versa. BlazePose stays confident on occluded far-side joints, so
+  //    visibility alone cannot flag them; a far leg is capped at
+  //    "caution" regardless of score.
+  /** share of this metric's frames in which its (worst) side was the far leg */
+  far_frac?: number | null;
+  camera_side?: "near" | "far" | "mixed" | "unknown";
+  /** which side was far when camera_side === "far" */
+  far_side?: "left" | "right" | null;
+  side_far_frac?: Partial<Record<"left" | "right", number | null>>;
+  /** true when the far-side rule lowered the tier */
+  cap_applied?: boolean;
+  /** share of the metric's frames that fell inside a known-direction pass */
+  known_frac?: number;
+  /** Knee peak only: the side whose maximum was reported ... */
+  peak_side?: "left" | "right";
+  /** ... and the losing side, so the UI can say "peak from near/far leg". */
+  other_side?: {
+    side: "left" | "right";
+    tier: ReliabilityEntryDTO["tier"];
+    score: number;
+    camera_side: ReliabilityEntryDTO["camera_side"];
+  } | null;
 }
 
 export type ReliabilityMap = Partial<Record<string, ReliabilityEntryDTO | null>>;
+
+/** Per-pass near/far legs, read from the existing walking-direction
+ *  segmentation. `mode` drives the report summary sentence. */
+export interface ReliabilityContextDTO {
+  mode: "single" | "bidirectional" | "unknown";
+  near_side: "left" | "right" | null;
+  far_side: "left" | "right" | null;
+  passes: {
+    start: number;
+    end: number;
+    direction: 1 | -1;
+    near_side: "left" | "right";
+    far_side: "left" | "right";
+  }[];
+}
 
 export interface MetricsBlockDTO {
   step_count: number;
@@ -72,6 +111,8 @@ export interface MetricsBlockDTO {
   double_support_pct?: number | null;
   /** Additive — see ReliabilityMap. */
   reliability?: ReliabilityMap | null;
+  /** Additive — camera-side context for the summary line. */
+  reliability_context?: ReliabilityContextDTO | null;
 }
 
 export interface JointDetailDTO {

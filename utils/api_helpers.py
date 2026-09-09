@@ -331,6 +331,8 @@ def _build_metrics_block(
     # Additive pass-through; None when the engine did not attach one.
     _rel = metrics.get("reliability")
     _cyc["reliability"] = _rel if isinstance(_rel, dict) else None
+    _ctx = metrics.get("reliability_context")
+    _cyc["reliability_context"] = _ctx if isinstance(_ctx, dict) else None
 
     if is_clean:
         total_frames = int(features.get("total_frames", 0) or 0)
@@ -387,7 +389,9 @@ def _build_joint_angles(features: dict, ts: dict | None = None) -> JointAnglesBl
             return None
         try:
             from engines.gait_engine import joint_series_reliability
-            return joint_series_reliability(ts, side, joint)
+            return joint_series_reliability(
+                ts, side, joint, features.get("pass_segments"),
+            )
         except Exception:  # pragma: no cover — never fail a report on this
             log.warning("joint reliability failed for %s %s", side, joint,
                         exc_info=True)

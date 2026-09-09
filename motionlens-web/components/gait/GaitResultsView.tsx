@@ -172,9 +172,24 @@ function reliabilitySummary(metrics: GaitDataDTO["metrics_clean"]): string | nul
   return `${reliable} of ${total} metrics reliable; ${low.length} with low landmark visibility (${joints}).`;
 }
 
+/** Camera-side sentence from the pass context. Empty for unknown, so a
+ *  clip with no validated pass (or a pre-1b save) adds nothing. */
+function cameraSideSentence(ctx: GaitDataDTO["metrics_clean"]["reliability_context"]): string {
+  if (!ctx) return "";
+  if (ctx.mode === "bidirectional") {
+    return "Bidirectional walk — both legs seen from the near side across passes.";
+  }
+  if (ctx.mode === "single" && ctx.near_side && ctx.far_side) {
+    const arrow = ctx.near_side === "right" ? "L→R" : "R→L";
+    return `Walking ${arrow} — ${ctx.near_side} leg nearer the camera; ${ctx.far_side}-leg metrics indicative only.`;
+  }
+  return "";
+}
+
 export function GaitResultsView({ data, patientNameOverride, patientOverride }: Props) {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const summary = reliabilitySummary(data.metrics_clean);
+  const cameraSide = cameraSideSentence(data.metrics_clean.reliability_context);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -188,7 +203,9 @@ export function GaitResultsView({ data, patientNameOverride, patientOverride }: 
       for (const [metric, e] of Object.entries(m.reliability ?? {})) {
         if (!e) continue;
         rows.push({ block, metric, tier: e.tier, score: e.score,
-                    pct_ge_07: e.pct_ge_07, worst_joint: e.worst_joint, n: e.n_frames });
+                    pct_ge_07: e.pct_ge_07, worst_joint: e.worst_joint, n: e.n_frames,
+                    far_frac: e.far_frac ?? null, camera_side: e.camera_side ?? "n/a",
+                    cap: e.cap_applied ? "yes" : "" });
       }
     }
     for (const [joint, d] of Object.entries(data.joint_angles)) {
@@ -199,6 +216,16 @@ export function GaitResultsView({ data, patientNameOverride, patientOverride }: 
     }
     if (rows.length) console.table(rows);
     else console.log("[GAIT] no reliability data on this report");
+    const ctx = data.metrics_clean.reliability_context;
+    if (ctx) {
+      console.log(`[GAIT] camera-side mode = ${ctx.mode}  near = ${ctx.near_side ?? "-"}  far = ${ctx.far_side ?? "-"}`);
+      if (ctx.passes.length) {
+        console.table(ctx.passes.map((p) => ({
+          frames: `${p.start}–${p.end}`, direction: p.direction > 0 ? "L→R" : "R→L",
+          near_side: p.near_side, far_side: p.far_side,
+        })));
+      }
+    }
   }, [data]);
 
   return (
@@ -224,6 +251,7 @@ export function GaitResultsView({ data, patientNameOverride, patientOverride }: 
         {summary && (
           <p className="mt-3 text-sm text-muted" data-testid="gait-reliability-summary">
             <span className="text-subtle">Landmark reliability:</span> {summary}
+            {cameraSide && <> {cameraSide}</>}
           </p>
         )}
       </div>
@@ -430,7 +458,8 @@ function OverviewTab({ data }: { data: GaitDataDTO }) {
 /** " · Reliable" / " · Caution" / " · Not assessed" for chart titles;
  *  empty when the series carries no reliability. */
 function reliabilitySuffix(e: ReliabilityEntryDTO | null | undefined): string {
-  return e ? ` · ${RELIABILITY_UI[e.tier].label}` : "";
+  if (!e) return "";
+  return ` · ${RELIABILITY_UI[e.tier].label}${e.camera_side === "far" ? " (far side)" : ""}`;
 }
 
 function KneeTab({ data }: { data: GaitDataDTO }) {

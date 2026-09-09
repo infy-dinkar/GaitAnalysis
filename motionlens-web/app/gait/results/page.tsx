@@ -157,9 +157,15 @@ export default function GaitResultsPage() {
       let y = margin;
       // Third column = landmark reliability, when the report carries it.
       // "Not assessed" rows print "—" for the value, matching the tile.
-      const relLabel = (e?: { tier: "reliable" | "caution" | "not_assessed" } | null) =>
-        e ? ({ reliable: "Reliable", caution: "Caution",
-               not_assessed: "Not assessed" } as const)[e.tier] : "";
+      // Far-side legs are named in the column so the PDF says why a
+      // well-tracked joint still reads "Caution".
+      const relLabel = (e?: { tier: "reliable" | "caution" | "not_assessed";
+                              camera_side?: string } | null) =>
+        e
+          ? ({ reliable: "Reliable", caution: "Caution",
+               not_assessed: "Not assessed" } as const)[e.tier]
+            + (e.camera_side === "far" ? " (far side)" : "")
+          : "";
       const writeRow = (k: string, v: string, rel?: string) => {
         doc.text(k, margin, y);
         doc.text(v, margin + 220, y);
@@ -230,16 +236,23 @@ export default function GaitResultsPage() {
           const reliable = distinct.filter(([, e]) => e.tier === "reliable").length;
           const low = distinct.filter(([, e]) => e.tier !== "reliable");
           const joints = Array.from(new Set(low.map(([, e]) => e.worst_joint.replace("_", " ")))).join(", ");
+          const ctx = c.reliability_context;
+          const cam = !ctx ? ""
+            : ctx.mode === "bidirectional"
+              ? " Bidirectional walk — both legs seen from the near side across passes."
+              : ctx.mode === "single" && ctx.near_side && ctx.far_side
+                ? ` Walking ${ctx.near_side === "right" ? "L→R" : "R→L"} — ${ctx.near_side} leg nearer the camera; ${ctx.far_side}-leg metrics indicative only.`
+                : "";
           y += 6;
           doc.setFontSize(9);
           doc.setTextColor(90);
-          doc.text(
-            low.length === 0
-              ? `Landmark reliability: ${reliable} of ${distinct.length} metrics reliable — all landmarks clearly tracked.`
-              : `Landmark reliability: ${reliable} of ${distinct.length} metrics reliable; ${low.length} with low landmark visibility (${joints}).`,
-            margin, y,
-          );
-          y += 12;
+          const line = (low.length === 0
+            ? `Landmark reliability: ${reliable} of ${distinct.length} metrics reliable — all landmarks clearly tracked.`
+            : `Landmark reliability: ${reliable} of ${distinct.length} metrics reliable; ${low.length} with low landmark visibility (${joints}).`)
+            + cam;
+          const wrappedLine = doc.splitTextToSize(line, doc.internal.pageSize.getWidth() - margin * 2);
+          doc.text(wrappedLine, margin, y);
+          y += 12 * wrappedLine.length;
           doc.setTextColor(0);
           doc.setFontSize(10);
         }
