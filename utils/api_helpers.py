@@ -150,14 +150,14 @@ def _floats_only(arr: Any) -> list[float]:
 # ══════════════════════════════════════════════════════════════════════
 # Joint summary
 # ══════════════════════════════════════════════════════════════════════
-def _summarise_joint_arr(arr: Any, reliability: dict | None = None) -> JointDetail:
+def _summarise_joint_arr(arr: Any) -> JointDetail:
     series = _array_to_list(arr)
     if arr is None:
-        return JointDetail(reliability=reliability)
+        return JointDetail()
     a = np.asarray(arr, dtype=float)
     valid = a[~np.isnan(a)]
     if valid.size == 0:
-        return JointDetail(time_series=series, reliability=reliability)
+        return JointDetail(time_series=series)
     peak = float(np.max(valid))
     mn = float(np.min(valid))
     return JointDetail(
@@ -166,7 +166,6 @@ def _summarise_joint_arr(arr: Any, reliability: dict | None = None) -> JointDeta
         rom=_scalar(peak - mn),
         mean=_scalar(float(np.mean(valid))),
         time_series=series,
-        reliability=reliability,
     )
 
 
@@ -328,9 +327,6 @@ def _build_metrics_block(
         "double_support_pct": metrics.get("double_support_pct"),
     }
     _cyc = {k: (float(v) if isinstance(v, (int, float)) else None) for k, v in _cyc.items()}
-    # Additive pass-through; None when the engine did not attach one.
-    _rel = metrics.get("reliability")
-    _cyc["reliability"] = _rel if isinstance(_rel, dict) else None
 
     if is_clean:
         total_frames = int(features.get("total_frames", 0) or 0)
@@ -375,31 +371,17 @@ def _build_metrics_block(
         )
 
 
-def _build_joint_angles(features: dict, ts: dict | None = None) -> JointAnglesBlock:
+def _build_joint_angles(features: dict) -> JointAnglesBlock:
     knee = features.get("knee_angles", {}) or {}
     hip = features.get("hip_angles", {}) or {}
     ankle = features.get("ankle_angles", {}) or {}
-
-    # Reliability of the landmarks behind each series. Whole-video
-    # frame set, because that is what the peak/min/rom/mean above reduce.
-    def _rel(side: str, joint: str) -> dict | None:
-        if ts is None:
-            return None
-        try:
-            from engines.gait_engine import joint_series_reliability
-            return joint_series_reliability(ts, side, joint)
-        except Exception:  # pragma: no cover — never fail a report on this
-            log.warning("joint reliability failed for %s %s", side, joint,
-                        exc_info=True)
-            return None
-
     return JointAnglesBlock(
-        left_knee=_summarise_joint_arr(knee.get("left"), _rel("left", "knee")),
-        right_knee=_summarise_joint_arr(knee.get("right"), _rel("right", "knee")),
-        left_hip=_summarise_joint_arr(hip.get("left"), _rel("left", "hip")),
-        right_hip=_summarise_joint_arr(hip.get("right"), _rel("right", "hip")),
-        left_ankle=_summarise_joint_arr(ankle.get("left"), _rel("left", "ankle")),
-        right_ankle=_summarise_joint_arr(ankle.get("right"), _rel("right", "ankle")),
+        left_knee=_summarise_joint_arr(knee.get("left")),
+        right_knee=_summarise_joint_arr(knee.get("right")),
+        left_hip=_summarise_joint_arr(hip.get("left")),
+        right_hip=_summarise_joint_arr(hip.get("right")),
+        left_ankle=_summarise_joint_arr(ankle.get("left")),
+        right_ankle=_summarise_joint_arr(ankle.get("right")),
     )
 
 
@@ -596,7 +578,7 @@ def format_gait_response(
         walking_direction=str(features.get("direction", "Unknown")),
         metrics_total=metrics_total,
         metrics_clean=metrics_clean,
-        joint_angles=_build_joint_angles(features, ts),
+        joint_angles=_build_joint_angles(features),
         gait_cycle_data=_build_gait_cycle_data(features),
         normalized_overview=_build_normalized_overview(features),
         tabs_data=_build_tabs_data(features, ts),

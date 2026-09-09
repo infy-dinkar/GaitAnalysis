@@ -155,15 +155,9 @@ export default function GaitResultsPage() {
       const doc = new jsPDF({ unit: "pt", format: "a4" });
       const margin = 48;
       let y = margin;
-      // Third column = landmark reliability, when the report carries it.
-      // "Not assessed" rows print "—" for the value, matching the tile.
-      const relLabel = (e?: { tier: "reliable" | "caution" | "not_assessed" } | null) =>
-        e ? ({ reliable: "Reliable", caution: "Caution",
-               not_assessed: "Not assessed" } as const)[e.tier] : "";
-      const writeRow = (k: string, v: string, rel?: string) => {
+      const writeRow = (k: string, v: string) => {
         doc.text(k, margin, y);
         doc.text(v, margin + 220, y);
-        if (rel) doc.text(rel, margin + 360, y);
         y += 14;
       };
       doc.setFontSize(20);
@@ -200,50 +194,14 @@ export default function GaitResultsPage() {
       doc.text("Clean metrics (steady-state)", margin, y); y += 16;
       doc.setFontSize(10);
       const c = data.metrics_clean;
-      const R = c.reliability ?? {};
-      const show = (key: string, v: string) =>
-        R[key]?.tier === "not_assessed" ? "—" : v;
-      if (Object.values(R).some(Boolean)) {
-        doc.setTextColor(120);
-        doc.text("Reliability", margin + 360, y); y += 14;
-        doc.setTextColor(0);
-      }
-      writeRow("Step count",  show("step_count", String(c.step_count)), relLabel(R["step_count"]));
-      writeRow("Cadence",     show("cadence", c.cadence !== null ? `${fmt(c.cadence, 0)} steps/min` : "—"), relLabel(R["cadence"]));
-      writeRow("Symmetry",    show("symmetry", c.symmetry !== null ? `${fmt(c.symmetry * 100, 0)}%` : "—"), relLabel(R["symmetry"]));
-      writeRow("Knee peak",   show("knee_peak", c.knee_peak !== null ? `${fmt(c.knee_peak, 1)}°` : "—"), relLabel(R["knee_peak"]));
-      writeRow("Stride CV",   show("stride_cv", c.stride_cv !== null ? `${fmt(c.stride_cv, 1)}%` : "—"), relLabel(R["stride_cv"]));
-      writeRow("Step length", show("step_length", c.step_length !== null ? `${fmt(c.step_length, 2)} ${c.step_length_unit}` : "—"), relLabel(R["step_length"]));
-      writeRow("Torso lean",  show("torso_lean", c.torso_lean !== null ? `${fmt(c.torso_lean, 1)}°` : "—"), relLabel(R["torso_lean"]));
-      writeRow("Step time",   show("step_time", c.step_time !== null ? `${fmt(c.step_time, 2)} s` : "—"), relLabel(R["step_time"]));
-
-      // Report-level reliability line — same wording as the web summary.
-      {
-        const entries = Object.entries(R).filter(([, e]) => !!e) as [string, NonNullable<typeof R[string]>][];
-        const seen = new Set<string>();
-        const distinct = entries.filter(([k]) => {
-          const canon = k.replace(/^swing_pct_/, "stance_pct_");
-          if (seen.has(canon)) return false;
-          seen.add(canon); return true;
-        });
-        if (distinct.length) {
-          const reliable = distinct.filter(([, e]) => e.tier === "reliable").length;
-          const low = distinct.filter(([, e]) => e.tier !== "reliable");
-          const joints = Array.from(new Set(low.map(([, e]) => e.worst_joint.replace("_", " ")))).join(", ");
-          y += 6;
-          doc.setFontSize(9);
-          doc.setTextColor(90);
-          doc.text(
-            low.length === 0
-              ? `Landmark reliability: ${reliable} of ${distinct.length} metrics reliable — all landmarks clearly tracked.`
-              : `Landmark reliability: ${reliable} of ${distinct.length} metrics reliable; ${low.length} with low landmark visibility (${joints}).`,
-            margin, y,
-          );
-          y += 12;
-          doc.setTextColor(0);
-          doc.setFontSize(10);
-        }
-      }
+      writeRow("Step count",  String(c.step_count));
+      writeRow("Cadence",     c.cadence !== null ? `${fmt(c.cadence, 0)} steps/min` : "—");
+      writeRow("Symmetry",    c.symmetry !== null ? `${fmt(c.symmetry * 100, 0)}%` : "—");
+      writeRow("Knee peak",   c.knee_peak !== null ? `${fmt(c.knee_peak, 1)}°` : "—");
+      writeRow("Stride CV",   c.stride_cv !== null ? `${fmt(c.stride_cv, 1)}%` : "—");
+      writeRow("Step length", c.step_length !== null ? `${fmt(c.step_length, 2)} ${c.step_length_unit}` : "—");
+      writeRow("Torso lean",  c.torso_lean !== null ? `${fmt(c.torso_lean, 1)}°` : "—");
+      writeRow("Step time",   c.step_time !== null ? `${fmt(c.step_time, 2)} s` : "—");
 
       // ── Disclaimer footer (always at the bottom of the last page) ──
       const pageWidth = doc.internal.pageSize.getWidth();

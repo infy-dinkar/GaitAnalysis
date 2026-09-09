@@ -3,7 +3,7 @@
 // renders, but as a self-contained component so the saved-report viewer
 // can render identical UI from a stored GaitDataDTO.
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { CalibrationHeader } from "@/components/gait/CalibrationHeader";
 import { MetricsSection } from "@/components/gait/MetricsSection";
 import { JointTabs, TabDef } from "@/components/gait/JointTabs";
@@ -19,8 +19,6 @@ import {
 } from "@/components/gait/PlotlyChart";
 import { fmt } from "@/lib/utils";
 import { PatientHeader } from "@/components/dashboard/PatientHeader";
-import { RELIABILITY_UI } from "@/components/gait/MetricTile";
-import type { ReliabilityEntryDTO } from "@/lib/api";
 import type { GaitDataDTO, JointDetailDTO, PassSegmentDTO } from "@/lib/api";
 import type { PatientDTO } from "@/lib/patients";
 
@@ -141,65 +139,8 @@ interface Props {
   patientOverride?: PatientDTO | null;
 }
 
-/** Report-level reliability sentence + the ?gaitdebug=1 console table.
- *  Built from the CLEAN block (the one observations use). Returns null
- *  when the report carries no reliability at all (pre-feature saves),
- *  so those render byte-identically. */
-function reliabilitySummary(metrics: GaitDataDTO["metrics_clean"]): string | null {
-  const map = metrics.reliability;
-  if (!map) return null;
-  const entries = Object.entries(map).filter(
-    (e): e is [string, ReliabilityEntryDTO] => !!e[1],
-  );
-  if (entries.length === 0) return null;
-  // Stance and swing share one entry per side; count each side once.
-  const seen = new Set<string>();
-  const distinct = entries.filter(([k]) => {
-    const canon = k.replace(/^swing_pct_/, "stance_pct_");
-    if (seen.has(canon)) return false;
-    seen.add(canon);
-    return true;
-  });
-  const total = distinct.length;
-  const reliable = distinct.filter(([, e]) => e.tier === "reliable").length;
-  const low = distinct.filter(([, e]) => e.tier !== "reliable");
-  if (low.length === 0) {
-    return `${reliable} of ${total} metrics reliable — all landmarks clearly tracked.`;
-  }
-  const joints = Array.from(
-    new Set(low.map(([, e]) => e.worst_joint.replace("_", " "))),
-  ).join(", ");
-  return `${reliable} of ${total} metrics reliable; ${low.length} with low landmark visibility (${joints}).`;
-}
-
 export function GaitResultsView({ data, patientNameOverride, patientOverride }: Props) {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
-  const summary = reliabilitySummary(data.metrics_clean);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      if (new URLSearchParams(window.location.search).get("gaitdebug") !== "1") return;
-    } catch {
-      return;
-    }
-    const rows: Record<string, unknown>[] = [];
-    for (const [block, m] of [["clean", data.metrics_clean], ["total", data.metrics_total]] as const) {
-      for (const [metric, e] of Object.entries(m.reliability ?? {})) {
-        if (!e) continue;
-        rows.push({ block, metric, tier: e.tier, score: e.score,
-                    pct_ge_07: e.pct_ge_07, worst_joint: e.worst_joint, n: e.n_frames });
-      }
-    }
-    for (const [joint, d] of Object.entries(data.joint_angles)) {
-      const e = d.reliability;
-      if (!e) continue;
-      rows.push({ block: "joint", metric: joint, tier: e.tier, score: e.score,
-                  pct_ge_07: e.pct_ge_07, worst_joint: e.worst_joint, n: e.n_frames });
-    }
-    if (rows.length) console.table(rows);
-    else console.log("[GAIT] no reliability data on this report");
-  }, [data]);
 
   return (
     <div className="space-y-12">
@@ -221,11 +162,6 @@ export function GaitResultsView({ data, patientNameOverride, patientOverride }: 
             heightCm={data.patient_info.height_cm}
           />
         </div>
-        {summary && (
-          <p className="mt-3 text-sm text-muted" data-testid="gait-reliability-summary">
-            <span className="text-subtle">Landmark reliability:</span> {summary}
-          </p>
-        )}
       </div>
 
       <div className="space-y-12">
@@ -427,12 +363,6 @@ function OverviewTab({ data }: { data: GaitDataDTO }) {
   );
 }
 
-/** " · Reliable" / " · Caution" / " · Not assessed" for chart titles;
- *  empty when the series carries no reliability. */
-function reliabilitySuffix(e: ReliabilityEntryDTO | null | undefined): string {
-  return e ? ` · ${RELIABILITY_UI[e.tier].label}` : "";
-}
-
 function KneeTab({ data }: { data: GaitDataDTO }) {
   const passes = data.tabs_data.pass_segments;
   const ts = data.normalized_overview.time_axis;
@@ -447,7 +377,7 @@ function KneeTab({ data }: { data: GaitDataDTO }) {
 
       <div className="grid gap-6 md:grid-cols-2">
         <SideChart
-          title={`Left Knee — Mean ${fmtJoint(left.mean)}${reliabilitySuffix(left.reliability)}`}
+          title={`Left Knee — Mean ${fmtJoint(left.mean)}`}
           color={COLOR_LEFT}
           time={ts}
           values={left.time_series}
@@ -458,7 +388,7 @@ function KneeTab({ data }: { data: GaitDataDTO }) {
           passes={passes}
         />
         <SideChart
-          title={`Right Knee — Mean ${fmtJoint(right.mean)}${reliabilitySuffix(right.reliability)}`}
+          title={`Right Knee — Mean ${fmtJoint(right.mean)}`}
           color={COLOR_RIGHT}
           time={ts}
           values={right.time_series}

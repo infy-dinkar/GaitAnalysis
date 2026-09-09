@@ -72,10 +72,6 @@ class MetricsBlock(BaseModel):
     swing_pct_left: Optional[float] = None
     swing_pct_right: Optional[float] = None
     double_support_pct: Optional[float] = None
-    # Additive — per-metric landmark reliability, keyed by the field
-    # names above ({tier, score, pct_ge_07, joints, side, worst_joint,
-    # note}). None on reports that predate it.
-    reliability: Optional[dict] = None
 
 
 class JointDetail(BaseModel):
@@ -84,8 +80,6 @@ class JointDetail(BaseModel):
     rom: Optional[float] = None
     mean: Optional[float] = None
     time_series: list[Optional[float]] = Field(default_factory=list)
-    # Additive — reliability of the landmarks behind this series.
-    reliability: Optional[dict] = None
 
 
 class JointAnglesBlock(BaseModel):
