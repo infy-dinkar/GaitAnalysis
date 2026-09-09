@@ -28,6 +28,7 @@ from utils.gait_plots import (
     normal_ankle_reference,
 )
 
+from utils.quality_weights import frame_weights, weighted_extreme, weighted_mean
 from models.api_models import (
     AnkleTrajectoryTab,
     BiomechData,
@@ -150,11 +151,25 @@ def _floats_only(arr: Any) -> list[float]:
 # ══════════════════════════════════════════════════════════════════════
 # Joint summary
 # ══════════════════════════════════════════════════════════════════════
-def _summarise_joint_arr(arr: Any) -> JointDetail:
+def _summarise_joint_arr(arr: Any, w: Any = None) -> JointDetail:
     series = _array_to_list(arr)
     if arr is None:
         return JointDetail()
     a = np.asarray(arr, dtype=float)
+    if w is not None:
+        # Phase G: peak / min only over fully-visible frames (None when
+        # there are none), mean weighted. ROM only when both ends exist.
+        wa = np.asarray(w, dtype=float)
+        peak = weighted_extreme(a, wa, np.nanmax)
+        mn = weighted_extreme(a, wa, np.nanmin)
+        mean = weighted_mean(a, wa)
+        return JointDetail(
+            peak=_scalar(peak) if peak is not None else None,
+            min=_scalar(mn) if mn is not None else None,
+            rom=_scalar(peak - mn) if (peak is not None and mn is not None) else None,
+            mean=_scalar(mean) if mean is not None else None,
+            time_series=series,
+        )
     valid = a[~np.isnan(a)]
     if valid.size == 0:
         return JointDetail(time_series=series)
@@ -279,6 +294,11 @@ def _build_video_info(features: dict, height_cm: float) -> VideoInfo:
         ankle_baseline_right=float(abase.get("offset_deg_right", 0.0) or 0.0),
         ankle_baseline_method=str(abase.get("method", "unknown")),
         ankle_baseline_n_frames=int(abase.get("n_frames", 0) or 0),
+        weighted=bool(features.get("weighted")) if "weighted" in features else None,
+        mpp_calibration_degraded=(
+            bool(features.get("mpp_calibration_degraded"))
+            if "mpp_calibration_degraded" in features else None
+        ),
     )
 
 
@@ -327,6 +347,12 @@ def _build_metrics_block(
         "double_support_pct": metrics.get("double_support_pct"),
     }
     _cyc = {k: (float(v) if isinstance(v, (int, float)) else None) for k, v in _cyc.items()}
+    # Phase G provenance (additive; None on pre-weighting reports).
+    _cyc["weighted"] = bool(metrics.get("weighted")) if "weighted" in metrics else None
+    _kpd = metrics.get("knee_peak_degraded")
+    _cyc["knee_peak_degraded"] = bool(_kpd) if _kpd is not None else None
+    _qc = metrics.get("quality_coverage")
+    _cyc["quality_coverage"] = _qc if isinstance(_qc, dict) else None
 
     if is_clean:
         total_frames = int(features.get("total_frames", 0) or 0)
@@ -371,17 +397,40 @@ def _build_metrics_block(
         )
 
 
-def _build_joint_angles(features: dict) -> JointAnglesBlock:
+def _build_joint_angles(features: dict, ts: dict | None = None) -> JointAnglesBlock:
     knee = features.get("knee_angles", {}) or {}
     hip = features.get("hip_angles", {}) or {}
     ankle = features.get("ankle_angles", {}) or {}
+
+    # Phase G: per-joint quality weights over the whole video (the frame
+    # set these summaries reduce). Joint sets mirror the angle helpers.
+    def _w(side: str, joint: str):
+        if ts is None:
+            return None
+        try:
+            vis = {k: v["vis"] for k, v in ts.items()
+                   if isinstance(v, dict) and "vis" in v}
+            if joint == "knee":
+                js = [f"{side}_hip", f"{side}_knee", f"{side}_ankle"]
+            elif joint == "hip":
+                js = ["left_shoulder", "right_shoulder", "left_hip",
+                      "right_hip", f"{side}_knee"]
+            else:
+                js = [f"{side}_knee", f"{side}_ankle",
+                      f"{side}_foot_index", f"{side}_heel"]
+            return frame_weights(vis, js)
+        except Exception:  # pragma: no cover — never fail a report on this
+            log.warning("joint quality weights failed for %s %s", side, joint,
+                        exc_info=True)
+            return None
+
     return JointAnglesBlock(
-        left_knee=_summarise_joint_arr(knee.get("left")),
-        right_knee=_summarise_joint_arr(knee.get("right")),
-        left_hip=_summarise_joint_arr(hip.get("left")),
-        right_hip=_summarise_joint_arr(hip.get("right")),
-        left_ankle=_summarise_joint_arr(ankle.get("left")),
-        right_ankle=_summarise_joint_arr(ankle.get("right")),
+        left_knee=_summarise_joint_arr(knee.get("left"), _w("left", "knee")),
+        right_knee=_summarise_joint_arr(knee.get("right"), _w("right", "knee")),
+        left_hip=_summarise_joint_arr(hip.get("left"), _w("left", "hip")),
+        right_hip=_summarise_joint_arr(hip.get("right"), _w("right", "hip")),
+        left_ankle=_summarise_joint_arr(ankle.get("left"), _w("left", "ankle")),
+        right_ankle=_summarise_joint_arr(ankle.get("right"), _w("right", "ankle")),
     )
 
 
@@ -498,11 +547,24 @@ def _build_tabs_data(features: dict, ts: dict) -> TabsData:
     step_timing = clean.get("step_timing", {}) or {}
     L_t = _floats_only(step_timing.get("left", []))
     R_t = _floats_only(step_timing.get("right", []))
+    # Phase G: per-side means weighted by stride quality when the engine
+    # supplied weights (left_w / right_w); plain mean otherwise.
+    L_w = _floats_only(step_timing.get("left_w", []))
+    R_w = _floats_only(step_timing.get("right_w", []))
+
+    def _side_mean(vals, wts):
+        if not vals:
+            return 0.0
+        if len(wts) == len(vals):
+            m = weighted_mean(np.asarray(vals), np.asarray(wts))
+            return float(m) if m is not None else 0.0
+        return float(np.mean(vals))
+
     timing_tab = TimingTab(
         left_intervals=L_t,
         right_intervals=R_t,
-        left_mean=float(np.mean(L_t)) if L_t else 0.0,
-        right_mean=float(np.mean(R_t)) if R_t else 0.0,
+        left_mean=_side_mean(L_t, L_w),
+        right_mean=_side_mean(R_t, R_w),
     )
 
     # ── Torso lean tab ─────────────────────────────────────────
@@ -578,7 +640,7 @@ def format_gait_response(
         walking_direction=str(features.get("direction", "Unknown")),
         metrics_total=metrics_total,
         metrics_clean=metrics_clean,
-        joint_angles=_build_joint_angles(features),
+        joint_angles=_build_joint_angles(features, ts),
         gait_cycle_data=_build_gait_cycle_data(features),
         normalized_overview=_build_normalized_overview(features),
         tabs_data=_build_tabs_data(features, ts),

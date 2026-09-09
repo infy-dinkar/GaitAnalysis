@@ -41,6 +41,10 @@ import numpy as np
 import mediapipe as mp
 from scipy.signal import savgol_filter, find_peaks
 
+from utils.quality_weights import (
+    frame_weights, stride_weights, weighted_extreme, weighted_mean,
+    weighted_std,
+)
 from engines.gait_cycle import (
     detect_heel_strikes,
     extract_cycles,
@@ -726,6 +730,8 @@ def _gait_cycle_percentages(
     hs_L: np.ndarray,
     hs_R: np.ndarray,
     fps: float,  # noqa: ARG001 — kept for signature parity / future use
+    w_stride_L: np.ndarray | None = None,
+    w_stride_R: np.ndarray | None = None,
 ) -> dict:
     """Return stance %, swing %, and double-support % per side over the
     heel-strike-bounded analysis window (first HS to last HS across
@@ -791,10 +797,20 @@ def _gait_cycle_percentages(
     # though the mask is fine WITHIN each stride window it does
     # cover. Fix: compute stance % PER STRIDE (event-guided mask
     # targets 60 % of each stride by construction), then average.
+    # Phase G: each stride's contribution is its quality weight (mean
+    # landmark weight across the stride; 0 when the strike frame itself
+    # was interpolated). weights=None -> plain mean, as before.
+    def _stride_w(ws, i):
+        if ws is None:
+            return 1.0
+        return float(ws[i]) if i < len(ws) else 0.0
+
     def _mean_stance_per_stride(
         mask: np.ndarray, hs: np.ndarray, wa: int, wb: int,
+        ws: np.ndarray | None = None,
     ) -> "float | None":
         vals: list[float] = []
+        wts: list[float] = []
         for i in range(len(hs) - 1):
             a = int(hs[i]); b = int(hs[i + 1])
             if a < wa or b > wb + 1 or b <= a:
@@ -802,12 +818,13 @@ def _gait_cycle_percentages(
             stride_len = b - a
             stance_frames = int(np.asarray(mask[a:b], dtype=bool).sum())
             vals.append(100.0 * float(stance_frames) / float(stride_len))
-        if not vals:
+            wts.append(_stride_w(ws, i))
+        if not vals or sum(wts) <= 0.0:
             return None
-        return float(np.mean(vals))
+        return float(np.average(vals, weights=wts))
 
-    stance_L_opt = _mean_stance_per_stride(mask_L, hs_L_arr, w_start, w_end)
-    stance_R_opt = _mean_stance_per_stride(mask_R, hs_R_arr, w_start, w_end)
+    stance_L_opt = _mean_stance_per_stride(mask_L, hs_L_arr, w_start, w_end, w_stride_L)
+    stance_R_opt = _mean_stance_per_stride(mask_R, hs_R_arr, w_start, w_end, w_stride_R)
     if stance_L_opt is None or stance_R_opt is None:
         return null_result
     stance_L = float(stance_L_opt)
@@ -819,8 +836,10 @@ def _gait_cycle_percentages(
     def _mean_ds_per_stride(
         mL: np.ndarray, mR: np.ndarray,
         hs: np.ndarray, wa: int, wb: int,
+        ws: np.ndarray | None = None,
     ) -> "float | None":
         vals: list[float] = []
+        wts: list[float] = []
         for i in range(len(hs) - 1):
             a = int(hs[i]); b = int(hs[i + 1])
             if a < wa or b > wb + 1 or b <= a:
@@ -830,11 +849,12 @@ def _gait_cycle_percentages(
             R_seg = np.asarray(mR[a:b], dtype=bool)
             overlap = int((L_seg & R_seg).sum())
             vals.append(100.0 * float(overlap) / float(stride_len))
-        if not vals:
+            wts.append(_stride_w(ws, i))
+        if not vals or sum(wts) <= 0.0:
             return None
-        return float(np.mean(vals))
+        return float(np.average(vals, weights=wts))
 
-    ds_opt = _mean_ds_per_stride(mask_L, mask_R, hs_L_arr, w_start, w_end)
+    ds_opt = _mean_ds_per_stride(mask_L, mask_R, hs_L_arr, w_start, w_end, w_stride_L)
     ds = float(ds_opt) if ds_opt is not None else 0.0
 
     # ── Physiological-plausibility sanity guard ─────────────────
@@ -856,14 +876,23 @@ def _gait_cycle_percentages(
 
 
 def compute_meters_per_pixel(ts: dict, user_height_cm: float,
-                             pass_segments=None, stance_frames: dict = None):
+                             pass_segments=None, stance_frames: dict = None,
+                             quality_w: dict | None = None,
+                             return_meta: bool = False):
     """
     leg_length_m   = (height_cm / 100) * 0.53
     leg_length_px  = median over stance frames of euclidean(hip_px, ankle_px)
     Returns meters_per_pixel, or None if calibration could not be made.
+
+    Phase G: `quality_w` = {side: per-frame weight over hip+ankle}. When
+    given, the median is taken over stance frames whose weight is 1.0
+    (both landmarks clearly seen). If fewer than 5 such frames exist the
+    original all-stance median is used and `calibration_degraded` is set.
+    `return_meta=True` returns (mpp, meta) instead of mpp.
     """
     leg_length_m = (float(user_height_cm) / 100.0) * LEG_HEIGHT_RATIO
     n = len(ts["left_hip"]["x_px"])
+    meta = {"calibration_degraded": False, "n_full_frames": 0}
 
     if pass_segments:
         pass_mask = np.zeros(n, dtype=bool)
@@ -873,6 +902,7 @@ def compute_meters_per_pixel(ts: dict, user_height_cm: float,
         pass_mask = np.ones(n, dtype=bool)
 
     distances = []
+    distances_full = []
     for side in ("left", "right"):
         hip_x = ts[f"{side}_hip"]["x_px"];  hip_y = ts[f"{side}_hip"]["y_px"]
         ank_x = ts[f"{side}_ankle"]["x_px"]; ank_y = ts[f"{side}_ankle"]["y_px"]
@@ -882,16 +912,34 @@ def compute_meters_per_pixel(ts: dict, user_height_cm: float,
             else _stance_mask_per_leg(ank_y)
         )
         d = np.hypot(hip_x - ank_x, hip_y - ank_y)
-        sel = d[stance & pass_mask]
+        base_sel = stance & pass_mask
+        sel = d[base_sel]
         if len(sel) > 5:
             distances.extend(sel.tolist())
+        if quality_w is not None and side in quality_w:
+            full = np.asarray(quality_w[side], dtype=float)[:n] >= 1.0
+            selq = d[base_sel & full]
+            distances_full.extend(selq.tolist())
 
-    if not distances:
-        return None
-    leg_px = float(np.median(distances))
-    if leg_px < 1e-6:
-        return None
-    return leg_length_m / leg_px
+    def _finish(vals, degraded):
+        if not vals:
+            return (None, dict(meta, calibration_degraded=degraded)) if return_meta else None
+        leg_px = float(np.median(vals))
+        if leg_px < 1e-6:
+            return (None, dict(meta, calibration_degraded=degraded)) if return_meta else None
+        out = leg_length_m / leg_px
+        if return_meta:
+            return out, dict(meta, calibration_degraded=degraded,
+                             n_full_frames=len(distances_full))
+        return out
+
+    if quality_w is not None:
+        if len(distances_full) >= 5:
+            return _finish(distances_full, False)
+        # Not enough clearly-seen stance frames: fall back to the
+        # original all-stance median and say so.
+        return _finish(distances, True)
+    return _finish(distances, False)
 
 
 # ══════════════════════════════════════════════
@@ -1317,28 +1365,72 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         "combined_indices": combined,
     }
 
-    # --- cadence ---
+    # --- cadence (UNWEIGHTED: a count per unit time) ---
     cadence = round((total_steps / dur_sec) * 60.0, 1) if dur_sec > 0 else 0.0
 
-    # --- knee angles (mean / peak / min computed only over masked frames) ---
+    # ══ Phase G — landmark-quality weights ═══════════════════════════
+    # Every aggregate below discounts frames / strides by how well the
+    # joints it reads were tracked (utils/quality_weights). Interpolated
+    # frames (vis 0.0) weigh 0. Counts are never weighted.
+    vis = {name: ts[name]["vis"] for name in LM}
+    w_knee = {
+        s: frame_weights(vis, [f"{s}_hip", f"{s}_knee", f"{s}_ankle"])
+        for s in ("left", "right")
+    }
+    w_torso = frame_weights(
+        vis, ["left_shoulder", "right_shoulder", "left_hip", "right_hip"],
+    )
+    w_heel = {s: frame_weights(vis, [f"{s}_heel"]) for s in ("left", "right")}
+    w_stance = {
+        s: frame_weights(vis, [f"{s}_foot_index", f"{s}_ankle", f"{s}_heel"])
+        for s in ("left", "right")
+    }
+
+    # --- knee angles: peak / min ONLY over fully-visible frames -------
+    # A maximum is a single frame; averaging cannot rescue it, so frames
+    # that were not clearly seen (w < 1) are refused outright. If a side
+    # has no such frame we degrade to any seen frame (w > 0) and flag it;
+    # if it has none of those either, the peak is None and the tile
+    # shows "-" (interpret() and _build_metrics_block already tolerate
+    # None).
     knee_angles = {}
+    knee_peak_degraded = False
     for side in ("left", "right"):
         full = knee_full[side]
         m_arr = full[mask] if n_mask > 0 else np.array([])
-        knee_angles[side]            = full
-        knee_angles[f"{side}_mean"]  = float(np.nanmean(m_arr)) if len(m_arr) else 0.0
-        knee_angles[f"peak_{side}"]  = float(np.nanmax(m_arr))  if len(m_arr) else 0.0
-        knee_angles[f"min_{side}"]   = float(np.nanmin(m_arr))  if len(m_arr) else 0.0
+        w_arr = w_knee[side][mask] if n_mask > 0 else np.array([])
+        knee_angles[side] = full
+        mean_v = weighted_mean(m_arr, w_arr) if len(m_arr) else None
+        knee_angles[f"{side}_mean"] = float(mean_v) if mean_v is not None else 0.0
+        pk = weighted_extreme(m_arr, w_arr, np.nanmax) if len(m_arr) else None
+        mn = weighted_extreme(m_arr, w_arr, np.nanmin) if len(m_arr) else None
+        if (pk is None or mn is None) and len(m_arr):
+            any_seen = (w_arr > 0).astype(float)
+            pk2 = weighted_extreme(m_arr, any_seen, np.nanmax)
+            mn2 = weighted_extreme(m_arr, any_seen, np.nanmin)
+            if pk is None and pk2 is not None:
+                pk, knee_peak_degraded = pk2, True
+            if mn is None and mn2 is not None:
+                mn, knee_peak_degraded = mn2, True
+        knee_angles[f"peak_{side}"] = pk
+        knee_angles[f"min_{side}"] = mn
     knee_angles["overall_mean"] = float(np.nanmean([knee_angles["left_mean"],  knee_angles["right_mean"]]))
-    knee_angles["overall_peak"] = float(max(knee_angles["peak_left"],         knee_angles["peak_right"]))
-    knee_angles["overall_min"]  = float(min(knee_angles["min_left"],          knee_angles["min_right"]))
+    _peaks = [v for v in (knee_angles["peak_left"], knee_angles["peak_right"]) if v is not None]
+    _mins = [v for v in (knee_angles["min_left"], knee_angles["min_right"]) if v is not None]
+    knee_angles["overall_peak"] = float(max(_peaks)) if _peaks else None
+    knee_angles["overall_min"] = float(min(_mins)) if _mins else None
 
     # --- step / stride times (per leg = same-leg strike intervals) ---
     # Important: when multiple passes are involved we compute intervals
     # WITHIN each pass core only — concatenating strikes across passes would
     # treat the inter-pass turning gap as a stride and inflate stride-CV.
-    step_timing = {"left": np.array([]), "right": np.array([])}
+    # Each interval carries the quality weight of its stride (heel weight
+    # averaged over [hs_k, hs_k+1); 0 when the strike frame itself was
+    # interpolated), aligned with np.diff of the same strike subset.
+    step_timing = {"left": np.array([]), "right": np.array([]),
+                   "left_w": np.array([]), "right_w": np.array([])}
     all_st = []
+    all_w = []
     if pass_segments and n_mask < n_total:
         for p in pass_segments:
             a, b = p["core_start"], p["core_end"]
@@ -1346,30 +1438,40 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
                 in_pass = strikes[side][(strikes[side] >= a) & (strikes[side] < b)]
                 if len(in_pass) >= 2:
                     ints = np.diff(in_pass) / fps
+                    iw = stride_weights(w_heel[side], in_pass)
                     step_timing[side] = np.concatenate([step_timing[side], ints])
+                    step_timing[f"{side}_w"] = np.concatenate([step_timing[f"{side}_w"], iw])
                     all_st.extend(ints.tolist())
+                    all_w.extend(iw.tolist())
     else:
         for side in ("left", "right"):
             idx = step_data[f"{side}_indices"]
             if len(idx) >= 2:
                 ints = np.diff(idx) / fps
+                iw = stride_weights(w_heel[side], idx)
                 step_timing[side] = ints
+                step_timing[f"{side}_w"] = iw
                 all_st.extend(ints.tolist())
-    step_timing["mean_step_time"] = float(np.mean(all_st)) if all_st else 0.0
+                all_w.extend(iw.tolist())
+    _mst = weighted_mean(np.asarray(all_st), np.asarray(all_w)) if all_st else None
+    step_timing["mean_step_time"] = float(_mst) if _mst is not None else 0.0
 
-    # --- symmetry (step-time means) ---
+    # --- symmetry (weighted step-time means) ---
     L_t, R_t = step_timing["left"], step_timing["right"]
-    if len(L_t) and len(R_t):
-        Lm, Rm = float(np.mean(L_t)), float(np.mean(R_t))
+    Lm = weighted_mean(L_t, step_timing["left_w"]) if len(L_t) else None
+    Rm = weighted_mean(R_t, step_timing["right_w"]) if len(R_t) else None
+    if Lm is not None and Rm is not None:
         denom  = (Lm + Rm) / 2.0
         sym    = 1.0 - abs(Lm - Rm) / denom if denom > 1e-9 else 1.0
         sym    = float(np.clip(sym, 0.0, 1.0))
     else:
         sym = 1.0
 
-    # --- stride CV (PERCENT) ---
-    if len(all_st) >= 2 and np.mean(all_st) > 1e-9:
-        cv_pct = round(float(np.std(all_st) / np.mean(all_st)) * 100.0, 2)
+    # --- stride CV (PERCENT, weighted std / weighted mean) ---
+    _cv_m = weighted_mean(np.asarray(all_st), np.asarray(all_w)) if len(all_st) >= 2 else None
+    _cv_s = weighted_std(np.asarray(all_st), np.asarray(all_w)) if len(all_st) >= 2 else None
+    if _cv_m is not None and _cv_s is not None and _cv_m > 1e-9:
+        cv_pct = round(float(_cv_s / _cv_m) * 100.0, 2)
     else:
         cv_pct = 0.0
 
@@ -1384,6 +1486,7 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
     l_heel_px = ts["left_heel"]["x_px"]
     r_heel_px = ts["right_heel"]["x_px"]
     sl_px_list = []
+    sl_w_list = []
     max_stride_sec = 2.0
     for side, side_idx, side_x in (
         ("left",  L_idx, l_heel_px),
@@ -1395,26 +1498,35 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         intervals = np.diff(side_idx) / fps
         strides   = np.abs(np.diff(positions))
         keep = intervals < max_stride_sec        # reject across-pass strides
+        sw = stride_weights(w_heel[side], side_idx)
         for s in (strides[keep] / 2.0).tolist():
             sl_px_list.append(s)
+        sl_w_list.extend(sw[keep].tolist())
     sep_px = np.array(sl_px_list, dtype=float)
+    sep_w = np.array(sl_w_list, dtype=float)
     if mpp and mpp > 0:
         sl_vals, sl_unit = sep_px * mpp, "m"
     else:
         sl_vals, sl_unit = sep_px, "px"
+    _sl_m = weighted_mean(sl_vals, sep_w) if len(sl_vals) else None
+    _sl_s = weighted_std(sl_vals, sep_w) if len(sl_vals) else None
     step_length = {
         "values": sl_vals,
-        "mean":   float(np.nanmean(sl_vals)) if len(sl_vals) else 0.0,
-        "std":    float(np.nanstd(sl_vals))  if len(sl_vals) else 0.0,
+        "weights": sep_w,
+        "mean":   float(_sl_m) if _sl_m is not None else 0.0,
+        "std":    float(_sl_s) if _sl_s is not None else 0.0,
         "unit":   sl_unit,
     }
 
-    # --- torso lean (mean / std over masked frames) ---
+    # --- torso lean (weighted mean / std over masked frames) ---
     t_arr = torso_full[mask] if n_mask > 0 else torso_full
+    t_w = w_torso[mask] if n_mask > 0 else w_torso
+    _t_m = weighted_mean(t_arr, t_w) if len(t_arr) else None
+    _t_s = weighted_std(t_arr, t_w) if len(t_arr) else None
     torso_lean = {
         "angles": torso_full,
-        "mean":   float(np.nanmean(t_arr)) if len(t_arr) else 0.0,
-        "std":    float(np.nanstd(t_arr))  if len(t_arr) else 0.0,
+        "mean":   float(_t_m) if _t_m is not None else None,
+        "std":    float(_t_s) if _t_s is not None else 0.0,
     }
 
     # --- ankle trajectory (full series; for plotting only) ---
@@ -1442,6 +1554,8 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
     # `_stance_mask_per_leg` (30-th-pct velocity anchor) is untouched
     # and still owned by compute_meters_per_pixel.
     _n_total = int(len(ts["left_hip"]["y"]))
+    _wsL = stride_weights(w_stance["left"], L_idx)
+    _wsR = stride_weights(w_stance["right"], R_idx)
     _cycle_pct = _gait_cycle_percentages(
         mask_L=_stance_mask_by_foot_speed(
             ts["left_foot_index"]["x_px"], ts["left_foot_index"]["y_px"],
@@ -1456,6 +1570,8 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         hs_L=L_idx,
         hs_R=R_idx,
         fps=fps,
+        w_stride_L=_wsL,
+        w_stride_R=_wsR,
     )
     if _cycle_pct.get("stance_pct_left") is None:
         # Fallback — keep the block populated (never "not computed"
@@ -1470,7 +1586,22 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
             hs_L=L_idx,
             hs_R=R_idx,
             fps=fps,
+            w_stride_L=_wsL,
+            w_stride_R=_wsR,
         )
+
+    # Coverage telemetry: how much of the window each side's aggregates
+    # actually trusted. frames_full = share of masked frames with w == 1
+    # on that side's knee triad; strides_weighted_mean = mean stride
+    # weight over that side's strikes.
+    quality_coverage = {}
+    for side, idx in (("left", L_idx), ("right", R_idx)):
+        wk = w_knee[side][mask] if n_mask > 0 else np.array([])
+        sw = stride_weights(w_heel[side], idx)
+        quality_coverage[side] = {
+            "frames_full": round(float(np.mean(wk >= 1.0)), 3) if len(wk) else None,
+            "strides_weighted_mean": round(float(np.mean(sw)), 3) if len(sw) else None,
+        }
 
     return {
         "step_data":        step_data,
@@ -1490,6 +1621,10 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         "swing_pct_left":     _cycle_pct["swing_pct_left"],
         "swing_pct_right":    _cycle_pct["swing_pct_right"],
         "double_support_pct": _cycle_pct["double_support_pct"],
+        # Phase G — additive provenance.
+        "weighted":           True,
+        "knee_peak_degraded": bool(knee_peak_degraded),
+        "quality_coverage":   quality_coverage,
     }
 
 
@@ -1545,8 +1680,8 @@ def _compute_gait_cycle_curves(ts: dict, fps: float, n_frames: int,
     _, dur_meta_R = extract_cycles(
         hip_full["right"], hs_R, clean_mask=clean_mask, return_metadata=True,
     )
-    kept_mask_L = dur_meta_L["kept_mask"]
-    kept_mask_R = dur_meta_R["kept_mask"]
+    # (kept_mask now comes per joint from the weighted extract_cycles call
+    # below; dur_meta_* is retained for the _cycle_duration_filter report.)
 
     out: dict = {
         # underscore-prefixed keys so downstream loops over ('hip','knee','ankle')
@@ -1554,25 +1689,41 @@ def _compute_gait_cycle_curves(ts: dict, fps: float, n_frames: int,
         "_strike_rejection":       {"left": meta_L,     "right": meta_R},
         "_cycle_duration_filter":  {"left": dur_meta_L, "right": dur_meta_R},
     }
+    # Phase G: per-stride quality weights from the heel that defines the
+    # strikes; weighted cycles drop zero-weight and all-NaN strides from
+    # K (previously counted), and the ensemble is a weighted average.
+    _vis = {name: ts[name]["vis"] for name in LM}
+    _wpair = {
+        "left":  stride_weights(frame_weights(_vis, ["left_heel"]),  hs_L),
+        "right": stride_weights(frame_weights(_vis, ["right_heel"]), hs_R),
+    }
     for joint, sigL, sigR in (
         ("hip",   hip_full["left"],   hip_full["right"]),
         ("knee",  knee_full["left"],  knee_full["right"]),
         ("ankle", ankle_full["left"], ankle_full["right"]),
     ):
-        cyc_L = extract_cycles(sigL, hs_L, clean_mask=clean_mask)
-        cyc_R = extract_cycles(sigR, hs_R, clean_mask=clean_mask)
+        cyc_L, mL_meta = extract_cycles(sigL, hs_L, clean_mask=clean_mask,
+                                        return_metadata=True, weights=_wpair["left"])
+        cyc_R, mR_meta = extract_cycles(sigR, hs_R, clean_mask=clean_mask,
+                                        return_metadata=True, weights=_wpair["right"])
         sd_L  = stride_durations(hs_L, clean_mask=clean_mask, signal_length=n_frames)
         sd_R  = stride_durations(hs_R, clean_mask=clean_mask, signal_length=n_frames)
-        # Slice durations to match the cycles that survived extract_cycles'
-        # new duration filter, so filter_cycles' MAD step still K-aligns.
-        if len(sd_L) == len(kept_mask_L):
-            sd_L = sd_L[kept_mask_L]
-        if len(sd_R) == len(kept_mask_R):
-            sd_R = sd_R[kept_mask_R]
-        cyc_L, _ = filter_cycles(cyc_L, sd_L)
-        cyc_R, _ = filter_cycles(cyc_R, sd_R)
-        mL, stL, KL = ensemble_statistics(cyc_L)
-        mR, stR, KR = ensemble_statistics(cyc_R)
+        # Slice durations to THIS joint's kept cycles (the weighted path
+        # can drop an all-NaN cycle on one joint and not another).
+        if len(sd_L) == len(mL_meta["kept_mask"]):
+            sd_L = sd_L[mL_meta["kept_mask"]]
+        if len(sd_R) == len(mR_meta["kept_mask"]):
+            sd_R = sd_R[mR_meta["kept_mask"]]
+        cw_L = mL_meta.get("kept_weights")
+        cw_R = mR_meta.get("kept_weights")
+        cyc_L, keep_L = filter_cycles(cyc_L, sd_L)
+        cyc_R, keep_R = filter_cycles(cyc_R, sd_R)
+        if cw_L is not None and len(cw_L) >= len(keep_L):
+            cw_L = cw_L[keep_L]
+        if cw_R is not None and len(cw_R) >= len(keep_R):
+            cw_R = cw_R[keep_R]
+        mL, stL, KL = ensemble_statistics(cyc_L, weights=cw_L)
+        mR, stR, KR = ensemble_statistics(cyc_R, weights=cw_R)
         out[joint] = {
             "left":  {"mean": mL, "std": stL, "K": int(KL)},
             "right": {"mean": mR, "std": stR, "K": int(KR)},
@@ -1600,7 +1751,17 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
     pass_segments = segment_passes(hip_x_px, fps)
 
     # 2. Anatomical scale.
-    mpp = compute_meters_per_pixel(ts, user_height_cm, pass_segments=pass_segments)
+    # Phase G: calibration median over stance frames whose hip AND ankle
+    # were clearly seen; falls back (and flags) when fewer than 5 exist.
+    _vis_all = {name: ts[name]["vis"] for name in LM}
+    _w_hip_ankle = {
+        s: frame_weights(_vis_all, [f"{s}_hip", f"{s}_ankle"])
+        for s in ("left", "right")
+    }
+    mpp, mpp_meta = compute_meters_per_pixel(
+        ts, user_height_cm, pass_segments=pass_segments,
+        quality_w=_w_hip_ankle, return_meta=True,
+    )
 
     # Build the steady-state clean mask once, here, so the ankle baseline
     # detector can use it (turning-point velocity dips are NOT standing-still
@@ -1679,6 +1840,10 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
         "steady_state_duration_s": clean_metrics["duration_sec"],
         "meters_per_pixel":       mpp,
         "user_height_cm":         user_height_cm,
+        # Phase G provenance (additive).
+        "weighted":               True,
+        "mpp_calibration_degraded": bool(mpp_meta.get("calibration_degraded", False)),
+        "mpp_n_full_frames":      int(mpp_meta.get("n_full_frames", 0)),
         "gait_cycle_curves":      gait_cycle_curves,
         "ankle_baseline":         {
             "method":           ankle_full.get("_baseline_method", "unknown"),
@@ -1718,13 +1883,19 @@ def interpret(features: dict) -> dict:
 
     cadence       = clean["cadence"]
     symmetry      = clean["symmetry"]
+    # Phase G: weighted aggregates return None when no clearly-seen
+    # frame exists; treat as 0.0 here exactly as an empty window was.
     knee_peak     = clean["knee_angles"].get("overall_peak", 0.0)
+    knee_peak     = 0.0 if knee_peak is None else knee_peak
     knee_min      = clean["knee_angles"].get("overall_min", 0.0)
+    knee_min      = 0.0 if knee_min is None else knee_min
     knee_overall  = clean["knee_angles"]["overall_mean"]
     stride_cv_pct = clean["stride_cv"]
     step_len_mean = clean["step_length"]["mean"]
+    step_len_mean = 0.0 if step_len_mean is None else step_len_mean
     step_len_unit = clean["step_length"].get("unit", "m")
     torso_mean    = clean["torso_lean"]["mean"]
+    torso_mean    = 0.0 if torso_mean is None else torso_mean
     direction     = features.get("direction", "Unknown")
     num_passes    = features.get("num_passes", 0)
     frames_used   = features.get("frames_used", 0)

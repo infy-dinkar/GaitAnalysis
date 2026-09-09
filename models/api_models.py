@@ -47,6 +47,10 @@ class VideoInfo(BaseModel):
     ankle_baseline_right: float = 0.0
     ankle_baseline_method: str = "unknown"
     ankle_baseline_n_frames: int = 0
+    # Phase G — quality-weighted aggregation provenance. None on reports
+    # analysed before weighting existed.
+    weighted: Optional[bool] = None
+    mpp_calibration_degraded: Optional[bool] = None
 
 
 class MetricsBlock(BaseModel):
@@ -72,6 +76,10 @@ class MetricsBlock(BaseModel):
     swing_pct_left: Optional[float] = None
     swing_pct_right: Optional[float] = None
     double_support_pct: Optional[float] = None
+    # Phase G — additive provenance.
+    weighted: Optional[bool] = None
+    knee_peak_degraded: Optional[bool] = None
+    quality_coverage: Optional[dict] = None
 
 
 class JointDetail(BaseModel):
