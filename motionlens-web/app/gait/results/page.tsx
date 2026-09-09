@@ -42,6 +42,14 @@ const COLOR_ACCENT = "#EA580C";
 // "both" preserves the prior behaviour exactly.
 type SideFilter = "both" | "left" | "right";
 
+// What /gait/upload stores in sessionStorage: the API result plus the
+// source-video metadata and a per-analysis nonce (see upload/page.tsx).
+type StoredGaitResult = GaitDataDTO & {
+  _video_filename?: string;
+  _video_size_bytes?: number;
+  _run_id?: number;
+};
+
 function SideToggle({
   value,
   onChange,
@@ -138,7 +146,7 @@ export default function GaitResultsPage() {
   // Surfaces the registered patient (when launched from the doctor flow
   // with ?patientId=...) so the PatientHeader can render age / gender /
   // height / weight / contact / notes on the live results page.
-  const { patient: doctorPatient } = usePatientContext();
+  const { patient: doctorPatient, patientId } = usePatientContext();
 
   useEffect(() => {
     try {
@@ -304,7 +312,7 @@ export default function GaitResultsPage() {
               URL) — fires as soon as the results render, big banner
               with a 10s Undo. Same payload the manual button built. */}
           <AutoSaveToast
-            dedupeKey={`gait:${(data as unknown as { _video_filename?: string })._video_filename ?? "clip"}:${data.video_info?.total_frames ?? data.metrics_total?.cadence ?? ""}`}
+            dedupeKey={`gait:${patientId}:${(data as StoredGaitResult)._run_id ?? (data as StoredGaitResult)._video_filename ?? "clip"}`}
             buildPayload={() => ({
               module: "gait",
               metrics: {

@@ -79,6 +79,10 @@ export default function GaitUploadPage() {
           // to build the report payload when the doctor clicks "Save".
           _video_filename: file.name,
           _video_size_bytes: file.size,
+          // Per-analysis nonce — the results page keys its auto-save
+          // dedupe on this so a re-analysed clip saves again while a
+          // reload of the same results page does not double-save.
+          _run_id: Date.now(),
         }),
       );
 
@@ -147,6 +151,7 @@ export default function GaitUploadPage() {
           },
           _video_filename: recordedFile.name,
           _video_size_bytes: recordedFile.size,
+          _run_id: Date.now(),
         }),
       );
 
