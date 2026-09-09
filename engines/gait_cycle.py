@@ -179,7 +179,8 @@ def extract_cycles(signal: np.ndarray, heel_strikes: np.ndarray,
                    clean_mask: np.ndarray | None = None,
                    max_dur_ratio: float = 1.5,
                    min_dur_ratio: float = 0.7,
-                   return_metadata: bool = False):
+                   return_metadata: bool = False,
+                   weights: np.ndarray | None = None):
     """
     For each consecutive heel-strike pair (hs[k], hs[k+1]), slice the signal
     and resample to exactly n_points via linear interpolation.
@@ -210,8 +211,17 @@ def extract_cycles(signal: np.ndarray, heel_strikes: np.ndarray,
                                as `stride_durations(...)`, so callers can
                                slice `sd[kept_mask]` to stay K-aligned.
     """
+    # `weights` (Phase G): one quality weight per ADJACENT STRIKE PAIR,
+    # aligned with np.diff(heel_strikes) -- see quality_weights.stride_
+    # weights. When given, a pair whose weight is 0 (strike on an
+    # interpolated heel, or every frame lost) is rejected, and so is an
+    # all-NaN cycle -- previously that was appended as a NaN row and
+    # COUNTED in K. With weights=None behaviour is byte-identical to
+    # before, including that inflation, so the un-weighted path never
+    # moves.
     def _ret(arr, total=0, kept=0, long=0, short=0,
-             median_dur=float("nan"), kept_mask=None):
+             median_dur=float("nan"), kept_mask=None, kept_weights=None,
+             rejected_weight=0):
         if not return_metadata:
             return arr
         if kept_mask is None:
@@ -221,8 +231,11 @@ def extract_cycles(signal: np.ndarray, heel_strikes: np.ndarray,
             "kept":            int(kept),
             "rejected_long":   int(long),
             "rejected_short":  int(short),
+            "rejected_weight": int(rejected_weight),
             "median_duration": float(median_dur),
             "kept_mask":       kept_mask,
+            "kept_weights":    (np.asarray(kept_weights, dtype=float)
+                                if kept_weights is not None else None),
         }
 
     if signal is None or len(signal) == 0 or heel_strikes is None or len(heel_strikes) < 2:
@@ -241,14 +254,17 @@ def extract_cycles(signal: np.ndarray, heel_strikes: np.ndarray,
 
     tau_star = np.linspace(0, 1, n_points)
     cycles: list[np.ndarray] = []
+    kept_weights: list[float] = []
     kept_mask = np.zeros(total_pairs, dtype=bool)
     rejected_long = 0
     rejected_short = 0
-
+    rejected_weight = 0
+    w_arr = None
+    if weights is not None:
+        w_arr = np.asarray(weights, dtype=float)
     for i, k in enumerate(valid_ks):
         a, b = int(heel_strikes[k]), int(heel_strikes[k + 1])
         duration = b - a
-
         if not np.isnan(median_dur) and median_dur > 0:
             if duration > max_dur_ratio * median_dur:
                 rejected_long += 1
@@ -256,10 +272,20 @@ def extract_cycles(signal: np.ndarray, heel_strikes: np.ndarray,
             if duration < min_dur_ratio * median_dur:
                 rejected_short += 1
                 continue
-
+        wk = None
+        if w_arr is not None:
+            wk = float(w_arr[k]) if k < w_arr.shape[0] else 0.0
+            if wk <= 0.0:
+                rejected_weight += 1
+                continue
         seg = np.asarray(signal[a:b], dtype=float)
         valid = ~np.isnan(seg)
         if valid.sum() < 2:
+            if w_arr is not None:
+                # Weighted path: an all-NaN cycle carries no signal and
+                # must not count toward K.
+                rejected_weight += 1
+                continue
             cycles.append(np.full(n_points, np.nan))
             kept_mask[i] = True
             continue
@@ -270,6 +296,8 @@ def extract_cycles(signal: np.ndarray, heel_strikes: np.ndarray,
             # NaN-aware interpolation: skip NaN samples; np.interp clamps at edges.
             cycles.append(np.interp(tau_star, tau[valid], seg[valid]))
         kept_mask[i] = True
+        if wk is not None:
+            kept_weights.append(wk)
 
     arr = np.array(cycles) if cycles else np.empty((0, n_points))
     return _ret(
@@ -280,6 +308,8 @@ def extract_cycles(signal: np.ndarray, heel_strikes: np.ndarray,
         short=rejected_short,
         median_dur=median_dur,
         kept_mask=kept_mask,
+        kept_weights=(kept_weights if w_arr is not None else None),
+        rejected_weight=rejected_weight,
     )
 
 
@@ -355,7 +385,9 @@ def filter_cycles(cycles: np.ndarray,
 # ──────────────────────────────────────────────
 # 6. ENSEMBLE STATISTICS
 # ──────────────────────────────────────────────
-def ensemble_statistics(cycles: np.ndarray) -> tuple[np.ndarray | None, np.ndarray | None, int]:
+def ensemble_statistics(cycles: np.ndarray,
+                        weights: np.ndarray | None = None,
+                        ) -> tuple[np.ndarray | None, np.ndarray | None, int]:
     """
     Return (mean_curve, std_curve, K) where
         mean / std are per-percent arrays of length n_points
@@ -367,6 +399,34 @@ def ensemble_statistics(cycles: np.ndarray) -> tuple[np.ndarray | None, np.ndarr
     """
     if cycles is None or cycles.ndim != 2 or cycles.shape[0] == 0:
         return None, None, 0
+
+    if weights is not None:
+        # Phase G: quality-weighted ensemble. Zero-weight cycles are
+        # dropped (they should already be gone upstream); K counts only
+        # cycles that contribute. Masked arrays keep the NaN tolerance of
+        # the unweighted path.
+        w = np.asarray(weights, dtype=float)
+        if w.shape[0] != cycles.shape[0]:
+            raise ValueError("ensemble_statistics: weights/cycles length mismatch")
+        keep = w > 0
+        cycles = cycles[keep]
+        w = w[keep]
+        K = int(cycles.shape[0])
+        if K == 0:
+            return None, None, 0
+        m = np.ma.masked_invalid(cycles)
+        wm = np.repeat(w[:, None], cycles.shape[1], axis=1)
+        mean_curve = np.asarray(np.ma.average(m, axis=0, weights=wm))
+        if K >= 2:
+            dev = (m - mean_curve[None, :]) ** 2
+            v1 = np.ma.sum(np.ma.masked_array(wm, mask=m.mask), axis=0)
+            v2 = np.ma.sum(np.ma.masked_array(wm * wm, mask=m.mask), axis=0)
+            denom = v1 - v2 / np.ma.maximum(v1, 1e-12)
+            var = np.ma.sum(np.ma.masked_array(wm, mask=m.mask) * dev, axis=0) / np.ma.maximum(denom, 1e-12)
+            std_curve = np.asarray(np.sqrt(np.ma.filled(var, 0.0)))
+        else:
+            std_curve = np.zeros_like(mean_curve)
+        return mean_curve, std_curve, K
 
     K = int(cycles.shape[0])
     mean_curve = np.nanmean(cycles, axis=0)

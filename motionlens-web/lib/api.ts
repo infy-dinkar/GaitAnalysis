@@ -26,6 +26,12 @@ export interface VideoInfoDTO {
   ankle_baseline_right: number;
   ankle_baseline_method: string;
   ankle_baseline_n_frames: number;
+  /** Phase G — true when aggregates were landmark-quality weighted.
+   *  Absent on reports analysed before weighting existed. */
+  weighted?: boolean | null;
+  /** True when too few clearly-seen stance frames existed for the
+   *  metre calibration and the un-weighted median was used instead. */
+  mpp_calibration_degraded?: boolean | null;
 }
 
 export interface MetricsBlockDTO {
@@ -50,6 +56,15 @@ export interface MetricsBlockDTO {
   swing_pct_left?: number | null;
   swing_pct_right?: number | null;
   double_support_pct?: number | null;
+  /** Phase G provenance — all optional. */
+  weighted?: boolean | null;
+  /** True when no fully-visible frame existed for a knee peak and the
+   *  best seen frame (w > 0) was used instead. */
+  knee_peak_degraded?: boolean | null;
+  quality_coverage?: Partial<Record<"left" | "right", {
+    frames_full: number | null;
+    strides_weighted_mean: number | null;
+  }>> | null;
 }
 
 export interface JointDetailDTO {
