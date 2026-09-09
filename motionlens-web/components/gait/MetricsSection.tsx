@@ -4,13 +4,6 @@ import { MetricTile, Status } from "@/components/gait/MetricTile";
 import { fmt } from "@/lib/utils";
 import type { MetricsBlockDTO, ReliabilityEntryDTO } from "@/lib/api";
 
-type MetricTileSecondary = {
-  label: string;
-  value: string;
-  reliability?: ReliabilityEntryDTO | null;
-  reason?: string;
-} | null;
-
 const NORMAL = {
   cadence: [100, 120] as [number, number],
   symmetryPct: [95, 100] as [number, number],
@@ -75,73 +68,9 @@ export function MetricsSection({
   const rel = (key: string): ReliabilityEntryDTO | null =>
     metrics.reliability?.[key] ?? null;
 
-  // ── Knee peak, both legs ─────────────────────────────────────
-  // The stored value (metrics.knee_peak) is the overall max and is NOT
-  // changed. For display on a single-direction clip the primary row is
-  // the NEAR leg's peak (its own tier) and the second row is the far
-  // leg; each side's masked peak rides in reliability.knee_peak as
-  // peak_value. Mixed / unknown camera side keeps today's single value.
-  const kneeTile = (() => {
-    const kp = rel("knee_peak");
-    const single = kp?.other_side
-      && kp.peak_side
-      && (kp.camera_side === "near" || kp.camera_side === "far")
-      && (kp.other_side.camera_side === "near" || kp.other_side.camera_side === "far");
-    const fmtDeg = (v: number | null | undefined) =>
-      v === null || v === undefined ? "—" : `${fmt(v, 1)}°`;
-    const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
-    const shortReason = (e: ReliabilityEntryDTO | { tier: ReliabilityEntryDTO["tier"] } | null | undefined) =>
-      !e ? "" : e.tier === "not_assessed" ? "Not assessed — interpolated"
-        : e.tier === "caution" ? "Caution — far-side leg" : "Reliable";
-
-    if (!single) {
-      return {
-        label: "Knee peak",
-        value: metrics.knee_peak !== null ? fmtDeg(metrics.knee_peak) : "—",
-        hint: "swing flexion",
-        status: classify(metrics.knee_peak, NORMAL.kneePeak),
-        reliability: kp,
-        secondary: null as MetricTileSecondary,
-        suppressWhenNotAssessed: true,
-      };
-    }
-    // Which entry is the near leg?
-    const winner = { side: kp.peak_side!, tier: kp.tier, camera_side: kp.camera_side!,
-                     peak_value: kp.peak_value ?? metrics.knee_peak, entry: kp };
-    const other = kp.other_side!;
-    const near = winner.camera_side === "near" ? winner : { ...other, entry: null };
-    const far = winner.camera_side === "near" ? { ...other, entry: null } : winner;
-    const nearEntry: ReliabilityEntryDTO = near.entry ?? {
-      ...kp, tier: near.tier, camera_side: near.camera_side, note: other.note ?? kp.note,
-    };
-    const farEntry: ReliabilityEntryDTO = far.entry ?? {
-      ...kp, tier: far.tier, camera_side: far.camera_side, note: other.note ?? kp.note,
-    };
-    const nearAssessable = near.tier !== "not_assessed" && near.peak_value != null;
-    const farAssessable = far.tier !== "not_assessed" && far.peak_value != null;
-    return {
-      label: `Knee peak · ${cap(near.side)} (near)`,
-      value: nearAssessable ? fmtDeg(near.peak_value) : "—",
-      hint: "swing flexion",
-      status: nearAssessable
-        ? classify(near.peak_value as number, NORMAL.kneePeak)
-        : ("neutral" as Status),
-      reliability: nearEntry,
-      secondary: {
-        label: `${cap(far.side)} (far)`,
-        value: farAssessable ? fmtDeg(far.peak_value) : "—",
-        reliability: farEntry,
-        reason: shortReason(farEntry),
-      } as MetricTileSecondary,
-      suppressWhenNotAssessed: false,
-    };
-  })();
-
   const tiles: {
     label: string; value: string; hint?: string; status: Status;
     reliability: ReliabilityEntryDTO | null;
-    secondary?: MetricTileSecondary;
-    suppressWhenNotAssessed?: boolean;
   }[] = [
     {
       label: "Step count",
@@ -167,7 +96,13 @@ export function MetricsSection({
           : "neutral",
       reliability: rel("symmetry"),
     },
-    kneeTile,
+    {
+      label: "Knee peak",
+      value: metrics.knee_peak !== null ? `${fmt(metrics.knee_peak, 1)}°` : "—",
+      hint: "swing flexion",
+      status: classify(metrics.knee_peak, NORMAL.kneePeak),
+      reliability: rel("knee_peak"),
+    },
     {
       label: "Stride CV",
       value: metrics.stride_cv !== null ? `${fmt(metrics.stride_cv, 1)}%` : "—",
@@ -234,8 +169,6 @@ export function MetricsSection({
             hint={t.hint}
             status={t.status}
             reliability={t.reliability}
-            secondary={t.secondary ?? null}
-            suppressWhenNotAssessed={t.suppressWhenNotAssessed ?? true}
           />
         ))}
       </div>
