@@ -217,7 +217,32 @@ export default function GaitResultsPage() {
       writeRow("Step count",  show("step_count", String(c.step_count)), relLabel(R["step_count"]));
       writeRow("Cadence",     show("cadence", c.cadence !== null ? `${fmt(c.cadence, 0)} steps/min` : "—"), relLabel(R["cadence"]));
       writeRow("Symmetry",    show("symmetry", c.symmetry !== null ? `${fmt(c.symmetry * 100, 0)}%` : "—"), relLabel(R["symmetry"]));
-      writeRow("Knee peak",   show("knee_peak", c.knee_peak !== null ? `${fmt(c.knee_peak, 1)}°` : "—"), relLabel(R["knee_peak"]));
+      {
+        // Knee peak — both legs on a single-direction clip; same rule as
+        // the tile. metrics_clean.knee_peak itself is untouched.
+        const kp = R["knee_peak"];
+        const deg = (v: number | null | undefined) =>
+          v === null || v === undefined ? "—" : `${fmt(v, 1)}°`;
+        const capW = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+        const single = kp?.other_side && kp.peak_side
+          && (kp.camera_side === "near" || kp.camera_side === "far")
+          && (kp.other_side.camera_side === "near" || kp.other_side.camera_side === "far");
+        if (!single) {
+          writeRow("Knee peak", show("knee_peak", c.knee_peak !== null ? deg(c.knee_peak) : "—"), relLabel(kp));
+        } else {
+          const winner = { side: kp.peak_side!, tier: kp.tier, camera_side: kp.camera_side!,
+                           peak_value: kp.peak_value ?? c.knee_peak };
+          const other = kp.other_side!;
+          const near = winner.camera_side === "near" ? winner : other;
+          const far = winner.camera_side === "near" ? other : winner;
+          const nearOk = near.tier !== "not_assessed" && near.peak_value != null;
+          const farOk = far.tier !== "not_assessed" && far.peak_value != null;
+          writeRow(`Knee peak · ${capW(near.side)} (near)`, nearOk ? deg(near.peak_value) : "—",
+                   relLabel({ tier: near.tier, camera_side: near.camera_side }));
+          writeRow(`   ${capW(far.side)} (far)`, farOk ? deg(far.peak_value) : "—",
+                   relLabel({ tier: far.tier, camera_side: far.camera_side }));
+        }
+      }
       writeRow("Stride CV",   show("stride_cv", c.stride_cv !== null ? `${fmt(c.stride_cv, 1)}%` : "—"), relLabel(R["stride_cv"]));
       writeRow("Step length", show("step_length", c.step_length !== null ? `${fmt(c.step_length, 2)} ${c.step_length_unit}` : "—"), relLabel(R["step_length"]));
       writeRow("Torso lean",  show("torso_lean", c.torso_lean !== null ? `${fmt(c.torso_lean, 1)}°` : "—"), relLabel(R["torso_lean"]));

@@ -1790,6 +1790,17 @@ def _build_reliability(ts: dict, mask: np.ndarray, L_idx, R_idx,
         )
         if kp is not None:
             kp["peak_side"] = best_side
+            # Each side's masked peak VALUE rides along for display: the
+            # tile wants to show the NEAR leg's peak even when the far leg
+            # produced the stored overall maximum, and metrics_*.knee_peak
+            # (= the overall max) must not change. Same nanmax over the
+            # same masked frames the metric itself used.
+            def _side_peak(side_: str):
+                if len(mask_frames) == 0:
+                    return None
+                seg_ = np.asarray(knee_full[side_], dtype=float)[mask_frames]
+                return None if np.all(np.isnan(seg_)) else round(float(np.nanmax(seg_)), 2)
+            kp["peak_value"] = _side_peak(best_side)
             # The losing side, scored over its own masked frames, so the
             # UI can say "peak from near leg" / "peak from far leg".
             other = "right" if best_side == "left" else "left"
@@ -1799,7 +1810,8 @@ def _build_reliability(ts: dict, mask: np.ndarray, L_idx, R_idx,
             )
             kp["other_side"] = (
                 {"side": other, "tier": oe["tier"], "score": oe["score"],
-                 "camera_side": oe["camera_side"]} if oe else None
+                 "camera_side": oe["camera_side"], "note": oe["note"],
+                 "peak_value": _side_peak(other)} if oe else None
             )
             if kp["camera_side"] in ("near", "far"):
                 kp["note"] = f"Peak from {kp['camera_side']} leg ({best_side}). " + kp["note"]

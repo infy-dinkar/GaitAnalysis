@@ -61,12 +61,17 @@ export interface ReliabilityEntryDTO {
   known_frac?: number;
   /** Knee peak only: the side whose maximum was reported ... */
   peak_side?: "left" | "right";
-  /** ... and the losing side, so the UI can say "peak from near/far leg". */
+  /** Knee peak only: that side's masked peak, degrees. Display only —
+   *  metrics_*.knee_peak (the overall max) is the stored value. */
+  peak_value?: number | null;
+  /** ... and the losing side, so the UI can show both legs. */
   other_side?: {
     side: "left" | "right";
     tier: ReliabilityEntryDTO["tier"];
     score: number;
     camera_side: ReliabilityEntryDTO["camera_side"];
+    note?: string;
+    peak_value?: number | null;
   } | null;
 }
 
