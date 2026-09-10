@@ -80,6 +80,9 @@ class MetricsBlock(BaseModel):
     weighted: Optional[bool] = None
     knee_peak_degraded: Optional[bool] = None
     quality_coverage: Optional[dict] = None
+    # Near-side-only angles: {"left": bool, "right": bool} — True when the
+    # side had no near-side frames in this window (unidirectional clip).
+    side_not_captured: Optional[dict] = None
 
 
 class JointDetail(BaseModel):

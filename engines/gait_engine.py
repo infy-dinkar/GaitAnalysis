@@ -32,6 +32,7 @@ Metric math fixes vs the original engine:
     acceleration, and deceleration frames are excluded by frame mask).
 """
 
+import logging
 import math
 import subprocess
 import warnings
@@ -54,6 +55,8 @@ from engines.gait_cycle import (
 )
 
 warnings.filterwarnings("ignore")
+
+_log = logging.getLogger("motionlens.gait")
 
 # ──────────────────────────────────────────────
 # LANDMARK INDICES
@@ -1031,6 +1034,74 @@ def _knee_angles_px(ts: dict) -> dict:
 # ──────────────────────────────────────────────
 ANGLE_VIS_GATE = 0.5
 
+# Near-side-only angles. Joint-angle arrays (knee / hip / ankle) are
+# computed ONLY from frames where that side faces the camera (walking
+# L->R => right side near, R->L => left side near, read from
+# segment_passes) AND every joint the angle reads is seen at or above
+# this visibility. Far-side frames, frames outside any pass, and
+# under-visible near frames are NaN -- they never enter a peak, mean,
+# curve or baseline. Timing / count / position metrics are untouched.
+ANGLE_VIS_CUT = 0.85   # near-side frames below this are NaN'd for angle metrics
+
+
+def _near_far_masks(pass_segments, n_total: int):
+    """Per-frame direction READ from segment_passes (never recomputed):
+    +1 inside an L->R pass, -1 inside R->L, 0 outside any pass.
+
+    Camera geometry for a sagittal walk: walking L->R means the
+    patient's RIGHT side faces the camera, so the right leg is near
+    and the left leg is far; R->L is the mirror. Frames outside any
+    pass are UNKNOWN, not far."""
+    d = np.zeros(n_total, dtype=int)
+    if pass_segments:
+        for p in pass_segments:
+            d[p["start"]:p["end"]] = p["direction"]
+    known = d != 0
+    far = {
+        "left":  d == 1,     # L->R: left leg away from camera
+        "right": d == -1,    # R->L: right leg away from camera
+    }
+    return d, known, far
+
+
+def _angle_keep_masks(ts: dict, pass_segments, n_total: int):
+    """Boolean keep-masks for the angle arrays.
+
+    keep[joint][side] is True only on frames where `side` is the NEAR
+    side (inside a pass) and the minimum visibility over that angle's
+    joint set is >= ANGLE_VIS_CUT. Interpolated frames carry vis 0.0
+    and therefore drop automatically. Also returns near[side] so the
+    caller can tell "no near frames at all" (unidirectional clip) from
+    "near frames all under the cut"."""
+    _, known, far = _near_far_masks(pass_segments, n_total)
+    near = {s: known & ~far[s] for s in ("left", "right")}
+
+    def _min_vis(names):
+        arrs = [np.asarray(ts[k]["vis"], dtype=float)[:n_total] for k in names]
+        return np.min(np.vstack(arrs), axis=0)
+
+    sets = {
+        "knee":  lambda s: [f"{s}_hip", f"{s}_knee", f"{s}_ankle"],
+        "hip":   lambda s: ["left_shoulder", "right_shoulder",
+                            "left_hip", "right_hip", f"{s}_knee"],
+        # heel is sign-only for the ankle angle, so it is not in the cut set
+        "ankle": lambda s: [f"{s}_knee", f"{s}_ankle", f"{s}_foot_index"],
+    }
+    keep = {
+        j: {s: near[s] & (_min_vis(fn(s)) >= ANGLE_VIS_CUT) for s in ("left", "right")}
+        for j, fn in sets.items()
+    }
+    return keep, near
+
+
+def _apply_angle_cut(arr: np.ndarray, keep: np.ndarray) -> np.ndarray:
+    """Copy of `arr` with every frame outside `keep` set to NaN."""
+    out = np.array(arr, dtype=float, copy=True)
+    n = min(out.shape[0], keep.shape[0])
+    out[:n][~keep[:n]] = np.nan
+    out[n:] = np.nan
+    return out
+
 
 def _direction_per_frame(n: int, pass_segments) -> np.ndarray:
     """+1 inside an L→R pass, −1 inside R→L; +1 fallback outside any pass."""
@@ -1175,7 +1246,8 @@ def _detect_static_baseline(ts: dict, raw_dorsi_left: np.ndarray,
 
 
 def _ankle_angles_px(ts: dict, pass_segments=None, fps: float = 30.0,
-                     clean_mask: np.ndarray | None = None) -> dict:
+                     clean_mask: np.ndarray | None = None,
+                     angle_keep: dict | None = None) -> dict:
     """
     Per-frame ankle dorsiflexion (deg) using PIXEL coords.
     0° = neutral standing (after baseline correction).
@@ -1244,6 +1316,13 @@ def _ankle_angles_px(ts: dict, pass_segments=None, fps: float = 30.0,
     # baseline when the subject pauses anywhere in the video.
     # clean_mask is forwarded so turning-point velocity dips don't qualify
     # — only frames inside a steady-state pass core can become baselines.
+    # Near-side-only + visibility cut applied to the RAW angle first, so
+    # the static baseline and the running-median fallback below only
+    # ever see frames that are allowed into the ankle metrics.
+    if angle_keep is not None:
+        for side in ("left", "right"):
+            if side in angle_keep:
+                raw_dorsi[side] = _apply_angle_cut(raw_dorsi[side], angle_keep[side])
     baseline = _detect_static_baseline(ts, raw_dorsi["left"],
                                        raw_dorsi["right"], fps,
                                        clean_mask=clean_mask)
@@ -1263,6 +1342,12 @@ def _ankle_angles_px(ts: dict, pass_segments=None, fps: float = 30.0,
         # robust per-leg baseline even with no static window in the clip.
         L_arr = raw_dorsi["left"]
         R_arr = raw_dorsi["right"]
+        if angle_keep is not None:
+            _log.warning(
+                "gait: ankle static baseline not found on the cut angle arrays "
+                "(no >=0.5 s standing window with both sides usable) — using "
+                "the per-leg running-median fallback",
+            )
         baseline_L = float(np.nanmedian(L_arr)) if not np.all(np.isnan(L_arr)) else 0.0
         baseline_R = float(np.nanmedian(R_arr)) if not np.all(np.isnan(R_arr)) else 0.0
         n_baseline = 0
@@ -1311,7 +1396,7 @@ def _torso_lean_arr(ts: dict, pass_segments=None) -> np.ndarray:
 # ══════════════════════════════════════════════
 def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
                     pass_segments=None, strikes=None, knee_full=None,
-                    torso_full=None) -> dict:
+                    torso_full=None, near_masks=None) -> dict:
     """
     Compute the full gait-metric dict over ONLY the given frame_indices.
 
@@ -1625,6 +1710,13 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         "weighted":           True,
         "knee_peak_degraded": bool(knee_peak_degraded),
         "quality_coverage":   quality_coverage,
+        # Near-side-only angles: True when this side had NO near-side frame
+        # inside the window (unidirectional clip), so its knee peak / min
+        # are None for want of data rather than for want of visibility.
+        "side_not_captured":  (
+            {s: bool(int(near_masks[s][mask].sum()) == 0) for s in ("left", "right")}
+            if near_masks is not None and n_mask > 0 else None
+        ),
     }
 
 
@@ -1775,10 +1867,28 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
 
     # 3. Pre-compute per-frame caches (shared by Total & Clean).
     strikes    = _detect_strikes(ts, fps, pass_segments)
-    knee_full  = _knee_angles_px(ts)
-    hip_full   = _hip_angles_px(ts, pass_segments)
+    # Near-side-only angles with the ANGLE_VIS_CUT visibility cut. The
+    # cut is applied to the ANGLE ARRAYS ONLY -- the frame mask, strikes,
+    # positions and every timing / count metric are left exactly as is.
+    angle_keep, near_masks = _angle_keep_masks(ts, pass_segments, n)
+    knee_raw   = _knee_angles_px(ts)
+    hip_raw    = _hip_angles_px(ts, pass_segments)
+    knee_full  = {s: _apply_angle_cut(knee_raw[s], angle_keep["knee"][s])
+                  for s in ("left", "right")}
+    hip_full   = {s: _apply_angle_cut(hip_raw[s], angle_keep["hip"][s])
+                  for s in ("left", "right")}
     ankle_full = _ankle_angles_px(ts, pass_segments, fps=fps,
-                                  clean_mask=clean_mask)
+                                  clean_mask=clean_mask,
+                                  angle_keep=angle_keep["ankle"])
+    angle_cut_stats = {
+        s: {
+            "near_frames":  int(near_masks[s].sum()),
+            "knee_kept":    int(angle_keep["knee"][s].sum()),
+            "hip_kept":     int(angle_keep["hip"][s].sum()),
+            "ankle_kept":   int(angle_keep["ankle"][s].sum()),
+        }
+        for s in ("left", "right")
+    }
     torso_full = _torso_lean_arr(ts, pass_segments)
 
     # 4. TOTAL metrics — every frame.
@@ -1787,6 +1897,7 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
         ts, total_indices, mpp, fps,
         pass_segments=pass_segments,
         strikes=strikes, knee_full=knee_full, torso_full=torso_full,
+        near_masks=near_masks,
     )
 
     # 5. CLEAN metrics — only frames inside any pass core (steady state).
@@ -1800,6 +1911,7 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
         ts, clean_indices, mpp, fps,
         pass_segments=pass_segments,
         strikes=strikes, knee_full=knee_full, torso_full=torso_full,
+        near_masks=near_masks,
     )
 
     direction = compute_walking_direction(pass_segments)
@@ -1844,6 +1956,9 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
         "weighted":               True,
         "mpp_calibration_degraded": bool(mpp_meta.get("calibration_degraded", False)),
         "mpp_n_full_frames":      int(mpp_meta.get("n_full_frames", 0)),
+        # Near-side-only angle cut telemetry (frames per side).
+        "angle_cut_stats":        angle_cut_stats,
+        "angle_vis_cut":          ANGLE_VIS_CUT,
         "gait_cycle_curves":      gait_cycle_curves,
         "ankle_baseline":         {
             "method":           ankle_full.get("_baseline_method", "unknown"),

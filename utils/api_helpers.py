@@ -353,6 +353,12 @@ def _build_metrics_block(
     _cyc["knee_peak_degraded"] = bool(_kpd) if _kpd is not None else None
     _qc = metrics.get("quality_coverage")
     _cyc["quality_coverage"] = _qc if isinstance(_qc, dict) else None
+    # Near-side-only angles: which sides had no near-side frames in this
+    # window (their knee peak / min are None for want of data).
+    _snc = metrics.get("side_not_captured")
+    _cyc["side_not_captured"] = (
+        {k: bool(v) for k, v in _snc.items()} if isinstance(_snc, dict) else None
+    )
 
     if is_clean:
         total_frames = int(features.get("total_frames", 0) or 0)
