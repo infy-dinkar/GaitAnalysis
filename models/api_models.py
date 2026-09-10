@@ -51,6 +51,9 @@ class VideoInfo(BaseModel):
     # analysed before weighting existed.
     weighted: Optional[bool] = None
     mpp_calibration_degraded: Optional[bool] = None
+    # Phase 2 — all-frames calibration kept for comparison with the
+    # near-side value in calibration_mm_per_px.
+    calibration_mm_per_px_all_frames: Optional[float] = None
 
 
 class MetricsBlock(BaseModel):
@@ -83,6 +86,15 @@ class MetricsBlock(BaseModel):
     # Near-side-only angles: {"left": bool, "right": bool} — True when the
     # side had no near-side frames in this window (unidirectional clip).
     side_not_captured: Optional[dict] = None
+    # Phase 2 — near-side-only timing (clean block). All optional.
+    near_side_timing: Optional[bool] = None
+    cadence_all_strikes: Optional[float] = None
+    step_count_left: Optional[int] = None
+    step_count_right: Optional[int] = None
+    step_time_left: Optional[float] = None
+    step_time_right: Optional[float] = None
+    step_length_left: Optional[float] = None
+    step_length_right: Optional[float] = None
 
 
 class JointDetail(BaseModel):
