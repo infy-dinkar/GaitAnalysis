@@ -1200,8 +1200,12 @@ def _detect_static_baseline(ts: dict, raw_dorsi_left: np.ndarray,
     with clean_mask excludes turn frames so only true standing-still windows
     INSIDE a validated pass qualify.
 
-    Returns None when no qualifying static window exists OR when the static
-    frames don't contain valid (non-NaN) angle samples on both sides.
+    Returns None when no qualifying static window exists. Otherwise the
+    baseline is PER SIDE: each side's value is the median of its own
+    valid (non-NaN) samples inside the window, or None when that side has
+    no valid sample there -- a side whose angle array is fully NaN (far
+    side on a unidirectional clip) never forces the other side out of
+    static mode.
     """
     hip_x_norm = (ts["left_hip"]["x"] + ts["right_hip"]["x"]) / 2.0
     if len(hip_x_norm) < 3:
@@ -1215,34 +1219,43 @@ def _detect_static_baseline(ts: dict, raw_dorsi_left: np.ndarray,
         static = static & clean_mask
 
     min_static_frames = max(int(min_static_sec * fps), 3)
-    static_idx: list[int] = []
-    i = 0
-    while i < len(static):
-        if not static[i]:
-            i += 1
+
+    def _runs(flags: np.ndarray) -> list[int]:
+        """Frame indices inside contiguous True runs of >= min_static_frames."""
+        idx: list[int] = []
+        i = 0
+        while i < len(flags):
+            if not flags[i]:
+                i += 1
+                continue
+            j = i
+            while j < len(flags) and flags[j]:
+                j += 1
+            if j - i >= min_static_frames:
+                idx.extend(range(i, j))
+            i = j
+        return idx
+
+    # PER SIDE: the standing window must be static AND carry that side's
+    # own valid (non-NaN, post-cut) angle for >= min_static_sec contiguous
+    # frames. One side's NaN gap never invalidates the other side's window.
+    out: dict = {"n_frames": 0, "n_frames_left": 0, "n_frames_right": 0}
+    any_side = False
+    for side, arr in (("left", raw_dorsi_left), ("right", raw_dorsi_right)):
+        a = np.asarray(arr, dtype=float)
+        n_a = min(len(a), len(static))
+        side_static = static[:n_a] & ~np.isnan(a[:n_a])
+        idx = _runs(side_static)
+        if len(idx) < min_static_frames:
+            out[side] = None
             continue
-        j = i
-        while j < len(static) and static[j]:
-            j += 1
-        if j - i >= min_static_frames:
-            static_idx.extend(range(i, j))
-        i = j
-
-    if len(static_idx) < min_static_frames:
+        out[side] = float(np.median(a[np.asarray(idx, dtype=int)]))
+        out[f"n_frames_{side}"] = int(len(idx))
+        any_side = True
+    if not any_side:
         return None
-
-    idx_arr = np.asarray(static_idx, dtype=int)
-    L_samples = raw_dorsi_left[idx_arr]
-    R_samples = raw_dorsi_right[idx_arr]
-    L_valid = L_samples[~np.isnan(L_samples)]
-    R_valid = R_samples[~np.isnan(R_samples)]
-    if len(L_valid) == 0 or len(R_valid) == 0:
-        return None
-    return {
-        "left":     float(np.median(L_valid)),
-        "right":    float(np.median(R_valid)),
-        "n_frames": int(len(static_idx)),
-    }
+    out["n_frames"] = max(out["n_frames_left"], out["n_frames_right"])
+    return out
 
 
 def _ankle_angles_px(ts: dict, pass_segments=None, fps: float = 30.0,
@@ -1326,33 +1339,41 @@ def _ankle_angles_px(ts: dict, pass_segments=None, fps: float = 30.0,
     baseline = _detect_static_baseline(ts, raw_dorsi["left"],
                                        raw_dorsi["right"], fps,
                                        clean_mask=clean_mask)
-    if baseline is not None:
-        baseline_L  = baseline["left"]
-        baseline_R  = baseline["right"]
-        n_baseline  = baseline["n_frames"]
-        method      = "static_detected"
-    else:
-        # PER-LEG running-median fallback. The previous implementation applied
-        # a single global constant to BOTH legs, which couldn't compensate for
-        # per-side anatomical/jitter differences (one leg closer to the camera,
-        # different MediaPipe detection noise per side, etc.) and left the two
-        # legs offset from each other by tens of degrees on real video.
-        # nanmedian over the full signal is dominated by stance/swing samples
-        # (which spend most of the cycle near anatomical neutral), giving a
-        # robust per-leg baseline even with no static window in the clip.
-        L_arr = raw_dorsi["left"]
-        R_arr = raw_dorsi["right"]
+    # PER SIDE: a side with a static-window median uses it; a side without
+    # one (no window at all, or fully NaN there -- the far side on a
+    # unidirectional clip) uses its own running-median fallback. One side's
+    # fallback never drags the other side out of static mode.
+    #
+    # Fallback = nanmedian over the full (cut) signal: dominated by stance /
+    # swing samples near anatomical neutral, so it is a robust per-leg
+    # baseline even with no standing pause in the clip.
+    base: dict = {}
+    methods: dict = {}
+    for side in ("left", "right"):
+        b = baseline.get(side) if baseline is not None else None
+        if b is not None:
+            base[side] = float(b)
+            methods[side] = "static_detected"
+            continue
+        arr = raw_dorsi[side]
+        base[side] = float(np.nanmedian(arr)) if not np.all(np.isnan(arr)) else 0.0
+        methods[side] = "running_median_fallback"
         if angle_keep is not None:
             _log.warning(
-                "gait: ankle static baseline not found on the cut angle arrays "
-                "(no >=0.5 s standing window with both sides usable) — using "
-                "the per-leg running-median fallback",
+                "gait: ankle static baseline not found for the %s side "
+                "(no >=0.5 s standing window with that side's cut angle valid) "
+                "— using that side's running-median fallback",
+                side,
             )
-        baseline_L = float(np.nanmedian(L_arr)) if not np.all(np.isnan(L_arr)) else 0.0
-        baseline_R = float(np.nanmedian(R_arr)) if not np.all(np.isnan(R_arr)) else 0.0
-        n_baseline = 0
-        method     = "running_median_fallback"
-
+    n_baseline = int(baseline["n_frames"]) if baseline is not None else 0
+    if methods["left"] == methods["right"]:
+        method = methods["left"]
+    else:
+        static_side = "left" if methods["left"] == "static_detected" else "right"
+        other = "right" if static_side == "left" else "left"
+        method = f"static_detected({static_side})/running_median_fallback({other})"
+    baseline_L = base["left"]
+    baseline_R = base["right"]
     corrected_L = raw_dorsi["left"]  - baseline_L
     corrected_R = raw_dorsi["right"] - baseline_R
 
@@ -1362,6 +1383,8 @@ def _ankle_angles_px(ts: dict, pass_segments=None, fps: float = 30.0,
         # Metadata (underscore-prefixed → ignored by downstream consumers
         # that iterate ('left', 'right') only).
         "_baseline_method":  method,
+        "_baseline_method_left":  methods["left"],
+        "_baseline_method_right": methods["right"],
         "_baseline_left":    baseline_L,
         "_baseline_right":   baseline_R,
         "_baseline_n_frames": n_baseline,
@@ -1478,6 +1501,13 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
     # if it has none of those either, the peak is None and the tile
     # shows "-" (interpret() and _build_metrics_block already tolerate
     # None).
+    # Near-side-only angles: a side with NO near-side frame in this window
+    # (unidirectional clip) has no angle data at all -- its mean is None,
+    # not the 0.0 that an empty aggregate otherwise reports.
+    side_not_captured = (
+        {s: bool(int(near_masks[s][mask].sum()) == 0) for s in ("left", "right")}
+        if near_masks is not None and n_mask > 0 else None
+    )
     knee_angles = {}
     knee_peak_degraded = False
     for side in ("left", "right"):
@@ -1486,7 +1516,10 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         w_arr = w_knee[side][mask] if n_mask > 0 else np.array([])
         knee_angles[side] = full
         mean_v = weighted_mean(m_arr, w_arr) if len(m_arr) else None
-        knee_angles[f"{side}_mean"] = float(mean_v) if mean_v is not None else 0.0
+        if side_not_captured is not None and side_not_captured[side]:
+            knee_angles[f"{side}_mean"] = None
+        else:
+            knee_angles[f"{side}_mean"] = float(mean_v) if mean_v is not None else 0.0
         pk = weighted_extreme(m_arr, w_arr, np.nanmax) if len(m_arr) else None
         mn = weighted_extreme(m_arr, w_arr, np.nanmin) if len(m_arr) else None
         if (pk is None or mn is None) and len(m_arr):
@@ -1499,7 +1532,8 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
                 mn, knee_peak_degraded = mn2, True
         knee_angles[f"peak_{side}"] = pk
         knee_angles[f"min_{side}"] = mn
-    knee_angles["overall_mean"] = float(np.nanmean([knee_angles["left_mean"],  knee_angles["right_mean"]]))
+    _means = [v for v in (knee_angles["left_mean"], knee_angles["right_mean"]) if v is not None]
+    knee_angles["overall_mean"] = float(np.nanmean(_means)) if _means else None
     _peaks = [v for v in (knee_angles["peak_left"], knee_angles["peak_right"]) if v is not None]
     _mins = [v for v in (knee_angles["min_left"], knee_angles["min_right"]) if v is not None]
     knee_angles["overall_peak"] = float(max(_peaks)) if _peaks else None
@@ -1713,10 +1747,7 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         # Near-side-only angles: True when this side had NO near-side frame
         # inside the window (unidirectional clip), so its knee peak / min
         # are None for want of data rather than for want of visibility.
-        "side_not_captured":  (
-            {s: bool(int(near_masks[s][mask].sum()) == 0) for s in ("left", "right")}
-            if near_masks is not None and n_mask > 0 else None
-        ),
+        "side_not_captured":  side_not_captured,
     }
 
 
@@ -1962,6 +1993,8 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
         "gait_cycle_curves":      gait_cycle_curves,
         "ankle_baseline":         {
             "method":           ankle_full.get("_baseline_method", "unknown"),
+            "method_left":      ankle_full.get("_baseline_method_left", "unknown"),
+            "method_right":     ankle_full.get("_baseline_method_right", "unknown"),
             "offset_deg_left":  float(ankle_full.get("_baseline_left",  0.0)),
             "offset_deg_right": float(ankle_full.get("_baseline_right", 0.0)),
             "n_frames":         int(ankle_full.get("_baseline_n_frames", 0)),

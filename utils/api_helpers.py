@@ -430,7 +430,7 @@ def _build_joint_angles(features: dict, ts: dict | None = None) -> JointAnglesBl
                         exc_info=True)
             return None
 
-    return JointAnglesBlock(
+    block = JointAnglesBlock(
         left_knee=_summarise_joint_arr(knee.get("left"), _w("left", "knee")),
         right_knee=_summarise_joint_arr(knee.get("right"), _w("right", "knee")),
         left_hip=_summarise_joint_arr(hip.get("left"), _w("left", "hip")),
@@ -438,6 +438,16 @@ def _build_joint_angles(features: dict, ts: dict | None = None) -> JointAnglesBl
         left_ankle=_summarise_joint_arr(ankle.get("left"), _w("left", "ankle")),
         right_ankle=_summarise_joint_arr(ankle.get("right"), _w("right", "ankle")),
     )
+    # Near-side-only angles: a side that was never the near side has no
+    # angle data -- every summary for it is None, mean included.
+    snc = features.get("side_not_captured")
+    if isinstance(snc, dict):
+        for side in ("left", "right"):
+            if snc.get(side):
+                for joint in ("knee", "hip", "ankle"):
+                    setattr(block, f"{side}_{joint}",
+                            JointDetail(time_series=getattr(block, f"{side}_{joint}").time_series))
+    return block
 
 
 def _curve(curve_dict: dict | None) -> GaitCycleCurve:
