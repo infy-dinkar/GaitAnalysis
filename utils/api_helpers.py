@@ -288,6 +288,10 @@ def _build_video_info(features: dict, height_cm: float) -> VideoInfo:
         fps=fps,
         total_frames=total_frames,
         calibration_mm_per_px=cal_mm_per_px,
+        calibration_mm_per_px_all_frames=(
+            float(features["meters_per_pixel_all_frames"] * 1000.0)
+            if features.get("meters_per_pixel_all_frames") else None
+        ),
         valid_passes=int(features.get("num_passes", 0) or 0),
         frames_used=int(features.get("frames_used", 0) or 0),
         ankle_baseline_left=float(abase.get("offset_deg_left", 0.0) or 0.0),
@@ -353,6 +357,23 @@ def _build_metrics_block(
     _cyc["knee_peak_degraded"] = bool(_kpd) if _kpd is not None else None
     _qc = metrics.get("quality_coverage")
     _cyc["quality_coverage"] = _qc if isinstance(_qc, dict) else None
+    # Near-side-only angles: which sides had no near-side frames in this
+    # window (their knee peak / min are None for want of data).
+    _snc = metrics.get("side_not_captured")
+    _cyc["side_not_captured"] = (
+        {k: bool(v) for k, v in _snc.items()} if isinstance(_snc, dict) else None
+    )
+    # Phase 2 — near-side-only timing fields (populated on the clean block;
+    # None on the total block and on reports saved before Phase 2).
+    if "near_side_timing" in metrics:
+        _cyc["near_side_timing"] = bool(metrics.get("near_side_timing"))
+        _cyc["cadence_all_strikes"] = _scalar(metrics.get("cadence_all_strikes"))
+        _cyc["step_count_left"] = metrics.get("step_count_left")
+        _cyc["step_count_right"] = metrics.get("step_count_right")
+        _cyc["step_time_left"] = _scalar(timing.get("left_mean"))
+        _cyc["step_time_right"] = _scalar(timing.get("right_mean"))
+        _cyc["step_length_left"] = _scalar(sl.get("left_mean"))
+        _cyc["step_length_right"] = _scalar(sl.get("right_mean"))
 
     if is_clean:
         total_frames = int(features.get("total_frames", 0) or 0)
@@ -424,7 +445,7 @@ def _build_joint_angles(features: dict, ts: dict | None = None) -> JointAnglesBl
                         exc_info=True)
             return None
 
-    return JointAnglesBlock(
+    block = JointAnglesBlock(
         left_knee=_summarise_joint_arr(knee.get("left"), _w("left", "knee")),
         right_knee=_summarise_joint_arr(knee.get("right"), _w("right", "knee")),
         left_hip=_summarise_joint_arr(hip.get("left"), _w("left", "hip")),
@@ -432,6 +453,16 @@ def _build_joint_angles(features: dict, ts: dict | None = None) -> JointAnglesBl
         left_ankle=_summarise_joint_arr(ankle.get("left"), _w("left", "ankle")),
         right_ankle=_summarise_joint_arr(ankle.get("right"), _w("right", "ankle")),
     )
+    # Near-side-only angles: a side that was never the near side has no
+    # angle data -- every summary for it is None, mean included.
+    snc = features.get("side_not_captured")
+    if isinstance(snc, dict):
+        for side in ("left", "right"):
+            if snc.get(side):
+                for joint in ("knee", "hip", "ankle"):
+                    setattr(block, f"{side}_{joint}",
+                            JointDetail(time_series=getattr(block, f"{side}_{joint}").time_series))
+    return block
 
 
 def _curve(curve_dict: dict | None) -> GaitCycleCurve:

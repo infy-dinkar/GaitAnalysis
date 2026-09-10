@@ -32,6 +32,7 @@ Metric math fixes vs the original engine:
     acceleration, and deceleration frames are excluded by frame mask).
 """
 
+import logging
 import math
 import subprocess
 import warnings
@@ -54,6 +55,8 @@ from engines.gait_cycle import (
 )
 
 warnings.filterwarnings("ignore")
+
+_log = logging.getLogger("motionlens.gait")
 
 # ──────────────────────────────────────────────
 # LANDMARK INDICES
@@ -732,8 +735,23 @@ def _gait_cycle_percentages(
     fps: float,  # noqa: ARG001 — kept for signature parity / future use
     w_stride_L: np.ndarray | None = None,
     w_stride_R: np.ndarray | None = None,
+    pair_ok_L: np.ndarray | None = None,
+    pair_ok_R: np.ndarray | None = None,
+    allow_partial: bool = False,
+    ds_from_sum: bool = False,
 ) -> dict:
     """Return stance %, swing %, and double-support % per side over the
+    heel-strike-bounded analysis window.
+
+    Phase 2 (near-side-only timing, all defaults keep the old behaviour):
+      pair_ok_L/R   — per consecutive-strike pair (len = len(hs)-1); a
+                      False pair is skipped (strikes in different passes).
+      allow_partial — a side with no usable stride yields None for that
+                      side instead of nulling the whole block.
+      ds_from_sum   — double support = stance_L + stance_R - 100 (None
+                      if either stance is None) instead of the mask overlap.
+
+    Original docstring: return stance %, swing %, and double-support % per side over the
     heel-strike-bounded analysis window (first HS to last HS across
     both sides). Additive helper — does NOT mutate the existing stance
     or heel-strike math; consumes their outputs by call only.
@@ -764,7 +782,12 @@ def _gait_cycle_percentages(
     # Need at least one full stride on EACH side (2 same-side heel
     # strikes = one bounded stride window) so the event-guided mask
     # has something to score. Below that, return nulls.
-    if len(hs_L_arr) < 2 or len(hs_R_arr) < 2:
+    if allow_partial:
+        # Phase 2: one side may have no strides at all (never the near
+        # side); the block still scores whichever side has >= 2 strikes.
+        if max(len(hs_L_arr), len(hs_R_arr)) < 2:
+            return null_result
+    elif len(hs_L_arr) < 2 or len(hs_R_arr) < 2:
         return null_result
 
     all_strikes = np.concatenate([hs_L_arr, hs_R_arr])
@@ -808,12 +831,15 @@ def _gait_cycle_percentages(
     def _mean_stance_per_stride(
         mask: np.ndarray, hs: np.ndarray, wa: int, wb: int,
         ws: np.ndarray | None = None,
+        ok: np.ndarray | None = None,
     ) -> "float | None":
         vals: list[float] = []
         wts: list[float] = []
         for i in range(len(hs) - 1):
             a = int(hs[i]); b = int(hs[i + 1])
             if a < wa or b > wb + 1 or b <= a:
+                continue
+            if ok is not None and (i >= len(ok) or not ok[i]):
                 continue
             stride_len = b - a
             stance_frames = int(np.asarray(mask[a:b], dtype=bool).sum())
@@ -823,8 +849,26 @@ def _gait_cycle_percentages(
             return None
         return float(np.average(vals, weights=wts))
 
-    stance_L_opt = _mean_stance_per_stride(mask_L, hs_L_arr, w_start, w_end, w_stride_L)
-    stance_R_opt = _mean_stance_per_stride(mask_R, hs_R_arr, w_start, w_end, w_stride_R)
+    stance_L_opt = _mean_stance_per_stride(mask_L, hs_L_arr, w_start, w_end, w_stride_L, pair_ok_L)
+    stance_R_opt = _mean_stance_per_stride(mask_R, hs_R_arr, w_start, w_end, w_stride_R, pair_ok_R)
+    if allow_partial:
+        # Near-side-only: each side stands on its own strides; a side with
+        # none (never the near side) is None, the other side still reports.
+        if stance_L_opt is None and stance_R_opt is None:
+            return null_result
+        sL = None if stance_L_opt is None else float(stance_L_opt)
+        sR = None if stance_R_opt is None else float(stance_R_opt)
+        if sL is not None and sR is not None and (sL + sR) < 100.0:
+            return null_result
+        ds_p = (round(sL + sR - 100.0, 1)
+                if (ds_from_sum and sL is not None and sR is not None) else None)
+        return {
+            "stance_pct_left":    None if sL is None else round(sL, 1),
+            "stance_pct_right":   None if sR is None else round(sR, 1),
+            "swing_pct_left":     None if sL is None else round(100.0 - sL, 1),
+            "swing_pct_right":    None if sR is None else round(100.0 - sR, 1),
+            "double_support_pct": ds_p,
+        }
     if stance_L_opt is None or stance_R_opt is None:
         return null_result
     stance_L = float(stance_L_opt)
@@ -878,7 +922,8 @@ def _gait_cycle_percentages(
 def compute_meters_per_pixel(ts: dict, user_height_cm: float,
                              pass_segments=None, stance_frames: dict = None,
                              quality_w: dict | None = None,
-                             return_meta: bool = False):
+                             return_meta: bool = False,
+                             frame_filter: dict | None = None):
     """
     leg_length_m   = (height_cm / 100) * 0.53
     leg_length_px  = median over stance frames of euclidean(hip_px, ankle_px)
@@ -913,6 +958,9 @@ def compute_meters_per_pixel(ts: dict, user_height_cm: float,
         )
         d = np.hypot(hip_x - ank_x, hip_y - ank_y)
         base_sel = stance & pass_mask
+        if frame_filter is not None and side in frame_filter:
+            # Phase 2: only frames where this side is the NEAR side.
+            base_sel = base_sel & np.asarray(frame_filter[side], dtype=bool)[:n]
         sel = d[base_sel]
         if len(sel) > 5:
             distances.extend(sel.tolist())
@@ -1031,6 +1079,74 @@ def _knee_angles_px(ts: dict) -> dict:
 # ──────────────────────────────────────────────
 ANGLE_VIS_GATE = 0.5
 
+# Near-side-only angles. Joint-angle arrays (knee / hip / ankle) are
+# computed ONLY from frames where that side faces the camera (walking
+# L->R => right side near, R->L => left side near, read from
+# segment_passes) AND every joint the angle reads is seen at or above
+# this visibility. Far-side frames, frames outside any pass, and
+# under-visible near frames are NaN -- they never enter a peak, mean,
+# curve or baseline. Timing / count / position metrics are untouched.
+ANGLE_VIS_CUT = 0.85   # near-side frames below this are NaN'd for angle metrics
+
+
+def _near_far_masks(pass_segments, n_total: int):
+    """Per-frame direction READ from segment_passes (never recomputed):
+    +1 inside an L->R pass, -1 inside R->L, 0 outside any pass.
+
+    Camera geometry for a sagittal walk: walking L->R means the
+    patient's RIGHT side faces the camera, so the right leg is near
+    and the left leg is far; R->L is the mirror. Frames outside any
+    pass are UNKNOWN, not far."""
+    d = np.zeros(n_total, dtype=int)
+    if pass_segments:
+        for p in pass_segments:
+            d[p["start"]:p["end"]] = p["direction"]
+    known = d != 0
+    far = {
+        "left":  d == 1,     # L->R: left leg away from camera
+        "right": d == -1,    # R->L: right leg away from camera
+    }
+    return d, known, far
+
+
+def _angle_keep_masks(ts: dict, pass_segments, n_total: int):
+    """Boolean keep-masks for the angle arrays.
+
+    keep[joint][side] is True only on frames where `side` is the NEAR
+    side (inside a pass) and the minimum visibility over that angle's
+    joint set is >= ANGLE_VIS_CUT. Interpolated frames carry vis 0.0
+    and therefore drop automatically. Also returns near[side] so the
+    caller can tell "no near frames at all" (unidirectional clip) from
+    "near frames all under the cut"."""
+    _, known, far = _near_far_masks(pass_segments, n_total)
+    near = {s: known & ~far[s] for s in ("left", "right")}
+
+    def _min_vis(names):
+        arrs = [np.asarray(ts[k]["vis"], dtype=float)[:n_total] for k in names]
+        return np.min(np.vstack(arrs), axis=0)
+
+    sets = {
+        "knee":  lambda s: [f"{s}_hip", f"{s}_knee", f"{s}_ankle"],
+        "hip":   lambda s: ["left_shoulder", "right_shoulder",
+                            "left_hip", "right_hip", f"{s}_knee"],
+        # heel is sign-only for the ankle angle, so it is not in the cut set
+        "ankle": lambda s: [f"{s}_knee", f"{s}_ankle", f"{s}_foot_index"],
+    }
+    keep = {
+        j: {s: near[s] & (_min_vis(fn(s)) >= ANGLE_VIS_CUT) for s in ("left", "right")}
+        for j, fn in sets.items()
+    }
+    return keep, near
+
+
+def _apply_angle_cut(arr: np.ndarray, keep: np.ndarray) -> np.ndarray:
+    """Copy of `arr` with every frame outside `keep` set to NaN."""
+    out = np.array(arr, dtype=float, copy=True)
+    n = min(out.shape[0], keep.shape[0])
+    out[:n][~keep[:n]] = np.nan
+    out[n:] = np.nan
+    return out
+
 
 def _direction_per_frame(n: int, pass_segments) -> np.ndarray:
     """+1 inside an L→R pass, −1 inside R→L; +1 fallback outside any pass."""
@@ -1129,8 +1245,12 @@ def _detect_static_baseline(ts: dict, raw_dorsi_left: np.ndarray,
     with clean_mask excludes turn frames so only true standing-still windows
     INSIDE a validated pass qualify.
 
-    Returns None when no qualifying static window exists OR when the static
-    frames don't contain valid (non-NaN) angle samples on both sides.
+    Returns None when no qualifying static window exists. Otherwise the
+    baseline is PER SIDE: each side's value is the median of its own
+    valid (non-NaN) samples inside the window, or None when that side has
+    no valid sample there -- a side whose angle array is fully NaN (far
+    side on a unidirectional clip) never forces the other side out of
+    static mode.
     """
     hip_x_norm = (ts["left_hip"]["x"] + ts["right_hip"]["x"]) / 2.0
     if len(hip_x_norm) < 3:
@@ -1144,38 +1264,48 @@ def _detect_static_baseline(ts: dict, raw_dorsi_left: np.ndarray,
         static = static & clean_mask
 
     min_static_frames = max(int(min_static_sec * fps), 3)
-    static_idx: list[int] = []
-    i = 0
-    while i < len(static):
-        if not static[i]:
-            i += 1
+
+    def _runs(flags: np.ndarray) -> list[int]:
+        """Frame indices inside contiguous True runs of >= min_static_frames."""
+        idx: list[int] = []
+        i = 0
+        while i < len(flags):
+            if not flags[i]:
+                i += 1
+                continue
+            j = i
+            while j < len(flags) and flags[j]:
+                j += 1
+            if j - i >= min_static_frames:
+                idx.extend(range(i, j))
+            i = j
+        return idx
+
+    # PER SIDE: the standing window must be static AND carry that side's
+    # own valid (non-NaN, post-cut) angle for >= min_static_sec contiguous
+    # frames. One side's NaN gap never invalidates the other side's window.
+    out: dict = {"n_frames": 0, "n_frames_left": 0, "n_frames_right": 0}
+    any_side = False
+    for side, arr in (("left", raw_dorsi_left), ("right", raw_dorsi_right)):
+        a = np.asarray(arr, dtype=float)
+        n_a = min(len(a), len(static))
+        side_static = static[:n_a] & ~np.isnan(a[:n_a])
+        idx = _runs(side_static)
+        if len(idx) < min_static_frames:
+            out[side] = None
             continue
-        j = i
-        while j < len(static) and static[j]:
-            j += 1
-        if j - i >= min_static_frames:
-            static_idx.extend(range(i, j))
-        i = j
-
-    if len(static_idx) < min_static_frames:
+        out[side] = float(np.median(a[np.asarray(idx, dtype=int)]))
+        out[f"n_frames_{side}"] = int(len(idx))
+        any_side = True
+    if not any_side:
         return None
-
-    idx_arr = np.asarray(static_idx, dtype=int)
-    L_samples = raw_dorsi_left[idx_arr]
-    R_samples = raw_dorsi_right[idx_arr]
-    L_valid = L_samples[~np.isnan(L_samples)]
-    R_valid = R_samples[~np.isnan(R_samples)]
-    if len(L_valid) == 0 or len(R_valid) == 0:
-        return None
-    return {
-        "left":     float(np.median(L_valid)),
-        "right":    float(np.median(R_valid)),
-        "n_frames": int(len(static_idx)),
-    }
+    out["n_frames"] = max(out["n_frames_left"], out["n_frames_right"])
+    return out
 
 
 def _ankle_angles_px(ts: dict, pass_segments=None, fps: float = 30.0,
-                     clean_mask: np.ndarray | None = None) -> dict:
+                     clean_mask: np.ndarray | None = None,
+                     angle_keep: dict | None = None) -> dict:
     """
     Per-frame ankle dorsiflexion (deg) using PIXEL coords.
     0° = neutral standing (after baseline correction).
@@ -1244,30 +1374,51 @@ def _ankle_angles_px(ts: dict, pass_segments=None, fps: float = 30.0,
     # baseline when the subject pauses anywhere in the video.
     # clean_mask is forwarded so turning-point velocity dips don't qualify
     # — only frames inside a steady-state pass core can become baselines.
+    # Near-side-only + visibility cut applied to the RAW angle first, so
+    # the static baseline and the running-median fallback below only
+    # ever see frames that are allowed into the ankle metrics.
+    if angle_keep is not None:
+        for side in ("left", "right"):
+            if side in angle_keep:
+                raw_dorsi[side] = _apply_angle_cut(raw_dorsi[side], angle_keep[side])
     baseline = _detect_static_baseline(ts, raw_dorsi["left"],
                                        raw_dorsi["right"], fps,
                                        clean_mask=clean_mask)
-    if baseline is not None:
-        baseline_L  = baseline["left"]
-        baseline_R  = baseline["right"]
-        n_baseline  = baseline["n_frames"]
-        method      = "static_detected"
+    # PER SIDE: a side with a static-window median uses it; a side without
+    # one (no window at all, or fully NaN there -- the far side on a
+    # unidirectional clip) uses its own running-median fallback. One side's
+    # fallback never drags the other side out of static mode.
+    #
+    # Fallback = nanmedian over the full (cut) signal: dominated by stance /
+    # swing samples near anatomical neutral, so it is a robust per-leg
+    # baseline even with no standing pause in the clip.
+    base: dict = {}
+    methods: dict = {}
+    for side in ("left", "right"):
+        b = baseline.get(side) if baseline is not None else None
+        if b is not None:
+            base[side] = float(b)
+            methods[side] = "static_detected"
+            continue
+        arr = raw_dorsi[side]
+        base[side] = float(np.nanmedian(arr)) if not np.all(np.isnan(arr)) else 0.0
+        methods[side] = "running_median_fallback"
+        if angle_keep is not None:
+            _log.warning(
+                "gait: ankle static baseline not found for the %s side "
+                "(no >=0.5 s standing window with that side's cut angle valid) "
+                "— using that side's running-median fallback",
+                side,
+            )
+    n_baseline = int(baseline["n_frames"]) if baseline is not None else 0
+    if methods["left"] == methods["right"]:
+        method = methods["left"]
     else:
-        # PER-LEG running-median fallback. The previous implementation applied
-        # a single global constant to BOTH legs, which couldn't compensate for
-        # per-side anatomical/jitter differences (one leg closer to the camera,
-        # different MediaPipe detection noise per side, etc.) and left the two
-        # legs offset from each other by tens of degrees on real video.
-        # nanmedian over the full signal is dominated by stance/swing samples
-        # (which spend most of the cycle near anatomical neutral), giving a
-        # robust per-leg baseline even with no static window in the clip.
-        L_arr = raw_dorsi["left"]
-        R_arr = raw_dorsi["right"]
-        baseline_L = float(np.nanmedian(L_arr)) if not np.all(np.isnan(L_arr)) else 0.0
-        baseline_R = float(np.nanmedian(R_arr)) if not np.all(np.isnan(R_arr)) else 0.0
-        n_baseline = 0
-        method     = "running_median_fallback"
-
+        static_side = "left" if methods["left"] == "static_detected" else "right"
+        other = "right" if static_side == "left" else "left"
+        method = f"static_detected({static_side})/running_median_fallback({other})"
+    baseline_L = base["left"]
+    baseline_R = base["right"]
     corrected_L = raw_dorsi["left"]  - baseline_L
     corrected_R = raw_dorsi["right"] - baseline_R
 
@@ -1277,6 +1428,8 @@ def _ankle_angles_px(ts: dict, pass_segments=None, fps: float = 30.0,
         # Metadata (underscore-prefixed → ignored by downstream consumers
         # that iterate ('left', 'right') only).
         "_baseline_method":  method,
+        "_baseline_method_left":  methods["left"],
+        "_baseline_method_right": methods["right"],
         "_baseline_left":    baseline_L,
         "_baseline_right":   baseline_R,
         "_baseline_n_frames": n_baseline,
@@ -1311,7 +1464,8 @@ def _torso_lean_arr(ts: dict, pass_segments=None) -> np.ndarray:
 # ══════════════════════════════════════════════
 def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
                     pass_segments=None, strikes=None, knee_full=None,
-                    torso_full=None) -> dict:
+                    torso_full=None, near_masks=None,
+                    near_only_timing: bool = False) -> dict:
     """
     Compute the full gait-metric dict over ONLY the given frame_indices.
 
@@ -1352,6 +1506,28 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
 
     L_idx    = _filter(strikes["left"])
     R_idx    = _filter(strikes["right"])
+    L_idx_all, R_idx_all = L_idx, R_idx
+
+    # ── Phase 2: near-side-only timing (CLEAN block only) ───────────────
+    # Per side keep only strikes whose frame lies in a pass where that
+    # side is the NEAR side; far-side strikes are dropped for that side's
+    # timing metrics. The TOTAL block (near_only_timing=False) is untouched.
+    near_only = bool(near_only_timing and near_masks is not None and pass_segments)
+    dropped_far = {"left": 0, "right": 0}
+    if near_only:
+        L_idx = L_idx_all[near_masks["left"][L_idx_all]] if len(L_idx_all) else L_idx_all
+        R_idx = R_idx_all[near_masks["right"][R_idx_all]] if len(R_idx_all) else R_idx_all
+        dropped_far = {"left": int(len(L_idx_all) - len(L_idx)),
+                       "right": int(len(R_idx_all) - len(R_idx))}
+    # pass id per frame (core ranges) so "same pass" is an explicit test
+    pass_id = np.full(n_total, -1, dtype=int)
+    if pass_segments:
+        for _k, _p in enumerate(pass_segments):
+            pass_id[_p["core_start"]:_p["core_end"]] = _k
+
+    def _side_near_in_pass(side: str, p: dict) -> bool:
+        return (p["direction"] > 0) == (side == "right")
+
     combined = np.sort(np.concatenate([L_idx, R_idx])) if (len(L_idx) or len(R_idx)) else np.array([], dtype=int)
 
     # Each detected heel strike = 1 step
@@ -1363,10 +1539,21 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         "left_indices":     L_idx,
         "right_indices":    R_idx,
         "combined_indices": combined,
+        "left_count_all":   int(len(L_idx_all)),
+        "right_count_all":  int(len(R_idx_all)),
+        "dropped_far_left": dropped_far["left"],
+        "dropped_far_right": dropped_far["right"],
+        "near_only":        near_only,
     }
 
     # --- cadence (UNWEIGHTED: a count per unit time) ---
     cadence = round((total_steps / dur_sec) * 60.0, 1) if dur_sec > 0 else 0.0
+    # Same formula over ALL masked strikes (telemetry; == cadence unless
+    # near-only). In near-only mode cadence is re-derived from stride
+    # intervals further down.
+    cadence_all_strikes = (
+        round(((len(L_idx_all) + len(R_idx_all)) / dur_sec) * 60.0, 1) if dur_sec > 0 else 0.0
+    )
 
     # ══ Phase G — landmark-quality weights ═══════════════════════════
     # Every aggregate below discounts frames / strides by how well the
@@ -1393,6 +1580,13 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
     # if it has none of those either, the peak is None and the tile
     # shows "-" (interpret() and _build_metrics_block already tolerate
     # None).
+    # Near-side-only angles: a side with NO near-side frame in this window
+    # (unidirectional clip) has no angle data at all -- its mean is None,
+    # not the 0.0 that an empty aggregate otherwise reports.
+    side_not_captured = (
+        {s: bool(int(near_masks[s][mask].sum()) == 0) for s in ("left", "right")}
+        if near_masks is not None and n_mask > 0 else None
+    )
     knee_angles = {}
     knee_peak_degraded = False
     for side in ("left", "right"):
@@ -1401,7 +1595,10 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         w_arr = w_knee[side][mask] if n_mask > 0 else np.array([])
         knee_angles[side] = full
         mean_v = weighted_mean(m_arr, w_arr) if len(m_arr) else None
-        knee_angles[f"{side}_mean"] = float(mean_v) if mean_v is not None else 0.0
+        if side_not_captured is not None and side_not_captured[side]:
+            knee_angles[f"{side}_mean"] = None
+        else:
+            knee_angles[f"{side}_mean"] = float(mean_v) if mean_v is not None else 0.0
         pk = weighted_extreme(m_arr, w_arr, np.nanmax) if len(m_arr) else None
         mn = weighted_extreme(m_arr, w_arr, np.nanmin) if len(m_arr) else None
         if (pk is None or mn is None) and len(m_arr):
@@ -1414,7 +1611,8 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
                 mn, knee_peak_degraded = mn2, True
         knee_angles[f"peak_{side}"] = pk
         knee_angles[f"min_{side}"] = mn
-    knee_angles["overall_mean"] = float(np.nanmean([knee_angles["left_mean"],  knee_angles["right_mean"]]))
+    _means = [v for v in (knee_angles["left_mean"], knee_angles["right_mean"]) if v is not None]
+    knee_angles["overall_mean"] = float(np.nanmean(_means)) if _means else None
     _peaks = [v for v in (knee_angles["peak_left"], knee_angles["peak_right"]) if v is not None]
     _mins = [v for v in (knee_angles["min_left"], knee_angles["min_right"]) if v is not None]
     knee_angles["overall_peak"] = float(max(_peaks)) if _peaks else None
@@ -1435,7 +1633,10 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         for p in pass_segments:
             a, b = p["core_start"], p["core_end"]
             for side in ("left", "right"):
-                in_pass = strikes[side][(strikes[side] >= a) & (strikes[side] < b)]
+                if near_only and not _side_near_in_pass(side, p):
+                    continue                      # Phase 2: this side is far here
+                src = step_data[f"{side}_indices"] if near_only else strikes[side]
+                in_pass = src[(src >= a) & (src < b)]
                 if len(in_pass) >= 2:
                     ints = np.diff(in_pass) / fps
                     iw = stride_weights(w_heel[side], in_pass)
@@ -1465,7 +1666,15 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         sym    = 1.0 - abs(Lm - Rm) / denom if denom > 1e-9 else 1.0
         sym    = float(np.clip(sym, 0.0, 1.0))
     else:
-        sym = 1.0
+        # Phase 2: near-only means -> None when either side has no
+        # intervals (legacy path keeps the 1.0 default).
+        sym = None if near_only else 1.0
+    step_timing["left_mean"] = float(Lm) if Lm is not None else None
+    step_timing["right_mean"] = float(Rm) if Rm is not None else None
+    if near_only:
+        # Phase 2 cadence: 120 / weighted mean near-only stride interval
+        # (two steps per stride), pooled across both sides.
+        cadence = round(120.0 / _mst, 1) if (_mst is not None and _mst > 1e-9) else 0.0
 
     # --- stride CV (PERCENT, weighted std / weighted mean) ---
     _cv_m = weighted_mean(np.asarray(all_st), np.asarray(all_w)) if len(all_st) >= 2 else None
@@ -1487,12 +1696,29 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
     r_heel_px = ts["right_heel"]["x_px"]
     sl_px_list = []
     sl_w_list = []
+    sl_side_px = {"left": [], "right": []}
+    sl_side_w = {"left": [], "right": []}
     max_stride_sec = 2.0
     for side, side_idx, side_x in (
         ("left",  L_idx, l_heel_px),
         ("right", R_idx, r_heel_px),
     ):
         if len(side_idx) < 2:
+            continue
+        if near_only:
+            # Phase 2: consecutive near-strike pairs INSIDE one pass core,
+            # dropped explicitly when the pair straddles passes.
+            for p in pass_segments:
+                if not _side_near_in_pass(side, p):
+                    continue
+                a, b = p["core_start"], p["core_end"]
+                idx = side_idx[(side_idx >= a) & (side_idx < b)]
+                if len(idx) < 2:
+                    continue
+                strides = np.abs(np.diff(side_x[idx].astype(float))) / 2.0
+                sw = stride_weights(w_heel[side], idx)
+                sl_px_list.extend(strides.tolist()); sl_w_list.extend(sw.tolist())
+                sl_side_px[side].extend(strides.tolist()); sl_side_w[side].extend(sw.tolist())
             continue
         positions = side_x[side_idx].astype(float)
         intervals = np.diff(side_idx) / fps
@@ -1502,6 +1728,8 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         for s in (strides[keep] / 2.0).tolist():
             sl_px_list.append(s)
         sl_w_list.extend(sw[keep].tolist())
+        sl_side_px[side].extend((strides[keep] / 2.0).tolist())
+        sl_side_w[side].extend(sw[keep].tolist())
     sep_px = np.array(sl_px_list, dtype=float)
     sep_w = np.array(sl_w_list, dtype=float)
     if mpp and mpp > 0:
@@ -1510,12 +1738,20 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         sl_vals, sl_unit = sep_px, "px"
     _sl_m = weighted_mean(sl_vals, sep_w) if len(sl_vals) else None
     _sl_s = weighted_std(sl_vals, sep_w) if len(sl_vals) else None
+    _scale = mpp if (mpp and mpp > 0) else 1.0
+    _sl_side_mean = {}
+    for side in ("left", "right"):
+        _v = np.asarray(sl_side_px[side], dtype=float) * _scale
+        _m = weighted_mean(_v, np.asarray(sl_side_w[side], dtype=float)) if len(_v) else None
+        _sl_side_mean[side] = float(_m) if _m is not None else None
     step_length = {
         "values": sl_vals,
         "weights": sep_w,
         "mean":   float(_sl_m) if _sl_m is not None else 0.0,
         "std":    float(_sl_s) if _sl_s is not None else 0.0,
         "unit":   sl_unit,
+        "left_mean":  _sl_side_mean["left"],
+        "right_mean": _sl_side_mean["right"],
     }
 
     # --- torso lean (weighted mean / std over masked frames) ---
@@ -1556,6 +1792,12 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
     _n_total = int(len(ts["left_hip"]["y"]))
     _wsL = stride_weights(w_stance["left"], L_idx)
     _wsR = stride_weights(w_stance["right"], R_idx)
+    # Phase 2: a stride counts only when both bounding near strikes are in
+    # the SAME pass core (legacy path: pair_ok None -> every pair).
+    _pair_ok_L = _pair_ok_R = None
+    if near_only:
+        _pair_ok_L = np.array([pass_id[a] == pass_id[b] != -1 for a, b in zip(L_idx[:-1], L_idx[1:])], dtype=bool)
+        _pair_ok_R = np.array([pass_id[a] == pass_id[b] != -1 for a, b in zip(R_idx[:-1], R_idx[1:])], dtype=bool)
     _cycle_pct = _gait_cycle_percentages(
         mask_L=_stance_mask_by_foot_speed(
             ts["left_foot_index"]["x_px"], ts["left_foot_index"]["y_px"],
@@ -1572,8 +1814,15 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         fps=fps,
         w_stride_L=_wsL,
         w_stride_R=_wsR,
+        pair_ok_L=_pair_ok_L, pair_ok_R=_pair_ok_R,
+        allow_partial=near_only, ds_from_sum=near_only,
     )
-    if _cycle_pct.get("stance_pct_left") is None:
+    _needs_fb = any(
+        _cycle_pct.get(f"stance_pct_{_s}") is None
+        and not (near_only and side_not_captured and side_not_captured.get(_s))
+        for _s in ("left", "right")
+    )
+    if _needs_fb:
         # Fallback — keep the block populated (never "not computed"
         # when we have enough strikes for the legacy estimate).
         _cycle_pct = _gait_cycle_percentages(
@@ -1588,6 +1837,8 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
             fps=fps,
             w_stride_L=_wsL,
             w_stride_R=_wsR,
+            pair_ok_L=_pair_ok_L, pair_ok_R=_pair_ok_R,
+            allow_partial=near_only, ds_from_sum=near_only,
         )
 
     # Coverage telemetry: how much of the window each side's aggregates
@@ -1603,12 +1854,34 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
             "strides_weighted_mean": round(float(np.mean(sw)), 3) if len(sw) else None,
         }
 
+    # Phase 2: an uncaptured side (never near) carries None for its
+    # timing metrics; symmetry / DS need both sides.
+    _snc = side_not_captured if near_only and side_not_captured else {"left": False, "right": False}
+    if near_only:
+        for _s in ("left", "right"):
+            if _snc.get(_s):
+                step_timing[f"{_s}_mean"] = None
+                step_length[f"{_s}_mean"] = None
+                _cycle_pct[f"stance_pct_{_s}"] = None
+                _cycle_pct[f"swing_pct_{_s}"] = None
+        if _snc.get("left") or _snc.get("right"):
+            sym = None
+            _cycle_pct["double_support_pct"] = None
+    step_count_side = {
+        _s: (None if (near_only and _snc.get(_s)) else int(step_data[f"{_s}_count"]))
+        for _s in ("left", "right")
+    }
+
     return {
         "step_data":        step_data,
         "cadence":          cadence,
+        "cadence_all_strikes": cadence_all_strikes,
+        "step_count_left":  step_count_side["left"],
+        "step_count_right": step_count_side["right"],
+        "near_side_timing": near_only,
         "knee_angles":      knee_angles,
         "step_timing":      step_timing,
-        "symmetry":         round(sym, 3),
+        "symmetry":         round(sym, 3) if sym is not None else None,
         "step_length":      step_length,
         "stride_cv":        cv_pct,
         "ankle_trajectory": ankle_traj,
@@ -1625,6 +1898,10 @@ def compute_metrics(ts: dict, frame_indices, mpp, fps: float,
         "weighted":           True,
         "knee_peak_degraded": bool(knee_peak_degraded),
         "quality_coverage":   quality_coverage,
+        # Near-side-only angles: True when this side had NO near-side frame
+        # inside the window (unidirectional clip), so its knee peak / min
+        # are None for want of data rather than for want of visibility.
+        "side_not_captured":  side_not_captured,
     }
 
 
@@ -1762,6 +2039,18 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
         ts, user_height_cm, pass_segments=pass_segments,
         quality_w=_w_hip_ankle, return_meta=True,
     )
+    # Phase 2: a second calibration over NEAR-side frames only (both
+    # sides' near frames pooled) for the clean block; the total block keeps
+    # the all-frames value above.
+    _near_for_mpp = {
+        s: (_near_far_masks(pass_segments, n)[1] & ~_near_far_masks(pass_segments, n)[2][s])
+        for s in ("left", "right")
+    }
+    mpp_near, mpp_near_meta = compute_meters_per_pixel(
+        ts, user_height_cm, pass_segments=pass_segments,
+        quality_w=_w_hip_ankle, return_meta=True, frame_filter=_near_for_mpp,
+    )
+    mpp_clean = mpp_near if mpp_near is not None else mpp
 
     # Build the steady-state clean mask once, here, so the ankle baseline
     # detector can use it (turning-point velocity dips are NOT standing-still
@@ -1775,10 +2064,28 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
 
     # 3. Pre-compute per-frame caches (shared by Total & Clean).
     strikes    = _detect_strikes(ts, fps, pass_segments)
-    knee_full  = _knee_angles_px(ts)
-    hip_full   = _hip_angles_px(ts, pass_segments)
+    # Near-side-only angles with the ANGLE_VIS_CUT visibility cut. The
+    # cut is applied to the ANGLE ARRAYS ONLY -- the frame mask, strikes,
+    # positions and every timing / count metric are left exactly as is.
+    angle_keep, near_masks = _angle_keep_masks(ts, pass_segments, n)
+    knee_raw   = _knee_angles_px(ts)
+    hip_raw    = _hip_angles_px(ts, pass_segments)
+    knee_full  = {s: _apply_angle_cut(knee_raw[s], angle_keep["knee"][s])
+                  for s in ("left", "right")}
+    hip_full   = {s: _apply_angle_cut(hip_raw[s], angle_keep["hip"][s])
+                  for s in ("left", "right")}
     ankle_full = _ankle_angles_px(ts, pass_segments, fps=fps,
-                                  clean_mask=clean_mask)
+                                  clean_mask=clean_mask,
+                                  angle_keep=angle_keep["ankle"])
+    angle_cut_stats = {
+        s: {
+            "near_frames":  int(near_masks[s].sum()),
+            "knee_kept":    int(angle_keep["knee"][s].sum()),
+            "hip_kept":     int(angle_keep["hip"][s].sum()),
+            "ankle_kept":   int(angle_keep["ankle"][s].sum()),
+        }
+        for s in ("left", "right")
+    }
     torso_full = _torso_lean_arr(ts, pass_segments)
 
     # 4. TOTAL metrics — every frame.
@@ -1787,6 +2094,7 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
         ts, total_indices, mpp, fps,
         pass_segments=pass_segments,
         strikes=strikes, knee_full=knee_full, torso_full=torso_full,
+        near_masks=near_masks,
     )
 
     # 5. CLEAN metrics — only frames inside any pass core (steady state).
@@ -1797,9 +2105,11 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
                      else total_indices)
 
     clean_metrics = compute_metrics(
-        ts, clean_indices, mpp, fps,
+        ts, clean_indices, mpp_clean, fps,
         pass_segments=pass_segments,
         strikes=strikes, knee_full=knee_full, torso_full=torso_full,
+        near_masks=near_masks,
+        near_only_timing=True,          # Phase 2: near-side-only timing
     )
 
     direction = compute_walking_direction(pass_segments)
@@ -1838,15 +2148,28 @@ def compute_all_features(ts: dict, fps: float, total_frames: int,
         "num_passes":             len(pass_segments),
         "frames_used":            clean_metrics["n_frames"],
         "steady_state_duration_s": clean_metrics["duration_sec"],
-        "meters_per_pixel":       mpp,
+        # Phase 2: the headline scale is the near-side calibration used by
+        # the clean block; the all-frames value used by the total block is
+        # kept alongside for comparison.
+        "meters_per_pixel":       mpp_clean,
+        "meters_per_pixel_all_frames": mpp,
         "user_height_cm":         user_height_cm,
         # Phase G provenance (additive).
         "weighted":               True,
-        "mpp_calibration_degraded": bool(mpp_meta.get("calibration_degraded", False)),
-        "mpp_n_full_frames":      int(mpp_meta.get("n_full_frames", 0)),
+        "mpp_calibration_degraded": bool(mpp_near_meta.get("calibration_degraded", False))
+                                    if mpp_near is not None
+                                    else bool(mpp_meta.get("calibration_degraded", False)),
+        "mpp_calibration_degraded_all_frames": bool(mpp_meta.get("calibration_degraded", False)),
+        "mpp_n_full_frames":      int(mpp_near_meta.get("n_full_frames", 0))
+                                  if mpp_near is not None else int(mpp_meta.get("n_full_frames", 0)),
+        # Near-side-only angle cut telemetry (frames per side).
+        "angle_cut_stats":        angle_cut_stats,
+        "angle_vis_cut":          ANGLE_VIS_CUT,
         "gait_cycle_curves":      gait_cycle_curves,
         "ankle_baseline":         {
             "method":           ankle_full.get("_baseline_method", "unknown"),
+            "method_left":      ankle_full.get("_baseline_method_left", "unknown"),
+            "method_right":     ankle_full.get("_baseline_method_right", "unknown"),
             "offset_deg_left":  float(ankle_full.get("_baseline_left",  0.0)),
             "offset_deg_right": float(ankle_full.get("_baseline_right", 0.0)),
             "n_frames":         int(ankle_full.get("_baseline_n_frames", 0)),
@@ -1932,8 +2255,14 @@ def interpret(features: dict) -> dict:
             obs.append(f" Step length: {step_len_mean:.1f} px (real-world scale unavailable).")
 
     # ── Symmetry (target > 95%) ──────────────────────────
-    sym_pct = symmetry * 100
-    if sym_pct < 85:
+    if symmetry is None:
+        obs.append(" Gait symmetry not assessed — one side was never nearest the camera in a steady-state pass.")
+        sym_pct = None
+    else:
+        sym_pct = symmetry * 100
+    if sym_pct is None:
+        pass
+    elif sym_pct < 85:
         obs.append(f" Significant gait asymmetry ({sym_pct:.1f}%). Left and right step rhythm differ markedly.")
         sug.append("Consult a physical therapist to evaluate possible limb-length discrepancy or muscle imbalance.")
     elif sym_pct < 95:
