@@ -552,27 +552,29 @@ export function RehabCameraShell({
           const b = prevB === null ? bRaw : prevB + 0.3 * (bRaw - prevB);
 
           // Dead zone: under 5° the lean is indistinguishable from
-          // landmark noise, so draw exactly the straight [S, H] this
-          // branch produced before and drop the EMA so the next lean
-          // seeds from raw instead of easing out of a stale value.
+          // landmark noise, so the bend collapses to bEff = 0 — A and B
+          // land exactly on the straight S→H line. The shape is the same
+          // straight trunk as before, but it is still FOUR points, so
+          // the two bend dots stay on screen at neutral posture instead
+          // of appearing only once the patient leans. The EMA is still
+          // dropped here so the next real lean seeds from raw rather
+          // than easing out of a stale value.
           const leanDeg = Math.abs((Math.atan2(b, a) * 180) / Math.PI);
-          if (leanDeg < 5) {
-            frontLeanRef.current = null;
-          } else {
-            frontLeanRef.current = b;
-            spineDraw = [
-              S,
-              {
-                x: H.x + nx * ((2 * a) / 3) + ux * ((3 / 7) * b),
-                y: H.y + ny * ((2 * a) / 3) + uy * ((3 / 7) * b),
-              },
-              {
-                x: H.x + nx * (a / 3) + ux * ((1 / 7) * b),
-                y: H.y + ny * (a / 3) + uy * ((1 / 7) * b),
-              },
-              H,
-            ];
-          }
+          const inDeadZone = leanDeg < 5;
+          const bEff = inDeadZone ? 0 : b;
+          frontLeanRef.current = inDeadZone ? null : b;
+          spineDraw = [
+            S,
+            {
+              x: H.x + nx * ((2 * a) / 3) + ux * ((3 / 7) * bEff),
+              y: H.y + ny * ((2 * a) / 3) + uy * ((3 / 7) * bEff),
+            },
+            {
+              x: H.x + nx * (a / 3) + ux * ((1 / 7) * bEff),
+              y: H.y + ny * (a / 3) + uy * ((1 / 7) * bEff),
+            },
+            H,
+          ];
         } else {
           frontLeanRef.current = null;
         }
