@@ -399,9 +399,58 @@ export function RehabCameraShell({
         (lShP.y - rShP.y) * dispH,
       );
       const trunkLen = Math.hypot(H.x - S.x, H.y - S.y);
+      // Foreshortening measure for the front-view bend guard further
+      // down. NOT the side/front gate any more — see gateRatio.
       const ratio = trunkLen >= 1 ? shoulderW / trunkLen : Infinity;
-      const isSide = sideViewRef.current ? ratio <= 0.38 : ratio < 0.30;
-      sideViewRef.current = isSide;
+
+      // SIDE/FRONT GATE. The denominator is thigh length, not trunk
+      // length: the femur keeps its projected length through a forward
+      // bend, the trunk does not. Measured over the gait and
+      // sit-to-stand clips, shoulderW/trunkLen pushed 1.5–8.3% of
+      // genuine side frames past the old 0.38 line, and a deep bend
+      // held FRONT for the whole pose. shoulderW/thighLen separates
+      // with an empty gap — side median 0.20–0.26, front median
+      // 0.82–1.07, forward-lean side frames 0.10–0.13 — so the
+      // 0.60/0.75 hysteresis band sits in clear air.
+      //
+      // Both thighs are averaged when both pass, so one occluded knee
+      // cannot halve the denominator. With no usable thigh, or a
+      // shoulder below threshold, the previous verdict is HELD rather
+      // than recomputed: a stale verdict is cheaper than a wrong flip.
+      const lKneeP = landmarks[LM.LEFT_KNEE];
+      const rKneeP = landmarks[LM.RIGHT_KNEE];
+      const thighs: number[] = [];
+      if (
+        lHipP && lKneeP
+        && lHipP.visibility >= OVERLAY_VIS_THRESHOLD
+        && lKneeP.visibility >= OVERLAY_VIS_THRESHOLD
+      ) {
+        thighs.push(Math.hypot(
+          (lHipP.x - lKneeP.x) * dispW,
+          (lHipP.y - lKneeP.y) * dispH,
+        ));
+      }
+      if (
+        rHipP && rKneeP
+        && rHipP.visibility >= OVERLAY_VIS_THRESHOLD
+        && rKneeP.visibility >= OVERLAY_VIS_THRESHOLD
+      ) {
+        thighs.push(Math.hypot(
+          (rHipP.x - rKneeP.x) * dispW,
+          (rHipP.y - rKneeP.y) * dispH,
+        ));
+      }
+      const shouldersVisible =
+        lShP.visibility >= OVERLAY_VIS_THRESHOLD
+        && rShP.visibility >= OVERLAY_VIS_THRESHOLD;
+      if (thighs.length > 0 && shouldersVisible) {
+        const thighLen = thighs.reduce((a, b) => a + b, 0) / thighs.length;
+        const gateRatio = shoulderW / Math.max(thighLen, 1);
+        sideViewRef.current = sideViewRef.current
+          ? gateRatio <= 0.75
+          : gateRatio < 0.60;
+      }
+      const isSide = sideViewRef.current;
 
       const lEar = landmarks[LM.LEFT_EAR];
       const rEar = landmarks[LM.RIGHT_EAR];
@@ -588,12 +637,11 @@ export function RehabCameraShell({
           if (Math.abs(tilt) >= 6) {
             const clamped = Math.max(-40, Math.min(40, tilt));
 
-            // ROTATION GUARD. `ratio` (shoulder span / trunk length) is
-            // the same quantity the side gate reads: it collapses as the
-            // patient turns. Mid-turn, a tilted shoulder line is
-            // foreshortening, not a bend — so fade the bend out over
-            // 0.32→0.42 instead of trusting it. smoothstep, so there is
-            // no visible flick at either edge.
+            // ROTATION GUARD. `ratio` (shoulder span / trunk length)
+            // collapses as the patient turns. Mid-turn, a tilted
+            // shoulder line is foreshortening, not a bend — so fade
+            // the bend out over 0.32→0.42 instead of trusting it.
+            // smoothstep, so there is no visible flick at either edge.
             const t = Math.min(1, Math.max(0, (ratio - 0.32) / (0.42 - 0.32)));
             const confidence = t * t * (3 - 2 * t);
 
