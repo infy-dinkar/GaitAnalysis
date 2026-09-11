@@ -12,6 +12,13 @@ interface JointTabsProps<TId extends string> {
   active: TId;
   onChange: (id: TId) => void;
   children: ReactNode;
+  /** Extra classes for the tab BAR only — the content wrapper below is
+   *  never affected. Added so the saved-report view can mark the bar
+   *  "no-pdf": the tabs are interactive, and only the active tab's
+   *  children are ever mounted, so a printed bar advertises seven tabs
+   *  whose content is not in the document. Undefined by default, which
+   *  leaves the rendered markup byte-identical for every other caller. */
+  barClassName?: string;
 }
 
 export function JointTabs<TId extends string>({
@@ -19,10 +26,11 @@ export function JointTabs<TId extends string>({
   active,
   onChange,
   children,
+  barClassName,
 }: JointTabsProps<TId>) {
   return (
     <div>
-      <div className="flex flex-wrap gap-1 border-b border-border">
+      <div className={cn("flex flex-wrap gap-1 border-b border-border", barClassName)}>
         {tabs.map((t) => (
           <button
             key={t.id}

@@ -156,13 +156,25 @@ export function GaitResultsView({ data, patientNameOverride, patientOverride }: 
           {patientNameOverride || data.patient_info.name || "Anonymous patient"}
           <span className="text-accent">.</span>
         </h2>
-        <div className="mt-5">
+        {/* no-pdf: the processed/calibration/ankle-baseline lines are
+            acquisition diagnostics — useful on screen, noise in the
+            handed-over report. The class is a marker only (no CSS);
+            exportReportPdf's ignoreElements drops it from the capture,
+            so the screen view is unchanged. */}
+        <div className="mt-5 no-pdf">
           <CalibrationHeader videoInfo={data.video_info} />
         </div>
       </div>
 
       <div className="space-y-12">
-        <MetricsSection variant="total" metrics={data.metrics_total} />
+        {/* no-pdf on a WRAPPER, not on MetricsSection itself — the
+            component is shared with the live results page, which must
+            keep exporting nothing differently. Total metrics include
+            turns and accel/decel, so they are informational only; the
+            clean block below is what the report is read from. */}
+        <div className="no-pdf">
+          <MetricsSection variant="total" metrics={data.metrics_total} />
+        </div>
         <MetricsSection
           variant="clean"
           metrics={data.metrics_clean}
@@ -181,13 +193,25 @@ export function GaitResultsView({ data, patientNameOverride, patientOverride }: 
         <h3 className="text-2xl font-semibold tracking-tight md:text-3xl">
           Per-joint analysis<span className="text-accent">.</span>
         </h3>
-        <p className="mt-2 text-sm text-muted">
+        {/* no-pdf: reading instructions for the interactive view. The
+            "Per-joint analysis" heading above stays in the PDF. */}
+        <p className="mt-2 text-sm text-muted no-pdf">
           Detailed per-joint and per-cycle views. Validated walking passes are highlighted on
           every time-domain chart in lime — turning, accel and decel frames are unhighlighted.
         </p>
 
         <div className="mt-8">
-          <JointTabs tabs={TABS} active={activeTab} onChange={setActiveTab}>
+          {/* barClassName="no-pdf" hides the BAR from the PDF only.
+              The tab contents below are untouched — the short-circuits
+              mean only the active tab is mounted either way, so the
+              captured document is unchanged apart from losing a row of
+              buttons that cannot be clicked on paper. */}
+          <JointTabs
+            tabs={TABS}
+            active={activeTab}
+            onChange={setActiveTab}
+            barClassName="no-pdf"
+          >
             {activeTab === "overview"    && <OverviewTab data={data} />}
             {activeTab === "knee"        && <KneeTab data={data} />}
             {activeTab === "heel"        && <HeelTab data={data} />}
@@ -342,7 +366,10 @@ function OverviewTab({ data }: { data: GaitDataDTO }) {
         <h3 className="text-2xl font-semibold tracking-tight md:text-3xl">
           Normalized Gait Analysis Overview
         </h3>
-        <p className="mx-auto mt-2 max-w-2xl text-sm italic text-muted">
+        {/* no-pdf: tells the reader to scroll and to use the tabs —
+            both meaningless on paper, and the tab bar itself is hidden
+            from the PDF too. The heading above stays. */}
+        <p className="mx-auto mt-2 max-w-2xl text-sm italic text-muted no-pdf">
           Scroll through each joint below. For deeper inspection with zoom and pan controls,
           switch to the individual joint tabs above.
         </p>
