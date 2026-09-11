@@ -40,6 +40,51 @@ import type { Keypoint } from "@tensorflow-models/pose-detection";
 
 const OVERLAY_VIS_THRESHOLD = 0.35;
 
+// Uniform Catmull-Rom through every supplied point, with the two
+// endpoints duplicated so the curve starts exactly on the first control
+// and ends exactly on the last. Catmull-Rom INTERPOLATES its controls,
+// so the knots are on the curve, not merely near it — the front spine's
+// bend points keep their computed positions and only the corners
+// between them round off.
+//
+// Every sample is an affine combination of four controls (the weights
+// sum to 1), so collinear controls return an exactly straight line —
+// which is what a zero bend must draw.
+function catmullRomPath(
+  pts: { x: number; y: number }[],
+  samples: number,
+): { x: number; y: number }[] {
+  const first = pts[0];
+  const last = pts[pts.length - 1];
+  if (!first || !last || pts.length < 2 || samples < 2) return pts;
+  const ctrl = [first, ...pts, last];
+  const segs = pts.length - 1;
+  const out: { x: number; y: number }[] = [];
+  for (let i = 0; i < samples; i++) {
+    const u = (i / (samples - 1)) * segs;
+    const seg = Math.min(segs - 1, Math.floor(u));
+    const t = u - seg;
+    const p0 = ctrl[seg];
+    const p1 = ctrl[seg + 1];
+    const p2 = ctrl[seg + 2];
+    const p3 = ctrl[seg + 3];
+    if (!p0 || !p1 || !p2 || !p3) continue;
+    const t2 = t * t;
+    const t3 = t2 * t;
+    out.push({
+      x: 0.5 * (2 * p1.x
+        + (-p0.x + p2.x) * t
+        + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2
+        + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
+      y: 0.5 * (2 * p1.y
+        + (-p0.y + p2.y) * t
+        + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2
+        + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3),
+    });
+  }
+  return out;
+}
+
 const FULL_BODY_DOTS: number[] = [
   LM.NOSE, LM.LEFT_EYE, LM.RIGHT_EYE, LM.LEFT_EAR, LM.RIGHT_EAR,
   LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER,
@@ -723,28 +768,48 @@ export function RehabCameraShell({
       lineWidth: Math.max(2, dispW * 0.002),
       endPoint: neckAnchor,
     });
-    // Dots ONLY on the front-view 4-point spine, where they mark the
-    // two inferred bend points and make the 4:2:1 lateral split legible
-    // — without them the polyline reads as an unexplained kink. Every
-    // other branch keeps showDots:false exactly as before: on the
-    // straight 2-point line (side-on without a lean, or the front dead
-    // zone) the helper's evenly-spaced marks are pure noise, and the
-    // side Hermite is already a smooth 13-sample curve.
-    //
-    // The helper dots interior points only (i = 1 .. length-2), so a
-    // 4-point spine gets dots at A and B; S and H stay bare — they are
-    // already drawn as skeleton joint dots.
+    // The four control points describe the bend correctly, but three
+    // straight lineTo segments render it as a bent stick with two hard
+    // corners. Resampling them through a Catmull-Rom spline rounds the
+    // corners while leaving A and B exactly where the maths put them.
+    // Side view is untouched: the Hermite path is already a smooth
+    // 13-sample curve and the 2-point straight line has nothing to
+    // round.
     const frontBend = spineDraw?.length === 4;
+    const strokePts =
+      frontBend && spineDraw ? catmullRomPath(spineDraw, 16) : spineDraw;
+
+    // showDots is false on every branch now. The helper dots every
+    // interior point, which on a 16-sample curve would be 14 marks
+    // strung along the spine; the meaningful positions are the four
+    // KNOTS, so they are drawn below instead. Nothing was added to
+    // skeletonExtras for this.
     drawSpineSegment(ctx, landmarks, dispW, dispH, {
       visibilityThreshold: OVERLAY_VIS_THRESHOLD,
-      points: spineDraw,
-      showDots: frontBend,
-      // Slightly under the helper's default (max(5, w*0.008)) so the
-      // bend markers stay subordinate to the body joint dots.
-      dotColor: "#F97316",
-      dotRadius: Math.max(4, dispW * 0.006),
+      points: strokePts,
+      showDots: false,
       tangentFrom: spineTangentFrom,
     });
+
+    // Knot markers, front bend only: S, A, B and H. Fill, shadow and
+    // radius match what the helper would have drawn, and its own
+    // save/restore has already unwound by this point, so this sets up
+    // and tears down its own canvas state. Radius sits slightly under
+    // the helper's default (max(5, w*0.008)) so the bend markers stay
+    // subordinate to the body joint dots.
+    if (frontBend && spineDraw) {
+      ctx.save();
+      ctx.fillStyle = "#F97316";
+      ctx.shadowColor = "rgba(249, 115, 22, 0.6)";
+      ctx.shadowBlur = 10;
+      const r = Math.max(4, dispW * 0.006);
+      for (const p of spineDraw) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
     const arc = angleArcRef.current;
     if (arc) {
       drawAngleArc(ctx, landmarks, dispW, dispH, {
