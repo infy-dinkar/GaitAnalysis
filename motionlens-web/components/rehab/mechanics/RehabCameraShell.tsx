@@ -592,10 +592,26 @@ export function RehabCameraShell({
       lineWidth: Math.max(2, dispW * 0.002),
       endPoint: neckAnchor,
     });
+    // Dots ONLY on the front-view 4-point spine, where they mark the
+    // two inferred bend points and make the 4:2:1 lateral split legible
+    // — without them the polyline reads as an unexplained kink. Every
+    // other branch keeps showDots:false exactly as before: on the
+    // straight 2-point line (side-on without a lean, or the front dead
+    // zone) the helper's evenly-spaced marks are pure noise, and the
+    // side Hermite is already a smooth 13-sample curve.
+    //
+    // The helper dots interior points only (i = 1 .. length-2), so a
+    // 4-point spine gets dots at A and B; S and H stay bare — they are
+    // already drawn as skeleton joint dots.
+    const frontBend = spineDraw?.length === 4;
     drawSpineSegment(ctx, landmarks, dispW, dispH, {
       visibilityThreshold: OVERLAY_VIS_THRESHOLD,
       points: spineDraw,
-      showDots: false,
+      showDots: frontBend,
+      // Slightly under the helper's default (max(5, w*0.008)) so the
+      // bend markers stay subordinate to the body joint dots.
+      dotColor: "#F97316",
+      dotRadius: Math.max(4, dispW * 0.006),
       tangentFrom: spineTangentFrom,
     });
     const arc = angleArcRef.current;
