@@ -186,9 +186,11 @@ export function RehabCameraShell({
   const spinePerpRef = useRef<{ x: number; y: number } | null>(null);
   //   frontLeanRef — EMA-smoothed LATERAL component (display px) of the
   //                  trunk vector in the PELVIS frame, for the front-view
-  //                  bend. Null while side-on, while the trunk is
-  //                  degenerate, and inside the dead zone, so every
-  //                  re-entry seeds from the raw value.
+  //                  bend. Null while side-on and while the trunk is
+  //                  degenerate or occluded, so every re-entry seeds
+  //                  from the raw value. NOT cleared inside the dead
+  //                  zone — the offset keeps smoothing through neutral
+  //                  so crossing the threshold stays continuous.
   const frontLeanRef = useRef<number | null>(null);
 
   const [busy, setBusy] = useState(false);
@@ -399,9 +401,6 @@ export function RehabCameraShell({
         (lShP.y - rShP.y) * dispH,
       );
       const trunkLen = Math.hypot(H.x - S.x, H.y - S.y);
-      // Foreshortening measure for the front-view bend guard further
-      // down. NOT the side/front gate any more — see gateRatio.
-      const ratio = trunkLen >= 1 ? shoulderW / trunkLen : Infinity;
 
       // SIDE/FRONT GATE. The denominator is thigh length, not trunk
       // length: the femur keeps its projected length through a forward
@@ -443,9 +442,13 @@ export function RehabCameraShell({
       const shouldersVisible =
         lShP.visibility >= OVERLAY_VIS_THRESHOLD
         && rShP.visibility >= OVERLAY_VIS_THRESHOLD;
+      // Hoisted out of the branch below only so the front-view bend's
+      // rotation guard can read it; null on a held frame. The gate
+      // logic and its 0.60/0.75 edges are unchanged.
+      let gateRatio: number | null = null;
       if (thighs.length > 0 && shouldersVisible) {
         const thighLen = thighs.reduce((a, b) => a + b, 0) / thighs.length;
-        const gateRatio = shoulderW / Math.max(thighLen, 1);
+        gateRatio = shoulderW / Math.max(thighLen, 1);
         sideViewRef.current = sideViewRef.current
           ? gateRatio <= 0.75
           : gateRatio < 0.60;
@@ -557,17 +560,21 @@ export function RehabCameraShell({
       // is meaningless here — but a LATERAL lean is genuinely visible
       // and is what a clinician reads from this view.
       //
-      // The bend is driven by the SHOULDER-LINE TILT measured in the
-      // TRUNK frame, not by where the shoulder-mid sits relative to the
-      // hips. That distinction is the whole point: a patient who simply
-      // leans keeps a square shoulder line and gets a straight spine,
-      // while a patient who side-bends tips the shoulders and gets a bow.
+      // The bend is driven by the LATERAL OFFSET of shoulder-mid from
+      // hip-mid, measured in the PELVIS frame. Shoulder-line tilt was
+      // tried first and cannot see this pose at all: in pure lateral
+      // flexion the shoulder line rotates WITH the trunk, so its angle
+      // relative to the trunk axis barely changes while the trunk is
+      // plainly bent, and no bow was drawn.
       //
-      //   axis  = H − S,  L = |axis|
-      //   n     = unit(S − H)        trunk up-direction
-      //   uAxis = ⟂ n                lateral direction
-      //   tilt  = signed angle of (rSh − lSh) away from square-with-n
-      //   b     = L · tan(clamp(tilt, ±40°)) · 0.5 · confidence
+      //   u     = unit(rHip − lHip)  pelvis lateral direction
+      //   n     = ⟂ u, oriented H → S
+      //   v     = S − H
+      //   a     = v · n              trunk height in the pelvis frame
+      //   b     = v · u              lateral offset — the bend signal
+      //   lean  = |atan2(b, a)|
+      //
+      // b needs no scaling: it already is the displacement being drawn.
       //
       // S and H are never moved — they stay exactly on the shoulder-mid
       // and hip-mid landmarks, so only A (at 1/3) and B (at 2/3) carry
@@ -576,34 +583,52 @@ export function RehabCameraShell({
       // Straight segments between the four points: BlazePose has no
       // mid-torso landmark, so A and B are inferred bend points, not
       // measured vertebrae, and the two corners say so honestly.
-      if (!isSide && trunkLen >= 1) {
-        // Trunk frame: n runs UP the body, uAxis is the lateral
-        // direction square to it. Both endpoints stay exactly on their
-        // landmarks — only A and B move, so the bend is a bow about the
-        // S→H chord rather than a re-drawn trunk.
-        const axX = H.x - S.x;
-        const axY = H.y - S.y;
-        const L = trunkLen;
-        const nx = -axX / L;
-        const ny = -axY / L;
-        const uX = -ny;
-        const uY = nx;
-
-        // Bend source = SHOULDER-LINE TILT, i.e. how far the shoulder
-        // line has rotated away from square-with-the-trunk. A lateral
-        // bend tips the shoulders; a plain whole-body lean does not, so
-        // this reads curvature rather than posture.
+      if (!isSide && trunkLen >= 1 && lHipP && rHipP) {
+        // PELVIS FRAME. In a lateral flexion the pelvis is the base the
+        // trunk bends away from, so the axes come from the HIP LINE:
+        // u runs along the hips, n is square to it and oriented up the
+        // body (H → S).
         //
-        // The shoulder line is UNDIRECTED (left/right ordering flips
-        // with facing, and the landmark space is mirrored), so the raw
-        // angle is folded into (−90°, 90°]: square reads 0 either way.
-        const shX = (rShP.x - lShP.x) * dispW;
-        const shY = (rShP.y - lShP.y) * dispH;
-        let tiltRaw =
-          (Math.atan2(shX * nx + shY * ny, shX * uX + shY * uY) * 180)
-          / Math.PI;
-        if (tiltRaw > 90) tiltRaw -= 180;
-        else if (tiltRaw <= -90) tiltRaw += 180;
+        // Bend source = the LATERAL OFFSET of shoulder-mid from
+        // hip-mid, v·u. Shoulder-line tilt cannot see this pose: in
+        // pure lateral flexion the shoulder line rotates WITH the
+        // trunk, so its angle relative to the trunk axis barely moves
+        // while the trunk is visibly bent. The offset moves with the
+        // full excursion, and needs no scaling — it already IS the
+        // displacement being drawn.
+        const hipVX = (rHipP.x - lHipP.x) * dispW;
+        const hipVY = (rHipP.y - lHipP.y) * dispH;
+        const hipLen = Math.hypot(hipVX, hipVY);
+        const vX = S.x - H.x;
+        const vY = S.y - H.y;
+
+        let uX: number;
+        let uY: number;
+        let nX: number;
+        let nY: number;
+        if (hipLen >= 1) {
+          uX = hipVX / hipLen;
+          uY = hipVY / hipLen;
+          // Square to u, then flipped if it points down the body, so n
+          // is always H → S whichever way the hip line is ordered.
+          nX = -uY;
+          nY = uX;
+          if (nX * vX + nY * vY < 0) {
+            nX = -nX;
+            nY = -nY;
+          }
+        } else {
+          // Degenerate hip line (hips coincident): fall back to the
+          // trunk chord so the straight line still draws correctly.
+          nX = vX / trunkLen;
+          nY = vY / trunkLen;
+          uX = -nY;
+          uY = nX;
+        }
+
+        // a = trunk height in the pelvis frame, b = lateral excursion.
+        const a = vX * nX + vY * nY;
+        const bRaw = vX * uX + vY * uY;
 
         // Visibility guard: a bend inferred from a landmark the model
         // is guessing at is worse than no bend, so fall back to the
@@ -611,56 +636,74 @@ export function RehabCameraShell({
         const trunkVisible =
           lShP.visibility >= OVERLAY_VIS_THRESHOLD
           && rShP.visibility >= OVERLAY_VIS_THRESHOLD
-          && (lHipP?.visibility ?? 0) >= OVERLAY_VIS_THRESHOLD
-          && (rHipP?.visibility ?? 0) >= OVERLAY_VIS_THRESHOLD;
+          && lHipP.visibility >= OVERLAY_VIS_THRESHOLD
+          && rHipP.visibility >= OVERLAY_VIS_THRESHOLD;
 
         let b = 0;
-        if (!trunkVisible) {
+        if (!trunkVisible || hipLen < 1) {
           frontLeanRef.current = null;
         } else {
-          // EMA on the ANGLE (not on the resulting offset), plus a hard
-          // slew limit so a single mis-tracked frame can never snap the
-          // spine sideways — it can only ever walk 4° per frame.
-          const prevTilt = frontLeanRef.current;
-          let tilt = tiltRaw;
-          if (prevTilt !== null) {
-            const eased = prevTilt + 0.25 * (tiltRaw - prevTilt);
-            tilt = prevTilt + Math.max(-4, Math.min(4, eased - prevTilt));
+          // EMA on the offset, plus a hard slew limit expressed as an
+          // ANGLE — 4° per frame, converted to px at this trunk height
+          // so the cap means the same thing on a tall adult and a
+          // child. A single mis-tracked frame can only walk the spine
+          // 4° sideways, never snap it.
+          const prevB = frontLeanRef.current;
+          let smoothed = bRaw;
+          if (prevB !== null) {
+            const eased = prevB + 0.25 * (bRaw - prevB);
+            const maxStep = Math.abs(a) * Math.tan((4 * Math.PI) / 180);
+            smoothed = prevB
+              + Math.max(-maxStep, Math.min(maxStep, eased - prevB));
           }
-          frontLeanRef.current = tilt;
+          frontLeanRef.current = smoothed;
 
-          // Dead zone: under 6° the shoulder line is square within
-          // landmark noise, so b stays 0 and A/B sit exactly on the
-          // chord. The ref is NOT cleared here — the angle keeps
-          // smoothing through neutral so crossing the threshold is
-          // continuous rather than a jump from a fresh seed.
-          if (Math.abs(tilt) >= 6) {
-            const clamped = Math.max(-40, Math.min(40, tilt));
-
-            // ROTATION GUARD. `ratio` (shoulder span / trunk length)
-            // collapses as the patient turns. Mid-turn, a tilted
-            // shoulder line is foreshortening, not a bend — so fade
-            // the bend out over 0.32→0.42 instead of trusting it.
-            // smoothstep, so there is no visible flick at either edge.
-            const t = Math.min(1, Math.max(0, (ratio - 0.32) / (0.42 - 0.32)));
+          // Dead zone: under 6° of lean the offset is landmark noise,
+          // so b stays 0 and A/B sit exactly on the straight line. The
+          // ref is NOT cleared here — the offset keeps smoothing
+          // through neutral so crossing the threshold is continuous
+          // rather than a jump from a fresh seed.
+          const leanDeg = Math.abs((Math.atan2(smoothed, a) * 180) / Math.PI);
+          if (leanDeg >= 6) {
+            // ROTATION GUARD, now reading gateRatio (shoulder span /
+            // thigh length) rather than shoulder/trunk. Measured, the
+            // old input never suppressed a genuine lateral flexion —
+            // it sits at confidence 1.000 through 35° of bend — but it
+            // has a hole: trunk length foreshortens on a forward bend,
+            // so a patient turned 60° away AND bent forward reads
+            // ratio 0.610 and gets full confidence in a bend that is
+            // pure foreshortening. gateRatio cannot foreshorten, and
+            // its 0.60→0.75 band is exactly the gate's own hysteresis,
+            // so the bend fades to nothing precisely as the gate
+            // commits to SIDE. smoothstep, so neither edge flicks.
+            //
+            // No gateRatio (knee or shoulder dropped out, gate holding
+            // its previous verdict): trust the four trunk landmarks,
+            // which passed their own guard above, rather than blanking
+            // a bend the clinician can plainly see.
+            const g = gateRatio ?? 1;
+            const t = Math.min(1, Math.max(0, (g - 0.60) / (0.75 - 0.60)));
             const confidence = t * t * (3 - 2 * t);
 
-            b = L * Math.tan((clamped * Math.PI) / 180) * 0.5 * confidence;
+            b = smoothed * confidence;
           }
         }
 
-        // b = 0 collapses both terms, so the dead zone, the rotation
-        // guard and the visibility guard all produce exactly the
-        // straight S→H line — still as four points.
+        // 4:2:1 lateral split, read top-down: S carries the full offset
+        // b, A three sevenths, B one seventh, H none — so the gaps are
+        // 4/7, 2/7 and 1/7 of b. b = 0 collapses every lateral term, so
+        // the dead zone, the rotation guard and the visibility guard
+        // all produce exactly the straight S→H line, still as four
+        // points. S and H are never moved off their landmarks.
         spineDraw = [
           S,
           {
-            x: S.x + axX * (1 / 3) + uX * ((3 / 7) * b),
-            y: S.y + axY * (1 / 3) + uY * ((3 / 7) * b),
+            x: H.x + nX * ((2 * a) / 3) + uX * ((3 / 7) * b),
+            y: H.y + nY * ((2 * a) / 3) + uY * ((3 / 7) * b),
           },
           {
-            x: S.x + axX * (2 / 3) + uX * ((1 / 7) * b),
-            y: S.y + axY * (2 / 3) + uY * ((1 / 7) * b),
+            x: H.x + nX * (a / 3) + uX * ((1 / 7) * b),
+            y: H.y + nY * (a / 3) + uY * ((1 / 7) * b),
           },
           H,
         ];
