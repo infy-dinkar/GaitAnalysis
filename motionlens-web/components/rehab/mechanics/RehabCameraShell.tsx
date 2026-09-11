@@ -48,9 +48,9 @@ const OVERLAY_VIS_THRESHOLD = 0.35;
 // them onto the chord instead: A lands on it at gain 14/9 = 1.556 and
 // the spine flattens into a diagonal stick.
 //
-// 0.6 gives ~1.67x the bow depth of the geometrically faithful 1.0
+// 0.45 gives ~2.22x the bow depth of the geometrically faithful 1.0
 // while keeping both points comfortably inside the chord.
-const BEND_GAIN = 0.6;
+const BEND_GAIN = 0.45;
 
 // Uniform Catmull-Rom through every supplied point, with the two
 // endpoints duplicated so the curve starts exactly on the first control
@@ -241,14 +241,16 @@ export function RehabCameraShell({
   //   spinePerpRef — EMA-smoothed unit vector pointing POSTERIORLY
   //                  (away from the nose), for the back-tracking offset.
   const spinePerpRef = useRef<{ x: number; y: number } | null>(null);
-  //   frontLeanRef — EMA-smoothed LATERAL component (display px) of the
-  //                  trunk vector in the PELVIS frame, for the front-view
-  //                  bend. Null while side-on and while the trunk is
-  //                  degenerate or occluded, so every re-entry seeds
-  //                  from the raw value. NOT cleared inside the dead
-  //                  zone — the offset keeps smoothing through neutral
-  //                  so crossing the threshold stays continuous.
-  const frontLeanRef = useRef<number | null>(null);
+  //   frontLeanRef — { b, on } for the front-view bend. `b` is the
+  //                  EMA-smoothed LATERAL component (display px) of the
+  //                  trunk vector in the PELVIS frame; `on` is the
+  //                  dead-zone latch, held in the same ref so both
+  //                  reset together. Null while side-on and while the
+  //                  trunk is degenerate or occluded, so every re-entry
+  //                  seeds from the raw value. NOT cleared inside the
+  //                  dead zone — the offset keeps smoothing through
+  //                  neutral so crossing the threshold stays continuous.
+  const frontLeanRef = useRef<{ b: number; on: boolean } | null>(null);
 
   const [busy, setBusy] = useState(false);
 
@@ -700,28 +702,37 @@ export function RehabCameraShell({
         if (!trunkVisible || hipLen < 1) {
           frontLeanRef.current = null;
         } else {
-          // EMA on the offset, plus a hard slew limit expressed as an
-          // ANGLE — 4° per frame, converted to px at this trunk height
-          // so the cap means the same thing on a tall adult and a
-          // child. A single mis-tracked frame can only walk the spine
-          // 4° sideways, never snap it.
-          const prevB = frontLeanRef.current;
+          // EMA on the offset at 0.15, plus a hard slew limit expressed
+          // as an ANGLE — 2.5° per frame, converted to px at this trunk
+          // height so the cap means the same thing on a tall adult and
+          // a child. Lateral flexion is a slow movement, so trading
+          // responsiveness for steadiness is the right way round here:
+          // a single mis-tracked frame can only walk the spine 2.5°
+          // sideways, never snap it.
+          const prev = frontLeanRef.current;
           let smoothed = bRaw;
-          if (prevB !== null) {
-            const eased = prevB + 0.25 * (bRaw - prevB);
-            const maxStep = Math.abs(a) * Math.tan((4 * Math.PI) / 180);
-            smoothed = prevB
-              + Math.max(-maxStep, Math.min(maxStep, eased - prevB));
+          if (prev !== null) {
+            const eased = prev.b + 0.15 * (bRaw - prev.b);
+            const maxStep = Math.abs(a) * Math.tan((2.5 * Math.PI) / 180);
+            smoothed = prev.b
+              + Math.max(-maxStep, Math.min(maxStep, eased - prev.b));
           }
-          frontLeanRef.current = smoothed;
 
-          // Dead zone: under 6° of lean the offset is landmark noise,
-          // so b stays 0 and A/B sit exactly on the straight line. The
-          // ref is NOT cleared here — the offset keeps smoothing
+          // Dead zone with hysteresis: the bend switches ON above 7°
+          // and OFF below 5°, and holds whatever it already was in
+          // between, so a lean hovering on the boundary cannot flicker
+          // the curve on and off frame to frame. Seeded OFF, so a fresh
+          // entry has to clear 7° before anything is drawn.
+          //
+          // The ref is NOT cleared here — the offset keeps smoothing
           // through neutral so crossing the threshold is continuous
           // rather than a jump from a fresh seed.
           const leanDeg = Math.abs((Math.atan2(smoothed, a) * 180) / Math.PI);
-          if (leanDeg >= 6) {
+          const wasOn = prev?.on ?? false;
+          const on = leanDeg > 7 ? true : leanDeg < 5 ? false : wasOn;
+          frontLeanRef.current = { b: smoothed, on };
+
+          if (on) {
             // ROTATION GUARD, now reading gateRatio (shoulder span /
             // thigh length) rather than shoulder/trunk. Measured, the
             // old input never suppressed a genuine lateral flexion —
@@ -754,7 +765,7 @@ export function RehabCameraShell({
         // gain can preserve that: the three gaps telescope from H to S
         // so they always sum to b, which leaves 4:2:1 exactly one
         // solution and no freedom to deepen. The closed form is
-        // (7/gain − 3) : 2 : 1, so 0.6 gives 8.667 : 2 : 1 — most of
+        // (7/gain − 3) : 2 : 1, so 0.45 gives 12.556 : 2 : 1 — most of
         // the excursion spent up near the shoulders, which is where a
         // laterally-flexed spine actually does most of its travelling.
         //
