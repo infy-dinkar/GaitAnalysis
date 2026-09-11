@@ -296,10 +296,7 @@ export default function GaitResultsPage() {
                 <span className="text-accent">.</span>
               </h1>
               <div className="mt-5">
-                <CalibrationHeader
-                  videoInfo={data.video_info}
-                  heightCm={data.patient_info.height_cm}
-                />
+                <CalibrationHeader videoInfo={data.video_info} />
               </div>
             </div>
             <Button onClick={downloadPDF}>
