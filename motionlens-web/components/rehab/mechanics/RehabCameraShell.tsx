@@ -184,6 +184,12 @@ export function RehabCameraShell({
   //   spinePerpRef — EMA-smoothed unit vector pointing POSTERIORLY
   //                  (away from the nose), for the back-tracking offset.
   const spinePerpRef = useRef<{ x: number; y: number } | null>(null);
+  //   frontLeanRef — EMA-smoothed LATERAL component (display px) of the
+  //                  trunk vector in the PELVIS frame, for the front-view
+  //                  bend. Null while side-on, while the trunk is
+  //                  degenerate, and inside the dead zone, so every
+  //                  re-entry seeds from the raw value.
+  const frontLeanRef = useRef<number | null>(null);
 
   const [busy, setBusy] = useState(false);
 
@@ -495,6 +501,83 @@ export function RehabCameraShell({
             y: top.y - dy * trunkLen,
           };
         }
+      }
+
+      // ── Front-view lateral bend ─────────────────────────────────
+      // Front-on there is no depth, so the side-profile Hermite above
+      // is meaningless here — but a LATERAL lean is genuinely visible
+      // and is what a clinician reads from this view.
+      //
+      // Everything is measured in the PELVIS frame so a tilted camera
+      // cancels out: the basis rides the hip line, not the screen.
+      //   u = unit(rHip − lHip)          along the hip line
+      //   n = unit ⟂ u, pointing from hip-mid H toward shoulder-mid S
+      //   v = S − H,  a = v·n (trunk height), b = v·u (lateral offset)
+      // Since {u, n} is orthonormal, v ≡ n·a + u·b exactly, so the
+      // reconstructed top lands on S to floating-point precision.
+      //
+      // The trunk is split into three EQUAL heights along n, with the
+      // lateral share weighted 4:2:1 from the TOP — cumulative 1/7,
+      // 3/7, 7/7 of b measured upward from H. A lateral lean really
+      // does distribute that way: the thoracic segment deviates most,
+      // the lumbar least, rather than bowing evenly.
+      //
+      // Straight segments only, and showDots stays false: BlazePose
+      // has no mid-torso landmark, so A and B are inferred bend points,
+      // not measured vertebrae, and the two corners say so honestly.
+      if (!isSide && trunkLen >= 1 && lHipP && rHipP) {
+        const hipX = (rHipP.x - lHipP.x) * dispW;
+        const hipY = (rHipP.y - lHipP.y) * dispH;
+        const hipLen = Math.hypot(hipX, hipY);
+        if (hipLen >= 1) {
+          const ux = hipX / hipLen;
+          const uy = hipY / hipLen;
+          let nx = uy;
+          let ny = -ux;
+          const vx = S.x - H.x;
+          const vy = S.y - H.y;
+          // Orient n up the body — the hip line's own direction is
+          // arbitrary (left-right ordering flips with facing).
+          if (nx * vx + ny * vy < 0) {
+            nx = -nx;
+            ny = -ny;
+          }
+          const a = vx * nx + vy * ny;
+          const bRaw = vx * ux + vy * uy;
+
+          // EMA on the LATERAL component only. `a` is the trunk's own
+          // height — it barely moves and needs no smoothing; the jitter
+          // that matters rides on b.
+          const prevB = frontLeanRef.current;
+          const b = prevB === null ? bRaw : prevB + 0.3 * (bRaw - prevB);
+
+          // Dead zone: under 5° the lean is indistinguishable from
+          // landmark noise, so draw exactly the straight [S, H] this
+          // branch produced before and drop the EMA so the next lean
+          // seeds from raw instead of easing out of a stale value.
+          const leanDeg = Math.abs((Math.atan2(b, a) * 180) / Math.PI);
+          if (leanDeg < 5) {
+            frontLeanRef.current = null;
+          } else {
+            frontLeanRef.current = b;
+            spineDraw = [
+              S,
+              {
+                x: H.x + nx * ((2 * a) / 3) + ux * ((3 / 7) * b),
+                y: H.y + ny * ((2 * a) / 3) + uy * ((3 / 7) * b),
+              },
+              {
+                x: H.x + nx * (a / 3) + ux * ((1 / 7) * b),
+                y: H.y + ny * (a / 3) + uy * ((1 / 7) * b),
+              },
+              H,
+            ];
+          }
+        } else {
+          frontLeanRef.current = null;
+        }
+      } else {
+        frontLeanRef.current = null;
       }
     }
     // Neck (nose -> shoulder-mid) deliberately thinner and more
