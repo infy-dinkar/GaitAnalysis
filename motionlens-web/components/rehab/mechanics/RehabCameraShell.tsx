@@ -40,6 +40,18 @@ import type { Keypoint } from "@tensorflow-models/pose-detection";
 
 const OVERLAY_VIS_THRESHOLD = 0.35;
 
+// Front-view spine: how much of their measured lateral share the two
+// interior control points actually take. Counter-intuitively this goes
+// DOWN to deepen the bend, because the visible bow is the departure
+// from the straight S→H chord, and A and B sit INSIDE that chord — so
+// pulling them further in bows the curve harder. Scaling them UP walks
+// them onto the chord instead: A lands on it at gain 14/9 = 1.556 and
+// the spine flattens into a diagonal stick.
+//
+// 0.6 gives ~1.67x the bow depth of the geometrically faithful 1.0
+// while keeping both points comfortably inside the chord.
+const BEND_GAIN = 0.6;
+
 // Uniform Catmull-Rom through every supplied point, with the two
 // endpoints duplicated so the curve starts exactly on the first control
 // and ends exactly on the last. Catmull-Rom INTERPOLATES its controls,
@@ -734,21 +746,31 @@ export function RehabCameraShell({
           }
         }
 
-        // 4:2:1 lateral split, read top-down: S carries the full offset
-        // b, A three sevenths, B one seventh, H none — so the gaps are
-        // 4/7, 2/7 and 1/7 of b. b = 0 collapses every lateral term, so
-        // the dead zone, the rotation guard and the visibility guard
-        // all produce exactly the straight S→H line, still as four
-        // points. S and H are never moved off their landmarks.
+        // Lateral shares of b, read top-down: S carries the full offset
+        // (it IS the shoulder landmark), A three sevenths and B one
+        // seventh, both scaled by BEND_GAIN, H none.
+        //
+        // At gain 1.0 the gaps are 4/7, 2/7, 1/7 — the 4:2:1 split. No
+        // gain can preserve that: the three gaps telescope from H to S
+        // so they always sum to b, which leaves 4:2:1 exactly one
+        // solution and no freedom to deepen. The closed form is
+        // (7/gain − 3) : 2 : 1, so 0.6 gives 8.667 : 2 : 1 — most of
+        // the excursion spent up near the shoulders, which is where a
+        // laterally-flexed spine actually does most of its travelling.
+        //
+        // b = 0 collapses every lateral term whatever the gain, so the
+        // dead zone, the rotation guard and the visibility guard all
+        // still produce exactly the straight S→H line, as four points.
+        // S and H are never moved off their landmarks.
         spineDraw = [
           S,
           {
-            x: H.x + nX * ((2 * a) / 3) + uX * ((3 / 7) * b),
-            y: H.y + nY * ((2 * a) / 3) + uY * ((3 / 7) * b),
+            x: H.x + nX * ((2 * a) / 3) + uX * ((3 / 7) * b * BEND_GAIN),
+            y: H.y + nY * ((2 * a) / 3) + uY * ((3 / 7) * b * BEND_GAIN),
           },
           {
-            x: H.x + nX * (a / 3) + uX * ((1 / 7) * b),
-            y: H.y + nY * (a / 3) + uY * ((1 / 7) * b),
+            x: H.x + nX * (a / 3) + uX * ((1 / 7) * b * BEND_GAIN),
+            y: H.y + nY * (a / 3) + uY * ((1 / 7) * b * BEND_GAIN),
           },
           H,
         ];
