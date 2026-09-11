@@ -157,10 +157,7 @@ export function GaitResultsView({ data, patientNameOverride, patientOverride }: 
           <span className="text-accent">.</span>
         </h2>
         <div className="mt-5">
-          <CalibrationHeader
-            videoInfo={data.video_info}
-            heightCm={data.patient_info.height_cm}
-          />
+          <CalibrationHeader videoInfo={data.video_info} />
         </div>
       </div>
 

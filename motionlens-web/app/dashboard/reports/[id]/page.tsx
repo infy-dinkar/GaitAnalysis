@@ -923,7 +923,9 @@ function GaitBody({
   const data: GaitDataDTO = {
     patient_info: {
       name: patientNameOverride,
-      // height_cm is needed for CalibrationHeader; saved video_info also carries calibration.
+      // Saved gait reports don't persist patient_info; the patient card
+      // above carries the height. 0 only satisfies the required DTO field —
+      // nothing in the gait view reads it.
       height_cm: 0,
     },
     video_info: m.video_info as GaitDataDTO["video_info"],

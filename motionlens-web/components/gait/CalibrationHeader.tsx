@@ -3,10 +3,9 @@ import { fmt } from "@/lib/utils";
 
 interface Props {
   videoInfo: VideoInfoDTO;
-  heightCm: number;
 }
 
-export function CalibrationHeader({ videoInfo, heightCm }: Props) {
+export function CalibrationHeader({ videoInfo }: Props) {
   const cal =
     videoInfo.calibration_mm_per_px !== null
       ? `${fmt(videoInfo.calibration_mm_per_px, 3)} mm/px`
@@ -26,8 +25,7 @@ export function CalibrationHeader({ videoInfo, heightCm }: Props) {
         <span className="tabular text-foreground">
           {videoInfo.frames_used}/{videoInfo.total_frames}
         </span>{" "}
-        frames used · height ={" "}
-        <span className="tabular text-foreground">{fmt(heightCm, 0)} cm</span>
+        frames used
       </p>
       <p>
         Ankle baseline correction: L ={" "}
