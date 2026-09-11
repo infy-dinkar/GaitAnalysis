@@ -188,7 +188,30 @@ function ReportView({ id }: { id: string }) {
     if (autoDownloadFiredRef.current) return;
     autoDownloadFiredRef.current = true;
     const t = window.setTimeout(() => {
-      handleDownload();
+      // Strip ?download=1 once the export has settled, so a manual
+      // refresh lands on a plain report view instead of firing a second
+      // capture. handleDownload swallows its own errors, so .finally
+      // covers the failure path too — a failed export should not leave
+      // the param armed either.
+      //
+      // history.replaceState rather than router.replace: this must not
+      // re-render or navigate mid-capture. useSearchParams therefore
+      // keeps reporting the old value for this mount, which is
+      // harmless — autoDownloadFiredRef already blocks a re-fire, and
+      // the next load reads the clean URL.
+      //
+      // Only reachable on the auto path: the effect has already
+      // returned unless autoDownload is true.
+      const startPath = window.location.pathname;
+      handleDownload().finally(() => {
+        // Guard against the user having navigated away during the
+        // capture — otherwise this would rewrite whatever page they
+        // are on now.
+        if (window.location.pathname !== startPath) return;
+        const url = new URL(window.location.href);
+        url.searchParams.delete("download");
+        window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+      });
     }, 600);
     return () => window.clearTimeout(t);
   }, [autoDownload, report, patient, handleDownload]);

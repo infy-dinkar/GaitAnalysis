@@ -50,6 +50,27 @@ export async function exportReportPdf(
     // Tailwind classes; turning these off gives a cleaner print look
     // without changing what's on-screen.
     ignoreElements: (el) => el.classList?.contains("no-pdf") ?? false,
+    // Force the LIGHT theme for the capture. backgroundColor below is
+    // always white, but the report body itself has no background of its
+    // own — so in dark mode the white fill landed behind dark-theme
+    // text (--color-foreground #F1F5F9) and most of the page went
+    // invisible.
+    //
+    // Both theme mechanisms are anchored at <html>: the design tokens
+    // re-bind under `html[data-theme="dark"]`, and Tailwind's dark
+    // variant is `[data-theme="dark"], [data-theme="dark"] *`. Setting
+    // the attribute to "light" on the cloned documentElement therefore
+    // switches every token AND disables every `dark:` utility in one
+    // write. html2canvas renders the clone in its own iframe, so the
+    // live DOM, the user's theme and localStorage are untouched — no
+    // flash, nothing to restore on failure.
+    //
+    // Charts need no repaint: every Plotly and inline-SVG colour in
+    // the app is a hardcoded light-theme hex, never read from a CSS
+    // variable.
+    onclone: (doc) => {
+      doc.documentElement.dataset.theme = "light";
+    },
   });
 
   const pdf = new jsPDF({ unit: "pt", format: "a4", orientation: "portrait" });

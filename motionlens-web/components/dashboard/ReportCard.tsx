@@ -237,10 +237,13 @@ export function ReportCard({
           <ChevronRight className="h-4 w-4 text-muted transition group-hover:text-accent" />
         </Link>
 
+        {/* Same-tab navigation. The report body has to be rendered
+            somewhere for html2canvas to capture it, so the hop through
+            the viewer is load-bearing — opening it in a SECOND tab was
+            not, and left an orphan tab sitting on the report after the
+            file had saved. */}
         <a
           href={`/dashboard/reports/${report.id}?download=1`}
-          target="_blank"
-          rel="noopener noreferrer"
           aria-label="Download this report as PDF"
           title="Download this report as PDF"
           className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted transition hover:bg-accent/10 hover:text-accent"
