@@ -508,76 +508,114 @@ export function RehabCameraShell({
       // is meaningless here — but a LATERAL lean is genuinely visible
       // and is what a clinician reads from this view.
       //
-      // Everything is measured in the PELVIS frame so a tilted camera
-      // cancels out: the basis rides the hip line, not the screen.
-      //   u = unit(rHip − lHip)          along the hip line
-      //   n = unit ⟂ u, pointing from hip-mid H toward shoulder-mid S
-      //   v = S − H,  a = v·n (trunk height), b = v·u (lateral offset)
-      // Since {u, n} is orthonormal, v ≡ n·a + u·b exactly, so the
-      // reconstructed top lands on S to floating-point precision.
+      // The bend is driven by the SHOULDER-LINE TILT measured in the
+      // TRUNK frame, not by where the shoulder-mid sits relative to the
+      // hips. That distinction is the whole point: a patient who simply
+      // leans keeps a square shoulder line and gets a straight spine,
+      // while a patient who side-bends tips the shoulders and gets a bow.
       //
-      // The trunk is split into three EQUAL heights along n, with the
-      // lateral share weighted 4:2:1 from the TOP — cumulative 1/7,
-      // 3/7, 7/7 of b measured upward from H. A lateral lean really
-      // does distribute that way: the thoracic segment deviates most,
-      // the lumbar least, rather than bowing evenly.
+      //   axis  = H − S,  L = |axis|
+      //   n     = unit(S − H)        trunk up-direction
+      //   uAxis = ⟂ n                lateral direction
+      //   tilt  = signed angle of (rSh − lSh) away from square-with-n
+      //   b     = L · tan(clamp(tilt, ±40°)) · 0.5 · confidence
       //
-      // Straight segments only, and showDots stays false: BlazePose
-      // has no mid-torso landmark, so A and B are inferred bend points,
-      // not measured vertebrae, and the two corners say so honestly.
-      if (!isSide && trunkLen >= 1 && lHipP && rHipP) {
-        const hipX = (rHipP.x - lHipP.x) * dispW;
-        const hipY = (rHipP.y - lHipP.y) * dispH;
-        const hipLen = Math.hypot(hipX, hipY);
-        if (hipLen >= 1) {
-          const ux = hipX / hipLen;
-          const uy = hipY / hipLen;
-          let nx = uy;
-          let ny = -ux;
-          const vx = S.x - H.x;
-          const vy = S.y - H.y;
-          // Orient n up the body — the hip line's own direction is
-          // arbitrary (left-right ordering flips with facing).
-          if (nx * vx + ny * vy < 0) {
-            nx = -nx;
-            ny = -ny;
-          }
-          const a = vx * nx + vy * ny;
-          const bRaw = vx * ux + vy * uy;
+      // S and H are never moved — they stay exactly on the shoulder-mid
+      // and hip-mid landmarks, so only A (at 1/3) and B (at 2/3) carry
+      // the bow, at 3/7 and 1/7 of b.
+      //
+      // Straight segments between the four points: BlazePose has no
+      // mid-torso landmark, so A and B are inferred bend points, not
+      // measured vertebrae, and the two corners say so honestly.
+      if (!isSide && trunkLen >= 1) {
+        // Trunk frame: n runs UP the body, uAxis is the lateral
+        // direction square to it. Both endpoints stay exactly on their
+        // landmarks — only A and B move, so the bend is a bow about the
+        // S→H chord rather than a re-drawn trunk.
+        const axX = H.x - S.x;
+        const axY = H.y - S.y;
+        const L = trunkLen;
+        const nx = -axX / L;
+        const ny = -axY / L;
+        const uX = -ny;
+        const uY = nx;
 
-          // EMA on the LATERAL component only. `a` is the trunk's own
-          // height — it barely moves and needs no smoothing; the jitter
-          // that matters rides on b.
-          const prevB = frontLeanRef.current;
-          const b = prevB === null ? bRaw : prevB + 0.3 * (bRaw - prevB);
+        // Bend source = SHOULDER-LINE TILT, i.e. how far the shoulder
+        // line has rotated away from square-with-the-trunk. A lateral
+        // bend tips the shoulders; a plain whole-body lean does not, so
+        // this reads curvature rather than posture.
+        //
+        // The shoulder line is UNDIRECTED (left/right ordering flips
+        // with facing, and the landmark space is mirrored), so the raw
+        // angle is folded into (−90°, 90°]: square reads 0 either way.
+        const shX = (rShP.x - lShP.x) * dispW;
+        const shY = (rShP.y - lShP.y) * dispH;
+        let tiltRaw =
+          (Math.atan2(shX * nx + shY * ny, shX * uX + shY * uY) * 180)
+          / Math.PI;
+        if (tiltRaw > 90) tiltRaw -= 180;
+        else if (tiltRaw <= -90) tiltRaw += 180;
 
-          // Dead zone: under 5° the lean is indistinguishable from
-          // landmark noise, so the bend collapses to bEff = 0 — A and B
-          // land exactly on the straight S→H line. The shape is the same
-          // straight trunk as before, but it is still FOUR points, so
-          // the two bend dots stay on screen at neutral posture instead
-          // of appearing only once the patient leans. The EMA is still
-          // dropped here so the next real lean seeds from raw rather
-          // than easing out of a stale value.
-          const leanDeg = Math.abs((Math.atan2(b, a) * 180) / Math.PI);
-          const inDeadZone = leanDeg < 5;
-          const bEff = inDeadZone ? 0 : b;
-          frontLeanRef.current = inDeadZone ? null : b;
-          spineDraw = [
-            S,
-            {
-              x: H.x + nx * ((2 * a) / 3) + ux * ((3 / 7) * bEff),
-              y: H.y + ny * ((2 * a) / 3) + uy * ((3 / 7) * bEff),
-            },
-            {
-              x: H.x + nx * (a / 3) + ux * ((1 / 7) * bEff),
-              y: H.y + ny * (a / 3) + uy * ((1 / 7) * bEff),
-            },
-            H,
-          ];
-        } else {
+        // Visibility guard: a bend inferred from a landmark the model
+        // is guessing at is worse than no bend, so fall back to the
+        // straight line — still four points, so the dots stay put.
+        const trunkVisible =
+          lShP.visibility >= OVERLAY_VIS_THRESHOLD
+          && rShP.visibility >= OVERLAY_VIS_THRESHOLD
+          && (lHipP?.visibility ?? 0) >= OVERLAY_VIS_THRESHOLD
+          && (rHipP?.visibility ?? 0) >= OVERLAY_VIS_THRESHOLD;
+
+        let b = 0;
+        if (!trunkVisible) {
           frontLeanRef.current = null;
+        } else {
+          // EMA on the ANGLE (not on the resulting offset), plus a hard
+          // slew limit so a single mis-tracked frame can never snap the
+          // spine sideways — it can only ever walk 4° per frame.
+          const prevTilt = frontLeanRef.current;
+          let tilt = tiltRaw;
+          if (prevTilt !== null) {
+            const eased = prevTilt + 0.25 * (tiltRaw - prevTilt);
+            tilt = prevTilt + Math.max(-4, Math.min(4, eased - prevTilt));
+          }
+          frontLeanRef.current = tilt;
+
+          // Dead zone: under 6° the shoulder line is square within
+          // landmark noise, so b stays 0 and A/B sit exactly on the
+          // chord. The ref is NOT cleared here — the angle keeps
+          // smoothing through neutral so crossing the threshold is
+          // continuous rather than a jump from a fresh seed.
+          if (Math.abs(tilt) >= 6) {
+            const clamped = Math.max(-40, Math.min(40, tilt));
+
+            // ROTATION GUARD. `ratio` (shoulder span / trunk length) is
+            // the same quantity the side gate reads: it collapses as the
+            // patient turns. Mid-turn, a tilted shoulder line is
+            // foreshortening, not a bend — so fade the bend out over
+            // 0.32→0.42 instead of trusting it. smoothstep, so there is
+            // no visible flick at either edge.
+            const t = Math.min(1, Math.max(0, (ratio - 0.32) / (0.42 - 0.32)));
+            const confidence = t * t * (3 - 2 * t);
+
+            b = L * Math.tan((clamped * Math.PI) / 180) * 0.5 * confidence;
+          }
         }
+
+        // b = 0 collapses both terms, so the dead zone, the rotation
+        // guard and the visibility guard all produce exactly the
+        // straight S→H line — still as four points.
+        spineDraw = [
+          S,
+          {
+            x: S.x + axX * (1 / 3) + uX * ((3 / 7) * b),
+            y: S.y + axY * (1 / 3) + uY * ((3 / 7) * b),
+          },
+          {
+            x: S.x + axX * (2 / 3) + uX * ((1 / 7) * b),
+            y: S.y + axY * (2 / 3) + uY * ((1 / 7) * b),
+          },
+          H,
+        ];
       } else {
         frontLeanRef.current = null;
       }
