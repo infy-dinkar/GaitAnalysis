@@ -177,6 +177,21 @@ export function drawSpineOverlay(
   dispH: number,
   refs: SpineRefs,
   style?: SpineStyle,
+  /** Extra per-landmark usability test, applied to the four trunk
+   *  landmarks and to the knees behind thighLen, ON TOP of the
+   *  visibility gate. Exists because BlazePose hallucinates
+   *  positions for joints below or above the view: a shell that
+   *  already rejects those (an in-frame test) can pass the same
+   *  predicate here, so the spine cannot draw to a fabricated
+   *  pelvis while the bone loop correctly refuses to.
+   *
+   *  Rejecting any required landmark suppresses the spine stroke
+   *  and its knot dots — exactly what the visibility gate already
+   *  does. The neck centreline keeps its own guard.
+   *
+   *  Undefined (every caller but biomech) means everything is
+   *  usable, so those callers are byte-identical. */
+  isUsable?: (landmarkIndex: number) => boolean,
 ): void {
   // Aliased so the geometry below is the rehab source unchanged,
   // down to the identifier names.
@@ -184,6 +199,15 @@ export function drawSpineOverlay(
   const spineDirRef = refs.spineDir;
   const spinePerpRef = refs.spinePerp;
   const frontLeanRef = refs.frontLean;
+
+  // Undefined predicate === everything usable, so the branches below
+  // collapse to their previous form for every existing caller.
+  const usable = (i: number): boolean => isUsable?.(i) ?? true;
+  const trunkUsable =
+    usable(LM.LEFT_SHOULDER)
+    && usable(LM.RIGHT_SHOULDER)
+    && usable(LM.LEFT_HIP)
+    && usable(LM.RIGHT_HIP);
 
   // Spine as a STRAIGHT shoulder-mid → hip-mid line.
   //
@@ -277,6 +301,7 @@ export function drawSpineOverlay(
       lHipP && lKneeP
       && lHipP.visibility >= OVERLAY_VIS_THRESHOLD
       && lKneeP.visibility >= OVERLAY_VIS_THRESHOLD
+      && usable(LM.LEFT_HIP) && usable(LM.LEFT_KNEE)
     ) {
       thighs.push(Math.hypot(
         (lHipP.x - lKneeP.x) * dispW,
@@ -287,6 +312,7 @@ export function drawSpineOverlay(
       rHipP && rKneeP
       && rHipP.visibility >= OVERLAY_VIS_THRESHOLD
       && rKneeP.visibility >= OVERLAY_VIS_THRESHOLD
+      && usable(LM.RIGHT_HIP) && usable(LM.RIGHT_KNEE)
     ) {
       thighs.push(Math.hypot(
         (rHipP.x - rKneeP.x) * dispW,
@@ -614,7 +640,11 @@ export function drawSpineOverlay(
   // strung along the spine; the meaningful positions are the four
   // KNOTS, so they are drawn below instead. Nothing was added to
   // skeletonExtras for this.
-  drawSpineSegment(ctx, landmarks, dispW, dispH, {
+  // Guarded rather than passed points:undefined — that would hand
+  // drawSpineSegment back to its own inferred-bow geometry and draw
+  // a spine anyway, which is the opposite of what the predicate asks
+  // for.
+  if (trunkUsable) drawSpineSegment(ctx, landmarks, dispW, dispH, {
     visibilityThreshold: OVERLAY_VIS_THRESHOLD,
     points: strokePts,
     showDots: false,
@@ -633,7 +663,7 @@ export function drawSpineOverlay(
   // and tears down its own canvas state. Radius sits slightly under
   // the helper's default (max(5, w*0.008)) so the bend markers stay
   // subordinate to the body joint dots.
-  if (frontBend && spineDraw) {
+  if (trunkUsable && frontBend && spineDraw) {
     ctx.save();
     ctx.fillStyle = style?.dotColor ?? "#F97316";
     ctx.shadowColor = style?.dotShadowColor ?? "rgba(249, 115, 22, 0.6)";
