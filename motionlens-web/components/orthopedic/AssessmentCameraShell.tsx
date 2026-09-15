@@ -137,7 +137,38 @@ export function AssessmentCameraShell({
     ctx.clearRect(0, 0, w, h);
     if (!landmarks || landmarks.length === 0) return;
 
-    const px = (n: Norm) => ({ x: n.x * w, y: n.y * h });
+    // ── object-cover compensation ────────────────────────────────
+    // The <video> is styled `object-cover`: it scales to COVER the
+    // container and the overflow is cropped. Mapping a normalised
+    // landmark straight onto the container (n.x * w) therefore
+    // assumed the whole frame was visible, which squashed the
+    // skeleton along whichever axis got cropped — correct at the
+    // centre, progressively wrong toward the edges (a wrist landed
+    // mid-forearm on a 16:9 camera in a ~4:3 box).
+    //
+    // Reproduce the browser's own object-cover geometry: scale by
+    // the LARGER ratio, then centre the overflow.
+    //
+    // When the container and video aspects match, scale === w / vw,
+    // so dispW === w, dispH === h and offX === offY === 0 — the
+    // mapping collapses to exactly `n.x * w, n.y * h`. Setups that
+    // were never cropped are byte-identical to before.
+    const video = videoRef.current;
+    const vw = video?.videoWidth ?? 0;
+    const vh = video?.videoHeight ?? 0;
+    const scale = vw > 0 && vh > 0 ? Math.max(w / vw, h / vh) : 0;
+    const dispW = scale > 0 ? vw * scale : w;
+    const dispH = scale > 0 ? vh * scale : h;
+    const offX = (w - dispW) / 2;
+    const offY = (h - dispH) / 2;
+
+    const px = (n: Norm) => ({ x: n.x * dispW, y: n.y * dispH });
+
+    // The origin shift is applied through the canvas transform rather
+    // than folded into px(), so anything drawn inside this save/restore
+    // lands in the same display space without needing its own offset.
+    ctx.save();
+    ctx.translate(offX, offY);
 
     // Bones — white with a soft dark halo so they read on ANY
     // background (light shirt, dark bg, etc.).
@@ -175,7 +206,8 @@ export function AssessmentCameraShell({
       ctx.fill();
     }
     ctx.shadowBlur = 0;
-  }, []);
+    ctx.restore();
+  }, [videoRef]);
 
   useEffect(() => {
     if (!active || !detectorReady) {
