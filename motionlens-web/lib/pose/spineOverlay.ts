@@ -51,6 +51,37 @@ export interface SpineRefs {
   frontLean: { current: { b: number; on: boolean } | null };
 }
 
+/**
+ * Optional per-shell appearance. Every field defaults to the rehab
+ * look, so a caller that passes nothing renders exactly as rehab does
+ * today — the geometry is shared, the palette is not.
+ *
+ * NOT covered, because it lives in skeletonExtras and that file is
+ * shared by other callers: the spine stroke's glow
+ * (`rgba(249,115,22,0.55)`, blur 12) and the neck line's glow
+ * (same colour, blur 8) are hardcoded there. A shell with a different
+ * halo treatment keeps the orange glow on those two strokes until
+ * those become options too.
+ */
+export interface SpineStyle {
+  /** Spine polyline colour. Default: the helper's orange. */
+  strokeStyle?: string;
+  /** Spine polyline width. Default: the helper's own auto-scale. */
+  lineWidth?: number;
+  /** Front-bend knot dot fill. Default "#F97316". */
+  dotColor?: string;
+  /** Front-bend knot dot radius. Default max(4, dispW * 0.006). */
+  dotRadius?: number;
+  /** Knot dot glow colour. Default "rgba(249, 115, 22, 0.6)". */
+  dotShadowColor?: string;
+  /** Knot dot glow blur. Default 10. */
+  dotShadowBlur?: number;
+  /** Neck centreline colour. Default "rgba(249, 115, 22, 0.55)". */
+  neckStrokeStyle?: string;
+  /** Neck centreline width. Default max(2, dispW * 0.002). */
+  neckLineWidth?: number;
+}
+
 /** Fresh state for one camera. Hold it in a single useRef. */
 export function createSpineRefs(): SpineRefs {
   return {
@@ -139,6 +170,7 @@ export function drawSpineOverlay(
   dispW: number,
   dispH: number,
   refs: SpineRefs,
+  style?: SpineStyle,
 ): void {
   // Aliased so the geometry below is the rehab source unchanged,
   // down to the identifier names.
@@ -554,8 +586,8 @@ export function drawSpineOverlay(
   // only so it can reuse neckAnchor; z-order is unchanged.
   drawCenterline(ctx, landmarks, dispW, dispH, {
     visibilityThreshold: OVERLAY_VIS_THRESHOLD,
-    strokeStyle: "rgba(249, 115, 22, 0.55)",
-    lineWidth: Math.max(2, dispW * 0.002),
+    strokeStyle: style?.neckStrokeStyle ?? "rgba(249, 115, 22, 0.55)",
+    lineWidth: style?.neckLineWidth ?? Math.max(2, dispW * 0.002),
     endPoint: neckAnchor,
   });
   // The four control points describe the bend correctly, but three
@@ -578,6 +610,10 @@ export function drawSpineOverlay(
     visibilityThreshold: OVERLAY_VIS_THRESHOLD,
     points: strokePts,
     showDots: false,
+    // Undefined passes straight through to drawSpineSegment's own
+    // defaults, so rehab is unchanged.
+    strokeStyle: style?.strokeStyle,
+    lineWidth: style?.lineWidth,
     tangentFrom: spineTangentFrom,
   });
 
@@ -589,10 +625,10 @@ export function drawSpineOverlay(
   // subordinate to the body joint dots.
   if (frontBend && spineDraw) {
     ctx.save();
-    ctx.fillStyle = "#F97316";
-    ctx.shadowColor = "rgba(249, 115, 22, 0.6)";
-    ctx.shadowBlur = 10;
-    const r = Math.max(4, dispW * 0.006);
+    ctx.fillStyle = style?.dotColor ?? "#F97316";
+    ctx.shadowColor = style?.dotShadowColor ?? "rgba(249, 115, 22, 0.6)";
+    ctx.shadowBlur = style?.dotShadowBlur ?? 10;
+    const r = style?.dotRadius ?? Math.max(4, dispW * 0.006);
     for (const p of spineDraw) {
       ctx.beginPath();
       ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
