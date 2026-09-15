@@ -56,12 +56,10 @@ export interface SpineRefs {
  * look, so a caller that passes nothing renders exactly as rehab does
  * today — the geometry is shared, the palette is not.
  *
- * NOT covered, because it lives in skeletonExtras and that file is
- * shared by other callers: the spine stroke's glow
- * (`rgba(249,115,22,0.55)`, blur 12) and the neck line's glow
- * (same colour, blur 8) are hardcoded there. A shell with a different
- * halo treatment keeps the orange glow on those two strokes until
- * those become options too.
+ * This now covers the glows too: the spine stroke's halo and the neck
+ * line's halo used to be hardcoded in skeletonExtras and are options
+ * there as well, so a shell whose skeleton uses a dark drop-shadow can
+ * pass its own instead of inheriting the orange.
  */
 export interface SpineStyle {
   /** Spine polyline colour. Default: the helper's orange. */
@@ -80,6 +78,14 @@ export interface SpineStyle {
   neckStrokeStyle?: string;
   /** Neck centreline width. Default max(2, dispW * 0.002). */
   neckLineWidth?: number;
+  /** Spine stroke glow colour. Default "rgba(249, 115, 22, 0.55)". */
+  shadowColor?: string;
+  /** Spine stroke glow radius. Default 12. Pass 0 for no glow. */
+  shadowBlur?: number;
+  /** Neck glow colour. Default "rgba(249, 115, 22, 0.55)". */
+  neckShadowColor?: string;
+  /** Neck glow radius. Default 8. Pass 0 for no glow. */
+  neckShadowBlur?: number;
 }
 
 /** Fresh state for one camera. Hold it in a single useRef. */
@@ -588,6 +594,8 @@ export function drawSpineOverlay(
     visibilityThreshold: OVERLAY_VIS_THRESHOLD,
     strokeStyle: style?.neckStrokeStyle ?? "rgba(249, 115, 22, 0.55)",
     lineWidth: style?.neckLineWidth ?? Math.max(2, dispW * 0.002),
+    shadowColor: style?.neckShadowColor,
+    shadowBlur: style?.neckShadowBlur,
     endPoint: neckAnchor,
   });
   // The four control points describe the bend correctly, but three
@@ -614,6 +622,8 @@ export function drawSpineOverlay(
     // defaults, so rehab is unchanged.
     strokeStyle: style?.strokeStyle,
     lineWidth: style?.lineWidth,
+    shadowColor: style?.shadowColor,
+    shadowBlur: style?.shadowBlur,
     tangentFrom: spineTangentFrom,
   });
 

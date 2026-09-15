@@ -241,19 +241,26 @@ export function AssessmentCameraShell({
     // joint-dot colour and radius, and the neck keeps its ~2/3-width,
     // 0.55-alpha relationship to the spine above it.
     //
-    // One thing this cannot reach: the spine and neck strokes carry an
-    // orange glow hardcoded inside skeletonExtras, which is shared with
-    // other callers. Everything else matches.
+    // The glow goes dark to match too. A white stroke under an orange
+    // halo reads as a different overlay system sitting on the skeleton;
+    // under the bones' own drop-shadow it reads as part of it. Kept as
+    // a shadow rather than dropped to blur 0 — the halo is what makes
+    // a white line survive a white shirt, which is the whole reason the
+    // bones have one.
     const boneW = Math.max(2, dispW * 0.0035);
     drawSpineOverlay(ctx, landmarks, dispW, dispH, spineRefs.current, {
       strokeStyle: "#FFFFFF",
       lineWidth: boneW,
+      shadowColor: "rgba(0,0,0,0.6)",
+      shadowBlur: 3,
       dotColor: "#EF4444",
       dotRadius: Math.max(4, dispW * 0.005),
       dotShadowColor: "rgba(0,0,0,0.6)",
       dotShadowBlur: 3,
       neckStrokeStyle: "rgba(255, 255, 255, 0.55)",
       neckLineWidth: boneW * (2 / 3),
+      neckShadowColor: "rgba(0,0,0,0.6)",
+      neckShadowBlur: 3,
     });
 
     ctx.restore();
