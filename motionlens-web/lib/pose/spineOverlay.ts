@@ -192,6 +192,22 @@ export function drawSpineOverlay(
    *  Undefined (every caller but biomech) means everything is
    *  usable, so those callers are byte-identical. */
   isUsable?: (landmarkIndex: number) => boolean,
+  /** Shift the side-profile spine POSTERIORLY so it sits where the
+   *  real spine is, behind the body. Default true.
+   *
+   *  Shoulder-mid and hip-mid sit at the body's mid-depth, so a line
+   *  between them runs through the middle of the trunk rather than
+   *  along the back the clinician is looking at. That only reads as
+   *  correct against a video of the patient. A shell drawing the
+   *  skeleton on an empty background has nothing for the shifted line
+   *  to line up with, so it just looks off-centre between the
+   *  shoulder and hip bars — those callers pass false.
+   *
+   *  False takes exactly the path a missing nose already takes:
+   *  spineDraw stays [S, H] and neckAnchor stays undefined, so the
+   *  neck falls back to the raw shoulder-mid. The Hermite curve, the
+   *  gate, every guard and the front 4-point path are untouched. */
+  posteriorOffset: boolean = true,
 ): void {
   // Aliased so the geometry below is the rehab source unchanged,
   // down to the identifier names.
@@ -387,7 +403,7 @@ export function drawSpineOverlay(
         // fwd = ear → nose (which way the patient faces);
         // p    = the trunk-axis perpendicular pointing AWAY from
         //        the nose, i.e. toward the back.
-        if (nose) {
+        if (posteriorOffset && nose) {
           const fx = (nose.x - ear.x) * dispW;
           const fy = (nose.y - ear.y) * dispH;
           const fLen = Math.hypot(fx, fy);

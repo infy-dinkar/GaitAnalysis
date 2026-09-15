@@ -387,6 +387,12 @@ export function LiveBiomechCamera({
           neckShadowBlur: 10,
         },
         inFrame,
+        // No posterior offset: that shift only reads as correct
+        // against a video of the patient's back. Here the skeleton
+        // floats on a dark gradient with nothing to line up against,
+        // so a shifted line just sits off-centre between the shoulder
+        // and hip bars.
+        false,
       );
     },
     [bodyPart],
