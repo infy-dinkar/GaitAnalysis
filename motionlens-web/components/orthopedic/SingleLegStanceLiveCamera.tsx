@@ -17,6 +17,11 @@ import { useCamera } from "@/hooks/useCamera";
 import { usePoseDetectionLive as usePoseDetection } from "@/hooks/usePoseDetectionLive";
 import { Button } from "@/components/ui/Button";
 import { LM_LIVE as LM, SKELETON_EDGES_LIVE as SKELETON_EDGES } from "@/lib/pose/landmarks-live";
+import {
+  TORSO_SIDE_EDGES,
+  createSpineRefs,
+  drawSpineOverlay,
+} from "@/lib/pose/spineOverlay";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 
 const OVERLAY_VIS_THRESHOLD = 0.35;
@@ -78,6 +83,11 @@ export function SingleLegStanceLiveCamera({
   const lastVideoRef = useRef<HTMLVideoElement | null>(null);
   const lastNormRef = useRef<Norm[] | null>(null);
   const onFrameRef = useRef(onFrame);
+  // Draw-only smoothing state for the spine overlay — the side/front
+  // verdict, two EMA direction vectors and the front-bend offset plus
+  // its latch. Owned by lib/pose/spineOverlay; nothing here reaches
+  // onFrame or this test's engine. One set per camera, created once.
+  const spineRefs = useRef(createSpineRefs());
 
   const [busy, setBusy] = useState(false);
   const [showPip, setShowPip] = useState(true);
@@ -118,12 +128,44 @@ export function SingleLegStanceLiveCamera({
     ctx.clearRect(0, 0, w, h);
     if (!landmarks || landmarks.length === 0) return;
 
-    const px = (n: Norm) => ({ x: n.x * w, y: n.y * h });
+    // ── object-cover compensation ────────────────────────────────
+    // The <video> is styled `object-cover`: it scales to COVER the
+    // container and the overflow is cropped. Mapping a normalised
+    // landmark straight onto the container (n.x * w) therefore assumed
+    // the whole frame was visible, which squashed the skeleton along
+    // whichever axis got cropped — correct at the centre, progressively
+    // wrong toward the edges.
+    //
+    // Reproduce the browser's own object-cover geometry: scale by the
+    // LARGER ratio, then centre the overflow. When the container and
+    // video aspects match, dispW === w, dispH === h and the offsets are
+    // 0, so the mapping collapses to exactly `n.x * w, n.y * h`.
+    const video = videoRef.current;
+    const vw = video?.videoWidth ?? 0;
+    const vh = video?.videoHeight ?? 0;
+    const coverScale = vw > 0 && vh > 0 ? Math.max(w / vw, h / vh) : 0;
+    const dispW = coverScale > 0 ? vw * coverScale : w;
+    const dispH = coverScale > 0 ? vh * coverScale : h;
+    const offX = (w - dispW) / 2;
+    const offY = (h - dispH) / 2;
+
+    const px = (n: Norm) => ({ x: n.x * dispW, y: n.y * dispH });
+
+    // The origin shift goes through the canvas transform, so everything
+    // drawn inside this save/restore lands in the same display space.
+    ctx.save();
+    ctx.translate(offX, offY);
     ctx.strokeStyle = "#FFFFFF";
     ctx.lineWidth = Math.max(2, w * 0.0035);
     ctx.shadowColor = "rgba(0,0,0,0.6)";
     ctx.shadowBlur = 3;
     for (const [a, b] of SKELETON_EDGES) {
+      // Skip the shoulder→hip verticals so the trunk no longer closes
+      // into a rectangle — the spine overlay below fills the middle.
+      // Both crossbars (shoulder-shoulder, hip-hip) stay. The skip lives
+      // here, not in SKELETON_EDGES_LIVE: that table has 20 consumers.
+      const key = a < b ? `${a}-${b}` : `${b}-${a}`;
+      if (TORSO_SIDE_EDGES.has(key)) continue;
       const p = landmarks[a];
       const q = landmarks[b];
       if (!p || !q || p.visibility < OVERLAY_VIS_THRESHOLD || q.visibility < OVERLAY_VIS_THRESHOLD) continue;
@@ -145,7 +187,31 @@ export function SingleLegStanceLiveCamera({
       ctx.fill();
     }
     ctx.shadowBlur = 0;
-  }, []);
+
+    // Trunk (neck centreline + spine) — the shared overlay from
+    // lib/pose/spineOverlay, drawn AFTER the bones and dots so it sits
+    // on top, and inside the translate because the module works in that
+    // already-translated display space. Styled to this camera's own
+    // palette: bone colour at bone width, joint-dot colour and radius,
+    // and the same dark halo the bones use.
+    const boneW = Math.max(2, dispW * 0.0035);
+    drawSpineOverlay(ctx, landmarks, dispW, dispH, spineRefs.current, {
+      strokeStyle: "#FFFFFF",
+      lineWidth: boneW,
+      shadowColor: "rgba(0,0,0,0.6)",
+      shadowBlur: 3,
+      dotColor: "#EF4444",
+      dotRadius: Math.max(4, dispW * 0.005),
+      dotShadowColor: "rgba(0,0,0,0.6)",
+      dotShadowBlur: 3,
+      neckStrokeStyle: "rgba(255, 255, 255, 0.55)",
+      neckLineWidth: boneW * (2 / 3),
+      neckShadowColor: "rgba(0,0,0,0.6)",
+      neckShadowBlur: 3,
+    });
+
+    ctx.restore();
+  }, [videoRef]);
 
   useEffect(() => {
     if (!active || !detectorReady) {
