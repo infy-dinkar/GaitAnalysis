@@ -74,6 +74,13 @@ export interface CenterlineOptions {
    *  stop short of the spine's top and leave a visible gap. The
    *  shoulder visibility gate above still applies. */
   endPoint?: { x: number; y: number };
+  /** Glow colour behind the stroke. Defaults to the orange halo
+   *  every caller had baked in before this became an option, so
+   *  omitting it changes nothing. A shell whose skeleton uses a
+   *  different halo (e.g. a dark drop-shadow) passes its own. */
+  shadowColor?: string;
+  /** Glow radius. Default 8. Pass 0 for no glow at all. */
+  shadowBlur?: number;
 }
 
 export function drawCenterline(
@@ -103,8 +110,8 @@ export function drawCenterline(
   ctx.lineWidth = opts?.lineWidth ?? Math.max(2, w * 0.003);
   ctx.lineCap = "round";
   ctx.setLineDash([]);
-  ctx.shadowColor = "rgba(249, 115, 22, 0.55)";
-  ctx.shadowBlur = 8;
+  ctx.shadowColor = opts?.shadowColor ?? "rgba(249, 115, 22, 0.55)";
+  ctx.shadowBlur = opts?.shadowBlur ?? 8;
   ctx.beginPath();
   ctx.moveTo(nosePx.x, nosePx.y);
   ctx.lineTo(shMid.x, shMid.y);
@@ -168,6 +175,13 @@ export interface SpineSegmentOptions {
    *  Omit it — as every frontal-view frame does — and the straight
    *  2-point expansion below runs unchanged. */
   tangentFrom?: { x: number; y: number };
+  /** Glow colour behind the spine stroke. Defaults to the orange
+   *  halo that was hardcoded here before, so omitting it changes
+   *  nothing. Applies to the STROKE only — the interior dot glow
+   *  below keeps its own default. */
+  shadowColor?: string;
+  /** Glow radius. Default 12. Pass 0 for no glow at all. */
+  shadowBlur?: number;
 }
 
 export function drawSpineSegment(
@@ -356,8 +370,8 @@ export function drawSpineSegment(
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.setLineDash([]);
-  ctx.shadowColor = "rgba(249, 115, 22, 0.55)";
-  ctx.shadowBlur = 12;
+  ctx.shadowColor = opts?.shadowColor ?? "rgba(249, 115, 22, 0.55)";
+  ctx.shadowBlur = opts?.shadowBlur ?? 12;
 
   ctx.beginPath();
   ctx.moveTo(spinePoints[0].x, spinePoints[0].y);

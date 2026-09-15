@@ -35,6 +35,11 @@ import {
   LM_LIVE as LM,
   SKELETON_EDGES_LIVE as SKELETON_EDGES,
 } from "@/lib/pose/landmarks-live";
+import {
+  TORSO_SIDE_EDGES,
+  createSpineRefs,
+  drawSpineOverlay,
+} from "@/lib/pose/spineOverlay";
 import type { Keypoint } from "@tensorflow-models/pose-detection";
 
 const OVERLAY_VIS_THRESHOLD = 0.35;
@@ -108,6 +113,11 @@ export function AssessmentCameraShell({
   const cancelledRef = useRef(false);
   const lastNormRef = useRef<Norm[] | null>(null);
   const onFrameRef = useRef(onFrame);
+  // Draw-only smoothing state for the spine overlay — the side/front
+  // verdict, two EMA direction vectors and the front-bend offset plus
+  // its latch. Owned by lib/pose/spineOverlay; nothing here reaches
+  // onFrame or any assessment engine. One set per camera, created once.
+  const spineRefs = useRef(createSpineRefs());
 
   const [busy, setBusy] = useState(false);
 
@@ -137,7 +147,38 @@ export function AssessmentCameraShell({
     ctx.clearRect(0, 0, w, h);
     if (!landmarks || landmarks.length === 0) return;
 
-    const px = (n: Norm) => ({ x: n.x * w, y: n.y * h });
+    // ── object-cover compensation ────────────────────────────────
+    // The <video> is styled `object-cover`: it scales to COVER the
+    // container and the overflow is cropped. Mapping a normalised
+    // landmark straight onto the container (n.x * w) therefore
+    // assumed the whole frame was visible, which squashed the
+    // skeleton along whichever axis got cropped — correct at the
+    // centre, progressively wrong toward the edges (a wrist landed
+    // mid-forearm on a 16:9 camera in a ~4:3 box).
+    //
+    // Reproduce the browser's own object-cover geometry: scale by
+    // the LARGER ratio, then centre the overflow.
+    //
+    // When the container and video aspects match, scale === w / vw,
+    // so dispW === w, dispH === h and offX === offY === 0 — the
+    // mapping collapses to exactly `n.x * w, n.y * h`. Setups that
+    // were never cropped are byte-identical to before.
+    const video = videoRef.current;
+    const vw = video?.videoWidth ?? 0;
+    const vh = video?.videoHeight ?? 0;
+    const scale = vw > 0 && vh > 0 ? Math.max(w / vw, h / vh) : 0;
+    const dispW = scale > 0 ? vw * scale : w;
+    const dispH = scale > 0 ? vh * scale : h;
+    const offX = (w - dispW) / 2;
+    const offY = (h - dispH) / 2;
+
+    const px = (n: Norm) => ({ x: n.x * dispW, y: n.y * dispH });
+
+    // The origin shift is applied through the canvas transform rather
+    // than folded into px(), so anything drawn inside this save/restore
+    // lands in the same display space without needing its own offset.
+    ctx.save();
+    ctx.translate(offX, offY);
 
     // Bones — white with a soft dark halo so they read on ANY
     // background (light shirt, dark bg, etc.).
@@ -148,6 +189,17 @@ export function AssessmentCameraShell({
     ctx.shadowColor = "rgba(0,0,0,0.6)";
     ctx.shadowBlur = 3;
     for (const [a, b] of SKELETON_EDGES) {
+      // Skip the shoulder→hip verticals so the trunk no longer closes
+      // into a rectangle — the spine overlay below fills the middle
+      // instead. The horizontal shoulder-shoulder and hip-hip crossbars
+      // stay, which is what keeps the spine reading as a centre column
+      // rather than leaving a gap. Order-independent key, because the
+      // shared table's pair order is not guaranteed.
+      //
+      // The skip lives here rather than in SKELETON_EDGES_LIVE: that
+      // table has 20 consumers and only some of them want the change.
+      const key = a < b ? `${a}-${b}` : `${b}-${a}`;
+      if (TORSO_SIDE_EDGES.has(key)) continue;
       const p = landmarks[a];
       const q = landmarks[b];
       if (
@@ -175,7 +227,44 @@ export function AssessmentCameraShell({
       ctx.fill();
     }
     ctx.shadowBlur = 0;
-  }, []);
+
+    // Trunk (neck centreline + spine) — the same overlay the rehab live
+    // view draws, from lib/pose/spineOverlay. Drawn AFTER the bones and
+    // dots so it sits on top as annotation, and inside the translate
+    // above because the module documents that it works in that
+    // already-translated display space.
+    //
+    // The geometry is shared; the palette is not. Rehab is side-coded
+    // orange-on-cyan/pink, this shell is white bones with a dark halo
+    // and red joints — so the spine takes the bone colour at the BONE
+    // width (not rehab's heavier orange stroke), the knot dots take the
+    // joint-dot colour and radius, and the neck keeps its ~2/3-width,
+    // 0.55-alpha relationship to the spine above it.
+    //
+    // The glow goes dark to match too. A white stroke under an orange
+    // halo reads as a different overlay system sitting on the skeleton;
+    // under the bones' own drop-shadow it reads as part of it. Kept as
+    // a shadow rather than dropped to blur 0 — the halo is what makes
+    // a white line survive a white shirt, which is the whole reason the
+    // bones have one.
+    const boneW = Math.max(2, dispW * 0.0035);
+    drawSpineOverlay(ctx, landmarks, dispW, dispH, spineRefs.current, {
+      strokeStyle: "#FFFFFF",
+      lineWidth: boneW,
+      shadowColor: "rgba(0,0,0,0.6)",
+      shadowBlur: 3,
+      dotColor: "#EF4444",
+      dotRadius: Math.max(4, dispW * 0.005),
+      dotShadowColor: "rgba(0,0,0,0.6)",
+      dotShadowBlur: 3,
+      neckStrokeStyle: "rgba(255, 255, 255, 0.55)",
+      neckLineWidth: boneW * (2 / 3),
+      neckShadowColor: "rgba(0,0,0,0.6)",
+      neckShadowBlur: 3,
+    });
+
+    ctx.restore();
+  }, [videoRef]);
 
   useEffect(() => {
     if (!active || !detectorReady) {

@@ -25,6 +25,11 @@ import type { LiveKeypoint as Keypoint } from "@/hooks/usePoseDetectionLive";
 import { computeKneeAngle, type KneeMovementId } from "@/lib/biomech/knee-live";
 import { computeHipAngle, type HipMovementId } from "@/lib/biomech/hip-live";
 import { computeAnkleAngle, type AnkleMovementId } from "@/lib/biomech/ankle-live";
+import {
+  TORSO_SIDE_EDGES,
+  createSpineRefs,
+  drawSpineOverlay,
+} from "@/lib/pose/spineOverlay";
 // Suppress unused-import warning for SKELETON_EDGES — the local
 // FULL_BODY_EDGES table inlines LM-keyed edges directly, but the
 // brief asked for this re-export to be available from landmarks-live
@@ -217,6 +222,9 @@ export function LiveBiomechCamera({
   // an annotated thumbnail (video frame + skeleton overlay).
   const lastNormRef = useRef<Norm[] | null>(null);
   const compositeCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // Draw-only smoothing state for the spine overlay. Nothing here
+  // reaches onResult, onSmoothedKeypoints, or any angle engine.
+  const spineRefs = useRef(createSpineRefs());
   // Latest baseline kept in a ref so the rAF closure picks up live
   // updates without re-binding the loop on every change.
   const neckRotationBaselineRef = useRef<NeckRotationCalibration | null>(
@@ -300,6 +308,12 @@ export function LiveBiomechCamera({
       ctx.shadowBlur = 10;
       ctx.shadowColor = "rgba(255, 255, 255, 0.35)";
       for (const [a, b] of edges) {
+        // Skip the shoulder→hip verticals so the trunk no longer
+        // closes into a rectangle — the spine overlay below fills the
+        // middle. Both crossbars stay. Skipped here rather than by
+        // editing FULL_BODY_EDGES, which the thumbnail loop shares.
+        const key = a < b ? `${a}-${b}` : `${b}-${a}`;
+        if (TORSO_SIDE_EDGES.has(key)) continue;
         const la = landmarks[a];
         const lb = landmarks[b];
         if (!la || !lb) continue;
@@ -335,6 +349,51 @@ export function LiveBiomechCamera({
         ctx.stroke();
       }
       ctx.shadowBlur = 0;
+
+      // Trunk (neck centreline + spine) — the shared overlay from
+      // lib/pose/spineOverlay, drawn AFTER the bones and dots.
+      //
+      // NO object-cover mapping here, unlike the assessment shells:
+      // there is no full-size background video to register against.
+      // The camera is a PiP inset and the skeleton owns the panel, so
+      // `n.x * w` stretching the pose to fill it is correct — the
+      // compensation would only shrink it and add dead margins.
+      //
+      // inFrame is passed through: the module gates on visibility
+      // alone, and BlazePose hallucinates positions for joints below
+      // the view. Without it the spine would draw to a fabricated
+      // pelvis while the bone loop above correctly refused to.
+      //
+      // Styled to this file's glow-on-dark palette, not the
+      // assessment halo-on-video one.
+      drawSpineOverlay(
+        ctx,
+        landmarks,
+        w,
+        h,
+        spineRefs.current,
+        {
+          strokeStyle: LINE_COLOR,
+          lineWidth: 3.5,
+          shadowColor: "rgba(255, 255, 255, 0.35)",
+          shadowBlur: 10,
+          dotColor: DOT_COLOR,
+          dotRadius: 6,
+          dotShadowColor: "rgba(239, 68, 68, 0.55)",
+          dotShadowBlur: 8,
+          neckStrokeStyle: "rgba(255, 255, 255, 0.55)",
+          neckLineWidth: 3.5 * (2 / 3),
+          neckShadowColor: "rgba(255, 255, 255, 0.35)",
+          neckShadowBlur: 10,
+        },
+        inFrame,
+        // No posterior offset: that shift only reads as correct
+        // against a video of the patient's back. Here the skeleton
+        // floats on a dark gradient with nothing to line up against,
+        // so a shifted line just sits off-centre between the shoulder
+        // and hip bars.
+        false,
+      );
     },
     [bodyPart],
   );
