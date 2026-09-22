@@ -57,45 +57,73 @@ interface Sample extends Point {
  * Drives one hold. Feed it every frame; it reports ring progress and
  * hands back a point once the hold completes.
  */
+export type HoldStatus = "idle" | "holding" | "drifted" | "paused";
+
+/** What the patient should be told, per status. Empty for "holding" —
+ *  the calibration screen already says what to do. */
+export const HOLD_MESSAGE: Record<HoldStatus, string> = {
+  idle: "Raise your hand into position to start the timer",
+  holding: "Hold still…",
+  drifted: "Hold still",
+  paused: "Hand out of view — move back or lower the camera",
+};
+
 export class HoldTracker {
   private samples: Sample[] = [];
   private anchor: Point | null = null;
-  private startedAt = 0;
+  /** Time actually spent holding. Accumulated rather than taken from a
+   *  wall-clock start, so a pause can stop the clock without losing
+   *  the progress already earned. */
+  private heldMs = 0;
+  private lastFeedMs = 0;
 
   /** 0..1 ring fill. */
   progress = 0;
   /** True while the wrist is inside tolerance and the ring is filling. */
   holding = false;
+  /** Why the ring is doing what it is doing. The ring used to reset
+   *  silently when the wrist left the frame, which is indistinguishable
+   *  to the patient from "hold stiller" — so they lower the arm until
+   *  it fills, and the recorded reach is wrong. */
+  status: HoldStatus = "idle";
 
   reset(): void {
     this.samples = [];
     this.anchor = null;
-    this.startedAt = 0;
+    this.heldMs = 0;
+    this.lastFeedMs = 0;
     this.progress = 0;
     this.holding = false;
+    this.status = "idle";
   }
 
   /**
    * @returns the recorded point when the hold completes, else null.
    */
   feed(nx: number, ny: number, usable: boolean, nowMs: number): Point | null {
-    // Rejected sample — visibility floor or out of frame. Treat exactly
-    // like a break in the hold rather than guessing a position.
+    const prev = this.lastFeedMs;
+    this.lastFeedMs = nowMs;
+    // Clamp so a backgrounded tab or a long stall cannot award seconds
+    // of hold time in a single frame.
+    const dt = prev > 0 ? Math.max(0, Math.min(200, nowMs - prev)) : 0;
+
+    // Rejected sample — visibility floor or out of frame. PAUSE rather
+    // than reset: the wrist leaving the top of the frame is exactly
+    // what happens when the arm goes properly up, and throwing the
+    // progress away there is what taught patients to lower the arm.
     if (!usable) {
-      this.anchor = null;
-      this.samples = [];
-      this.startedAt = 0;
-      this.progress = 0;
+      this.status = "paused";
       this.holding = false;
       return null;
     }
 
     if (!this.anchor) {
       this.anchor = { nx, ny };
-      this.startedAt = nowMs;
+      this.heldMs = 0;
       this.samples = [{ nx, ny, t: nowMs }];
       this.progress = 0;
       this.holding = true;
+      this.status = "holding";
       return null;
     }
 
@@ -103,19 +131,21 @@ export class HoldTracker {
     if (drift > STILL_TOLERANCE) {
       // Moved too far — restart the ring from the new position.
       this.anchor = { nx, ny };
-      this.startedAt = nowMs;
+      this.heldMs = 0;
       this.samples = [{ nx, ny, t: nowMs }];
       this.progress = 0;
       this.holding = true;
+      this.status = "drifted";
       return null;
     }
 
     this.samples.push({ nx, ny, t: nowMs });
     this.holding = true;
-    const elapsed = nowMs - this.startedAt;
-    this.progress = Math.min(1, elapsed / HOLD_MS);
+    this.status = "holding";
+    this.heldMs += dt;
+    this.progress = Math.min(1, this.heldMs / HOLD_MS);
 
-    if (elapsed < HOLD_MS) return null;
+    if (this.heldMs < HOLD_MS) return null;
 
     // Median of the last MEDIAN_WINDOW_MS of samples.
     const cutoff = nowMs - MEDIAN_WINDOW_MS;
@@ -210,6 +240,36 @@ export function buildReachBox(
     hand,
     holds: { up, side, across },
   };
+}
+
+/**
+ * Sanity check on the "arm up" hold.
+ *
+ * It is the same arm in every direction, so the overhead reach should
+ * be close to the sideways reach. A much shorter "up" radius means the
+ * arm never actually went up — almost always because the raised wrist
+ * left the top of the frame, the ring refused to fill, and the patient
+ * lowered the arm until it did.
+ */
+export const UP_REACH_TOLERANCE = 0.25;
+
+export function upReachLooksShort(
+  up: Point,
+  side: Point,
+  shoulderX: number,
+  shoulderY: number,
+  cover: Cover,
+): { short: boolean; rUp: number; rSide: number; ratio: number } {
+  const px = (p: Point) => ({
+    x: cover.offX + p.nx * cover.dispW,
+    y: cover.offY + p.ny * cover.dispH,
+  });
+  const u = px(up);
+  const s = px(side);
+  const rUp = Math.hypot(u.x - shoulderX, u.y - shoulderY);
+  const rSide = Math.hypot(s.x - shoulderX, s.y - shoulderY);
+  const ratio = rSide > 1 ? rUp / rSide : 0;
+  return { short: ratio < 1 - UP_REACH_TOLERANCE, rUp, rSide, ratio };
 }
 
 function clamp01(v: number): number {

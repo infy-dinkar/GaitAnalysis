@@ -131,6 +131,12 @@ export interface GameDebug {
   lastSpawnDeg: number;
   /** Last spawn's distance as a percentage of the reach that way. */
   lastSpawnPct: number;
+  /** Shoulder -> elbow -> wrist, canvas px. */
+  armLenPx: number;
+  /** Space above the chosen shoulder on the VISIBLE canvas, px. */
+  headroomPx: number;
+  /** headroomPx / armLenPx. Below ~1.1 a raised arm cannot be seen. */
+  headroomRatio: number;
 }
 
 export function createGameDebug(): GameDebug {
@@ -165,6 +171,9 @@ export function createGameDebug(): GameDebug {
     reachR: null,
     lastSpawnDeg: 0,
     lastSpawnPct: 0,
+    armLenPx: 0,
+    headroomPx: 0,
+    headroomRatio: 0,
   };
 }
 
@@ -547,6 +556,9 @@ export class FruitHarvestScene extends Phaser.Scene {
     d.poseHz = Math.round(c.state.poseHz * 10) / 10;
     d.cutoffHz = Math.round(this.filter.lastCutoff * 100) / 100;
     d.palmFromElbow = c.state.palmFromElbow;
+    d.armLenPx = Math.round(c.state.armLenPx);
+    d.headroomPx = Math.round(c.state.headroomPx);
+    d.headroomRatio = Math.round(c.state.headroomRatio * 100) / 100;
     if (this.fpsText) {
       const sh = d.shoulderPx ? `${d.shoulderPx.x},${d.shoulderPx.y}` : "—";
       const rr = d.reachR
@@ -557,6 +569,8 @@ export class FruitHarvestScene extends Phaser.Scene {
         + `cutoff ${d.cutoffHz}Hz  lag ${d.lagPx}px  `
         + `palm ${d.palmFromElbow ? "elbow" : "wrist"}\n`
         + `shoulder ${sh}  reach px: ${rr}\n`
+        + `arm ${d.armLenPx}px  headroom ${d.headroomPx}px  `
+        + `ratio ${d.headroomRatio}\n`
         + `last spawn ${d.lastSpawnDeg >= 0 ? "+" : ""}${d.lastSpawnDeg}deg `
         + `@ ${d.lastSpawnPct}% of reach`,
       );

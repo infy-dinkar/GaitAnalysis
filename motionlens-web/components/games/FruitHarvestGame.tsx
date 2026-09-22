@@ -28,12 +28,16 @@ import {
 } from "@/lib/games/handTracker";
 import {
   HOLDS,
+  HOLD_MESSAGE,
   HOLD_MS,
   HoldTracker,
   buildReachBox,
+  upReachLooksShort,
+  type HoldStatus,
   type Point,
   type ReachBox,
 } from "@/lib/games/calibration";
+import { HEADROOM_RATIO_MIN } from "@/lib/games/handTracker";
 import { GameAudio } from "@/lib/games/gameAudio";
 import {
   ROUND_MS,
@@ -47,26 +51,39 @@ type Phase =
   | "setup"
   | "countdown-calib"
   | "calibrate"
+  | "verify"
   | "countdown-play"
   | "play"
   | "result";
 
 interface Live {
+  noseOk: boolean;
   shouldersOk: boolean;
-  hipsOk: boolean;
+  elbowOk: boolean;
   wristOk: boolean;
-  ready: boolean;
+  headroomOk: boolean;
+  setupOk: boolean;
+  armLenPx: number;
+  headroomPx: number;
+  headroomRatio: number;
   progress: number;
   holding: boolean;
+  holdStatus: HoldStatus;
 }
 
 const BLANK_LIVE: Live = {
+  noseOk: false,
   shouldersOk: false,
-  hipsOk: false,
+  elbowOk: false,
   wristOk: false,
-  ready: false,
+  headroomOk: false,
+  setupOk: false,
+  armLenPx: 0,
+  headroomPx: 0,
+  headroomRatio: 0,
   progress: 0,
   holding: false,
+  holdStatus: "idle",
 };
 
 export function FruitHarvestGame() {
@@ -85,6 +102,9 @@ export function FruitHarvestGame() {
   const [result, setResult] = useState<{ harvested: number; missed: number } | null>(
     null,
   );
+  const [upCheck, setUpCheck] = useState<
+    { rUp: number; rSide: number; ratio: number } | null
+  >(null);
   const [dbg, setDbg] = useState<GameDebug | null>(null);
   const debugRef = useRef<GameDebug>(createGameDebug());
 
@@ -100,6 +120,7 @@ export function FruitHarvestGame() {
   const audioRef = useRef<GameAudio | null>(null);
   const holdIndexRef = useRef(0);
   const lastPoseAtRef = useRef(0);
+  const calibModeRef = useRef<"all" | "upOnly">("all");
   const onHoldDoneRef = useRef<(p: Point) => void>(() => {});
 
   // ── Camera. Started from the hand-pick click so the permission
@@ -194,12 +215,18 @@ export function FruitHarvestGame() {
       const s = stateRef.current;
       const t = holdRef.current;
       setLive({
+        noseOk: s.noseOk,
         shouldersOk: s.shouldersOk,
-        hipsOk: s.hipsOk,
+        elbowOk: s.elbowOk,
         wristOk: s.wristOk,
-        ready: s.ready,
+        headroomOk: s.headroomOk,
+        setupOk: s.setupOk,
+        armLenPx: Math.round(s.armLenPx),
+        headroomPx: Math.round(s.headroomPx),
+        headroomRatio: Math.round(s.headroomRatio * 100) / 100,
         progress: t.progress,
         holding: t.holding,
+        holdStatus: t.status,
       });
     }, 60);
     return () => window.clearInterval(id);
@@ -224,36 +251,71 @@ export function FruitHarvestGame() {
   }, [phase]);
 
   // ── Calibration: advance through the three holds, then build the box.
+  // Build the box from whatever holds are recorded, then check the "up"
+  // hold against the "side" hold — it is the same arm, so a much
+  // shorter overhead reach means the arm never really went up.
+  const finishCalibration = useCallback(() => {
+    const up = pointsRef.current.up;
+    const side = pointsRef.current.side;
+    const across = pointsRef.current.across;
+    const h = handRef.current;
+    const s = stateRef.current;
+    holdRef.current.reset();
+
+    if (!up || !side || !across || !h) {
+      setCount(3);
+      setPhase("countdown-play");
+      phaseRef.current = "countdown-play";
+      return;
+    }
+
+    boxRef.current = buildReachBox(
+      up,
+      side,
+      across,
+      s.midXValid ? s.midX : 0.5,
+      h,
+    );
+
+    const chk = s.shoulderOk
+      ? upReachLooksShort(up, side, s.shoulderX, s.shoulderY, s.cover)
+      : null;
+    if (chk?.short) {
+      setUpCheck({
+        rUp: Math.round(chk.rUp),
+        rSide: Math.round(chk.rSide),
+        ratio: Math.round(chk.ratio * 100),
+      });
+      setPhase("verify");
+      phaseRef.current = "verify";
+      return;
+    }
+    setCount(3);
+    setPhase("countdown-play");
+    phaseRef.current = "countdown-play";
+  }, []);
+
   useEffect(() => {
     onHoldDoneRef.current = (p: Point) => {
       const idx = holdIndexRef.current;
       pointsRef.current[HOLDS[idx].id] = p;
+      holdRef.current.reset();
+
+      // Redo mode repeats only the "up" hold, so go straight back to
+      // the check rather than walking the other two again.
+      if (calibModeRef.current === "upOnly") {
+        calibModeRef.current = "all";
+        finishCalibration();
+        return;
+      }
       if (idx < HOLDS.length - 1) {
         holdIndexRef.current = idx + 1;
         setHoldIndex(idx + 1);
-        holdRef.current.reset();
         return;
       }
-      const up = pointsRef.current.up;
-      const side = pointsRef.current.side;
-      const across = pointsRef.current.across;
-      const h = handRef.current;
-      if (up && side && across && h) {
-        const s = stateRef.current;
-        boxRef.current = buildReachBox(
-          up,
-          side,
-          across,
-          s.midXValid ? s.midX : 0.5,
-          h,
-        );
-      }
-      holdRef.current.reset();
-      setCount(3);
-      setPhase("countdown-play");
-      phaseRef.current = "countdown-play";
+      finishCalibration();
     };
-  }, []);
+  }, [finishCalibration]);
 
   // ── Play: mount Phaser, tear it down on exit. Dynamic import keeps
   //    Phaser out of every other route's bundle.
@@ -365,6 +427,25 @@ export function FruitHarvestGame() {
     phaseRef.current = "countdown-calib";
   }, []);
 
+  /** Repeat the "arm up" hold only; side and across are kept. */
+  const redoUpHold = useCallback(() => {
+    calibModeRef.current = "upOnly";
+    holdIndexRef.current = 0;
+    setHoldIndex(0);
+    delete pointsRef.current.up;
+    holdRef.current.reset();
+    setUpCheck(null);
+    setPhase("calibrate");
+    phaseRef.current = "calibrate";
+  }, []);
+
+  const acceptCalibration = useCallback(() => {
+    setUpCheck(null);
+    setCount(3);
+    setPhase("countdown-play");
+    phaseRef.current = "countdown-play";
+  }, []);
+
   const playAgain = useCallback(() => {
     setResult(null);
     setCount(3);
@@ -418,6 +499,9 @@ export function FruitHarvestGame() {
         />
 
         {debugOn && phase === "play" && dbg && <DebugPanel d={dbg} />}
+        {debugOn && (phase === "setup" || phase === "calibrate") && (
+          <SetupDebugPanel live={live} holdId={hold.id} />
+        )}
 
         {(camError || poseError) && (
           <Overlay>
@@ -451,16 +535,21 @@ export function FruitHarvestGame() {
         {phase === "setup" && (
           <Overlay>
             <h2 className="text-2xl font-semibold text-white">
-              Stand about 2 m back, full body in frame
+              Head and shoulders in frame, with room above your head
             </h2>
-            <ul className="mt-6 space-y-2 text-lg">
+            <p className="mt-1 text-base text-white/60">
+              Your legs are not needed for this game.
+            </p>
+            <ul className="mt-5 space-y-2 text-lg">
+              <Tick ok={live.noseOk} label="Head visible" />
               <Tick ok={live.shouldersOk} label="Both shoulders visible" />
-              <Tick ok={live.hipsOk} label="Both hips visible" />
               <Tick
-                ok={live.wristOk}
-                label={`${hand === "left" ? "Left" : "Right"} hand visible`}
+                ok={live.elbowOk && live.wristOk}
+                label={`${hand === "left" ? "Left" : "Right"} elbow and hand visible`}
               />
             </ul>
+
+            <HeadroomBar live={live} />
 
             <div className="mt-8 flex flex-col items-center">
               <p className="text-lg text-white/80">Is this clearly visible?</p>
@@ -477,15 +566,10 @@ export function FruitHarvestGame() {
                 >
                   Make bigger
                 </Button>
-                <Button onClick={startCalibration} disabled={!live.ready}>
+                <Button onClick={startCalibration} disabled={!live.setupOk}>
                   Yes — continue
                 </Button>
               </div>
-              {!live.ready && (
-                <p className="mt-3 text-sm text-white/60">
-                  Waiting for a clear view of your body…
-                </p>
-              )}
             </div>
           </Overlay>
         )}
@@ -515,11 +599,46 @@ export function FruitHarvestGame() {
               <HoldFigure id={hold.id} hand={hand ?? "right"} />
               <ProgressRing progress={live.progress} active={live.holding} />
             </div>
-            <p className="mt-4 text-base text-white/60">
-              {live.holding
-                ? "Hold still…"
-                : "Raise your hand into position to start the timer"}
+            {/* The ring never changes silently: paused, drifted and
+                idle each say what is happening and what to do. */}
+            <p
+              className={`mt-4 max-w-xl text-lg ${
+                live.holdStatus === "paused"
+                  ? "font-semibold text-amber-300"
+                  : "text-white/70"
+              }`}
+            >
+              {HOLD_MESSAGE[live.holdStatus]}
             </p>
+            {live.holdStatus === "paused" && live.progress > 0 && (
+              <p className="mt-1 text-sm text-white/50">
+                Timer paused at {Math.round(live.progress * 100)}% — it will
+                carry on from here.
+              </p>
+            )}
+          </Overlay>
+        )}
+
+        {phase === "verify" && upCheck && (
+          <Overlay>
+            <h2 className="text-3xl font-semibold text-white">
+              Arm didn&apos;t go fully up
+            </h2>
+            <p className="mt-3 max-w-xl text-lg text-white/70">
+              Your overhead reach measured {upCheck.ratio}% of your sideways
+              reach. It is the same arm, so those should be close. If the
+              raised hand left the top of the picture, move back or tilt the
+              camera down and try that hold again.
+            </p>
+            <div className="mt-8 flex gap-3">
+              <Button size="lg" onClick={redoUpHold}>
+                <RotateCcw className="h-5 w-5" />
+                Redo the &quot;arm up&quot; hold
+              </Button>
+              <Button size="lg" variant="secondary" onClick={acceptCalibration}>
+                Continue anyway
+              </Button>
+            </div>
           </Overlay>
         )}
 
@@ -553,6 +672,41 @@ export function FruitHarvestGame() {
   );
 }
 
+/** ?gamedebug=1 during setup and calibration — the play-phase panel
+ *  only exists once Phaser is running, and these are the numbers that
+ *  decide whether the calibration is worth anything. */
+function SetupDebugPanel({ live, holdId }: { live: Live; holdId: string }) {
+  const rows: [string, string][] = [
+    ["arm length", `${live.armLenPx} px`],
+    ["headroom", `${live.headroomPx} px`],
+    [
+      "ratio",
+      `${live.headroomRatio.toFixed(2)}  (need >= ${HEADROOM_RATIO_MIN})`,
+    ],
+    [
+      "landmarks",
+      `nose ${live.noseOk ? "Y" : "N"} · sh ${live.shouldersOk ? "Y" : "N"}`
+      + ` · elb ${live.elbowOk ? "Y" : "N"} · wr ${live.wristOk ? "Y" : "N"}`,
+    ],
+    ["setup ok", live.setupOk ? "YES" : "NO"],
+    ["hold", holdId],
+    ["ring status", live.holdStatus],
+    ["ring reason", HOLD_MESSAGE[live.holdStatus]],
+    ["ring progress", `${Math.round(live.progress * 100)}%`],
+  ];
+  return (
+    <div className="pointer-events-none absolute left-2 top-2 z-20 max-w-[24rem] rounded-md bg-black/80 p-3 font-mono text-[11px] leading-relaxed text-lime-300">
+      <p className="mb-1 font-bold text-white">gamedebug · setup</p>
+      {rows.map(([k, v]) => (
+        <div key={k} className="flex gap-2">
+          <span className="w-28 shrink-0 text-white/50">{k}</span>
+          <span className="break-all">{v}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** ?gamedebug=1 — live scene diagnostics, drawn above the canvas. */
 function DebugPanel({ d }: { d: GameDebug }) {
   const box = d.boxPx;
@@ -574,6 +728,8 @@ function DebugPanel({ d }: { d: GameDebug }) {
           + `y ${d.boxN.y0.toFixed(2)}..${d.boxN.y1.toFixed(2)}`
         : "none",
     ],
+    ["arm length", `${d.armLenPx} px`],
+    ["headroom", `${d.headroomPx} px  (ratio ${d.headroomRatio})`],
     ["pose rate", `${d.poseHz} Hz`],
     ["render fps", `${d.fps}  (min ${d.fpsMin})`],
     ["filter cutoff", `${d.cutoffHz} Hz`],
@@ -614,6 +770,66 @@ function Overlay({ children }: { children: React.ReactNode }) {
   return (
     <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-black/55 px-6 text-center backdrop-blur-[2px]">
       {children}
+    </div>
+  );
+}
+
+/**
+ * Live headroom gauge.
+ *
+ * A raised arm puts the wrist about one arm length above the shoulder,
+ * so the bar is scaled in arm lengths with the pass mark at
+ * HEADROOM_RATIO_MIN. The patient can watch it move as they step back
+ * or the camera tilts, which is the whole point — the old check gave
+ * no way to tell you were short until calibration silently failed.
+ */
+function HeadroomBar({ live }: { live: Live }) {
+  const target = HEADROOM_RATIO_MIN;
+  const pct = Math.min(100, (live.headroomRatio / (target * 1.4)) * 100);
+  const markPct = (target / (target * 1.4)) * 100;
+  const ok = live.headroomOk;
+  const shortBy = Math.max(0, Math.round(target * live.armLenPx - live.headroomPx));
+
+  return (
+    <div className="mt-6 w-full max-w-md">
+      <div className="flex items-baseline justify-between text-base">
+        <span className={ok ? "text-lime-300" : "text-amber-300"}>
+          Room above your head
+        </span>
+        <span className="font-mono text-sm text-white/60">
+          {live.headroomRatio.toFixed(2)} / {target.toFixed(2)} arm lengths
+        </span>
+      </div>
+      <div className="relative mt-2 h-5 overflow-hidden rounded-full bg-white/15">
+        <div
+          className={`h-full transition-[width] duration-150 ${
+            ok ? "bg-lime-400" : "bg-amber-400"
+          }`}
+          style={{ width: `${pct}%` }}
+        />
+        {/* Pass mark */}
+        <div
+          className="absolute inset-y-0 w-0.5 bg-white"
+          style={{ left: `${markPct}%` }}
+        />
+      </div>
+      {!ok && (
+        <p className="mt-3 text-2xl font-semibold text-amber-300">
+          {live.headroomRatio > 0.75
+            ? "Move back a little"
+            : "Tilt the camera down"}
+        </p>
+      )}
+      {!ok && live.armLenPx > 0 && (
+        <p className="mt-1 text-sm text-white/60">
+          About {shortBy} px more room needed above your shoulder.
+        </p>
+      )}
+      {ok && (
+        <p className="mt-3 text-lg text-lime-300">
+          Good — your raised arm will be in view.
+        </p>
+      )}
     </div>
   );
 }

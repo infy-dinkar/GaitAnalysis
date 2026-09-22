@@ -46,6 +46,18 @@ export const ELBOW_INDEX: Record<Hand, number> = {
  */
 export const PALM_REACH = 0.3;
 
+/**
+ * Headroom required above the chosen shoulder, as a multiple of arm
+ * length, before the setup check passes.
+ *
+ * A raised arm puts the wrist almost exactly one arm length above the
+ * shoulder, so 1.0 is the bare minimum for the wrist to be on screen
+ * at all. The extra 0.1 covers the wrist rising a little past vertical
+ * and the patient swaying, so the landmark does not clip in and out
+ * during a 5 s hold.
+ */
+export const HEADROOM_RATIO_MIN = 1.1;
+
 /** Below this visibility a landmark is treated as not present. Matches
  *  the value the production camera shells use for their overlay. */
 export const VIS_FLOOR = 0.35;
@@ -85,6 +97,28 @@ export interface HandState {
   hipsOk: boolean;
   wristOk: boolean;
   ready: boolean;
+  /** Head landmark — needed to frame the top of the body. */
+  noseOk: boolean;
+  /** Chosen side's elbow. */
+  elbowOk: boolean;
+
+  /** Shoulder -> elbow -> wrist, summed, in canvas px. With the arm
+   *  down this is the whole arm, which is also how far above the
+   *  shoulder the wrist will go when the arm is raised. */
+  armLenPx: number;
+  /** Distance from the chosen shoulder up to the top of the VISIBLE
+   *  canvas. Measured after object-cover cropping, so it is the space
+   *  actually on screen, not space in the raw camera frame that has
+   *  been cropped away. */
+  headroomPx: number;
+  /** headroomPx / armLenPx. Below 1 the raised wrist cannot be seen at
+   *  all, so abduction cannot be measured. */
+  headroomRatio: number;
+  headroomOk: boolean;
+  /** Everything Fruit Harvest needs: head, both shoulders, the chosen
+   *  elbow and wrist, and room above the head. Hips and legs are NOT
+   *  required — this game never looks below the waist. */
+  setupOk: boolean;
 
   /** Body midline in mirrored normalised x, from the shoulders. Used to
    *  split the reach box into same-side and across-midline halves. */
@@ -133,6 +167,13 @@ export function createHandState(): HandState {
     hipsOk: false,
     wristOk: false,
     ready: false,
+    noseOk: false,
+    elbowOk: false,
+    armLenPx: 0,
+    headroomPx: 0,
+    headroomRatio: 0,
+    headroomOk: false,
+    setupOk: false,
     midX: 0.5,
     midXValid: false,
     shoulderX: 0,
@@ -208,6 +249,10 @@ export function updateHandState(
     s.hipsOk = false;
     s.wristOk = false;
     s.ready = false;
+    s.noseOk = false;
+    s.elbowOk = false;
+    s.headroomOk = false;
+    s.setupOk = false;
     return;
   }
 
@@ -229,6 +274,7 @@ export function updateHandState(
     };
   };
 
+  let elbowRead: ReturnType<typeof read> = null;
   const wrist = read(WRIST_INDEX[hand]);
   if (wrist) {
     s.nx = wrist.nx;
@@ -242,7 +288,9 @@ export function updateHandState(
     if (wrist.ok) s.lastUsableMs = nowMs;
 
     // Palm = wrist projected along the forearm, in canvas pixels.
-    const elbow = read(ELBOW_INDEX[hand]);
+    elbowRead = read(ELBOW_INDEX[hand]);
+    const elbow = elbowRead;
+    s.elbowOk = !!elbow?.ok;
     if (elbow?.ok && wrist.ok) {
       const ex = cover.offX + elbow.nx * cover.dispW;
       const ey = cover.offY + elbow.ny * cover.dispH;
@@ -287,4 +335,28 @@ export function updateHandState(
   } else {
     s.shoulderOk = false;
   }
+
+  s.noseOk = !!read(LM_LIVE.NOSE)?.ok;
+
+  // ── Headroom.
+  //
+  // A raised arm puts the wrist about one arm length ABOVE the
+  // shoulder. If that much canvas does not exist above the shoulder,
+  // the raised wrist is off screen, the in-frame guard rejects it, and
+  // the calibration ring can never fill — which is exactly how an "arm
+  // up" hold ends up recorded below shoulder height.
+  if (s.shoulderOk && s.elbowOk && elbowRead) {
+    const ex = cover.offX + elbowRead.nx * cover.dispW;
+    const ey = cover.offY + elbowRead.ny * cover.dispH;
+    const upper = Math.hypot(s.shoulderX - ex, s.shoulderY - ey);
+    s.armLenPx = upper + s.forearmPx;
+  }
+  // Canvas y = 0 IS the top of what is visible; anything above it was
+  // cropped away by object-cover and can never be shown.
+  s.headroomPx = s.shoulderOk ? Math.max(0, s.shoulderY) : 0;
+  s.headroomRatio = s.armLenPx > 1 ? s.headroomPx / s.armLenPx : 0;
+  s.headroomOk = s.headroomRatio >= HEADROOM_RATIO_MIN;
+
+  s.setupOk =
+    s.noseOk && s.shouldersOk && s.elbowOk && s.wristOk && s.headroomOk;
 }
