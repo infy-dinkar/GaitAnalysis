@@ -1,0 +1,38 @@
+"use client";
+// Fruit Harvest — activity page.
+//
+// Placed OUTSIDE /dashboard, exactly like the rehab exercise pages: the
+// doctor launches it from the dashboard and the patient id arrives as
+// `?patientId=…`, which usePatientContext picks up. No AuthGuard here,
+// matching app/rehab/<slug>/page.tsx — the page is harmless without a
+// patient and simply runs in public flow.
+
+import { Suspense } from "react";
+import dynamic from "next/dynamic";
+import { Nav } from "@/components/layout/Nav";
+import { Footer } from "@/components/layout/Footer";
+
+// Client-only: the component owns a camera, a pose detector and (during
+// play) a Phaser canvas, none of which can be server-rendered.
+const FruitHarvestGame = dynamic(
+  () => import("@/components/games/FruitHarvestGame").then((m) => m.FruitHarvestGame),
+  { ssr: false },
+);
+
+export default function FruitHarvestPage() {
+  // Next.js 16 requires routes that use useSearchParams (via
+  // usePatientContext inside the game) to sit under a Suspense
+  // boundary, or the route's static prerender bails at build time.
+  // Same pattern as app/rehab/squat/page.tsx:61.
+  return (
+    <>
+      <Nav />
+      <main className="flex-1">
+        <Suspense fallback={null}>
+          <FruitHarvestGame />
+        </Suspense>
+      </main>
+      <Footer />
+    </>
+  );
+}
