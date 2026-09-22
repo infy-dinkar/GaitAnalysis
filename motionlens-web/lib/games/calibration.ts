@@ -57,15 +57,16 @@ interface Sample extends Point {
  * Drives one hold. Feed it every frame; it reports ring progress and
  * hands back a point once the hold completes.
  */
-export type HoldStatus = "idle" | "holding" | "drifted" | "paused";
+export type HoldStatus = "idle" | "holding" | "drifted" | "blocked";
 
-/** What the patient should be told, per status. Empty for "holding" —
- *  the calibration screen already says what to do. */
+/** Fallback text per status. A "blocked" hold carries its own reason —
+ *  the pose is wrong, the wrong hand is up, the hand is out of view,
+ *  the patient has stepped too close — so the caller supplies that. */
 export const HOLD_MESSAGE: Record<HoldStatus, string> = {
-  idle: "Raise your hand into position to start the timer",
+  idle: "Get into position to start the timer",
   holding: "Hold still…",
   drifted: "Hold still",
-  paused: "Hand out of view — move back or lower the camera",
+  blocked: "",
 };
 
 export class HoldTracker {
@@ -95,27 +96,38 @@ export class HoldTracker {
     this.progress = 0;
     this.holding = false;
     this.status = "idle";
+    this.blockReason = "";
   }
 
   /**
    * @returns the recorded point when the hold completes, else null.
    */
-  feed(nx: number, ny: number, usable: boolean, nowMs: number): Point | null {
+  /** Why the ring is currently held, when status is "blocked". */
+  blockReason = "";
+
+  /**
+   * @param block non-null to hold the ring, carrying the reason to
+   *              show the patient. Null to let it fill.
+   */
+  feed(nx: number, ny: number, block: string | null, nowMs: number): Point | null {
     const prev = this.lastFeedMs;
     this.lastFeedMs = nowMs;
     // Clamp so a backgrounded tab or a long stall cannot award seconds
     // of hold time in a single frame.
     const dt = prev > 0 ? Math.max(0, Math.min(200, nowMs - prev)) : 0;
 
-    // Rejected sample — visibility floor or out of frame. PAUSE rather
-    // than reset: the wrist leaving the top of the frame is exactly
-    // what happens when the arm goes properly up, and throwing the
-    // progress away there is what taught patients to lower the arm.
-    if (!usable) {
-      this.status = "paused";
+    // Held for any reason — out of view, wrong pose, wrong hand, too
+    // close. PAUSE rather than reset: the wrist leaving the top of the
+    // frame is exactly what happens when the arm goes properly up, and
+    // throwing the progress away there is what taught patients to
+    // lower the arm until the ring filled.
+    if (block !== null) {
+      this.status = "blocked";
+      this.blockReason = block;
       this.holding = false;
       return null;
     }
+    this.blockReason = "";
 
     if (!this.anchor) {
       this.anchor = { nx, ny };
@@ -589,4 +601,120 @@ function reportAngle(a: number, g: ReachGeometry): number {
   while (d > Math.PI) d -= Math.PI * 2;
   while (d < -Math.PI) d += Math.PI * 2;
   return Math.round((-d * 180) / Math.PI);
+}
+
+// ── Pose validation per hold ──────────────────────────────────────
+//
+// Stillness alone is not a hold. A hand hanging at the patient's side
+// is perfectly still, so all three holds could be — and were —
+// recorded with the arm down, giving a reach box across the bottom of
+// the frame and fruit that spawned by the basket.
+//
+// Each hold now has to be IN THE POSE before the ring fills. The
+// thresholds are fractions of the arm measured at setup, so they hold
+// for any body size and any distance from the camera.
+
+/** Wrist must clear the shoulder by this much of an arm length. */
+const POSE_REACH = 0.6;
+/** How far off shoulder height the SIDE hold may sit. */
+const SIDE_HEIGHT_TOL = 0.35;
+
+export interface PoseGeom {
+  /** Wrist being judged, canvas px. */
+  wx: number;
+  wy: number;
+  /** That wrist's own shoulder, canvas px. */
+  sx: number;
+  sy: number;
+  /** Body midline, canvas px. */
+  midX: number;
+  /** Arm length, canvas px. */
+  arm: number;
+  /**
+   * Which side of the body this arm is on, in SCREEN terms. The view
+   * is mirrored, so the patient's right arm is on screen-right: +1 for
+   * a right arm, -1 for a left one.
+   */
+  dir: 1 | -1;
+}
+
+export interface PoseVerdict {
+  ok: boolean;
+  /** What to tell the patient. Empty when ok. */
+  message: string;
+  /** Signed reach along the axis the hold cares about, in arm lengths.
+   *  Reported on the debug overlay so a near-miss is visible. */
+  reach: number;
+}
+
+/**
+ * Is this wrist in the pose for `hold`?
+ *
+ * Canvas y grows downward, so "above the shoulder" is a NEGATIVE dy.
+ */
+export function checkHoldPose(hold: HoldId, g: PoseGeom): PoseVerdict {
+  if (g.arm < 1) return { ok: false, message: "Line up with the camera", reach: 0 };
+
+  if (hold === "up") {
+    const above = (g.sy - g.wy) / g.arm;
+    return above >= POSE_REACH
+      ? { ok: true, message: "", reach: above }
+      : { ok: false, message: "Raise your arm higher", reach: above };
+  }
+
+  if (hold === "side") {
+    const out = ((g.wx - g.sx) * g.dir) / g.arm;
+    const drop = Math.abs(g.wy - g.sy) / g.arm;
+    if (out < POSE_REACH) {
+      return { ok: false, message: "Stretch your arm out to the side", reach: out };
+    }
+    if (drop > SIDE_HEIGHT_TOL) {
+      return { ok: false, message: "Keep your arm at shoulder level", reach: out };
+    }
+    return { ok: true, message: "", reach: out };
+  }
+
+  // across — the wrist must have crossed the midline toward the far
+  // side. Distance past it is deliberately small: crossing at all is
+  // the adduction we are measuring.
+  const past = ((g.midX - g.wx) * g.dir) / g.arm;
+  return past > 0
+    ? { ok: true, message: "", reach: past }
+    : { ok: false, message: "Bring your arm across your body", reach: past };
+}
+
+/** Screen-space side of the body for an arm, under the display mirror:
+ *  the patient's right arm appears on screen-right. */
+export function screenDir(hand: Hand): 1 | -1 {
+  return hand === "right" ? 1 : -1;
+}
+
+/**
+ * After the fact: does a RECORDED point actually satisfy its hold?
+ *
+ * The same rules, applied to the stored normalised point once the hold
+ * has completed, so a hold that slipped through cannot poison the
+ * reach box. Returns null when the point is acceptable.
+ */
+export function recordedHoldFails(
+  hold: HoldId,
+  point: Point,
+  hand: Hand,
+  shoulderX: number,
+  shoulderY: number,
+  midX: number,
+  arm: number,
+  cover: Cover,
+): string | null {
+  if (cover.dispW <= 0 || arm < 1) return null;
+  const v = checkHoldPose(hold, {
+    wx: cover.offX + point.nx * cover.dispW,
+    wy: cover.offY + point.ny * cover.dispH,
+    sx: shoulderX,
+    sy: shoulderY,
+    midX,
+    arm,
+    dir: screenDir(hand),
+  });
+  return v.ok ? null : v.message;
 }

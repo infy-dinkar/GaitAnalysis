@@ -49,6 +49,62 @@ export const FINGER_INDEX: Record<Hand, number> = {
 /** Where the drawn palm came from this frame. */
 export type PalmSource = "hand" | "elbow" | "wrist";
 
+/** Every landmark index for one side of the body. */
+export interface SideMap {
+  wrist: number;
+  elbow: number;
+  pinky: number;
+  finger: number;
+  shoulder: number;
+}
+
+const SIDE: Record<Hand, SideMap> = {
+  left: {
+    wrist: LM_LIVE.LEFT_WRIST,
+    elbow: LM_LIVE.LEFT_ELBOW,
+    pinky: LM_LIVE.LEFT_PINKY,
+    finger: LM_LIVE.LEFT_INDEX,
+    shoulder: LM_LIVE.LEFT_SHOULDER,
+  },
+  right: {
+    wrist: LM_LIVE.RIGHT_WRIST,
+    elbow: LM_LIVE.RIGHT_ELBOW,
+    pinky: LM_LIVE.RIGHT_PINKY,
+    finger: LM_LIVE.RIGHT_INDEX,
+    shoulder: LM_LIVE.RIGHT_SHOULDER,
+  },
+};
+
+/**
+ * Landmark set for the hand the patient chose.
+ *
+ * `swapped` exists because BlazePose's left/right labels are only
+ * anatomical if the detector is fed an UN-mirrored frame. Reading the
+ * code, this one is: `pose.send({ image: video })` passes the raw
+ * element (CSS transforms do not touch its pixels) and no `selfieMode`
+ * is set, so the default of false applies — the mirror at
+ * `nx = 1 - p.x / videoW` happens afterwards, for display only.
+ *
+ * CONFIRMED ON CAMERA: the labels ARE anatomical — choosing Right and
+ * using the right hand tracks correctly. So `swapped` is false in
+ * normal play and exists only as a debug override (?handswap=1) for
+ * re-testing this on a different browser or camera. Flipping it here
+ * flips every consumer at once — cursor, palm, calibration, spawn
+ * anchor, headroom — because they all read through this one function.
+ */
+export function sideLandmarks(hand: Hand, swapped: boolean): SideMap {
+  const use: Hand = swapped ? (hand === "left" ? "right" : "left") : hand;
+  return SIDE[use];
+}
+
+/** One landmark, as the debug overlay reports it. */
+export interface Probe {
+  x: number;
+  y: number;
+  vis: number;
+  inFrame: boolean;
+}
+
 /**
  * How far past the wrist the palm sits, as a fraction of the forearm.
  *
@@ -156,6 +212,18 @@ export interface HandState {
   shoulderX: number;
   shoulderY: number;
   shoulderOk: boolean;
+  /** The OTHER wrist and shoulder, canvas px. Calibration needs them
+   *  to tell "you are not in the pose" from "you are using the wrong
+   *  hand" — which look identical from the chosen wrist alone. */
+  otherX: number;
+  otherY: number;
+  otherUsable: boolean;
+  otherShoulderX: number;
+  otherShoulderY: number;
+  otherShoulderOk: boolean;
+  /** Body midline in canvas px, from both shoulders. The across-body
+   *  hold is judged against this. */
+  midShoulderX: number;
   /** Forearm length (wrist to elbow) in canvas px. The palm sits
    *  PALM_REACH of this beyond the wrist, so a target placed at the
    *  calibrated WRIST reach is reachable without full extension —
@@ -169,6 +237,16 @@ export interface HandState {
   hasPose: boolean;
   /** Timestamp of the last usable wrist sample, ms (performance.now). */
   lastUsableMs: number;
+  /** Raw readouts for BOTH wrists, so which physical hand a label
+   *  follows can be settled by looking rather than reasoning. Screen
+   *  coordinates, i.e. after the display mirror. */
+  probeL15: Probe;
+  probeR16: Probe;
+  /** Landmark index the cursor is actually reading this frame. */
+  usingWrist: number;
+  /** Whether the side mapping is currently swapped. */
+  swapped: boolean;
+
   /** Detector callbacks per second, smoothed. Written by the pose loop.
    *  The cursor can never be fresher than this, so it sets the floor on
    *  how much lag any amount of filtering can remove. */
@@ -205,11 +283,22 @@ export function createHandState(): HandState {
     shoulderX: 0,
     shoulderY: 0,
     shoulderOk: false,
+    otherX: 0,
+    otherY: 0,
+    otherUsable: false,
+    otherShoulderX: 0,
+    otherShoulderY: 0,
+    otherShoulderOk: false,
+    midShoulderX: 0,
     forearmPx: 0,
     cover: { dispW: 0, dispH: 0, offX: 0, offY: 0 },
     hasPose: false,
     lastUsableMs: 0,
     poseHz: 0,
+    probeL15: { x: 0, y: 0, vis: 0, inFrame: false },
+    probeR16: { x: 0, y: 0, vis: 0, inFrame: false },
+    usingWrist: LM_LIVE.RIGHT_WRIST,
+    swapped: false,
   };
 }
 
@@ -261,6 +350,9 @@ export function updateHandState(
   s: HandState,
   kp: { x: number; y: number; score: number }[] | null,
   hand: Hand,
+  /** True when BlazePose's left/right labels are the opposite of the
+   *  patient's anatomy. See sideLandmarks(). */
+  swapped: boolean,
   videoW: number,
   videoH: number,
   containerW: number,
@@ -301,7 +393,26 @@ export function updateHandState(
   };
 
   let elbowRead: ReturnType<typeof read> = null;
-  const wrist = read(WRIST_INDEX[hand]);
+  const side = sideLandmarks(hand, swapped);
+  s.swapped = swapped;
+  s.usingWrist = side.wrist;
+
+  // Raw probes for BOTH wrists, mapped to screen space, regardless of
+  // which one the game is using. This is what settles the question.
+  const probe = (idx: number, out: Probe) => {
+    const p = kp[idx];
+    if (!p) { out.vis = 0; out.inFrame = false; return; }
+    const nx = 1 - p.x / videoW;
+    const ny = p.y / videoH;
+    out.x = Math.round(cover.offX + nx * cover.dispW);
+    out.y = Math.round(cover.offY + ny * cover.dispH);
+    out.vis = p.score ?? 0;
+    out.inFrame = inFrameN(nx, ny);
+  };
+  probe(LM_LIVE.LEFT_WRIST, s.probeL15);
+  probe(LM_LIVE.RIGHT_WRIST, s.probeR16);
+
+  const wrist = read(side.wrist);
   if (wrist) {
     s.nx = wrist.nx;
     s.ny = wrist.ny;
@@ -313,7 +424,7 @@ export function updateHandState(
     s.y = cover.offY + wrist.ny * cover.dispH;
     if (wrist.ok) s.lastUsableMs = nowMs;
 
-    elbowRead = read(ELBOW_INDEX[hand]);
+    elbowRead = read(side.elbow);
     const elbow = elbowRead;
     s.elbowOk = !!elbow?.ok;
     if (elbow?.ok && wrist.ok) {
@@ -325,8 +436,8 @@ export function updateHandState(
     // ── Palm, best source first. Everything in CANVAS pixels: the
     //    normalised space is anisotropic whenever the video is not
     //    square, so averaging or extrapolating there would skew.
-    const pinky = read(PINKY_INDEX[hand]);
-    const finger = read(FINGER_INDEX[hand]);
+    const pinky = read(side.pinky);
+    const finger = read(side.finger);
     const haveFinger = !!(finger?.ok || pinky?.ok);
 
     if (wrist.ok && haveFinger) {
@@ -382,7 +493,8 @@ export function updateHandState(
   }
 
   // Chosen side's shoulder — the spawn anchor.
-  const ownSh = hand === "left" ? lSh : rSh;
+  // Chosen side's shoulder, through the same mapping as the hand.
+  const ownSh = read(side.shoulder);
   if (ownSh?.ok) {
     s.shoulderX = cover.offX + ownSh.nx * cover.dispW;
     s.shoulderY = cover.offY + ownSh.ny * cover.dispH;
@@ -392,6 +504,29 @@ export function updateHandState(
   }
 
   s.noseOk = !!read(LM_LIVE.NOSE)?.ok;
+
+  // The other side, for the wrong-hand check.
+  const otherHand: Hand = hand === "left" ? "right" : "left";
+  const other = sideLandmarks(otherHand, swapped);
+  const oWrist = read(other.wrist);
+  if (oWrist) {
+    s.otherX = cover.offX + oWrist.nx * cover.dispW;
+    s.otherY = cover.offY + oWrist.ny * cover.dispH;
+    s.otherUsable = oWrist.ok;
+  } else {
+    s.otherUsable = false;
+  }
+  const oSh = read(other.shoulder);
+  if (oSh?.ok) {
+    s.otherShoulderX = cover.offX + oSh.nx * cover.dispW;
+    s.otherShoulderY = cover.offY + oSh.ny * cover.dispH;
+    s.otherShoulderOk = true;
+  } else {
+    s.otherShoulderOk = false;
+  }
+  if (s.shoulderOk && s.otherShoulderOk) {
+    s.midShoulderX = (s.shoulderX + s.otherShoulderX) / 2;
+  }
 
   // ── Headroom.
   //

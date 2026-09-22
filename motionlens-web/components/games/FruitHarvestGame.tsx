@@ -31,6 +31,7 @@ import {
   updateHandState,
   type Hand,
   type HandState,
+  type Probe,
 } from "@/lib/games/handTracker";
 import {
   HOLDS,
@@ -39,6 +40,10 @@ import {
   HoldTracker,
   buildReachBox,
   upReachLooksShort,
+  checkHoldPose,
+  screenDir,
+  recordedHoldFails,
+  type HoldId,
   type HoldStatus,
   type Point,
   type ReachBox,
@@ -81,6 +86,96 @@ interface Live {
   progress: number;
   holding: boolean;
   holdStatus: HoldStatus;
+  /** Raw readouts for both wrists, to settle which label follows which
+   *  physical hand. */
+  l15: Probe;
+  r16: Probe;
+  usingWrist: number;
+  swapped: boolean;
+  blockReason: string;
+  /** Signed reach of each wrist along the axis this hold cares about,
+   *  in arm lengths. Near-misses are invisible without it. */
+  myReach: number;
+  otherReach: number;
+}
+
+const BLANK_PROBE: Probe = { x: 0, y: 0, vis: 0, inFrame: false };
+
+/**
+ * Why the calibration ring is currently held, or null to let it fill.
+ *
+ * Order matters. The patient can only act on one instruction, so the
+ * most fundamental problem wins: no view of the body, then not enough
+ * room, then the hand out of frame, then the wrong hand, then the
+ * pose itself.
+ */
+function holdBlockReason(
+  s: HandState,
+  hold: HoldId,
+  hand: Hand,
+): string | null {
+  if (!s.shoulderOk || s.armLenPx < 1) return "Step into view of the camera";
+
+  // Re-checked every frame, not just at setup: a patient who moves
+  // closer after the setup screen loses the room for a raised arm, and
+  // nothing downstream would ever notice.
+  if (s.headroomRatio < HEADROOM_RATIO_MIN) {
+    return "Step back — we need room above your head";
+  }
+  if (!s.usable) return "Hand out of view — move back or lower the camera";
+
+  const geom = {
+    wx: s.x,
+    wy: s.y,
+    sx: s.shoulderX,
+    sy: s.shoulderY,
+    midX: s.midShoulderX,
+    arm: s.armLenPx,
+    dir: screenDir(hand),
+  };
+  const mine = checkHoldPose(hold, geom);
+  if (mine.ok) return null;
+
+  // Wrong hand: the chosen arm is not in the pose but the other one
+  // is. Saying "raise your arm higher" at someone whose other arm is
+  // already up is the least helpful thing we could do.
+  if (s.otherUsable && s.otherShoulderOk) {
+    const theirs = checkHoldPose(hold, {
+      wx: s.otherX,
+      wy: s.otherY,
+      sx: s.otherShoulderX,
+      sy: s.otherShoulderY,
+      midX: s.midShoulderX,
+      arm: s.armLenPx,
+      dir: screenDir(hand === "left" ? "right" : "left"),
+    });
+    if (theirs.ok) {
+      return `Use your ${hand === "left" ? "LEFT" : "RIGHT"} hand`;
+    }
+  }
+  return mine.message;
+}
+
+/** Signed reach of one wrist along the axis `hold` cares about, in arm
+ *  lengths. Debug only. */
+function reachFor(
+  s: HandState,
+  hold: HoldId,
+  mine: boolean,
+  hand: Hand | null,
+): number {
+  if (!hand || s.armLenPx < 1) return 0;
+  const side = mine ? hand : hand === "left" ? "right" : "left";
+  const v = checkHoldPose(hold, {
+    wx: mine ? s.x : s.otherX,
+    wy: mine ? s.y : s.otherY,
+    sx: mine ? s.shoulderX : s.otherShoulderX,
+    sy: mine ? s.shoulderY : s.otherShoulderY,
+    midX: s.midShoulderX,
+    arm: s.armLenPx,
+    dir: screenDir(side),
+  });
+  return v.reach;
 }
 
 const BLANK_LIVE: Live = {
@@ -96,11 +191,26 @@ const BLANK_LIVE: Live = {
   progress: 0,
   holding: false,
   holdStatus: "idle",
+  l15: BLANK_PROBE,
+  r16: BLANK_PROBE,
+  usingWrist: 16,
+  swapped: false,
+  blockReason: "",
+  myReach: 0,
+  otherReach: 0,
 };
 
 export function FruitHarvestGame() {
   const search = useSearchParams();
   const debugOn = search.get("gamedebug") === "1";
+  // ?handswap=1 flips which BlazePose side the chosen hand reads.
+  //
+  // The code path says no flip should be needed: the detector is fed
+  // the raw <video> (CSS transforms do not touch its pixels) and no
+  // selfieMode is set, so its left/right labels should already be
+  // anatomical. On camera they came back reversed. Rather than guess,
+  // this makes it switchable so one round settles it.
+  const swapOn = search.get("handswap") === "1";
   const { patientId, patient } = usePatientContext();
   const { videoRef, active, error: camError, start } = useCamera();
   const { ready: poseReady, error: poseError, detect } = usePoseDetectionLive();
@@ -133,7 +243,10 @@ export function FruitHarvestGame() {
   const audioRef = useRef<GameAudio | null>(null);
   const holdIndexRef = useRef(0);
   const lastPoseAtRef = useRef(0);
-  const calibModeRef = useRef<"all" | "upOnly">("all");
+  // "all" walks the three holds; a HoldId repeats just that one, used
+  // by Redo and by the post-hold sanity check.
+  const calibModeRef = useRef<"all" | HoldId>("all");
+  const poseMsgRef = useRef("");
   const gameRef = useRef<import("phaser").Game | null>(null);
   const onHoldDoneRef = useRef<(p: Point) => void>(() => {});
 
@@ -200,6 +313,7 @@ export function FruitHarvestGame() {
           stateRef.current,
           pose?.keypoints ?? null,
           h,
+          swapOn,
           video.videoWidth,
           video.videoHeight,
           stage.clientWidth,
@@ -209,7 +323,10 @@ export function FruitHarvestGame() {
 
         if (phaseRef.current === "calibrate") {
           const s = stateRef.current;
-          const done = holdRef.current.feed(s.nx, s.ny, s.usable, now);
+          const hold = HOLDS[holdIndexRef.current];
+          const block = holdBlockReason(s, hold.id, h);
+          poseMsgRef.current = block ?? "";
+          const done = holdRef.current.feed(s.nx, s.ny, block, now);
           if (done) onHoldDoneRef.current(done);
         }
       } catch {
@@ -223,7 +340,7 @@ export function FruitHarvestGame() {
       cancelled = true;
       cancelAnimationFrame(raf);
     };
-  }, [active, poseReady, detect, videoRef]);
+  }, [active, poseReady, detect, videoRef, swapOn]);
 
   // ── Low-frequency mirror of the mutable state into React, for the
   //    setup ticks and the calibration ring.
@@ -245,6 +362,13 @@ export function FruitHarvestGame() {
         progress: t.progress,
         holding: t.holding,
         holdStatus: t.status,
+        blockReason: t.blockReason,
+        myReach: reachFor(s, HOLDS[holdIndexRef.current].id, true, handRef.current),
+        otherReach: reachFor(s, HOLDS[holdIndexRef.current].id, false, handRef.current),
+        l15: { ...s.probeL15 },
+        r16: { ...s.probeR16 },
+        usingWrist: s.usingWrist,
+        swapped: s.swapped,
       });
     }, 60);
     return () => window.clearInterval(id);
@@ -269,6 +393,19 @@ export function FruitHarvestGame() {
   }, [phase]);
 
   // ── Calibration: advance through the three holds, then build the box.
+  const redoHold = useCallback((id: HoldId) => {
+    const idx = HOLDS.findIndex((h) => h.id === id);
+    calibModeRef.current = id;
+    holdIndexRef.current = idx < 0 ? 0 : idx;
+    setHoldIndex(holdIndexRef.current);
+    delete pointsRef.current[id];
+    holdRef.current.reset();
+    setUpCheck(null);
+    setPhase("calibrate");
+    phaseRef.current = "calibrate";
+  }, []);
+  const redoUpHold = useCallback(() => redoHold("up"), [redoHold]);
+
   // Build the box from whatever holds are recorded, then check the "up"
   // hold against the "side" hold — it is the same arm, so a much
   // shorter overhead reach means the arm never really went up.
@@ -285,6 +422,34 @@ export function FruitHarvestGame() {
       setPhase("countdown-play");
       phaseRef.current = "countdown-play";
       return;
+    }
+
+    // Sanity check before the box is trusted. The live gate should
+    // have made this impossible, but a hold recorded at the very edge
+    // of tolerance, or with the body drifting, can still land outside
+    // its pose — and one bad hold poisons every spawn for the round.
+    if (s.shoulderOk && s.armLenPx > 1) {
+      const pairs: [HoldId, Point][] = [
+        ["up", up],
+        ["side", side],
+        ["across", across],
+      ];
+      for (const [id, pt] of pairs) {
+        const bad = recordedHoldFails(
+          id,
+          pt,
+          h,
+          s.shoulderX,
+          s.shoulderY,
+          s.midShoulderX,
+          s.armLenPx,
+          s.cover,
+        );
+        if (bad) {
+          redoHold(id);
+          return;
+        }
+      }
     }
 
     boxRef.current = buildReachBox(
@@ -311,7 +476,7 @@ export function FruitHarvestGame() {
     setCount(3);
     setPhase("countdown-play");
     phaseRef.current = "countdown-play";
-  }, []);
+  }, [redoHold]);
 
   useEffect(() => {
     onHoldDoneRef.current = (p: Point) => {
@@ -321,7 +486,7 @@ export function FruitHarvestGame() {
 
       // Redo mode repeats only the "up" hold, so go straight back to
       // the check rather than walking the other two again.
-      if (calibModeRef.current === "upOnly") {
+      if (calibModeRef.current !== "all") {
         calibModeRef.current = "all";
         finishCalibration();
         return;
@@ -472,16 +637,6 @@ export function FruitHarvestGame() {
   }, []);
 
   /** Repeat the "arm up" hold only; side and across are kept. */
-  const redoUpHold = useCallback(() => {
-    calibModeRef.current = "upOnly";
-    holdIndexRef.current = 0;
-    setHoldIndex(0);
-    delete pointsRef.current.up;
-    holdRef.current.reset();
-    setUpCheck(null);
-    setPhase("calibrate");
-    phaseRef.current = "calibrate";
-  }, []);
 
   const acceptCalibration = useCallback(() => {
     setUpCheck(null);
@@ -682,15 +837,17 @@ export function FruitHarvestGame() {
             {/* The ring never changes silently: paused, drifted and
                 idle each say what is happening and what to do. */}
             <p
-              className={`mt-4 max-w-xl text-lg ${
-                live.holdStatus === "paused"
-                  ? "font-semibold text-amber-300"
-                  : "text-white/70"
+              className={`mt-4 max-w-xl ${
+                live.holdStatus === "blocked"
+                  ? "text-3xl font-semibold text-amber-300"
+                  : "text-lg text-white/70"
               }`}
             >
-              {HOLD_MESSAGE[live.holdStatus]}
+              {live.holdStatus === "blocked"
+                ? live.blockReason
+                : HOLD_MESSAGE[live.holdStatus]}
             </p>
-            {live.holdStatus === "paused" && live.progress > 0 && (
+            {live.holdStatus === "blocked" && live.progress > 0 && (
               <p className="mt-1 text-sm text-white/50">
                 Timer paused at {Math.round(live.progress * 100)}% — it will
                 carry on from here.
@@ -771,9 +928,32 @@ function SetupDebugPanel({ live, holdId }: { live: Live; holdId: string }) {
       + ` · elb ${live.elbowOk ? "Y" : "N"} · wr ${live.wristOk ? "Y" : "N"}`,
     ],
     ["setup ok", live.setupOk ? "YES" : "NO"],
+    [
+      "L15 (labelled left)",
+      `x${live.l15.x} y${live.l15.y} vis ${live.l15.vis.toFixed(2)}`
+      + `${live.l15.inFrame ? "" : " OUT"}`,
+    ],
+    [
+      "R16 (labelled right)",
+      `x${live.r16.x} y${live.r16.y} vis ${live.r16.vis.toFixed(2)}`
+      + `${live.r16.inFrame ? "" : " OUT"}`,
+    ],
+    [
+      "game is using",
+      `${live.usingWrist === 15 ? "L15" : "R16"}`
+      + `${live.swapped ? "  (handswap=1)" : ""}`,
+    ],
     ["hold", holdId],
     ["ring status", live.holdStatus],
-    ["ring reason", HOLD_MESSAGE[live.holdStatus]],
+    [
+      "pose met",
+      live.holdStatus === "blocked" ? `NO — ${live.blockReason}` : "yes",
+    ],
+    [
+      "reach (arm lengths)",
+      `chosen ${live.myReach.toFixed(2)} · other ${live.otherReach.toFixed(2)}`
+      + "  (need >= 0.60)",
+    ],
     ["ring progress", `${Math.round(live.progress * 100)}%`],
   ];
   return (

@@ -82,6 +82,11 @@ const FALLBACK_POSE_HZ = 20;
 /** How long the hand may be missing before the round pauses. The
  *  patient can no longer see themselves, so they need telling. */
 const HAND_LOST_MS = 1000;
+/** Below this headroom ratio during PLAY the patient is warned, but the
+ *  round is not held — they are mid-game and a hard stop would be worse
+ *  than a slightly clipped overhead reach. Calibration uses the
+ *  stricter HEADROOM_RATIO_MIN and does pause. */
+const PLAY_HEADROOM_MIN = 1.0;
 /** Ground line, as a fraction of height — matches the orchard's. */
 const GROUND_Y = 0.9;
 /** Fall time into the basket when a fruit is collected. */
@@ -328,6 +333,7 @@ export class FruitHarvestScene extends Phaser.Scene {
   private backdrop: Phaser.GameObjects.Image | null = null;
   private backdropSize = { w: 0, h: 0 };
   private lostText: Phaser.GameObjects.Text | null = null;
+  private closeText: Phaser.GameObjects.Text | null = null;
   private lostBand: Phaser.GameObjects.Rectangle | null = null;
   /** Milliseconds the hand has been missing, and the total time the
    *  round clock has been held for. */
@@ -481,6 +487,19 @@ export class FruitHarvestScene extends Phaser.Scene {
       .setDepth(41)
       .setVisible(false);
 
+    // Non-blocking "you have moved closer" warning.
+    this.closeText = this.add
+      .text(0, 0, "Step back — top of your reach is off screen", {
+        fontFamily: "system-ui, sans-serif",
+        fontSize: `${Math.round(this.unit * 0.035 * s)}px`,
+        color: "#fbbf24",
+        backgroundColor: "#00000099",
+        padding: { x: 10, y: 5 },
+      })
+      .setOrigin(0.5, 0)
+      .setDepth(32)
+      .setVisible(false);
+
     this.layout();
     this.palmBase = { ...this.control.state.palmCounts };
 
@@ -536,6 +555,9 @@ export class FruitHarvestScene extends Phaser.Scene {
       .setStroke("#000000", Math.max(2, lost * 0.08));
 
     this.fpsText?.setPosition(w * 0.02, h * 0.82).setFontSize(Math.round(u * 0.032));
+    this.closeText
+      ?.setPosition(w / 2, h * 0.14)
+      .setFontSize(Math.round(u * 0.035 * s));
   }
 
   update(time: number) {
@@ -568,6 +590,14 @@ export class FruitHarvestScene extends Phaser.Scene {
     this.lostBand?.setVisible(lost);
     this.lostText?.setVisible(lost);
     c.debug.handLost = lost;
+
+    // Headroom during play: warn, never pause. Hidden while the
+    // hand-lost banner is up so the two cannot stack.
+    this.closeText?.setVisible(
+      !lost
+      && c.state.armLenPx > 1
+      && c.state.headroomRatio < PLAY_HEADROOM_MIN,
+    );
 
     // Entering or leaving fullscreen changes the canvas under us.
     // Everything positioned in create() has to be laid out again, or
