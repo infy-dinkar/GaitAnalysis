@@ -29,6 +29,53 @@ const BASKET = "🧺";
 /** Glyph texture size. Generous so a large sprite stays crisp. */
 const GLYPH_TEX = 256;
 
+/** Diagnostics surfaced by the ?gamedebug=1 overlay. Written by the
+ *  scene, polled by React. Keep it cheap — it is updated every frame. */
+export interface GameDebug {
+  phaserCreated: boolean;
+  sceneState: string;
+  canvasW: number;
+  canvasH: number;
+  canvasZ: string;
+  /** Reach box projected into canvas pixels, as the scene sees it. */
+  boxPx: { x0: number; x1: number; y0: number; y1: number } | null;
+  boxN: { x0: number; x1: number; y0: number; y1: number } | null;
+  spawnedTotal: number;
+  onScreen: number;
+  lastSpawn: string;
+  handLive: boolean;
+  handInFrame: boolean;
+  cursorX: number;
+  cursorY: number;
+  elapsedMs: number;
+  remainingMs: number;
+  texturesOk: boolean;
+  error: string | null;
+}
+
+export function createGameDebug(): GameDebug {
+  return {
+    phaserCreated: false,
+    sceneState: "not started",
+    canvasW: 0,
+    canvasH: 0,
+    canvasZ: "—",
+    boxPx: null,
+    boxN: null,
+    spawnedTotal: 0,
+    onScreen: 0,
+    lastSpawn: "none yet",
+    handLive: false,
+    handInFrame: false,
+    cursorX: 0,
+    cursorY: 0,
+    elapsedMs: 0,
+    remainingMs: ROUND_MS,
+    texturesOk: false,
+    error: null,
+  };
+}
+
 export interface FruitHarvestControl {
   /** Live hand state, mutated by the React pose loop. */
   state: HandState;
@@ -41,6 +88,7 @@ export interface FruitHarvestControl {
   missed: number;
   remainingMs: number;
   finished: boolean;
+  debug: GameDebug;
   onFinish: (r: { harvested: number; missed: number }) => void;
 }
 
@@ -129,9 +177,20 @@ export class FruitHarvestScene extends Phaser.Scene {
   private fruits: Fruit[] = [];
   private keys: string[] = [];
   private filter = new OneEuro2D({ minCutoff: 1.1, beta: 0.02 });
-  private startedAt = 0;
-  private lastSpawnAt = 0;
-  private lastFrameAt = 0;
+  /**
+   * -1 until the first update frame seeds it.
+   *
+   * It MUST come from update()'s own `time` argument and nothing else.
+   * Phaser has two unrelated clocks: `time` here is the raw rAF
+   * timestamp (ms since the PAGE loaded), while `this.time.now` is
+   * `game.loop.time`, which starts at 0 when THIS game boots. Seeding
+   * this from `this.time.now` and comparing it against `time` measured
+   * the age of the page, so the round ended on frame one with nothing
+   * spawned. Seed from the same clock you compare against.
+   */
+  private startedAt = -1;
+  private lastSpawnAt = -1;
+  private lastFrameAt = -1;
   private nextRegion: "same" | "across" = "same";
   private cursorSeeded = false;
 
@@ -198,14 +257,32 @@ export class FruitHarvestScene extends Phaser.Scene {
       .setOrigin(1, 0)
       .setDepth(30);
 
-    this.startedAt = this.time.now;
-    this.lastFrameAt = this.time.now;
-    this.lastSpawnAt = 0;
+    // NOTE: startedAt / lastFrameAt / lastSpawnAt are deliberately left
+    // at -1 here and seeded on the first update frame instead — see the
+    // field declaration for why this must not use this.time.now.
+    const d = this.control.debug;
+    d.sceneState = "created";
+    d.texturesOk = this.textures.exists("basket") && this.textures.exists(this.keys[0]);
+    d.boxN = {
+      x0: this.control.box.xLo,
+      x1: this.control.box.xHi,
+      y0: this.control.box.yLo,
+      y1: this.control.box.yHi,
+    };
   }
 
   update(time: number) {
     const c = this.control;
     if (c.finished) return;
+
+    // First frame: anchor every clock to update()'s own time base.
+    if (this.startedAt < 0) {
+      this.startedAt = time;
+      this.lastFrameAt = time;
+      // One full gap behind, so the first fruit appears immediately.
+      this.lastSpawnAt = time - SPAWN_GAP_MS - 1;
+      c.debug.sceneState = "running";
+    }
 
     const dt = Math.max(0.001, (time - this.lastFrameAt) / 1000);
     this.lastFrameAt = time;
@@ -276,11 +353,36 @@ export class FruitHarvestScene extends Phaser.Scene {
 
       if (time - f.bornAt > FRUIT_TTL_MS) this.dropAway(f, i);
     }
+
+    // ── Diagnostics (?gamedebug=1)
+    const d = c.debug;
+    d.elapsedMs = elapsed;
+    d.remainingMs = c.remainingMs;
+    d.onScreen = this.fruits.length;
+    d.handLive = c.state.live;
+    d.handInFrame = c.state.inFrame;
+    d.cursorX = Math.round(this.cursor.x);
+    d.cursorY = Math.round(this.cursor.y);
+    d.canvasW = Math.round(this.scale.width);
+    d.canvasH = Math.round(this.scale.height);
+    if (cover.dispW > 0) {
+      d.boxPx = {
+        x0: Math.round(cover.offX + c.box.xLo * cover.dispW),
+        x1: Math.round(cover.offX + c.box.xHi * cover.dispW),
+        y0: Math.round(cover.offY + c.box.yLo * cover.dispH),
+        y1: Math.round(cover.offY + c.box.yHi * cover.dispH),
+      };
+    }
   }
 
   private spawn(time: number) {
     const c = this.control;
-    const p = spawnPoint(c.box, this.nextRegion, Math.random);
+    const region = this.nextRegion;
+    const p = spawnPoint(c.box, region, Math.random);
+    if (!Number.isFinite(p.nx) || !Number.isFinite(p.ny)) {
+      c.debug.lastSpawn = `REJECTED: non-finite point from reach box (${p.nx}, ${p.ny})`;
+      return;
+    }
     // Alternate the halves so the across-midline reach — the part that
     // exercises adduction — is never crowded out by chance.
     this.nextRegion = this.nextRegion === "same" ? "across" : "same";
@@ -302,6 +404,10 @@ export class FruitHarvestScene extends Phaser.Scene {
     });
 
     this.fruits.push({ img, nx: p.nx, ny: p.ny, bornAt: time, dying: false });
+    c.debug.spawnedTotal += 1;
+    c.debug.lastSpawn =
+      `OK ${region} n(${p.nx.toFixed(2)}, ${p.ny.toFixed(2)}) `
+      + `px(${Math.round(x)}, ${Math.round(y)}) size ${Math.round(size)}`;
   }
 
   private harvest(f: Fruit, index: number) {

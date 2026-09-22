@@ -14,6 +14,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { Check, Gamepad2, Hand as HandIcon, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { useCamera } from "@/hooks/useCamera";
@@ -34,7 +35,12 @@ import {
   type ReachBox,
 } from "@/lib/games/calibration";
 import { GameAudio } from "@/lib/games/gameAudio";
-import { ROUND_MS, type FruitHarvestControl } from "@/lib/games/fruitHarvestScene";
+import {
+  ROUND_MS,
+  createGameDebug,
+  type FruitHarvestControl,
+  type GameDebug,
+} from "@/lib/games/fruitHarvestScene";
 
 type Phase =
   | "hand"
@@ -64,6 +70,8 @@ const BLANK_LIVE: Live = {
 };
 
 export function FruitHarvestGame() {
+  const search = useSearchParams();
+  const debugOn = search.get("gamedebug") === "1";
   const { patientId, patient } = usePatientContext();
   const { videoRef, active, error: camError, start } = useCamera();
   const { ready: poseReady, error: poseError, detect } = usePoseDetectionLive();
@@ -77,6 +85,8 @@ export function FruitHarvestGame() {
   const [result, setResult] = useState<{ harvested: number; missed: number } | null>(
     null,
   );
+  const [dbg, setDbg] = useState<GameDebug | null>(null);
+  const debugRef = useRef<GameDebug>(createGameDebug());
 
   const stageRef = useRef<HTMLDivElement | null>(null);
   const phaserHostRef = useRef<HTMLDivElement | null>(null);
@@ -237,6 +247,10 @@ export function FruitHarvestGame() {
     let game: import("phaser").Game | null = null;
     let cancelled = false;
 
+    const debug = createGameDebug();
+    debugRef.current = debug;
+    debug.boxN = { x0: box.xLo, x1: box.xHi, y0: box.yLo, y1: box.yHi };
+
     const control: FruitHarvestControl = {
       state: stateRef.current,
       box,
@@ -246,6 +260,7 @@ export function FruitHarvestGame() {
       missed: 0,
       remainingMs: ROUND_MS,
       finished: false,
+      debug,
       onFinish: (r) => {
         if (cancelled) return;
         setResult(r);
@@ -256,23 +271,47 @@ export function FruitHarvestGame() {
     controlRef.current = control;
 
     void (async () => {
-      const [Phaser, mod] = await Promise.all([
-        import("phaser"),
-        import("@/lib/games/fruitHarvestScene"),
-      ]);
-      if (cancelled) return;
-      game = new Phaser.Game({
-        type: Phaser.AUTO,
-        parent: host,
-        transparent: true,
-        scale: {
-          mode: Phaser.Scale.RESIZE,
-          width: host.clientWidth,
-          height: host.clientHeight,
-        },
-        scene: [mod.FruitHarvestScene],
-      });
-      game.scene.start("fruit-harvest", { control });
+      try {
+        debug.sceneState = "importing phaser";
+        const [Phaser, mod] = await Promise.all([
+          import("phaser"),
+          import("@/lib/games/fruitHarvestScene"),
+        ]);
+        if (cancelled) return;
+        debug.sceneState = "creating game";
+        game = new Phaser.Game({
+          type: Phaser.AUTO,
+          parent: host,
+          transparent: true,
+          scale: {
+            mode: Phaser.Scale.RESIZE,
+            width: host.clientWidth,
+            height: host.clientHeight,
+          },
+          scene: [mod.FruitHarvestScene],
+        });
+        // Called before the game has booted, so the SceneManager parks
+        // this in its holding pattern and injects `data` at bootQueue
+        // (SceneManager.js:236). That is what gets `control` into
+        // init() — the config array auto-starts scene 0 with no data.
+        game.scene.start("fruit-harvest", { control });
+        debug.phaserCreated = true;
+        debug.sceneState = "booting";
+        // Canvas geometry, once Phaser has appended it.
+        window.setTimeout(() => {
+          const cv = host.querySelector("canvas");
+          if (!cv) {
+            debug.error = "no <canvas> was appended to the host element";
+            return;
+          }
+          debug.canvasW = cv.width;
+          debug.canvasH = cv.height;
+          debug.canvasZ = window.getComputedStyle(cv).zIndex;
+        }, 120);
+      } catch (e) {
+        debug.error = e instanceof Error ? e.message : String(e);
+        debug.sceneState = "threw during creation";
+      }
     })();
 
     return () => {
@@ -286,6 +325,15 @@ export function FruitHarvestGame() {
     const audio = audioRef.current;
     return () => audio?.close();
   }, []);
+
+  // ── Debug overlay poll. Only while ?gamedebug=1 and only during play.
+  useEffect(() => {
+    if (!debugOn || phase !== "play") return;
+    const id = window.setInterval(() => {
+      setDbg({ ...debugRef.current });
+    }, 200);
+    return () => window.clearInterval(id);
+  }, [debugOn, phase]);
 
   const startCalibration = useCallback(() => {
     holdIndexRef.current = 0;
@@ -341,11 +389,15 @@ export function FruitHarvestGame() {
           muted
           className="h-full w-full scale-x-[-1] object-cover"
         />
-        {/* Phaser draws here during play only. */}
+        {/* Phaser draws here during play only. z-5 puts it above the
+            <video> (which has its own stacking context from the mirror
+            transform) and below the z-10 phase overlays. */}
         <div
           ref={phaserHostRef}
-          className={`absolute inset-0 ${phase === "play" ? "" : "hidden"}`}
+          className={`absolute inset-0 z-[5] ${phase === "play" ? "" : "hidden"}`}
         />
+
+        {debugOn && phase === "play" && dbg && <DebugPanel d={dbg} />}
 
         {(camError || poseError) && (
           <Overlay>
@@ -477,6 +529,57 @@ export function FruitHarvestGame() {
       <p className="mt-3 text-center text-sm text-muted">
         Nothing is saved in this step — no report is written.
       </p>
+    </div>
+  );
+}
+
+/** ?gamedebug=1 — live scene diagnostics, drawn above the canvas. */
+function DebugPanel({ d }: { d: GameDebug }) {
+  const box = d.boxPx;
+  const rows: [string, string][] = [
+    ["phaser created", d.phaserCreated ? "YES" : "NO"],
+    ["scene state", d.sceneState],
+    ["textures ok", d.texturesOk ? "YES" : "NO"],
+    ["canvas", `${d.canvasW} x ${d.canvasH}  z-index ${d.canvasZ}`],
+    [
+      "reach box (px)",
+      box
+        ? `x ${box.x0}..${box.x1}  y ${box.y0}..${box.y1}`
+        : "not projected yet",
+    ],
+    [
+      "reach box (norm)",
+      d.boxN
+        ? `x ${d.boxN.x0.toFixed(2)}..${d.boxN.x1.toFixed(2)}  `
+          + `y ${d.boxN.y0.toFixed(2)}..${d.boxN.y1.toFixed(2)}`
+        : "none",
+    ],
+    ["fruit spawned", String(d.spawnedTotal)],
+    ["fruit on screen", String(d.onScreen)],
+    ["last spawn", d.lastSpawn],
+    [
+      "hand",
+      `live ${d.handLive ? "Y" : "N"} · in frame ${d.handInFrame ? "Y" : "N"}`,
+    ],
+    ["cursor", `${d.cursorX}, ${d.cursorY}`],
+    [
+      "clock",
+      `elapsed ${(d.elapsedMs / 1000).toFixed(1)}s · `
+        + `remaining ${(d.remainingMs / 1000).toFixed(1)}s`,
+    ],
+  ];
+  return (
+    <div className="pointer-events-none absolute left-2 top-2 z-20 max-w-[24rem] rounded-md bg-black/80 p-3 font-mono text-[11px] leading-relaxed text-lime-300">
+      <p className="mb-1 font-bold text-white">gamedebug</p>
+      {rows.map(([k, v]) => (
+        <div key={k} className="flex gap-2">
+          <span className="w-28 shrink-0 text-white/50">{k}</span>
+          <span className="break-all">{v}</span>
+        </div>
+      ))}
+      {d.error && (
+        <p className="mt-2 text-rose-400">error: {d.error}</p>
+      )}
     </div>
   );
 }
