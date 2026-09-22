@@ -91,6 +91,18 @@ export interface HandState {
   midX: number;
   midXValid: boolean;
 
+  /** CHOSEN SIDE's shoulder in canvas pixels — the anchor every spawn
+   *  direction is measured from, so fruit placement follows the patient
+   *  rather than the frame. */
+  shoulderX: number;
+  shoulderY: number;
+  shoulderOk: boolean;
+  /** Forearm length (wrist to elbow) in canvas px. The palm sits
+   *  PALM_REACH of this beyond the wrist, so a target placed at the
+   *  calibrated WRIST reach is reachable without full extension —
+   *  spawning adds this back on. 0 when the elbow is not usable. */
+  forearmPx: number;
+
   /** Object-cover geometry used for the last mapping. */
   cover: { dispW: number; dispH: number; offX: number; offY: number };
 
@@ -123,6 +135,10 @@ export function createHandState(): HandState {
     ready: false,
     midX: 0.5,
     midXValid: false,
+    shoulderX: 0,
+    shoulderY: 0,
+    shoulderOk: false,
+    forearmPx: 0,
     cover: { dispW: 0, dispH: 0, offX: 0, offY: 0 },
     hasPose: false,
     lastUsableMs: 0,
@@ -233,6 +249,7 @@ export function updateHandState(
       s.palmX = s.x + (s.x - ex) * PALM_REACH;
       s.palmY = s.y + (s.y - ey) * PALM_REACH;
       s.palmFromElbow = true;
+      s.forearmPx = Math.hypot(s.x - ex, s.y - ey);
     } else {
       // No usable elbow — sit on the wrist rather than guess a
       // direction from a landmark MediaPipe extrapolated.
@@ -259,5 +276,15 @@ export function updateHandState(
   if (lSh?.ok && rSh?.ok) {
     s.midX = (lSh.nx + rSh.nx) / 2;
     s.midXValid = true;
+  }
+
+  // Chosen side's shoulder — the spawn anchor.
+  const ownSh = hand === "left" ? lSh : rSh;
+  if (ownSh?.ok) {
+    s.shoulderX = cover.offX + ownSh.nx * cover.dispW;
+    s.shoulderY = cover.offY + ownSh.ny * cover.dispH;
+    s.shoulderOk = true;
+  } else {
+    s.shoulderOk = false;
   }
 }

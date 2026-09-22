@@ -141,6 +141,11 @@ export interface ReachBox {
   /** Body midline in mirrored normalised x. */
   midX: number;
   hand: Hand;
+  /** The three held points themselves, kept so spawning can work in
+   *  polar terms around the shoulder. The bounding box alone throws
+   *  away the directions, which is what let fruit pile up near the
+   *  chest instead of at the limit of each direction. */
+  holds: { up: Point; side: Point; across: Point };
 }
 
 /** Keep fruit off the very edge of what the patient can reach. */
@@ -203,6 +208,7 @@ export function buildReachBox(
     yHi: clamp01(yHi),
     midX: clamp01(midX),
     hand,
+    holds: { up, side, across },
   };
 }
 
@@ -246,4 +252,281 @@ export function spawnPoint(
     nx: lo + rand() * (hi - lo),
     ny: box.yLo + rand() * (box.yHi - box.yLo),
   };
+}
+
+// ── Edge-of-reach spawning ────────────────────────────────────────
+//
+// The bounding box was the wrong shape for the job. Uniform sampling
+// inside it puts most fruit near the middle of the box — which is the
+// middle of the body, at chest height, right where the hand already
+// rests. A round could be won with almost no arm movement.
+//
+// Everything below works in POLAR terms around the chosen shoulder: a
+// direction on the arc from across-the-body, through straight out, to
+// overhead, and a distance that is a high fraction of the measured
+// reach in that direction.
+
+export interface Cover {
+  dispW: number;
+  dispH: number;
+  offX: number;
+  offY: number;
+}
+
+export interface ReachGeometry {
+  /** Anchor, canvas px. */
+  sx: number;
+  sy: number;
+  /** Radii in canvas px, already extended for the palm offset. */
+  rAcross: number;
+  rSide: number;
+  rUp: number;
+  /** Direction of each measured hold from the shoulder, radians. */
+  aAcross: number;
+  aSide: number;
+  aUp: number;
+}
+
+/**
+ * Build the polar model from the calibration holds.
+ *
+ * Radii are measured from the LIVE shoulder rather than a stored one,
+ * so if the patient drifts a step the whole reach fan follows them.
+ *
+ * `palmOffsetPx` is added to every radius. Calibration records the
+ * WRIST, but the cursor is the palm, which sits PALM_REACH of a
+ * forearm further out — so a target at the raw wrist radius is
+ * touchable without extending. Adding the offset back makes 100%
+ * reach mean 100% reach.
+ */
+export function reachGeometry(
+  box: ReachBox,
+  shoulderX: number,
+  shoulderY: number,
+  cover: Cover,
+  palmOffsetPx: number,
+): ReachGeometry | null {
+  if (cover.dispW <= 0 || cover.dispH <= 0) return null;
+  const toPx = (p: Point) => ({
+    x: cover.offX + p.nx * cover.dispW,
+    y: cover.offY + p.ny * cover.dispH,
+  });
+  const pick = (p: Point) => {
+    const q = toPx(p);
+    const dx = q.x - shoulderX;
+    const dy = q.y - shoulderY;
+    return { r: Math.hypot(dx, dy) + palmOffsetPx, a: Math.atan2(dy, dx) };
+  };
+  const up = pick(box.holds.up);
+  const side = pick(box.holds.side);
+  const across = pick(box.holds.across);
+  if (
+    !Number.isFinite(up.r)
+    || !Number.isFinite(side.r)
+    || !Number.isFinite(across.r)
+  ) {
+    return null;
+  }
+  return {
+    sx: shoulderX,
+    sy: shoulderY,
+    rUp: up.r,
+    rSide: side.r,
+    rAcross: across.r,
+    aUp: up.a,
+    aSide: side.a,
+    aAcross: across.a,
+  };
+}
+
+/** Shortest-arc interpolation, so the fan never takes the long way
+ *  round when two holds straddle the -PI/+PI wrap. */
+function lerpAngle(a: number, b: number, t: number): number {
+  let d = b - a;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return a + d * t;
+}
+
+/**
+ * Direction and radius at fan position `u`:
+ *   u = 0   -> across the body   (adduction)
+ *   u = 0.5 -> straight out      (mid abduction)
+ *   u = 1   -> overhead          (full abduction)
+ */
+function fanAt(g: ReachGeometry, u: number): { a: number; r: number } {
+  if (u <= 0.5) {
+    const t = u / 0.5;
+    return {
+      a: lerpAngle(g.aAcross, g.aSide, t),
+      r: g.rAcross + (g.rSide - g.rAcross) * t,
+    };
+  }
+  const t = (u - 0.5) / 0.5;
+  return {
+    a: lerpAngle(g.aSide, g.aUp, t),
+    r: g.rSide + (g.rUp - g.rSide) * t,
+  };
+}
+
+/** Largest distance along `a` from the shoulder that stays inside the
+ *  margin box. Used to pull a point IN along its own direction rather
+ *  than dropping a fruit whose direction runs off-canvas. */
+function maxAlong(
+  sx: number,
+  sy: number,
+  a: number,
+  w: number,
+  h: number,
+  m: number,
+): number {
+  const dx = Math.cos(a);
+  const dy = Math.sin(a);
+  let t = Infinity;
+  if (dx > 1e-6) t = Math.min(t, (w - m - sx) / dx);
+  else if (dx < -1e-6) t = Math.min(t, (m - sx) / dx);
+  if (dy > 1e-6) t = Math.min(t, (h - m - sy) / dy);
+  else if (dy < -1e-6) t = Math.min(t, (m - sy) / dy);
+  return t === Infinity ? 0 : Math.max(0, t);
+}
+
+export type Zone = "abduction" | "adduction";
+
+/** Fan positions each zone draws from. The gap in the middle keeps the
+ *  two zones visibly distinct instead of blurring into one arc. */
+const ZONE_U: Record<Zone, [number, number]> = {
+  adduction: [0.0, 0.42],
+  abduction: [0.58, 1.0],
+};
+
+/** Fruit sits at this fraction of the reach in its direction. */
+export const REACH_MIN = 0.7;
+export const REACH_MAX = 1.0;
+/** New fruit must be at least this fraction of the radius away from
+ *  both the cursor and the previous fruit. */
+export const MIN_SEPARATION = 0.35;
+/** In the abduction zone nothing may sit below the shoulder by more
+ *  than this fraction of the radius — reaching down is not the point. */
+const BELOW_SHOULDER_ALLOW = 0.12;
+
+export interface SpawnOpts {
+  canvasW: number;
+  canvasH: number;
+  /** Keep fruit this many px clear of the canvas edge. */
+  margin: number;
+  cursor: { x: number; y: number } | null;
+  prev: { x: number; y: number } | null;
+  rand: () => number;
+}
+
+export interface SpawnResult {
+  x: number;
+  y: number;
+  /** Direction from the shoulder in degrees, relative to straight out
+   *  on the playing side: 0 = out, positive = toward overhead,
+   *  negative = across the body. */
+  angleDeg: number;
+  /** Distance as a percentage of the reach in that direction. */
+  reachPct: number;
+  /** How many candidates were rejected before this one. */
+  tries: number;
+  clamped: boolean;
+}
+
+/**
+ * Pick a point at the edge of reach, in the requested zone, honouring
+ * the separation, canvas and below-shoulder constraints.
+ *
+ * Constraints are a preference, not a guarantee: after MAX_TRIES the
+ * best candidate so far is returned. A round that cannot place a
+ * perfect fruit should still place one.
+ */
+export function spawnAtReachEdge(
+  g: ReachGeometry,
+  zone: Zone,
+  o: SpawnOpts,
+): SpawnResult {
+  const MAX_TRIES = 12;
+  const [uLo, uHi] = ZONE_U[zone];
+  let best: SpawnResult | null = null;
+  let bestScore = -Infinity;
+
+  for (let i = 0; i < MAX_TRIES; i++) {
+    const u = uLo + o.rand() * (uHi - uLo);
+    const { a, r } = fanAt(g, u);
+    const frac = REACH_MIN + o.rand() * (REACH_MAX - REACH_MIN);
+    let dist = r * frac;
+
+    // Pull in along the same direction if it leaves the canvas.
+    const limit = maxAlong(g.sx, g.sy, a, o.canvasW, o.canvasH, o.margin);
+    const clamped = dist > limit;
+    if (clamped) dist = limit;
+    if (dist <= 0) continue;
+
+    const x = g.sx + Math.cos(a) * dist;
+    const y = g.sy + Math.sin(a) * dist;
+
+    // Abduction stays at or above shoulder height — but never demands
+    // higher than the patient actually demonstrated. If the "up" hold
+    // came in below the shoulder (a short raise, or the top of frame
+    // cropping the arm), the strict rule rejects the ENTIRE zone and
+    // every spawn falls through to the fallback. Relaxing to the
+    // measured up-hold height keeps the zone usable on a poor
+    // calibration instead of silently collapsing it.
+    if (zone === "abduction") {
+      const upY = g.sy + Math.sin(g.aUp) * g.rUp;
+      const yLimit = Math.max(g.sy + r * BELOW_SHOULDER_ALLOW, upY);
+      if (y > yLimit) continue;
+    }
+
+    const sep = r * MIN_SEPARATION;
+    const dCursor = o.cursor
+      ? Math.hypot(x - o.cursor.x, y - o.cursor.y)
+      : Infinity;
+    const dPrev = o.prev ? Math.hypot(x - o.prev.x, y - o.prev.y) : Infinity;
+
+    const cand: SpawnResult = {
+      x,
+      y,
+      angleDeg: reportAngle(a, g),
+      reachPct: r > 0 ? Math.round((dist / r) * 100) : 0,
+      tries: i,
+      clamped,
+    };
+    if (dCursor >= sep && dPrev >= sep) return cand;
+
+    // Keep the roomiest near-miss, biased toward the outer edge.
+    const score = Math.min(dCursor, dPrev) - sep + frac * 20;
+    if (score > bestScore) {
+      bestScore = score;
+      best = cand;
+    }
+  }
+
+  if (best) return best;
+
+  // Everything was rejected (a degenerate fan). Fall back to the MIDDLE
+  // OF THE REQUESTED ZONE, not straight out — a zone-blind fallback
+  // turns every abduction spawn into an adduction one.
+  const { a, r } = fanAt(g, (uLo + uHi) / 2);
+  const limit = maxAlong(g.sx, g.sy, a, o.canvasW, o.canvasH, o.margin);
+  const dist = Math.min(r * REACH_MIN, limit);
+  return {
+    x: g.sx + Math.cos(a) * dist,
+    y: g.sy + Math.sin(a) * dist,
+    angleDeg: reportAngle(a, g),
+    reachPct: r > 0 ? Math.round((dist / r) * 100) : 0,
+    tries: MAX_TRIES,
+    clamped: true,
+  };
+}
+
+/** Angle relative to "straight out on the playing side", so the number
+ *  reads the same for a left- and a right-handed session. Canvas y
+ *  grows downward, so the sign is flipped to make overhead positive. */
+function reportAngle(a: number, g: ReachGeometry): number {
+  let d = a - g.aSide;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return Math.round((-d * 180) / Math.PI);
 }

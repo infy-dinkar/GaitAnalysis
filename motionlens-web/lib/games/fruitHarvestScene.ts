@@ -12,7 +12,13 @@
 import Phaser from "phaser";
 import type { HandState } from "@/lib/games/handTracker";
 import type { ReachBox } from "@/lib/games/calibration";
-import { spawnPoint } from "@/lib/games/calibration";
+import {
+  reachGeometry,
+  spawnAtReachEdge,
+  spawnPoint,
+  type Zone,
+} from "@/lib/games/calibration";
+import { PALM_REACH } from "@/lib/games/handTracker";
 import { OneEuro2D } from "@/lib/games/oneEuro";
 import type { GameAudio } from "@/lib/games/gameAudio";
 import {
@@ -116,6 +122,15 @@ export interface GameDebug {
   lagPx: number;
   /** Whether the palm came from a live elbow or fell back to the wrist. */
   palmFromElbow: boolean;
+  /** Spawn anchor — the chosen side's shoulder, canvas px. */
+  shoulderPx: { x: number; y: number } | null;
+  /** Reach radius in each calibrated direction, canvas px. */
+  reachR: { across: number; side: number; up: number } | null;
+  /** Last spawn's direction, degrees from straight-out on the playing
+   *  side: positive = toward overhead, negative = across the body. */
+  lastSpawnDeg: number;
+  /** Last spawn's distance as a percentage of the reach that way. */
+  lastSpawnPct: number;
 }
 
 export function createGameDebug(): GameDebug {
@@ -146,6 +161,10 @@ export function createGameDebug(): GameDebug {
     cutoffHz: 0,
     lagPx: 0,
     palmFromElbow: false,
+    shoulderPx: null,
+    reachR: null,
+    lastSpawnDeg: 0,
+    lastSpawnPct: 0,
   };
 }
 
@@ -277,6 +296,8 @@ export class FruitHarvestScene extends Phaser.Scene {
   private leafKey: string | null = null;
   private fpsText: Phaser.GameObjects.Text | null = null;
   private fpsMin = Infinity;
+  /** Where the previous fruit went, for the separation rule. */
+  private lastSpawnPoint: { x: number; y: number } | null = null;
 
   constructor() {
     super("fruit-harvest");
@@ -359,7 +380,7 @@ export class FruitHarvestScene extends Phaser.Scene {
     if (debugOn) {
       const fs = Math.round(this.unit * 0.032);
       this.fpsText = this.add
-        .text(this.scale.width * 0.02, this.scale.height * 0.94, "fps —", {
+        .text(this.scale.width * 0.02, this.scale.height * 0.82, "fps —", {
           fontFamily: "ui-monospace, monospace",
           fontSize: `${fs}px`,
           color: "#a3e635",
@@ -527,10 +548,17 @@ export class FruitHarvestScene extends Phaser.Scene {
     d.cutoffHz = Math.round(this.filter.lastCutoff * 100) / 100;
     d.palmFromElbow = c.state.palmFromElbow;
     if (this.fpsText) {
+      const sh = d.shoulderPx ? `${d.shoulderPx.x},${d.shoulderPx.y}` : "—";
+      const rr = d.reachR
+        ? `across ${d.reachR.across} side ${d.reachR.side} up ${d.reachR.up}`
+        : "—";
       this.fpsText.setText(
         `fps ${d.fps} min ${d.fpsMin}  pose ${d.poseHz}Hz  `
         + `cutoff ${d.cutoffHz}Hz  lag ${d.lagPx}px  `
-        + `palm ${d.palmFromElbow ? "elbow" : "wrist"}`,
+        + `palm ${d.palmFromElbow ? "elbow" : "wrist"}\n`
+        + `shoulder ${sh}  reach px: ${rr}\n`
+        + `last spawn ${d.lastSpawnDeg >= 0 ? "+" : ""}${d.lastSpawnDeg}deg `
+        + `@ ${d.lastSpawnPct}% of reach`,
       );
     }
     if (cover.dispW > 0) {
@@ -546,18 +574,85 @@ export class FruitHarvestScene extends Phaser.Scene {
   private spawn(time: number) {
     const c = this.control;
     const region = this.nextRegion;
-    const p = spawnPoint(c.box, region, Math.random);
-    if (!Number.isFinite(p.nx) || !Number.isFinite(p.ny)) {
-      c.debug.lastSpawn = `REJECTED: non-finite point from reach box (${p.nx}, ${p.ny})`;
+    const zone: Zone = region === "same" ? "abduction" : "adduction";
+    const st = c.state;
+    const cover = st.cover;
+
+    // Polar placement around the LIVE shoulder. The palm offset is
+    // added to every radius inside reachGeometry, because calibration
+    // recorded the wrist while the cursor is the palm.
+    const geo = st.shoulderOk
+      ? reachGeometry(
+        c.box,
+        st.shoulderX,
+        st.shoulderY,
+        cover,
+        PALM_REACH * st.forearmPx,
+      )
+      : null;
+
+    let x: number;
+    let y: number;
+    let note: string;
+
+    if (geo) {
+      const r = spawnAtReachEdge(geo, zone, {
+        canvasW: this.scale.width,
+        canvasH: this.scale.height,
+        margin: this.unit * 0.08 * c.visualScale,
+        cursor: this.cursorSeeded
+          ? { x: this.cursor.x, y: this.cursor.y }
+          : null,
+        prev: this.lastSpawnPoint,
+        rand: Math.random,
+      });
+      x = r.x;
+      y = r.y;
+      c.debug.lastSpawnDeg = r.angleDeg;
+      c.debug.lastSpawnPct = r.reachPct;
+      c.debug.reachR = {
+        across: Math.round(geo.rAcross),
+        side: Math.round(geo.rSide),
+        up: Math.round(geo.rUp),
+      };
+      c.debug.shoulderPx = { x: Math.round(geo.sx), y: Math.round(geo.sy) };
+      note =
+        `${zone} ${r.angleDeg}deg ${r.reachPct}% of reach`
+        + `${r.clamped ? " (pulled in)" : ""}`
+        + `${r.tries > 0 ? ` after ${r.tries} rejected` : ""}`;
+    } else {
+      // No usable shoulder this frame. Fall back to the old uniform box
+      // rather than stalling the round, and say so on the overlay.
+      const p = spawnPoint(c.box, region, Math.random);
+      if (!Number.isFinite(p.nx) || !Number.isFinite(p.ny)) {
+        c.debug.lastSpawn = "REJECTED: non-finite point from reach box";
+        return;
+      }
+      x = cover.dispW > 0
+        ? cover.offX + p.nx * cover.dispW
+        : this.scale.width / 2;
+      y = cover.dispH > 0
+        ? cover.offY + p.ny * cover.dispH
+        : this.scale.height / 2;
+      c.debug.lastSpawnDeg = 0;
+      c.debug.lastSpawnPct = 0;
+      note = `${zone} FALLBACK uniform box (no live shoulder)`;
+    }
+
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      c.debug.lastSpawn = "REJECTED: non-finite spawn point";
       return;
     }
+    this.lastSpawnPoint = { x, y };
+    // Store normalised so a resize keeps the fruit where the patient
+    // reached for it — same contract the update loop expects.
+    const p = {
+      nx: cover.dispW > 0 ? (x - cover.offX) / cover.dispW : 0.5,
+      ny: cover.dispH > 0 ? (y - cover.offY) / cover.dispH : 0.5,
+    };
     // Alternate the halves so the across-midline reach — the part that
     // exercises adduction — is never crowded out by chance.
     this.nextRegion = this.nextRegion === "same" ? "across" : "same";
-
-    const cover = c.state.cover;
-    const x = cover.dispW > 0 ? cover.offX + p.nx * cover.dispW : this.scale.width / 2;
-    const y = cover.dispH > 0 ? cover.offY + p.ny * cover.dispH : this.scale.height / 2;
 
     const key = this.keys[Math.floor(Math.random() * this.keys.length)];
     const size = this.unit * 0.13 * c.visualScale;
@@ -593,9 +688,7 @@ export class FruitHarvestScene extends Phaser.Scene {
       warned: false,
     });
     c.debug.spawnedTotal += 1;
-    c.debug.lastSpawn =
-      `OK ${region} n(${p.nx.toFixed(2)}, ${p.ny.toFixed(2)}) `
-      + `px(${Math.round(x)}, ${Math.round(y)}) size ${Math.round(size)}`;
+    c.debug.lastSpawn = `${note} px(${Math.round(x)}, ${Math.round(y)})`;
   }
 
   private harvest(f: Fruit, index: number) {
