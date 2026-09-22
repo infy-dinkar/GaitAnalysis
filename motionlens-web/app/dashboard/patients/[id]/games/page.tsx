@@ -13,8 +13,6 @@ import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { Button } from "@/components/ui/Button";
 import { getPatient, type PatientDTO } from "@/lib/patients";
 
-const INTRO_MS = 1500;
-
 export default function PatientGamesPage({
   params,
 }: {
@@ -35,12 +33,6 @@ export default function PatientGamesPage({
 
 function Content({ patientId }: { patientId: string }) {
   const [patient, setPatient] = useState<PatientDTO | null>(null);
-  const [introDone, setIntroDone] = useState(false);
-
-  useEffect(() => {
-    const t = window.setTimeout(() => setIntroDone(true), INTRO_MS);
-    return () => window.clearTimeout(t);
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -55,8 +47,6 @@ function Content({ patientId }: { patientId: string }) {
       cancelled = true;
     };
   }, [patientId]);
-
-  if (!introDone) return <Intro />;
 
   return (
     <div className="space-y-8">
@@ -96,28 +86,6 @@ function Content({ patientId }: { patientId: string }) {
       <p className="text-sm text-muted">
         More games arrive as they are built.
       </p>
-    </div>
-  );
-}
-
-/** ~1.5 s intro — three fruit settling into place, then the list. */
-function Intro() {
-  return (
-    <div className="flex min-h-[50vh] flex-col items-center justify-center">
-      <div className="flex gap-4 text-6xl">
-        {["🍎", "🍊", "🍐"].map((f, i) => (
-          <span
-            key={f}
-            className="animate-bounce"
-            style={{ animationDelay: `${i * 140}ms`, animationDuration: "900ms" }}
-            role="img"
-            aria-hidden
-          >
-            {f}
-          </span>
-        ))}
-      </div>
-      <p className="mt-6 text-lg font-medium tracking-tight">Camera games</p>
     </div>
   );
 }
