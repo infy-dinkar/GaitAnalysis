@@ -1416,6 +1416,7 @@ function moduleHeading(r: ReportDTO): string {
   if (r.module === "functional_reach") return "Functional Reach";
   if (r.module === "single_leg_hop") return "Single-Leg Hop";
   if (r.module === "counter_movement_jump") return "Counter-Movement Jump";
+  if (r.module === "games") return "Games session";
   const bp = r.body_part ? `${r.body_part.charAt(0).toUpperCase()}${r.body_part.slice(1)}` : "";
   const mv = r.movement ? `${r.movement.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}` : "";
   return [bp, mv].filter(Boolean).join(" · ") || "Biomechanics";

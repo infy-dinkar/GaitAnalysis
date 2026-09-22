@@ -56,6 +56,11 @@ class ReportCreate(BaseModel):
         # `metrics` (provider-agnostic dict) so all 24 exercises share
         # this single literal.
         "rehab",
+        # Camera-controlled game rounds — one report per finished round.
+        # Same arrangement as "rehab": the per-game identity goes in
+        # `movement` (the game slug) and the round detail in `metrics`,
+        # so every game shares this single literal.
+        "games",
     ]
 
     # Biomech-specific (optional for other modules)
