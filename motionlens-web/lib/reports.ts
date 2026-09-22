@@ -32,7 +32,8 @@ export interface ReportSummaryDTO {
     | "tuck_jump"
     | "overhead_squat"
     | "squat_lateral"
-    | "rehab";
+    | "rehab"
+    | "games";
   body_part: string | null;
   movement: string | null;
   side: string | null;
@@ -87,7 +88,10 @@ export interface ReportCreatePayload {
     | "tuck_jump"
     | "overhead_squat"
     | "squat_lateral"
-    | "rehab";
+    | "rehab"
+    // Camera-controlled game rounds. The game slug goes in `movement`,
+    // exactly as the rehab exercises do, so all games share this label.
+    | "games";
   body_part?: "shoulder" | "neck" | "knee" | "hip" | "ankle";
   movement?: string;
   side?: "left" | "right";

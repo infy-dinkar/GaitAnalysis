@@ -11,6 +11,7 @@ import {
   Download,
   Dumbbell,
   Footprints,
+  Gamepad2,
   Layers,
   PersonStanding,
   ChevronRight,
@@ -160,6 +161,13 @@ const MODULE_META: Record<
     label: "Rehab session",
     icon: Dumbbell,
     tone: "bg-orange-500/10 text-orange-700 dark:text-orange-400",
+  },
+  // Every camera game shares this one label; the game itself is in
+  // `movement` and appears in the subline below.
+  games: {
+    label: "Games",
+    icon: Gamepad2,
+    tone: "bg-stone-500/10 text-stone-700 dark:text-stone-400",
   },
 };
 

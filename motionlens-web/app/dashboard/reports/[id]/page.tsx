@@ -18,6 +18,7 @@ import {
   Dumbbell,
   FileText,
   Footprints,
+  Gamepad2,
   Layers,
   Loader2,
   Move3d,
@@ -102,6 +103,9 @@ const MODULE_META: Record<
   overhead_squat: { label: "Overhead Squat", icon: MoveRight },
   squat_lateral: { label: "Squat (Lateral)", icon: MoveRight },
   rehab: { label: "Rehab session", icon: Dumbbell },
+  // Header + PDF title only. No body renderer yet, so a saved games
+  // report opens with a correct heading and an empty body.
+  games: { label: "Games", icon: Gamepad2 },
 };
 
 export default function ReportViewPage({

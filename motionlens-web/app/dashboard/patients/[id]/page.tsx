@@ -11,6 +11,7 @@ import {
   Dumbbell,
   FileText,
   Flame,
+  Gamepad2,
   GitCompare,
   Loader2,
   Pencil,
@@ -171,6 +172,12 @@ function PatientDetail({ id }: { id: string }) {
             >
               <Flame className="h-4 w-4" />
               Rehab progress
+            </Button>
+          </Link>
+          <Link href={`/dashboard/patients/${id}/games`}>
+            <Button variant="secondary">
+              <Gamepad2 className="h-4 w-4" />
+              Play Games
             </Button>
           </Link>
           {reports.length >= 2 && (

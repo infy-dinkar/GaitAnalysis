@@ -266,20 +266,10 @@ function drawFrontReferenceLines(
   }
   ctx.setLineDash([]);
 
-  // The measured body centre per row, drawn faintly against the plumb
-  // above: where the two separate is the lateral deviation, visible
-  // directly instead of inferred from the numbers.
-  const centerline = silhouette?.centerline;
-  if (centerline && centerline.length > 1) {
-    ctx.strokeStyle = "rgba(34, 197, 94, 0.5)";
-    ctx.lineWidth = Math.max(1, lineW * 0.5);
-    ctx.beginPath();
-    ctx.moveTo(centerline[0][0], centerline[0][1]);
-    for (let i = 1; i < centerline.length; i++) {
-      ctx.lineTo(centerline[i][0], centerline[i][1]);
-    }
-    ctx.stroke();
-  }
+  // `silhouette.centerline` is still in the payload and still stored on
+  // saved reports, but is deliberately NOT drawn: following the mask row
+  // by row made it jag on clothing folds, arms and the gap between the
+  // legs. Nothing measures it, so nothing downstream changes.
 
   // Horizontal reference lines at ear / shoulder / hip / knee / ankle
   // midpoints. Spanned to the BODY at that height (plus a small
