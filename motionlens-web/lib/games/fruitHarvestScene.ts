@@ -481,6 +481,7 @@ export class FruitHarvestScene extends Phaser.Scene {
       .setDepth(41)
       .setVisible(false);
 
+    this.layout();
     this.palmBase = { ...this.control.state.palmCounts };
 
     const d = this.control.debug;
@@ -492,6 +493,49 @@ export class FruitHarvestScene extends Phaser.Scene {
       y0: this.control.box.yLo,
       y1: this.control.box.yHi,
     };
+  }
+
+  /**
+   * Position and size everything that is anchored to the canvas.
+   *
+   * Called once at the end of create() and again whenever the canvas
+   * changes size — which is every fullscreen enter and exit. Fruit are
+   * NOT handled here: they carry normalised coordinates and are
+   * re-mapped from the live object-cover geometry every frame, so they
+   * stay reachable across a resize on their own.
+   */
+  private layout(): void {
+    const w = this.scale.width;
+    const h = this.scale.height;
+    const u = Math.min(w, h);
+    const s = this.control.visualScale;
+    this.backdropSize = { w, h };
+
+    this.backdrop?.setDisplaySize(w, h);
+
+    this.basket
+      ?.setPosition(w / 2, h * 0.93)
+      .setDisplaySize(u * 0.17 * s, u * 0.17 * s);
+    this.cursor?.setDisplaySize(u * 0.12 * s, u * 0.12 * s);
+
+    const hud = Math.round(u * 0.095 * s);
+    this.timerText
+      ?.setPosition(w * 0.04, h * 0.03)
+      .setFontSize(hud)
+      .setStroke("#000000", Math.max(2, hud * 0.1));
+    this.scoreText
+      ?.setPosition(w * 0.96, h * 0.03)
+      .setFontSize(hud)
+      .setStroke("#000000", Math.max(2, hud * 0.1));
+
+    this.lostBand?.setPosition(w / 2, h / 2).setSize(w, u * 0.3);
+    const lost = Math.round(u * 0.062 * s);
+    this.lostText
+      ?.setPosition(w / 2, h / 2)
+      .setFontSize(lost)
+      .setStroke("#000000", Math.max(2, lost * 0.08));
+
+    this.fpsText?.setPosition(w * 0.02, h * 0.82).setFontSize(Math.round(u * 0.032));
   }
 
   update(time: number) {
@@ -525,14 +569,14 @@ export class FruitHarvestScene extends Phaser.Scene {
     this.lostText?.setVisible(lost);
     c.debug.handLost = lost;
 
-    // Keep the backdrop covering the canvas across a resize.
+    // Entering or leaving fullscreen changes the canvas under us.
+    // Everything positioned in create() has to be laid out again, or
+    // the HUD and basket stay where they were on the old canvas.
     if (
-      this.backdrop
-      && (this.backdropSize.w !== this.scale.width
-        || this.backdropSize.h !== this.scale.height)
+      this.backdropSize.w !== this.scale.width
+      || this.backdropSize.h !== this.scale.height
     ) {
-      this.backdropSize = { w: this.scale.width, h: this.scale.height };
-      this.backdrop.setDisplaySize(this.scale.width, this.scale.height);
+      this.layout();
     }
 
     // ── Clock. Paused time is subtracted, so a round always gives the

@@ -15,7 +15,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { Check, Gamepad2, Hand as HandIcon, RotateCcw } from "lucide-react";
+import {
+  Check,
+  Gamepad2,
+  Hand as HandIcon,
+  Maximize2,
+  RotateCcw,
+} from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { useCamera } from "@/hooks/useCamera";
 import { usePoseDetectionLive } from "@/hooks/usePoseDetectionLive";
@@ -38,6 +44,12 @@ import {
   type ReachBox,
 } from "@/lib/games/calibration";
 import { HEADROOM_RATIO_MIN } from "@/lib/games/handTracker";
+import {
+  enterFullscreen,
+  exitFullscreen,
+  isFullscreen,
+  onFullscreenChange,
+} from "@/lib/games/fullscreen";
 import { GameAudio } from "@/lib/games/gameAudio";
 import {
   ROUND_MS,
@@ -105,6 +117,7 @@ export function FruitHarvestGame() {
   const [upCheck, setUpCheck] = useState<
     { rUp: number; rSide: number; ratio: number } | null
   >(null);
+  const [fs, setFs] = useState(false);
   const [dbg, setDbg] = useState<GameDebug | null>(null);
   const debugRef = useRef<GameDebug>(createGameDebug());
 
@@ -121,6 +134,7 @@ export function FruitHarvestGame() {
   const holdIndexRef = useRef(0);
   const lastPoseAtRef = useRef(0);
   const calibModeRef = useRef<"all" | "upOnly">("all");
+  const gameRef = useRef<import("phaser").Game | null>(null);
   const onHoldDoneRef = useRef<(p: Point) => void>(() => {});
 
   // ── Camera. Started from the hand-pick click so the permission
@@ -132,6 +146,10 @@ export function FruitHarvestGame() {
       setHand(h);
       if (!audioRef.current) audioRef.current = new GameAudio();
       audioRef.current.prime();
+      // Fullscreen must ride on a user gesture, and this click is the
+      // first one in the flow — it cannot be done when the countdown
+      // ends. Fire and forget: a refusal is not allowed to stop play.
+      void enterFullscreen(stageRef.current);
       void start();
       setPhase("setup");
       phaseRef.current = "setup";
@@ -376,6 +394,7 @@ export function FruitHarvestGame() {
         // this in its holding pattern and injects `data` at bootQueue
         // (SceneManager.js:236). That is what gets `control` into
         // init() — the config array auto-starts scene 0 with no data.
+        gameRef.current = game;
         game.scene.start("fruit-harvest", { control });
         debug.phaserCreated = true;
         debug.sceneState = "booting";
@@ -399,6 +418,7 @@ export function FruitHarvestGame() {
     return () => {
       cancelled = true;
       control.finished = true;
+      gameRef.current = null;
       game?.destroy(true);
     };
   }, [phase, visualScale]);
@@ -406,6 +426,30 @@ export function FruitHarvestGame() {
   useEffect(() => {
     const audio = audioRef.current;
     return () => audio?.close();
+  }, []);
+
+  // ── Fullscreen state, including the patient pressing Esc.
+  useEffect(() => onFullscreenChange(() => setFs(isFullscreen())), []);
+
+  // ── Keep Phaser's canvas matched to the stage.
+  //
+  // Scale.RESIZE follows window resizes, but entering fullscreen
+  // changes the PARENT's box without necessarily resizing the window,
+  // so watch the element itself. The scene re-lays-out the HUD and
+  // basket when it sees the new size, and fruit carry normalised
+  // coordinates so they stay reachable on their own.
+  useEffect(() => {
+    const host = phaserHostRef.current;
+    if (!host || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      const g = gameRef.current;
+      if (!g) return;
+      const w = host.clientWidth;
+      const h = host.clientHeight;
+      if (w > 0 && h > 0) g.scale.resize(w, h);
+    });
+    ro.observe(host);
+    return () => ro.disconnect();
   }, []);
 
   // ── Debug overlay poll. Only while ?gamedebug=1 and only during play.
@@ -480,9 +524,18 @@ export function FruitHarvestGame() {
         )}
       </div>
 
+      {/* In fullscreen the stage IS the fullscreen element, so the
+          browser sizes it to the screen — drop the aspect ratio and
+          the rounding, or it letterboxes itself inside the display.
+          Nav, footer and page padding are ancestors, so they are not
+          rendered at all while this element is in the top layer. */}
       <div
         ref={stageRef}
-        className="relative aspect-video w-full overflow-hidden rounded-card bg-black"
+        className={
+          fs
+            ? "relative h-full w-full overflow-hidden bg-black"
+            : "relative aspect-video w-full overflow-hidden rounded-card bg-black"
+        }
       >
         {/* The camera is HIDDEN during play — the patient sees the
             orchard and their hand, nothing else. The element stays
@@ -510,6 +563,20 @@ export function FruitHarvestGame() {
           ref={phaserHostRef}
           className={`absolute inset-0 z-[5] ${phase === "play" ? "" : "hidden"}`}
         />
+
+        {/* Dropped out of fullscreen mid-flow (Esc, usually). Offer the
+            way back without interrupting anything — the round keeps
+            running behind this. */}
+        {!fs && phase !== "hand" && (
+          <button
+            type="button"
+            onClick={() => void enterFullscreen(stageRef.current)}
+            className="absolute right-2 top-2 z-40 rounded-md border border-white/30 bg-black/60 px-3 py-1.5 text-sm text-white hover:bg-black/80"
+          >
+            <Maximize2 className="mr-1 inline h-4 w-4" />
+            Full screen
+          </button>
+        )}
 
         {debugOn && phase === "play" && dbg && <DebugPanel d={dbg} />}
         {debugOn && (phase === "setup" || phase === "calibrate") && (
@@ -668,7 +735,9 @@ export function FruitHarvestGame() {
                 <RotateCcw className="h-5 w-5" />
                 Play again
               </Button>
-              <Link href={backHref}>
+              {/* Leaving the game leaves fullscreen. "Play again"
+                  deliberately stays in it. */}
+              <Link href={backHref} onClick={() => void exitFullscreen()}>
                 <Button size="lg" variant="secondary">
                   Back to games
                 </Button>
