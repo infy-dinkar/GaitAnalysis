@@ -905,7 +905,7 @@ export function FruitHarvestGame() {
       </div>
 
       <p className="mt-3 text-center text-sm text-muted">
-        Nothing is saved in this step — no report is written.
+        Results are not saved yet.
       </p>
     </div>
   );
