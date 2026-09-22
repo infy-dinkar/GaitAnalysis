@@ -28,6 +28,7 @@ import {
   makeRingTexture,
   makeSoftDotTexture,
 } from "@/lib/games/fruitEffects";
+import { makeOrchardTexture, makeSprigTexture } from "@/lib/games/orchardScene";
 
 export const ROUND_MS = 60_000;
 const MAX_FRUIT = 3;
@@ -44,8 +45,6 @@ const LEAF = "🍃";
 //    the hit test or the score — they only shape what is drawn.
 /** Squash-and-stretch on contact, before the fruit sets off. */
 const SNAP_MS = 140;
-/** Flight time along the curve into the basket. */
-const ARC_MS = 500;
 /**
  * Wobble warning before a fruit falls away.
  *
@@ -79,6 +78,14 @@ const PREDICT_CAP = 0.035;
 const PREDICT_DEADBAND = 0.25;
 /** Assumed pose rate before a real measurement arrives. */
 const FALLBACK_POSE_HZ = 20;
+
+/** How long the hand may be missing before the round pauses. The
+ *  patient can no longer see themselves, so they need telling. */
+const HAND_LOST_MS = 1000;
+/** Ground line, as a fraction of height — matches the orchard's. */
+const GROUND_Y = 0.9;
+/** Fall time into the basket when a fruit is collected. */
+const FALL_MS = 520;
 
 /** Glyph texture size. Generous so a large sprite stays crisp. */
 const GLYPH_TEX = 256;
@@ -140,6 +147,8 @@ export interface GameDebug {
   headroomPx: number;
   /** headroomPx / armLenPx. Below ~1.1 a raised arm cannot be seen. */
   headroomRatio: number;
+  /** Round is held because the hand has not been seen for a second. */
+  handLost: boolean;
 }
 
 export function createGameDebug(): GameDebug {
@@ -178,6 +187,7 @@ export function createGameDebug(): GameDebug {
     armLenPx: 0,
     headroomPx: 0,
     headroomRatio: 0,
+    handLost: false,
   };
 }
 
@@ -207,6 +217,8 @@ interface Fruit {
   baseScale: number;
   /** The pre-fall wobble has been started. */
   warned: boolean;
+  /** Stem and leaf drawn behind the fruit, so it reads as attached. */
+  sprig: Phaser.GameObjects.Image | null;
 }
 
 /**
@@ -313,6 +325,14 @@ export class FruitHarvestScene extends Phaser.Scene {
   private lastSpawnPoint: { x: number; y: number } | null = null;
   /** Palm-source tallies as they stood when the round began. */
   private palmBase = { hand: 0, elbow: 0, wrist: 0 };
+  private backdrop: Phaser.GameObjects.Image | null = null;
+  private backdropSize = { w: 0, h: 0 };
+  private lostText: Phaser.GameObjects.Text | null = null;
+  private lostBand: Phaser.GameObjects.Rectangle | null = null;
+  /** Milliseconds the hand has been missing, and the total time the
+   *  round clock has been held for. */
+  private handLostMs = 0;
+  private pausedMs = 0;
 
   constructor() {
     super("fruit-harvest");
@@ -343,7 +363,28 @@ export class FruitHarvestScene extends Phaser.Scene {
     // Effect art, also generated rather than loaded.
     makeSoftDotTexture(this, "fx-dot");
     makeRingTexture(this, "fx-ring");
+    makeSprigTexture(this, "fx-sprig");
     this.leafKey = makeGlyphTexture(this, "fx-leaf", LEAF) ? "fx-leaf" : null;
+
+    // ── Orchard backdrop. Generated once here, then one sprite per
+    //    frame. The camera is hidden during play, so this is what the
+    //    patient actually sees behind the fruit.
+    const bw = Math.round(this.scale.width);
+    const bh = Math.round(this.scale.height);
+    if (makeOrchardTexture(this, "orchard", bw, bh, Math.floor(Math.random() * 1e6))) {
+      this.backdrop = this.add
+        .image(0, 0, "orchard")
+        .setOrigin(0, 0)
+        .setDisplaySize(bw, bh)
+        .setDepth(-10);
+      this.backdropSize = { w: bw, h: bh };
+    } else {
+      // Texture creation failed — a flat wash still hides the camera.
+      this.add
+        .rectangle(0, 0, bw, bh, 0x24512f)
+        .setOrigin(0, 0)
+        .setDepth(-10);
+    }
     if (!makeGlyphTexture(this, "basket", BASKET)) {
       makeDiscTexture(this, "basket", 0xb45309);
     }
@@ -408,6 +449,38 @@ export class FruitHarvestScene extends Phaser.Scene {
     // NOTE: startedAt / lastFrameAt / lastSpawnAt are deliberately left
     // at -1 here and seeded on the first update frame instead — see the
     // field declaration for why this must not use this.time.now.
+    // ── "Hand lost" banner. Hidden until needed. Built here so the
+    //    message never has to be created mid-round.
+    const lost = Math.round(this.unit * 0.062 * s);
+    this.lostBand = this.add
+      .rectangle(
+        this.scale.width / 2,
+        this.scale.height / 2,
+        this.scale.width,
+        this.unit * 0.3,
+        0x000000,
+        0.72,
+      )
+      .setDepth(40)
+      .setVisible(false);
+    this.lostText = this.add
+      .text(
+        this.scale.width / 2,
+        this.scale.height / 2,
+        "We can't see your hand\nstep back into view",
+        {
+          fontFamily: "system-ui, sans-serif",
+          fontSize: `${lost}px`,
+          color: "#ffffff",
+          align: "center",
+          stroke: "#000000",
+          strokeThickness: Math.max(2, lost * 0.08),
+        },
+      )
+      .setOrigin(0.5)
+      .setDepth(41)
+      .setVisible(false);
+
     this.palmBase = { ...this.control.state.palmCounts };
 
     const d = this.control.debug;
@@ -434,11 +507,37 @@ export class FruitHarvestScene extends Phaser.Scene {
       c.debug.sceneState = "running";
     }
 
+    const dtMs = Math.max(0, Math.min(200, time - this.lastFrameAt));
     const dt = Math.max(0.001, (time - this.lastFrameAt) / 1000);
     this.lastFrameAt = time;
 
-    // ── Clock
-    const elapsed = time - this.startedAt;
+    // ── Hand lost. With the camera hidden the patient cannot tell why
+    //    nothing is happening, so say so, and hold the round rather
+    //    than burning their time.
+    if (c.state.usable) {
+      this.handLostMs = 0;
+    } else {
+      this.handLostMs += dtMs;
+    }
+    const lost = this.handLostMs > HAND_LOST_MS;
+    if (lost) this.pausedMs += dtMs;
+    this.lostBand?.setVisible(lost);
+    this.lostText?.setVisible(lost);
+    c.debug.handLost = lost;
+
+    // Keep the backdrop covering the canvas across a resize.
+    if (
+      this.backdrop
+      && (this.backdropSize.w !== this.scale.width
+        || this.backdropSize.h !== this.scale.height)
+    ) {
+      this.backdropSize = { w: this.scale.width, h: this.scale.height };
+      this.backdrop.setDisplaySize(this.scale.width, this.scale.height);
+    }
+
+    // ── Clock. Paused time is subtracted, so a round always gives the
+    //    patient the full ROUND_MS of play.
+    const elapsed = time - this.startedAt - this.pausedMs;
     c.remainingMs = Math.max(0, ROUND_MS - elapsed);
     this.timerText.setText(String(Math.ceil(c.remainingMs / 1000)));
     if (c.remainingMs <= 0) {
@@ -498,8 +597,18 @@ export class FruitHarvestScene extends Phaser.Scene {
       this.cursor.setAlpha(0.25);
     }
 
-    // ── Spawn
-    if (
+    // ── Spawn. Held while the hand is lost: new fruit would only time
+    //    out unseen and count as misses the patient never had a chance
+    //    at. The gap is nudged forward so nothing bursts out at once
+    //    the moment they come back into view.
+    if (lost) {
+      this.lastSpawnAt += dtMs;
+      // Fruit already on the branch must not time out either — they
+      // would be counted missed for a hand the patient could not see
+      // to move. Shifting bornAt holds their TTL exactly as the round
+      // clock is held.
+      for (const f of this.fruits) f.bornAt += dtMs;
+    } else if (
       this.fruits.length < MAX_FRUIT
       && time - this.lastSpawnAt > SPAWN_GAP_MS
     ) {
@@ -520,6 +629,7 @@ export class FruitHarvestScene extends Phaser.Scene {
           cover.offX + f.nx * cover.dispW,
           cover.offY + f.ny * cover.dispH,
         );
+        f.sprig?.setPosition(f.img.x, f.img.y);
       }
 
       // Hit test reads the DRAWN cursor, so it is the palm point after
@@ -686,27 +796,50 @@ export class FruitHarvestScene extends Phaser.Scene {
 
     const key = this.keys[Math.floor(Math.random() * this.keys.length)];
     const size = this.unit * 0.13 * c.visualScale;
+    // Stem and leaf, behind the fruit and slightly above it.
+    let sprig: Phaser.GameObjects.Image | null = null;
+    if (this.textures.exists("fx-sprig")) {
+      sprig = this.add
+        .image(x, y, "fx-sprig")
+        .setDisplaySize(size * 1.15, size * 1.15)
+        .setDepth(9);
+    }
+
     const img = this.add.image(x, y, key).setDisplaySize(size, size).setDepth(10);
     const base = img.scaleX;
-    // Pop in: 0 -> 1.15 -> 1, rather than appearing fully formed.
+    const sprigBase = sprig ? (size * 1.15) / this.textures.get("fx-sprig").getSourceImage().width : 0;
+
+    // GROWS on the branch rather than popping out of nowhere: a slow
+    // swell with only a whisper of overshoot, so it reads as ripening
+    // rather than being thrown at the screen.
     img.setScale(0);
+    if (sprig) sprig.setScale(0);
     this.tweens.chain({
       targets: img,
       tweens: [
         {
-          scaleX: base * 1.15,
-          scaleY: base * 1.15,
-          duration: 150,
-          ease: "Quad.easeOut",
+          scaleX: base * 1.06,
+          scaleY: base * 1.06,
+          duration: 340,
+          ease: "Sine.easeOut",
         },
         {
           scaleX: base,
           scaleY: base,
-          duration: 110,
-          ease: "Quad.easeIn",
+          duration: 130,
+          ease: "Sine.easeInOut",
         },
       ],
     });
+    if (sprig) {
+      this.tweens.add({
+        targets: sprig,
+        scaleX: sprigBase,
+        scaleY: sprigBase,
+        duration: 300,
+        ease: "Sine.easeOut",
+      });
+    }
 
     this.fruits.push({
       img,
@@ -716,6 +849,7 @@ export class FruitHarvestScene extends Phaser.Scene {
       dying: false,
       baseScale: base,
       warned: false,
+      sprig,
     });
     c.debug.spawnedTotal += 1;
     c.debug.lastSpawn = `${note} px(${Math.round(x)}, ${Math.round(y)})`;
@@ -764,40 +898,48 @@ export class FruitHarvestScene extends Phaser.Scene {
     // 5 — floating "+1" from the contact point.
     floatScore(this, cx, cy, u, s);
 
-    // 3 — arc into the basket along a curve, not a straight drop. The
-    //     control point sits above both ends, so the fruit lofts.
-    const from = new Phaser.Math.Vector2(cx, cy);
-    const to = new Phaser.Math.Vector2(this.basket.x, this.basket.y);
-    const ctrl = new Phaser.Math.Vector2(
-      (cx + to.x) / 2 + (cx - to.x) * 0.22,
-      Math.min(cy, to.y) - u * 0.26,
-    );
-    const curve = new Phaser.Curves.QuadraticBezier(from, ctrl, to);
-    const at = new Phaser.Math.Vector2();
-    const path = { t: 0 };
+    // The stem stays on the branch — only the fruit detaches.
+    if (f.sprig) {
+      const sp = f.sprig;
+      this.tweens.add({
+        targets: sp,
+        alpha: 0,
+        duration: 420,
+        delay: 180,
+        onComplete: () => sp.destroy(),
+      });
+      f.sprig = null;
+    }
 
+    // 3 — DETACH AND FALL. Gravity down into the basket rather than a
+    //     lofted arc: the fruit was hanging on a branch, so it should
+    //     drop off it. Quad.easeIn on y is constant acceleration; x
+    //     drifts linearly toward the basket so it still lands in it.
     this.tweens.add({
-      targets: path,
-      t: 1,
-      duration: ARC_MS,
+      targets: f.img,
+      y: this.basket.y - u * 0.02,
+      duration: FALL_MS,
       delay: SNAP_MS,
-      ease: "Sine.easeInOut",
-      onUpdate: () => {
-        curve.getPoint(path.t, at);
-        f.img.setPosition(at.x, at.y);
-      },
+      ease: "Quad.easeIn",
       onComplete: () => {
         f.img.destroy();
         this.bounceBasket();
       },
     });
-    // Spin and shrink along the way — separate so the path stays exact.
     this.tweens.add({
       targets: f.img,
-      angle: 150,
-      scaleX: f.baseScale * 0.5,
-      scaleY: f.baseScale * 0.5,
-      duration: ARC_MS,
+      x: this.basket.x,
+      duration: FALL_MS,
+      delay: SNAP_MS,
+      ease: "Sine.easeInOut",
+    });
+    // A slow tumble and a little shrink as it drops away from the eye.
+    this.tweens.add({
+      targets: f.img,
+      angle: 110,
+      scaleX: f.baseScale * 0.6,
+      scaleY: f.baseScale * 0.6,
+      duration: FALL_MS,
       delay: SNAP_MS,
       ease: "Sine.easeIn",
     });
@@ -849,29 +991,53 @@ export class FruitHarvestScene extends Phaser.Scene {
 
     const u = this.unit;
     const drift = (Math.random() * 2 - 1) * u * 0.07;
-    // Quad.easeIn on y is constant acceleration — the fall reads as
-    // gravity rather than a slide.
+    // The stem is left behind on the branch and withers.
+    if (f.sprig) {
+      const sp = f.sprig;
+      this.tweens.add({
+        targets: sp,
+        alpha: 0,
+        duration: 500,
+        onComplete: () => sp.destroy(),
+      });
+      f.sprig = null;
+    }
+
+    // Lands ON THE GROUND beside the basket rather than falling out of
+    // frame — there is a ground plane now, so fruit should reach it.
+    // Quad.easeIn on y is constant acceleration, so it reads as gravity.
+    const groundY = this.scale.height * GROUND_Y + u * 0.02;
+    const fall = 720;
     this.tweens.add({
       targets: f.img,
-      y: this.scale.height + u * 0.25,
-      duration: 780,
+      y: groundY,
+      duration: fall,
       ease: "Quad.easeIn",
-      onComplete: () => f.img.destroy(),
+      onComplete: () => {
+        // Settle where it landed, then fade into the grass.
+        this.tweens.add({
+          targets: f.img,
+          scaleY: f.baseScale * 0.78,
+          scaleX: f.baseScale * 1.05,
+          duration: 90,
+          yoyo: true,
+          ease: "Quad.easeOut",
+        });
+        this.tweens.add({
+          targets: f.img,
+          alpha: 0,
+          delay: 260,
+          duration: 420,
+          onComplete: () => f.img.destroy(),
+        });
+      },
     });
     this.tweens.add({
       targets: f.img,
       x: f.img.x + drift,
       angle: drift > 0 ? 190 : -190,
-      duration: 780,
+      duration: fall,
       ease: "Sine.easeIn",
-    });
-    // Fade late, so it is clearly seen leaving rather than blinking out.
-    this.tweens.add({
-      targets: f.img,
-      alpha: 0,
-      delay: 300,
-      duration: 480,
-      ease: "Quad.easeIn",
     });
   }
 }

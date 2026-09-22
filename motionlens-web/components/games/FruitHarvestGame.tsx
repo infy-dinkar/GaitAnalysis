@@ -484,11 +484,24 @@ export function FruitHarvestGame() {
         ref={stageRef}
         className="relative aspect-video w-full overflow-hidden rounded-card bg-black"
       >
+        {/* The camera is HIDDEN during play — the patient sees the
+            orchard and their hand, nothing else. The element stays
+            mounted and playing either way, because pose detection
+            reads frames from it; only its presentation changes.
+            `opacity-0` rather than `hidden`, so the browser keeps
+            decoding it. With ?gamedebug=1 it shrinks to a corner PiP
+            instead of disappearing. */}
         <video
           ref={videoRef}
           playsInline
           muted
-          className="h-full w-full scale-x-[-1] object-cover"
+          className={
+            phase !== "play"
+              ? "h-full w-full scale-x-[-1] object-cover"
+              : debugOn
+                ? "absolute bottom-2 right-2 z-30 w-1/5 scale-x-[-1] rounded-md border border-white/30 object-cover opacity-90"
+                : "h-full w-full scale-x-[-1] object-cover opacity-0"
+          }
         />
         {/* Phaser draws here during play only. z-5 puts it above the
             <video> (which has its own stacking context from the mirror
@@ -728,6 +741,7 @@ function DebugPanel({ d }: { d: GameDebug }) {
           + `y ${d.boxN.y0.toFixed(2)}..${d.boxN.y1.toFixed(2)}`
         : "none",
     ],
+    ["hand lost", d.handLost ? "YES — round held" : "no"],
     ["arm length", `${d.armLenPx} px`],
     ["headroom", `${d.headroomPx} px  (ratio ${d.headroomRatio})`],
     ["pose rate", `${d.poseHz} Hz`],
