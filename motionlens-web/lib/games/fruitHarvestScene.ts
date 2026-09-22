@@ -10,7 +10,7 @@
 // size make absolute pixels meaningless.
 
 import Phaser from "phaser";
-import type { HandState } from "@/lib/games/handTracker";
+import type { HandState, PalmSource } from "@/lib/games/handTracker";
 import type { ReachBox } from "@/lib/games/calibration";
 import {
   reachGeometry,
@@ -120,8 +120,11 @@ export interface GameDebug {
   cutoffHz: number;
   /** Distance from the raw mapped palm to the drawn cursor, px. */
   lagPx: number;
-  /** Whether the palm came from a live elbow or fell back to the wrist. */
-  palmFromElbow: boolean;
+  /** Where the palm came from this frame. */
+  palmSource: PalmSource;
+  /** Frames per source SINCE THE ROUND STARTED, so setup and
+   *  calibration do not pollute the tally. */
+  palmCounts: { hand: number; elbow: number; wrist: number };
   /** Spawn anchor — the chosen side's shoulder, canvas px. */
   shoulderPx: { x: number; y: number } | null;
   /** Reach radius in each calibrated direction, canvas px. */
@@ -166,7 +169,8 @@ export function createGameDebug(): GameDebug {
     poseHz: 0,
     cutoffHz: 0,
     lagPx: 0,
-    palmFromElbow: false,
+    palmSource: "wrist",
+    palmCounts: { hand: 0, elbow: 0, wrist: 0 },
     shoulderPx: null,
     reachR: null,
     lastSpawnDeg: 0,
@@ -307,6 +311,8 @@ export class FruitHarvestScene extends Phaser.Scene {
   private fpsMin = Infinity;
   /** Where the previous fruit went, for the separation rule. */
   private lastSpawnPoint: { x: number; y: number } | null = null;
+  /** Palm-source tallies as they stood when the round began. */
+  private palmBase = { hand: 0, elbow: 0, wrist: 0 };
 
   constructor() {
     super("fruit-harvest");
@@ -402,6 +408,8 @@ export class FruitHarvestScene extends Phaser.Scene {
     // NOTE: startedAt / lastFrameAt / lastSpawnAt are deliberately left
     // at -1 here and seeded on the first update frame instead — see the
     // field declaration for why this must not use this.time.now.
+    this.palmBase = { ...this.control.state.palmCounts };
+
     const d = this.control.debug;
     d.sceneState = "created";
     d.texturesOk = this.textures.exists("basket") && this.textures.exists(this.keys[0]);
@@ -555,7 +563,14 @@ export class FruitHarvestScene extends Phaser.Scene {
     d.objects = this.children.list.length;
     d.poseHz = Math.round(c.state.poseHz * 10) / 10;
     d.cutoffHz = Math.round(this.filter.lastCutoff * 100) / 100;
-    d.palmFromElbow = c.state.palmFromElbow;
+    d.palmSource = c.state.palmSource;
+    // Report deltas against the baseline taken in create(), so the
+    // tally covers this round only.
+    d.palmCounts = {
+      hand: c.state.palmCounts.hand - this.palmBase.hand,
+      elbow: c.state.palmCounts.elbow - this.palmBase.elbow,
+      wrist: c.state.palmCounts.wrist - this.palmBase.wrist,
+    };
     d.armLenPx = Math.round(c.state.armLenPx);
     d.headroomPx = Math.round(c.state.headroomPx);
     d.headroomRatio = Math.round(c.state.headroomRatio * 100) / 100;
@@ -567,7 +582,8 @@ export class FruitHarvestScene extends Phaser.Scene {
       this.fpsText.setText(
         `fps ${d.fps} min ${d.fpsMin}  pose ${d.poseHz}Hz  `
         + `cutoff ${d.cutoffHz}Hz  lag ${d.lagPx}px  `
-        + `palm ${d.palmFromElbow ? "elbow" : "wrist"}\n`
+        + `palm ${d.palmSource} `
+        + `(h${d.palmCounts.hand}/e${d.palmCounts.elbow}/w${d.palmCounts.wrist})\n`
         + `shoulder ${sh}  reach px: ${rr}\n`
         + `arm ${d.armLenPx}px  headroom ${d.headroomPx}px  `
         + `ratio ${d.headroomRatio}\n`

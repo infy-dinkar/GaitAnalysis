@@ -734,7 +734,19 @@ function DebugPanel({ d }: { d: GameDebug }) {
     ["render fps", `${d.fps}  (min ${d.fpsMin})`],
     ["filter cutoff", `${d.cutoffHz} Hz`],
     ["lag px", `${d.lagPx}  (raw palm -> drawn cursor)`],
-    ["palm from", d.palmFromElbow ? "elbow (projected)" : "wrist (fallback)"],
+    [
+      "palm from",
+      d.palmSource === "hand"
+        ? "hand landmarks"
+        : d.palmSource === "elbow"
+          ? "elbow (projected)"
+          : "WRIST — cursor is short of the hand",
+    ],
+    [
+      "palm frames",
+      `hand ${d.palmCounts.hand} · elbow ${d.palmCounts.elbow} · `
+      + `wrist ${d.palmCounts.wrist}`,
+    ],
     ["tweens / objects", `${d.tweens} / ${d.objects}`],
     ["fruit spawned", String(d.spawnedTotal)],
     ["fruit on screen", String(d.onScreen)],
@@ -756,7 +768,15 @@ function DebugPanel({ d }: { d: GameDebug }) {
       {rows.map(([k, v]) => (
         <div key={k} className="flex gap-2">
           <span className="w-28 shrink-0 text-white/50">{k}</span>
-          <span className="break-all">{v}</span>
+          {/* The wrist fallback means the cursor is drawn short of the
+              hand — call it out rather than let it pass as normal. */}
+          <span
+            className={`break-all ${
+              v.startsWith("WRIST") ? "font-bold text-rose-400" : ""
+            }`}
+          >
+            {v}
+          </span>
         </div>
       ))}
       {d.error && (

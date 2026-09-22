@@ -27,11 +27,27 @@ export const WRIST_INDEX: Record<Hand, number> = {
   right: LM_LIVE.RIGHT_WRIST, // 16
 };
 
-/** Same-side elbow, used to project the wrist forward to the palm. */
+/** Same-side elbow, used to project the wrist forward to the palm when
+ *  the hand landmarks themselves are unavailable. */
 export const ELBOW_INDEX: Record<Hand, number> = {
   left: LM_LIVE.LEFT_ELBOW, // 13
   right: LM_LIVE.RIGHT_ELBOW, // 14
 };
+
+/** Same-side hand points. BlazePose emits these as part of its 33-point
+ *  pose model, so no extra detector is involved. Their mean with the
+ *  wrist lands close to the centre of the palm. */
+export const PINKY_INDEX: Record<Hand, number> = {
+  left: LM_LIVE.LEFT_PINKY, // 17
+  right: LM_LIVE.RIGHT_PINKY, // 18
+};
+export const FINGER_INDEX: Record<Hand, number> = {
+  left: LM_LIVE.LEFT_INDEX, // 19
+  right: LM_LIVE.RIGHT_INDEX, // 20
+};
+
+/** Where the drawn palm came from this frame. */
+export type PalmSource = "hand" | "elbow" | "wrist";
 
 /**
  * How far past the wrist the palm sits, as a fraction of the forearm.
@@ -82,8 +98,17 @@ export interface HandState {
    *  Falls back to the wrist when the elbow is not usable. */
   palmX: number;
   palmY: number;
-  /** True when palmX/palmY came from a live, in-frame elbow. */
-  palmFromElbow: boolean;
+  /**
+   * How the palm was derived this frame:
+   *   "hand"  — mean of wrist + index and/or pinky. What we want.
+   *   "elbow" — wrist projected along the forearm. Good enough.
+   *   "wrist" — nothing better available; the cursor is short of the
+   *             hand and the debug overlay flags it in red.
+   */
+  palmSource: PalmSource;
+  /** Running tally per source, so a whole round can be judged rather
+   *  than a glanced-at frame. */
+  palmCounts: { hand: number; elbow: number; wrist: number };
   score: number;
   /** Visibility passed the floor. */
   live: boolean;
@@ -158,7 +183,8 @@ export function createHandState(): HandState {
     y: 0,
     palmX: 0,
     palmY: 0,
-    palmFromElbow: false,
+    palmSource: "wrist",
+    palmCounts: { hand: 0, elbow: 0, wrist: 0 },
     score: 0,
     live: false,
     inFrame: false,
@@ -287,24 +313,53 @@ export function updateHandState(
     s.y = cover.offY + wrist.ny * cover.dispH;
     if (wrist.ok) s.lastUsableMs = nowMs;
 
-    // Palm = wrist projected along the forearm, in canvas pixels.
     elbowRead = read(ELBOW_INDEX[hand]);
     const elbow = elbowRead;
     s.elbowOk = !!elbow?.ok;
     if (elbow?.ok && wrist.ok) {
       const ex = cover.offX + elbow.nx * cover.dispW;
       const ey = cover.offY + elbow.ny * cover.dispH;
+      s.forearmPx = Math.hypot(s.x - ex, s.y - ey);
+    }
+
+    // ── Palm, best source first. Everything in CANVAS pixels: the
+    //    normalised space is anisotropic whenever the video is not
+    //    square, so averaging or extrapolating there would skew.
+    const pinky = read(PINKY_INDEX[hand]);
+    const finger = read(FINGER_INDEX[hand]);
+    const haveFinger = !!(finger?.ok || pinky?.ok);
+
+    if (wrist.ok && haveFinger) {
+      // 1. Mean of the hand points. The wrist plus the index and pinky
+      //    knuckles straddle the palm, so their mean sits in it.
+      let sx = s.x;
+      let sy = s.y;
+      let n = 1;
+      for (const p of [finger, pinky]) {
+        if (!p?.ok) continue;
+        sx += cover.offX + p.nx * cover.dispW;
+        sy += cover.offY + p.ny * cover.dispH;
+        n++;
+      }
+      s.palmX = sx / n;
+      s.palmY = sy / n;
+      s.palmSource = "hand";
+    } else if (wrist.ok && elbow?.ok) {
+      // 2. Project the wrist along the forearm.
+      const ex = cover.offX + elbow.nx * cover.dispW;
+      const ey = cover.offY + elbow.ny * cover.dispH;
       s.palmX = s.x + (s.x - ex) * PALM_REACH;
       s.palmY = s.y + (s.y - ey) * PALM_REACH;
-      s.palmFromElbow = true;
-      s.forearmPx = Math.hypot(s.x - ex, s.y - ey);
+      s.palmSource = "elbow";
     } else {
-      // No usable elbow — sit on the wrist rather than guess a
-      // direction from a landmark MediaPipe extrapolated.
+      // 3. Nothing better — sit on the wrist rather than guess a
+      //    direction from a landmark MediaPipe extrapolated. The cursor
+      //    is visibly short of the hand here; the overlay says so.
       s.palmX = s.x;
       s.palmY = s.y;
-      s.palmFromElbow = false;
+      s.palmSource = "wrist";
     }
+    if (s.usable) s.palmCounts[s.palmSource] += 1;
   } else {
     s.live = false;
     s.inFrame = false;
