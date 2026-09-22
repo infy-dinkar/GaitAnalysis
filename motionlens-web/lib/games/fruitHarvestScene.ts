@@ -15,6 +15,13 @@ import type { ReachBox } from "@/lib/games/calibration";
 import { spawnPoint } from "@/lib/games/calibration";
 import { OneEuro2D } from "@/lib/games/oneEuro";
 import type { GameAudio } from "@/lib/games/gameAudio";
+import {
+  collectBurst,
+  floatScore,
+  glyphAverageColour,
+  makeRingTexture,
+  makeSoftDotTexture,
+} from "@/lib/games/fruitEffects";
 
 export const ROUND_MS = 60_000;
 const MAX_FRUIT = 3;
@@ -25,6 +32,22 @@ const SPAWN_GAP_MS = 600;
 
 const FRUITS = ["🍎", "🍊", "🍐", "🍋", "🍓", "🍇", "🍑", "🥝"];
 const BASKET = "🧺";
+const LEAF = "🍃";
+
+// ── Animation timings. None of these change the round clock, the TTL,
+//    the hit test or the score — they only shape what is drawn.
+/** Squash-and-stretch on contact, before the fruit sets off. */
+const SNAP_MS = 140;
+/** Flight time along the curve into the basket. */
+const ARC_MS = 500;
+/**
+ * Wobble warning before a fruit falls away.
+ *
+ * It starts at TTL − this, NOT after the TTL, so the moment a fruit is
+ * counted missed is exactly where it was before. The fruit is still
+ * collectable while it wobbles — that is the point of the warning.
+ */
+const MISS_WARN_MS = 300;
 
 /** Glyph texture size. Generous so a large sprite stays crisp. */
 const GLYPH_TEX = 256;
@@ -51,6 +74,15 @@ export interface GameDebug {
   remainingMs: number;
   texturesOk: boolean;
   error: string | null;
+  /** Smoothed framerate from Phaser's own loop. */
+  fps: number;
+  /** Worst framerate seen since the round began — where a costly
+   *  effect would show up. Ignores the first second of warm-up. */
+  fpsMin: number;
+  /** Live tween count; the animation cost in one number. */
+  tweens: number;
+  /** Display-list size, so a leak would be visible as steady growth. */
+  objects: number;
 }
 
 export function createGameDebug(): GameDebug {
@@ -73,6 +105,10 @@ export function createGameDebug(): GameDebug {
     remainingMs: ROUND_MS,
     texturesOk: false,
     error: null,
+    fps: 0,
+    fpsMin: 0,
+    tweens: 0,
+    objects: 0,
   };
 }
 
@@ -98,6 +134,10 @@ interface Fruit {
   ny: number;
   bornAt: number;
   dying: boolean;
+  /** Base scale from setDisplaySize, so effects can return to it. */
+  baseScale: number;
+  /** The pre-fall wobble has been started. */
+  warned: boolean;
 }
 
 /**
@@ -193,6 +233,10 @@ export class FruitHarvestScene extends Phaser.Scene {
   private lastFrameAt = -1;
   private nextRegion: "same" | "across" = "same";
   private cursorSeeded = false;
+  private fruitColour: Record<string, number> = {};
+  private leafKey: string | null = null;
+  private fpsText: Phaser.GameObjects.Text | null = null;
+  private fpsMin = Infinity;
 
   constructor() {
     super("fruit-harvest");
@@ -215,8 +259,15 @@ export class FruitHarvestScene extends Phaser.Scene {
       if (!makeGlyphTexture(this, key, glyph)) {
         makeDiscTexture(this, key, 0xef4444);
       }
+      // Sampled once, here — never in the frame loop.
+      this.fruitColour[key] = glyphAverageColour(this, key);
       return key;
     });
+
+    // Effect art, also generated rather than loaded.
+    makeSoftDotTexture(this, "fx-dot");
+    makeRingTexture(this, "fx-ring");
+    this.leafKey = makeGlyphTexture(this, "fx-leaf", LEAF) ? "fx-leaf" : null;
     if (!makeGlyphTexture(this, "basket", BASKET)) {
       makeDiscTexture(this, "basket", 0xb45309);
     }
@@ -256,6 +307,27 @@ export class FruitHarvestScene extends Phaser.Scene {
       })
       .setOrigin(1, 0)
       .setDepth(30);
+
+    // In-canvas FPS readout. Read straight from the query string so the
+    // scene needs nothing from the React layer to show it.
+    let debugOn = false;
+    try {
+      debugOn = new URLSearchParams(window.location.search).get("gamedebug") === "1";
+    } catch {
+      debugOn = false;
+    }
+    if (debugOn) {
+      const fs = Math.round(this.unit * 0.032);
+      this.fpsText = this.add
+        .text(this.scale.width * 0.02, this.scale.height * 0.94, "fps —", {
+          fontFamily: "ui-monospace, monospace",
+          fontSize: `${fs}px`,
+          color: "#a3e635",
+          backgroundColor: "#000000b0",
+          padding: { x: 6, y: 3 },
+        })
+        .setDepth(31);
+    }
 
     // NOTE: startedAt / lastFrameAt / lastSpawnAt are deliberately left
     // at -1 here and seeded on the first update frame instead — see the
@@ -351,7 +423,12 @@ export class FruitHarvestScene extends Phaser.Scene {
         }
       }
 
-      if (time - f.bornAt > FRUIT_TTL_MS) this.dropAway(f, i);
+      const age = time - f.bornAt;
+      if (!f.warned && age > FRUIT_TTL_MS - MISS_WARN_MS) {
+        f.warned = true;
+        this.startWobble(f);
+      }
+      if (age > FRUIT_TTL_MS) this.dropAway(f, i);
     }
 
     // ── Diagnostics (?gamedebug=1)
@@ -365,6 +442,20 @@ export class FruitHarvestScene extends Phaser.Scene {
     d.cursorY = Math.round(this.cursor.y);
     d.canvasW = Math.round(this.scale.width);
     d.canvasH = Math.round(this.scale.height);
+
+    const fps = this.game.loop.actualFps;
+    d.fps = Math.round(fps);
+    // Skip the first second: the very first frames are always slow
+    // (shader compile, texture upload) and would mask a real dip.
+    if (elapsed > 1000 && fps > 0) this.fpsMin = Math.min(this.fpsMin, fps);
+    d.fpsMin = Number.isFinite(this.fpsMin) ? Math.round(this.fpsMin) : 0;
+    d.tweens = this.tweens.getTweens().length;
+    d.objects = this.children.list.length;
+    if (this.fpsText) {
+      this.fpsText.setText(
+        `fps ${d.fps}  min ${d.fpsMin}  tweens ${d.tweens}  objs ${d.objects}`,
+      );
+    }
     if (cover.dispW > 0) {
       d.boxPx = {
         x0: Math.round(cover.offX + c.box.xLo * cover.dispW),
@@ -394,16 +485,36 @@ export class FruitHarvestScene extends Phaser.Scene {
     const key = this.keys[Math.floor(Math.random() * this.keys.length)];
     const size = this.unit * 0.13 * c.visualScale;
     const img = this.add.image(x, y, key).setDisplaySize(size, size).setDepth(10);
-    img.setScale(img.scaleX * 0.4);
-    this.tweens.add({
+    const base = img.scaleX;
+    // Pop in: 0 -> 1.15 -> 1, rather than appearing fully formed.
+    img.setScale(0);
+    this.tweens.chain({
       targets: img,
-      scaleX: img.scaleX / 0.4,
-      scaleY: img.scaleY / 0.4,
-      duration: 220,
-      ease: "Back.easeOut",
+      tweens: [
+        {
+          scaleX: base * 1.15,
+          scaleY: base * 1.15,
+          duration: 150,
+          ease: "Quad.easeOut",
+        },
+        {
+          scaleX: base,
+          scaleY: base,
+          duration: 110,
+          ease: "Quad.easeIn",
+        },
+      ],
     });
 
-    this.fruits.push({ img, nx: p.nx, ny: p.ny, bornAt: time, dying: false });
+    this.fruits.push({
+      img,
+      nx: p.nx,
+      ny: p.ny,
+      bornAt: time,
+      dying: false,
+      baseScale: base,
+      warned: false,
+    });
     c.debug.spawnedTotal += 1;
     c.debug.lastSpawn =
       `OK ${region} n(${p.nx.toFixed(2)}, ${p.ny.toFixed(2)}) `
@@ -416,38 +527,151 @@ export class FruitHarvestScene extends Phaser.Scene {
     this.control.harvested += 1;
     this.scoreText.setText(String(this.control.harvested));
     this.control.audio.harvest();
+
+    // The wobble warning may be mid-flight; drop it so it cannot fight
+    // the collect animation.
+    this.tweens.killTweensOf(f.img);
+
+    const u = this.unit;
+    const s = this.control.visualScale;
+    const cx = f.img.x;
+    const cy = f.img.y;
+    const colour = this.fruitColour[f.img.texture.key] ?? 0xffd166;
+
+    // 1 — snap. Squash-and-stretch on contact, then straight back.
+    f.img.setScale(f.baseScale);
     this.tweens.add({
       targets: f.img,
-      x: this.basket.x,
-      y: this.basket.y,
-      scaleX: f.img.scaleX * 0.3,
-      scaleY: f.img.scaleY * 0.3,
-      duration: 320,
-      ease: "Cubic.easeIn",
-      onComplete: () => f.img.destroy(),
-    });
-    this.tweens.add({
-      targets: this.basket,
-      scaleX: this.basket.scaleX * 1.15,
-      scaleY: this.basket.scaleY * 0.88,
-      duration: 110,
+      scaleX: f.baseScale * 1.3,
+      scaleY: f.baseScale * 1.18,
+      duration: SNAP_MS / 2,
       yoyo: true,
+      ease: "Quad.easeOut",
+    });
+
+    // 2 — flash ring, particle burst, leaves. Tinted to this fruit.
+    collectBurst(this, {
+      x: cx,
+      y: cy,
+      unit: u,
+      colour,
+      visualScale: s,
+      leafKey: this.leafKey,
+      dotKey: "fx-dot",
+      ringKey: "fx-ring",
+    });
+
+    // 5 — floating "+1" from the contact point.
+    floatScore(this, cx, cy, u, s);
+
+    // 3 — arc into the basket along a curve, not a straight drop. The
+    //     control point sits above both ends, so the fruit lofts.
+    const from = new Phaser.Math.Vector2(cx, cy);
+    const to = new Phaser.Math.Vector2(this.basket.x, this.basket.y);
+    const ctrl = new Phaser.Math.Vector2(
+      (cx + to.x) / 2 + (cx - to.x) * 0.22,
+      Math.min(cy, to.y) - u * 0.26,
+    );
+    const curve = new Phaser.Curves.QuadraticBezier(from, ctrl, to);
+    const at = new Phaser.Math.Vector2();
+    const path = { t: 0 };
+
+    this.tweens.add({
+      targets: path,
+      t: 1,
+      duration: ARC_MS,
+      delay: SNAP_MS,
+      ease: "Sine.easeInOut",
+      onUpdate: () => {
+        curve.getPoint(path.t, at);
+        f.img.setPosition(at.x, at.y);
+      },
+      onComplete: () => {
+        f.img.destroy();
+        this.bounceBasket();
+      },
+    });
+    // Spin and shrink along the way — separate so the path stays exact.
+    this.tweens.add({
+      targets: f.img,
+      angle: 150,
+      scaleX: f.baseScale * 0.5,
+      scaleY: f.baseScale * 0.5,
+      duration: ARC_MS,
+      delay: SNAP_MS,
+      ease: "Sine.easeIn",
     });
   }
 
+  /** 4 — the basket takes the weight. */
+  private bounceBasket() {
+    const sx = this.basket.scaleX;
+    const sy = this.basket.scaleY;
+    this.tweens.killTweensOf(this.basket);
+    this.basket.setScale(sx, sy);
+    this.tweens.chain({
+      targets: this.basket,
+      tweens: [
+        { scaleX: sx * 1.18, scaleY: sy * 0.82, duration: 90, ease: "Quad.easeOut" },
+        { scaleX: sx * 0.94, scaleY: sy * 1.08, duration: 90, ease: "Quad.easeInOut" },
+        { scaleX: sx, scaleY: sy, duration: 110, ease: "Back.easeOut" },
+      ],
+    });
+  }
+
+  /** 6 — the warning wobble, started MISS_WARN_MS before the TTL. The
+   *  fruit is still collectable throughout; only the look changes. */
+  private startWobble(f: Fruit) {
+    this.tweens.add({
+      targets: f.img,
+      angle: 9,
+      duration: 70,
+      yoyo: true,
+      repeat: Math.ceil(MISS_WARN_MS / 140),
+      ease: "Sine.easeInOut",
+    });
+    this.tweens.add({
+      targets: f.img,
+      scaleX: f.baseScale * 0.92,
+      scaleY: f.baseScale * 0.92,
+      duration: MISS_WARN_MS,
+      ease: "Quad.easeIn",
+    });
+  }
+
+  /** 7 — falls out of frame under gravity, turning and fading. */
   private dropAway(f: Fruit, index: number) {
     f.dying = true;
     this.fruits.splice(index, 1);
     this.control.missed += 1;
     this.control.audio.miss();
+    this.tweens.killTweensOf(f.img);
+
+    const u = this.unit;
+    const drift = (Math.random() * 2 - 1) * u * 0.07;
+    // Quad.easeIn on y is constant acceleration — the fall reads as
+    // gravity rather than a slide.
     this.tweens.add({
       targets: f.img,
-      y: this.scale.height + this.unit * 0.2,
-      alpha: 0,
-      angle: 140,
-      duration: 620,
+      y: this.scale.height + u * 0.25,
+      duration: 780,
       ease: "Quad.easeIn",
       onComplete: () => f.img.destroy(),
+    });
+    this.tweens.add({
+      targets: f.img,
+      x: f.img.x + drift,
+      angle: drift > 0 ? 190 : -190,
+      duration: 780,
+      ease: "Sine.easeIn",
+    });
+    // Fade late, so it is clearly seen leaving rather than blinking out.
+    this.tweens.add({
+      targets: f.img,
+      alpha: 0,
+      delay: 300,
+      duration: 480,
+      ease: "Quad.easeIn",
     });
   }
 }
