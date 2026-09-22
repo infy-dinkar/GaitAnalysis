@@ -99,6 +99,7 @@ export function FruitHarvestGame() {
   const controlRef = useRef<FruitHarvestControl | null>(null);
   const audioRef = useRef<GameAudio | null>(null);
   const holdIndexRef = useRef(0);
+  const lastPoseAtRef = useRef(0);
   const onHoldDoneRef = useRef<(p: Point) => void>(() => {});
 
   // ── Camera. Started from the hand-pick click so the permission
@@ -137,6 +138,25 @@ export function FruitHarvestGame() {
         const pose = await detect(video);
         if (cancelled) return;
         const now = performance.now();
+
+        // Pose rate. detect() returns null when it dropped the frame
+        // (one send already in flight), so only real results count.
+        // This is the freshness ceiling for the cursor: no amount of
+        // filtering can show the hand sooner than the detector reports
+        // it, which is why it is on the debug overlay.
+        if (pose) {
+          const prev = lastPoseAtRef.current;
+          if (prev > 0) {
+            const gap = now - prev;
+            if (gap > 1 && gap < 1000) {
+              const hz = 1000 / gap;
+              const s = stateRef.current;
+              s.poseHz = s.poseHz > 0 ? s.poseHz * 0.85 + hz * 0.15 : hz;
+            }
+          }
+          lastPoseAtRef.current = now;
+        }
+
         updateHandState(
           stateRef.current,
           pose?.keypoints ?? null,
@@ -554,6 +574,12 @@ function DebugPanel({ d }: { d: GameDebug }) {
           + `y ${d.boxN.y0.toFixed(2)}..${d.boxN.y1.toFixed(2)}`
         : "none",
     ],
+    ["pose rate", `${d.poseHz} Hz`],
+    ["render fps", `${d.fps}  (min ${d.fpsMin})`],
+    ["filter cutoff", `${d.cutoffHz} Hz`],
+    ["lag px", `${d.lagPx}  (raw palm -> drawn cursor)`],
+    ["palm from", d.palmFromElbow ? "elbow (projected)" : "wrist (fallback)"],
+    ["tweens / objects", `${d.tweens} / ${d.objects}`],
     ["fruit spawned", String(d.spawnedTotal)],
     ["fruit on screen", String(d.onScreen)],
     ["last spawn", d.lastSpawn],

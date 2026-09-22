@@ -33,6 +33,14 @@ export class OneEuro {
   /** Cutoff actually applied on the last frame, in Hz. Diagnostic only. */
   lastCutoff = 0;
 
+  /** Low-passed velocity estimate in units/second, as used to open the
+   *  cutoff. Exposed so callers can extrapolate with the SAME velocity
+   *  the filter is already computing rather than differencing the
+   *  output again (which would re-introduce the noise this removes). */
+  get velocity(): number {
+    return this.dxPrev;
+  }
+
   constructor(opts: OneEuroOptions = {}) {
     this.minCutoff = opts.minCutoff ?? 1.1;
     this.beta = opts.beta ?? 0.02;
@@ -92,5 +100,16 @@ export class OneEuro2D {
 
   filter(x: number, y: number, dt: number): { x: number; y: number } {
     return { x: this.fx.filter(x, dt), y: this.fy.filter(y, dt) };
+  }
+
+  /** Effective cutoff actually applied, in Hz — the larger of the two
+   *  axes, which is the one doing the least smoothing. */
+  get lastCutoff(): number {
+    return Math.max(this.fx.lastCutoff, this.fy.lastCutoff);
+  }
+
+  /** Low-passed velocity in px/second on each axis. */
+  get velocity(): { vx: number; vy: number } {
+    return { vx: this.fx.velocity, vy: this.fy.velocity };
   }
 }

@@ -27,6 +27,25 @@ export const WRIST_INDEX: Record<Hand, number> = {
   right: LM_LIVE.RIGHT_WRIST, // 16
 };
 
+/** Same-side elbow, used to project the wrist forward to the palm. */
+export const ELBOW_INDEX: Record<Hand, number> = {
+  left: LM_LIVE.LEFT_ELBOW, // 13
+  right: LM_LIVE.RIGHT_ELBOW, // 14
+};
+
+/**
+ * How far past the wrist the palm sits, as a fraction of the forearm.
+ *
+ * BlazePose gives a wrist, but the ✋ cursor reads as a palm, so drawing
+ * it on the wrist puts it visibly short of the hand. Extending along
+ * the forearm by this much lands it near the middle of the palm.
+ *
+ * Computed in CANVAS pixels, not normalised space: normalised space is
+ * anisotropic whenever the video is not square (dispW != dispH), so
+ * extrapolating a direction there would skew it.
+ */
+export const PALM_REACH = 0.3;
+
 /** Below this visibility a landmark is treated as not present. Matches
  *  the value the production camera shells use for their overlay. */
 export const VIS_FLOOR = 0.35;
@@ -40,9 +59,19 @@ export interface HandState {
   /** Normalised MIRRORED video space, 0..1 across the frame. */
   nx: number;
   ny: number;
-  /** Canvas-space pixels, after object-cover compensation. */
+  /** WRIST in canvas-space pixels, after object-cover compensation.
+   *  Calibration and the reach box are defined in wrist terms, so this
+   *  keeps its original meaning. */
   x: number;
   y: number;
+  /** PALM in canvas-space pixels — the wrist projected along the
+   *  forearm. This is what the cursor is drawn at and what the hit test
+   *  uses, so what the patient sees is what collects the fruit.
+   *  Falls back to the wrist when the elbow is not usable. */
+  palmX: number;
+  palmY: number;
+  /** True when palmX/palmY came from a live, in-frame elbow. */
+  palmFromElbow: boolean;
   score: number;
   /** Visibility passed the floor. */
   live: boolean;
@@ -69,6 +98,10 @@ export interface HandState {
   hasPose: boolean;
   /** Timestamp of the last usable wrist sample, ms (performance.now). */
   lastUsableMs: number;
+  /** Detector callbacks per second, smoothed. Written by the pose loop.
+   *  The cursor can never be fresher than this, so it sets the floor on
+   *  how much lag any amount of filtering can remove. */
+  poseHz: number;
 }
 
 export function createHandState(): HandState {
@@ -77,6 +110,9 @@ export function createHandState(): HandState {
     ny: 0.5,
     x: 0,
     y: 0,
+    palmX: 0,
+    palmY: 0,
+    palmFromElbow: false,
     score: 0,
     live: false,
     inFrame: false,
@@ -90,6 +126,7 @@ export function createHandState(): HandState {
     cover: { dispW: 0, dispH: 0, offX: 0, offY: 0 },
     hasPose: false,
     lastUsableMs: 0,
+    poseHz: 0,
   };
 }
 
@@ -187,6 +224,22 @@ export function updateHandState(
     s.x = cover.offX + wrist.nx * cover.dispW;
     s.y = cover.offY + wrist.ny * cover.dispH;
     if (wrist.ok) s.lastUsableMs = nowMs;
+
+    // Palm = wrist projected along the forearm, in canvas pixels.
+    const elbow = read(ELBOW_INDEX[hand]);
+    if (elbow?.ok && wrist.ok) {
+      const ex = cover.offX + elbow.nx * cover.dispW;
+      const ey = cover.offY + elbow.ny * cover.dispH;
+      s.palmX = s.x + (s.x - ex) * PALM_REACH;
+      s.palmY = s.y + (s.y - ey) * PALM_REACH;
+      s.palmFromElbow = true;
+    } else {
+      // No usable elbow — sit on the wrist rather than guess a
+      // direction from a landmark MediaPipe extrapolated.
+      s.palmX = s.x;
+      s.palmY = s.y;
+      s.palmFromElbow = false;
+    }
   } else {
     s.live = false;
     s.inFrame = false;

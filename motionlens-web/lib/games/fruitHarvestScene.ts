@@ -49,6 +49,31 @@ const ARC_MS = 500;
  */
 const MISS_WARN_MS = 300;
 
+// ── Cursor responsiveness.
+//
+// Measured against a simulated 1500 px/s sweep at pose 22 Hz / render
+// 60 fps. The headline finding: the filter is NOT the main source of
+// trailing. Half a pose interval alone is ~34 px of lag at that speed,
+// and opening the filter right up (beta 0.02 -> 0.25) only moved the
+// total from 45 px to 37 px. Short prediction is what actually helps —
+// it halves the lag to ~19 px.
+/** Cutoff at zero speed. As low as it can go without visible jitter. */
+const CURSOR_MIN_CUTOFF = 0.9;
+/** Opens the cutoff with speed. 6x the old value; costs ~0.2 px of
+ *  jitter at rest and removes the filter as the limiting factor. */
+const CURSOR_BETA = 0.12;
+/** Extrapolate forward by this fraction of a pose interval. */
+const PREDICT_HORIZON = 0.5;
+/** Hard cap on the extrapolation, as a fraction of the canvas unit.
+ *  Sized so a hard stop overshoots ~25 px — under half the hit radius
+ *  (0.075 unit). Without a cap a fast stop overshoots much further. */
+const PREDICT_CAP = 0.035;
+/** Below this speed (canvas units/second) prediction is switched off
+ *  entirely, so a still hand cannot drift. */
+const PREDICT_DEADBAND = 0.25;
+/** Assumed pose rate before a real measurement arrives. */
+const FALLBACK_POSE_HZ = 20;
+
 /** Glyph texture size. Generous so a large sprite stays crisp. */
 const GLYPH_TEX = 256;
 
@@ -83,6 +108,14 @@ export interface GameDebug {
   tweens: number;
   /** Display-list size, so a leak would be visible as steady growth. */
   objects: number;
+  /** Detector callbacks per second — the freshness ceiling. */
+  poseHz: number;
+  /** One-euro cutoff actually applied this frame, in Hz. */
+  cutoffHz: number;
+  /** Distance from the raw mapped palm to the drawn cursor, px. */
+  lagPx: number;
+  /** Whether the palm came from a live elbow or fell back to the wrist. */
+  palmFromElbow: boolean;
 }
 
 export function createGameDebug(): GameDebug {
@@ -109,6 +142,10 @@ export function createGameDebug(): GameDebug {
     fpsMin: 0,
     tweens: 0,
     objects: 0,
+    poseHz: 0,
+    cutoffHz: 0,
+    lagPx: 0,
+    palmFromElbow: false,
   };
 }
 
@@ -216,7 +253,10 @@ export class FruitHarvestScene extends Phaser.Scene {
   private scoreText!: Phaser.GameObjects.Text;
   private fruits: Fruit[] = [];
   private keys: string[] = [];
-  private filter = new OneEuro2D({ minCutoff: 1.1, beta: 0.02 });
+  private filter = new OneEuro2D({
+    minCutoff: CURSOR_MIN_CUTOFF,
+    beta: CURSOR_BETA,
+  });
   /**
    * -1 until the first update frame seeds it.
    *
@@ -372,21 +412,50 @@ export class FruitHarvestScene extends Phaser.Scene {
     // ── Cursor. Map FIRST, then smooth: filtering in canvas space keeps
     //    the cutoff in the same units as the on-screen motion the
     //    patient sees, and survives a resize without a jump.
+    //    The target is the PALM, not the wrist — the ✋ glyph reads as a
+    //    palm and the hit test below uses the same point, so what the
+    //    patient sees is what collects the fruit.
     if (c.state.usable) {
-      const target = { x: c.state.x, y: c.state.y };
+      const rawX = c.state.palmX;
+      const rawY = c.state.palmY;
       if (!this.cursorSeeded) {
         // Snap on the first good frame instead of sliding in from the
         // middle of the screen.
         this.filter.reset();
-        this.cursor.setPosition(target.x, target.y);
+        this.cursor.setPosition(rawX, rawY);
         this.cursor.setAlpha(1);
         this.cursorSeeded = true;
-        this.filter.filter(target.x, target.y, dt);
+        this.filter.filter(rawX, rawY, dt);
       } else {
-        const p = this.filter.filter(target.x, target.y, dt);
-        this.cursor.setPosition(p.x, p.y);
+        const p = this.filter.filter(rawX, rawY, dt);
+
+        // Light prediction. Uses the filter's OWN low-passed velocity
+        // rather than differencing the output again, which would put
+        // back the noise the filter just removed.
+        const hz = c.state.poseHz > 1 ? c.state.poseHz : FALLBACK_POSE_HZ;
+        const ahead = (PREDICT_HORIZON / hz);
+        const { vx, vy } = this.filter.velocity;
+        const speed = Math.hypot(vx, vy);
+        let ex = 0;
+        let ey = 0;
+        if (speed > PREDICT_DEADBAND * this.unit) {
+          const cap = PREDICT_CAP * this.unit;
+          const dx = vx * ahead;
+          const dy = vy * ahead;
+          const mag = Math.hypot(dx, dy);
+          // Scale the vector as a whole so capping cannot bend its
+          // direction the way clamping each axis would.
+          const k = mag > cap ? cap / mag : 1;
+          ex = dx * k;
+          ey = dy * k;
+        }
+        this.cursor.setPosition(p.x + ex, p.y + ey);
         this.cursor.setAlpha(1);
       }
+      // Lag: raw mapped palm vs where the cursor is actually drawn.
+      c.debug.lagPx = Math.round(
+        Math.hypot(this.cursor.x - rawX, this.cursor.y - rawY),
+      );
     } else {
       this.cursor.setAlpha(0.25);
     }
@@ -415,6 +484,9 @@ export class FruitHarvestScene extends Phaser.Scene {
         );
       }
 
+      // Hit test reads the DRAWN cursor, so it is the palm point after
+      // smoothing and prediction — whatever the patient sees on screen
+      // is exactly what collects the fruit.
       if (c.state.usable && this.cursorSeeded) {
         const d = Math.hypot(this.cursor.x - f.img.x, this.cursor.y - f.img.y);
         if (d < hitR) {
@@ -451,9 +523,14 @@ export class FruitHarvestScene extends Phaser.Scene {
     d.fpsMin = Number.isFinite(this.fpsMin) ? Math.round(this.fpsMin) : 0;
     d.tweens = this.tweens.getTweens().length;
     d.objects = this.children.list.length;
+    d.poseHz = Math.round(c.state.poseHz * 10) / 10;
+    d.cutoffHz = Math.round(this.filter.lastCutoff * 100) / 100;
+    d.palmFromElbow = c.state.palmFromElbow;
     if (this.fpsText) {
       this.fpsText.setText(
-        `fps ${d.fps}  min ${d.fpsMin}  tweens ${d.tweens}  objs ${d.objects}`,
+        `fps ${d.fps} min ${d.fpsMin}  pose ${d.poseHz}Hz  `
+        + `cutoff ${d.cutoffHz}Hz  lag ${d.lagPx}px  `
+        + `palm ${d.palmFromElbow ? "elbow" : "wrist"}`,
       );
     }
     if (cover.dispW > 0) {
