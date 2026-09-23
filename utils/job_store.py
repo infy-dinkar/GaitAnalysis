@@ -66,6 +66,9 @@ except ImportError:                      # pragma: no cover - platform
 
 JOBS_DIR = os.environ.get("MOTIONLENS_JOBS_DIR", os.path.join(tempfile.gettempdir(), "motionlens_jobs"))
 DISABLED_FLAG = "DISABLED"
+#: Per-kind kill switches, e.g. DISABLED_BIOMECH turns off only the
+#: biomech job endpoint. DISABLED (above) turns off all of them.
+DISABLED_PREFIX = "DISABLED_"
 RUN_LOCK = ".run.lock"
 
 STATUS_QUEUED = "queued"
@@ -107,9 +110,20 @@ def is_valid_id(job_id: str) -> bool:
     )
 
 
-def is_disabled() -> bool:
-    """Kill switch. Checked per request so it needs no restart."""
-    return os.path.exists(os.path.join(JOBS_DIR, DISABLED_FLAG))
+def is_disabled(kind: Optional[str] = None) -> bool:
+    """Kill switch. Checked per request so it needs no restart.
+
+    `DISABLED` turns every job endpoint off. `DISABLED_<KIND>` turns off
+    just that one, so biomech can be rolled back without taking gait —
+    which is already proven in production — down with it.
+    """
+    if os.path.exists(os.path.join(JOBS_DIR, DISABLED_FLAG)):
+        return True
+    if kind:
+        per_kind = DISABLED_PREFIX + kind.upper()
+        if os.path.exists(os.path.join(JOBS_DIR, per_kind)):
+            return True
+    return False
 
 
 def _write_atomic(job_id: str, payload: dict[str, Any]) -> None:
@@ -254,23 +268,55 @@ def sweep(ttl_sec: int = JOB_TTL_SEC) -> int:
     return removed
 
 
-#: Serialises threads WITHIN one process. The file lock below handles
-#: the cross-process half, but relying on it for threads too is a trap:
-#: fcntl.flock is per open-file-description, so it happens to work on
-#: Linux, while Windows' msvcrt.locking is per-process and does not —
-#: a local test had a second job wait on the lock forever. One extra
-#: in-process lock makes the behaviour identical on both.
-_THREAD_SLOT = threading.Lock()
+class _FifoLock:
+    """An in-process lock that grants in ARRIVAL order.
+
+    threading.Lock makes no ordering promise — whichever waiter the OS
+    happens to wake gets it — so with gait and biomech sharing one
+    queue, a job could sit behind others that arrived after it. A ticket
+    lock is the smallest thing that makes "first in, first served" true
+    rather than typical.
+    """
+
+    def __init__(self) -> None:
+        self._cv = threading.Condition()
+        self._next_ticket = 0
+        self._now_serving = 0
+
+    def acquire(self) -> None:
+        with self._cv:
+            ticket = self._next_ticket
+            self._next_ticket += 1
+            while ticket != self._now_serving:
+                self._cv.wait()
+
+    def release(self) -> None:
+        with self._cv:
+            self._now_serving += 1
+            self._cv.notify_all()
+
+
+#: Serialises threads WITHIN one process, in arrival order. The file
+#: lock below handles the cross-process half, but relying on it for
+#: threads too is a trap: fcntl.flock is per open-file-description, so
+#: it happens to work on Linux, while Windows' msvcrt.locking is
+#: per-process and does not — a local test had a second job wait on the
+#: lock forever. One extra in-process lock makes the behaviour
+#: identical on both, and making it FIFO costs nothing more.
+_THREAD_SLOT = _FifoLock()
 
 
 class RunSlot:
     """Machine-wide 'one analysis at a time' gate.
 
-    Two layers, because there are two kinds of concurrency:
+    Shared by EVERY kind of analysis — gait and biomech alike — so the
+    box only ever runs one at a time. Two layers, because there are two
+    kinds of concurrency:
 
-      • threading.Lock — other threads in THIS gunicorn worker
-      • file lock      — the OTHER gunicorn worker, via the shared
-                         container filesystem
+      • FIFO ticket lock — other threads in THIS gunicorn worker,
+                           served in arrival order
+      • file lock        — the OTHER gunicorn worker, via the shared
+                           container filesystem
 
     Jobs waiting here stay `queued`, which is the honest status — they
     have not started.
