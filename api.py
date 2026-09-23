@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import asyncio
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -732,7 +733,11 @@ async def analyze_gait(
 # advisory lock on the shared container filesystem (job_store.RunSlot),
 # because 2 gunicorn workers on 2 vCPUs cannot usefully run two at once
 # — that is what turns 114 s into 210 s.
-_GAIT_JOB_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="gaitjob")
+# Shared by gait AND biomech. Sized so submitted jobs get a thread and
+# queue on the FIFO run lock in arrival order, rather than waiting in
+# the executor where ordering across kinds would be less obvious.
+# They are blocked, not running: only one holds the run slot at a time.
+_GAIT_JOB_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="analysisjob")
 
 
 def _gait_job_worker(
@@ -808,7 +813,7 @@ async def start_gait_job(
     # here is what makes the frontend fall back to the synchronous
     # endpoint, so disabling this file is a complete, instant rollback
     # of the whole feature without a deploy.
-    if job_store.is_disabled():
+    if job_store.is_disabled("gait"):
         raise HTTPException(status_code=404, detail="Job endpoint disabled.")
 
     contents = await video.read()
@@ -5966,6 +5971,146 @@ async def analyze_neck(
         cleanup_temp_file(tmp_path)
         if fixed_path_cleanup and fixed_path_cleanup != tmp_path:
             cleanup_temp_file(fixed_path_cleanup)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Biomech as a background job
+# ══════════════════════════════════════════════════════════════════════
+# Same reasoning as gait: a synchronous upload holds one HTTP connection
+# open for the whole analysis, and Vercel's rewrite gives up between
+# ~115 s and ~210 s. Biomech clips are shorter than gait, so a single
+# one usually survives — but BatchSession fires one POST per picked
+# file with no limit, so one doctor filling a 10-20 item queue can
+# overload the box by themselves and push every request past the line.
+#
+# The five synchronous endpoints are REUSED AS-IS rather than having
+# their bodies extracted. They take only File/Form parameters — no
+# Depends, no Request — so the job worker can call the very same
+# coroutine with an UploadFile built from the saved clip. That makes
+# "identical output" a property of the design rather than something to
+# re-verify per body part: it is the same function.
+_BIOMECH_HANDLERS = {
+    "shoulder": analyze_shoulder,
+    "knee": analyze_knee,
+    "hip": analyze_hip,
+    "ankle": analyze_ankle,
+    "neck": analyze_neck,
+}
+
+
+def _biomech_job_worker(
+    job_id: str,
+    tmp_path: str,
+    filename: str,
+    body_part: str,
+    movement_type: str,
+    side: Optional[str],
+    patient_name: Optional[str],
+    recording_duration_ms: Optional[int],
+) -> None:
+    """Run one biomech job to completion. Never raises."""
+    stop_beat = threading.Event()
+
+    def _beat() -> None:
+        while not stop_beat.wait(job_store.HEARTBEAT_EVERY_SEC):
+            job_store.heartbeat(job_id)
+
+    beat = threading.Thread(target=_beat, daemon=True, name=f"beat-{job_id[:8]}")
+    try:
+        # The SAME slot gait uses, so only one analysis of any kind runs
+        # machine-wide, and the two kinds queue together in arrival
+        # order rather than fighting for the 2 vCPUs.
+        with job_store.RunSlot():
+            job_store.mark_running(job_id)
+            beat.start()
+            t0 = time.time()
+            handler = _BIOMECH_HANDLERS[body_part]
+            fh = None
+            try:
+                fh = open(tmp_path, "rb")
+                upload = UploadFile(file=fh, filename=filename)
+                # asyncio.run gives this POOL THREAD its own loop. The
+                # handler is CPU-bound inside, which is exactly why it
+                # must not run on the server's event loop.
+                resp = asyncio.run(handler(
+                    video=upload,
+                    movement_type=movement_type,
+                    side=side,
+                    patient_name=patient_name,
+                    recording_duration_ms=recording_duration_ms,
+                ))
+            except HTTPException as e:
+                job_store.mark_error(job_id, str(e.detail))
+                return
+            except Exception as e:                       # noqa: BLE001
+                log.exception("biomech job %s failed", job_id)
+                job_store.mark_error(job_id, f"Analysis failed: {e}")
+                return
+            finally:
+                if fh is not None:
+                    try:
+                        fh.close()
+                    except OSError:
+                        pass
+
+            log.info(
+                "biomech job %s (%s/%s) finished in %.1fs (success=%s)",
+                job_id, body_part, movement_type, time.time() - t0, resp.success,
+            )
+            job_store.mark_done(job_id, jsonable_encoder(resp))
+    finally:
+        stop_beat.set()
+        cleanup_temp_file(tmp_path)
+
+
+@app.post("/api/jobs/analyze-biomech")
+async def start_biomech_job(
+    video: UploadFile = File(...),
+    body_part: str = Form(...),
+    movement_type: str = Form(...),
+    side: Optional[str] = Form(None),
+    patient_name: Optional[str] = Form(None),
+    recording_duration_ms: Optional[int] = Form(None),
+) -> dict:
+    """Accept a biomech clip and return a job id immediately.
+
+    Same form fields as the five synchronous endpoints, plus body_part
+    to say which one to run.
+    """
+    # DISABLED turns off every job endpoint; DISABLED_BIOMECH turns off
+    # only this one, so biomech can be rolled back without disturbing
+    # gait. Either way the frontend sees a 404 and falls back to the
+    # synchronous path — no deploy, no restart.
+    if job_store.is_disabled("biomech"):
+        raise HTTPException(status_code=404, detail="Job endpoint disabled.")
+
+    part = (body_part or "").strip().lower()
+    if part not in _BIOMECH_HANDLERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown body_part '{body_part}'.",
+        )
+
+    contents = await video.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Empty video upload.")
+
+    tmp_path = save_uploaded_video(contents, video.filename or "video.mp4")
+    job_id = job_store.create("biomech", {
+        "filename": video.filename,
+        "body_part": part,
+        "movement_type": movement_type,
+    })
+    log.info(
+        "biomech job %s queued: part=%s movement=%s side=%s file=%s",
+        job_id, part, movement_type, side, video.filename,
+    )
+    _GAIT_JOB_POOL.submit(
+        _biomech_job_worker,
+        job_id, tmp_path, video.filename or "video.mp4",
+        part, movement_type, side, patient_name, recording_duration_ms,
+    )
+    return {"job_id": job_id}
 
 
 @app.post("/api/live/biomech-frame", response_model=LiveBiomechFrameResponse)
