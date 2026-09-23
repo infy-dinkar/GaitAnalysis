@@ -10,7 +10,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { VideoUpload } from "@/components/analysis/VideoUpload";
 import { GaitRecordCapture } from "@/components/gait/GaitRecordCapture";
-import { analyzeGait } from "@/lib/api";
+import { analyzeGaitJob } from "@/lib/api";
 import { SaveStatusBanner } from "@/components/dashboard/SaveStatusBanner";
 import { usePatientContext } from "@/hooks/usePatientContext";
 
@@ -53,7 +53,7 @@ export default function GaitUploadPage() {
     const patientName = patient?.name?.trim() || null;
 
     try {
-      const res = await analyzeGait(
+      const res = await analyzeGaitJob(
         { video: file, heightCm, patientName },
         (loaded, total) => {
           setProgress(total > 0 ? loaded / total : 0);
@@ -122,7 +122,7 @@ export default function GaitUploadPage() {
     const patientName = patient?.name?.trim() || null;
 
     try {
-      const res = await analyzeGait(
+      const res = await analyzeGaitJob(
         {
           video: recordedFile,
           heightCm,
