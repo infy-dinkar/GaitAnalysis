@@ -62,6 +62,7 @@ import { SavedTuckJumpReport } from "@/components/orthopedic/SavedTuckJumpReport
 import { SavedOverheadSquatReport } from "@/components/orthopedic/SavedOverheadSquatReport";
 import { SavedSquatLateralReport } from "@/components/orthopedic/SavedSquatLateralReport";
 import { SavedRehabReport } from "@/components/dashboard/SavedRehabReport";
+import { GamesBody } from "@/components/games/GamesBody";
 import { resolveMovement } from "@/lib/biomech/movements";
 import { getReport, type ReportDTO } from "@/lib/reports";
 import { getPatient, type PatientDTO } from "@/lib/patients";
@@ -103,8 +104,6 @@ const MODULE_META: Record<
   overhead_squat: { label: "Overhead Squat", icon: MoveRight },
   squat_lateral: { label: "Squat (Lateral)", icon: MoveRight },
   rehab: { label: "Rehab session", icon: Dumbbell },
-  // Header + PDF title only. No body renderer yet, so a saved games
-  // report opens with a correct heading and an empty body.
   games: { label: "Games", icon: Gamepad2 },
 };
 
@@ -480,6 +479,7 @@ function ReportView({ id }: { id: string }) {
             observations={report.observations as Record<string, unknown>}
           />
         )}
+        {report.module === "games" && <GamesBody report={report} />}
       </div>
     </div>
   );

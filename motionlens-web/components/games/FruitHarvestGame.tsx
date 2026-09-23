@@ -17,6 +17,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
   Check,
+  ChevronRight,
   Gamepad2,
   Hand as HandIcon,
   Maximize2,
@@ -56,6 +57,20 @@ import {
   onFullscreenChange,
 } from "@/lib/games/fullscreen";
 import { GameAudio } from "@/lib/games/gameAudio";
+import {
+  MetricsRecorder,
+  meanCollectSec,
+  pct,
+  type RoundMetrics,
+} from "@/lib/games/gameMetrics";
+import { reachGeometry } from "@/lib/games/calibration";
+import type { ReportCreatePayload } from "@/lib/reports";
+import {
+  DEFAULT_LEVEL,
+  LEVELS,
+  levelById,
+  type LevelId,
+} from "@/lib/games/levels";
 import {
   ROUND_MS,
   createGameDebug,
@@ -99,7 +114,20 @@ interface Live {
   otherReach: number;
 }
 
+type SaveState =
+  | { status: "idle" }
+  | { status: "saving" }
+  | { status: "saved" }
+  | { status: "none" }
+  | { status: "error"; message: string };
+
 const BLANK_PROBE: Probe = { x: 0, y: 0, vis: 0, inFrame: false };
+
+/** Consecutive passing pose frames before the setup screen advances.
+ *  At ~20 Hz this is about a quarter of a second — long enough that a
+ *  single flickering landmark cannot trigger it, short enough that it
+ *  still feels immediate. */
+const SETUP_OK_FRAMES = 5;
 
 /**
  * Why the calibration ring is currently held, or null to let it fill.
@@ -211,24 +239,33 @@ export function FruitHarvestGame() {
   // anatomical. On camera they came back reversed. Rather than guess,
   // this makes it switchable so one round settles it.
   const swapOn = search.get("handswap") === "1";
-  const { patientId, patient } = usePatientContext();
+  const { patientId, patient, saveReport } = usePatientContext();
   const { videoRef, active, error: camError, start } = useCamera();
   const { ready: poseReady, error: poseError, detect } = usePoseDetectionLive();
 
   const [phase, setPhase] = useState<Phase>("hand");
   const [hand, setHand] = useState<Hand | null>(null);
   const [visualScale, setVisualScale] = useState(1);
+  // Chosen on the hand screen, where the clinician is still at the
+  // device. Kept in a ref too so the play effect reads the current
+  // value without re-running when it changes mid-flow.
+  const [level, setLevel] = useState<LevelId>(DEFAULT_LEVEL);
   const [count, setCount] = useState(3);
   const [holdIndex, setHoldIndex] = useState(0);
   const [live, setLive] = useState<Live>(BLANK_LIVE);
-  const [result, setResult] = useState<{ harvested: number; missed: number } | null>(
-    null,
-  );
+  const [result, setResult] = useState<
+    { harvested: number; missed: number; level: number } | null
+  >(null);
   const [upCheck, setUpCheck] = useState<
     { rUp: number; rSide: number; ratio: number } | null
   >(null);
   const [fs, setFs] = useState(false);
   const [dbg, setDbg] = useState<GameDebug | null>(null);
+  const [saveState, setSaveState] = useState<SaveState>({ status: "idle" });
+  // Snapshot taken when the round ends. The recorder itself is a ref
+  // (written ~20x/s by the pose loop); React must not read it during
+  // render, so the finished numbers are copied out once.
+  const [roundStats, setRoundStats] = useState<RoundMetrics | null>(null);
   const debugRef = useRef<GameDebug>(createGameDebug());
 
   const stageRef = useRef<HTMLDivElement | null>(null);
@@ -247,7 +284,16 @@ export function FruitHarvestGame() {
   // by Redo and by the post-hold sanity check.
   const calibModeRef = useRef<"all" | HoldId>("all");
   const poseMsgRef = useRef("");
+  // Consecutive pose frames with the setup fully passing. The setup
+  // screen advances on its own once this is reached, so one noisy
+  // frame cannot launch the countdown while the patient is still
+  // getting into position.
+  const setupOkFramesRef = useRef(0);
+  const autoAdvanceRef = useRef<() => void>(() => {});
   const gameRef = useRef<import("phaser").Game | null>(null);
+  const metricsRef = useRef<MetricsRecorder | null>(null);
+  const pendingSaveRef = useRef<{ key: string; body: ReportCreatePayload } | null>(null);
+  const savedKeysRef = useRef<Set<string>>(new Set());
   const onHoldDoneRef = useRef<(p: Point) => void>(() => {});
 
   // ── Camera. Started from the hand-pick click so the permission
@@ -320,6 +366,26 @@ export function FruitHarvestGame() {
           stage.clientHeight,
           now,
         );
+
+        // Clinical sampling. Raw, un-mirrored keypoints, exactly what
+        // the biomech formulas expect.
+        if (phaseRef.current === "play") {
+          metricsRef.current?.sample(pose?.keypoints ?? null, now);
+        }
+
+        // Setup advances by itself: no click, so the patient never has
+        // to walk back to the machine mid-framing.
+        if (phaseRef.current === "setup") {
+          if (stateRef.current.setupOk) {
+            setupOkFramesRef.current += 1;
+            if (setupOkFramesRef.current >= SETUP_OK_FRAMES) {
+              setupOkFramesRef.current = 0;
+              autoAdvanceRef.current();
+            }
+          } else {
+            setupOkFramesRef.current = 0;
+          }
+        }
 
         if (phaseRef.current === "calibrate") {
           const s = stateRef.current;
@@ -520,6 +586,8 @@ export function FruitHarvestGame() {
       state: stateRef.current,
       box,
       visualScale,
+      level: levelById(level),
+      metrics: (metricsRef.current = new MetricsRecorder(h, Date.now())),
       audio: audioRef.current ?? new GameAudio(),
       harvested: 0,
       missed: 0,
@@ -528,6 +596,7 @@ export function FruitHarvestGame() {
       debug,
       onFinish: (r) => {
         if (cancelled) return;
+        setRoundStats(metricsRef.current ? { ...metricsRef.current.m } : null);
         setResult(r);
         setPhase("result");
         phaseRef.current = "result";
@@ -586,7 +655,7 @@ export function FruitHarvestGame() {
       gameRef.current = null;
       game?.destroy(true);
     };
-  }, [phase, visualScale]);
+  }, [phase, visualScale, level]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -636,10 +705,126 @@ export function FruitHarvestGame() {
     phaseRef.current = "countdown-calib";
   }, []);
 
+  // The pose loop calls this through a ref, so the loop does not have
+  // to be torn down and rebuilt when the callback identity changes.
+  // The phase guard makes a second call during the same setup a no-op.
+  useEffect(() => {
+    autoAdvanceRef.current = () => {
+      if (phaseRef.current !== "setup") return;
+      startCalibration();
+    };
+  }, [startCalibration]);
+
   /** Repeat the "arm up" hold only; side and across are kept. */
 
   const acceptCalibration = useCallback(() => {
     setUpCheck(null);
+    setCount(3);
+    setPhase("countdown-play");
+    phaseRef.current = "countdown-play";
+  }, []);
+
+  // ── Save the finished round.
+  //
+  // One report per round, guarded by the round's own start timestamp:
+  // "Play again" and "Next level" each begin a new round with a new
+  // startedAtMs, so they save separately and can never resave the old
+  // one. A failed save leaves the result on screen untouched — Retry
+  // re-posts the SAME payload rather than re-deriving it.
+  const saveRoundRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    saveRoundRef.current = () => {
+      const payload = pendingSaveRef.current;
+      if (!payload) return;
+      if (!patientId) {
+        setSaveState({ status: "none" });
+        return;
+      }
+      if (savedKeysRef.current.has(payload.key)) return;
+      setSaveState({ status: "saving" });
+      void saveReport(payload.body)
+        .then((out) => {
+          if (out.ok) {
+            savedKeysRef.current.add(payload.key);
+            setSaveState({ status: "saved" });
+          } else {
+            setSaveState({
+              status: "error",
+              message: out.message || "Could not save the report.",
+            });
+          }
+        })
+        .catch((e: unknown) => {
+          setSaveState({
+            status: "error",
+            message: e instanceof Error ? e.message : "Could not save the report.",
+          });
+        });
+    };
+  }, [patientId, saveReport]);
+
+  // Build the payload the moment a round finishes, then save it.
+  useEffect(() => {
+    if (phase !== "result" || !result) return;
+    const rec = metricsRef.current;
+    const h = handRef.current;
+    if (!rec || !h) return;
+
+    const m = rec.m;
+    const total = m.harvested + m.missed;
+    const box = boxRef.current;
+    const st = stateRef.current;
+    const arm = st.armLenPx > 1 ? st.armLenPx : 1;
+    const cal = box && st.shoulderOk
+      ? reachGeometry(box, st.shoulderX, st.shoulderY, st.cover, 0)
+      : null;
+
+    pendingSaveRef.current = {
+      // Identity of THIS round. A new round gets a new key, so the
+      // guard blocks a double-save without blocking the next round.
+      key: `${m.startedAtMs}`,
+      body: {
+        module: "games" as const,
+        movement: "fruit_harvest",
+        side: h,
+        metrics: {
+          game: "fruit_harvest",
+          level: result.level,
+          duration_sec: Math.round(ROUND_MS / 1000),
+          harvested: m.harvested,
+          missed: m.missed,
+          accuracy_pct: pct(m.harvested, total),
+          avg_collect_sec: meanCollectSec(m.collectSecs),
+          max_abduction_deg: m.maxAbductionDeg,
+          // No max_adduction_deg: see lib/games/gameMetrics.ts. The
+          // across-body reach count below is what the game can honestly
+          // report for adduction.
+
+          abduction_low_confidence: m.abductionLowConfidence,
+          zone_hits: m.zoneHits,
+          first_half_accuracy_pct: pct(m.firstHalf.hit, m.firstHalf.total),
+          second_half_accuracy_pct: pct(m.secondHalf.hit, m.secondHalf.total),
+          calibration: cal
+            ? {
+              // Arm lengths, so the numbers mean the same thing for
+              // any body size at any distance from the camera.
+              up: Math.round((cal.rUp / arm) * 100) / 100,
+              side: Math.round((cal.rSide / arm) * 100) / 100,
+              across: Math.round((cal.rAcross / arm) * 100) / 100,
+              headroom_ratio: Math.round(st.headroomRatio * 100) / 100,
+            }
+            : null,
+          started_at_ms: m.startedAtMs,
+        },
+      },
+    };
+    saveRoundRef.current();
+  }, [phase, result]);
+
+  /** Same hand, same calibration, next level. */
+  const nextLevel = useCallback(() => {
+    setLevel(2);
+    setResult(null);
     setCount(3);
     setPhase("countdown-play");
     phaseRef.current = "countdown-play";
@@ -754,7 +939,7 @@ export function FruitHarvestGame() {
             <p className="mt-2 text-lg text-white/70">
               Only that hand controls the game. The other one is ignored.
             </p>
-            <div className="mt-8 flex gap-4">
+            <div className="mt-8 flex flex-wrap items-center justify-center gap-4">
               <Button size="lg" onClick={() => beginWithHand("left")}>
                 <HandIcon className="h-5 w-5 scale-x-[-1]" />
                 Left hand
@@ -763,6 +948,17 @@ export function FruitHarvestGame() {
                 <HandIcon className="h-5 w-5" />
                 Right hand
               </Button>
+              <span className="mx-1 h-8 w-px bg-white/25" aria-hidden />
+              {([1, 2] as LevelId[]).map((id) => (
+                <Button
+                  key={id}
+                  size="lg"
+                  variant={level === id ? "primary" : "secondary"}
+                  onClick={() => setLevel(id)}
+                >
+                  {LEVELS[id].label}
+                </Button>
+              ))}
             </div>
           </Overlay>
         )}
@@ -800,9 +996,6 @@ export function FruitHarvestGame() {
                   onClick={() => setVisualScale((v) => Math.min(2.2, v * 1.35))}
                 >
                   Make bigger
-                </Button>
-                <Button onClick={startCalibration} disabled={!live.setupOk}>
-                  Yes — continue
                 </Button>
               </div>
             </div>
@@ -882,16 +1075,34 @@ export function FruitHarvestGame() {
         {phase === "result" && result && (
           <Overlay>
             <h2 className="text-3xl font-semibold text-white">Round complete</h2>
-            <div className="mt-8 flex gap-10 text-center">
+            <p className="mt-1 text-lg text-white/60">
+              {levelById(result.level).label}
+            </p>
+            {/* Patient-facing: big, two numbers, nothing else. */}
+            <div className="mt-6 flex gap-12 text-center">
               <Figure value={result.harvested} label="Harvested" tone="text-lime-300" />
-              <Figure value={result.missed} label="Missed" tone="text-rose-300" />
               <Figure value={`${accuracy}%`} label="Accuracy" tone="text-white" />
             </div>
+
+            {/* Clinician-facing: smaller, below the fold of attention. */}
+            <ClinicalBlock m={roundStats} missed={result.missed} />
+
+            <SaveStatus
+              state={saveState}
+              patientName={patient?.name ?? null}
+              onRetry={() => saveRoundRef.current()}
+            />
             <div className="mt-10 flex gap-3">
               <Button size="lg" onClick={playAgain}>
                 <RotateCcw className="h-5 w-5" />
                 Play again
               </Button>
+              {result.level === 1 && (
+                <Button size="lg" onClick={nextLevel}>
+                  <ChevronRight className="h-5 w-5" />
+                  Next level
+                </Button>
+              )}
               {/* Leaving the game leaves fullscreen. "Play again"
                   deliberately stays in it. */}
               <Link href={backHref} onClick={() => void exitFullscreen()}>
@@ -904,9 +1115,6 @@ export function FruitHarvestGame() {
         )}
       </div>
 
-      <p className="mt-3 text-center text-sm text-muted">
-        Results are not saved yet.
-      </p>
     </div>
   );
 }
@@ -991,6 +1199,21 @@ function DebugPanel({ d }: { d: GameDebug }) {
         : "none",
     ],
     ["hand lost", d.handLost ? "YES — round held" : "no"],
+    [
+      "angle",
+      `${d.angleDeg === null ? "—" : `${d.angleDeg}°`}  dir ${d.angleDir}`,
+    ],
+    ["decided by", d.angleDecidedBy],
+    [
+      "elbow (shoulder widths)",
+      `dx ${d.elbowDx}  dy ${d.elbowDy}  fromMid ${d.elbowFromMid}`,
+    ],
+    [
+      "wrist (shoulder widths)",
+      `dx ${d.wristDx}  fromMid ${d.wristFromMid}`,
+    ],
+    ["counted this frame", d.angleCounted],
+    ["running max abduction", `${d.maxAbductionDeg}°`],
     ["arm length", `${d.armLenPx} px`],
     ["headroom", `${d.headroomPx} px  (ratio ${d.headroomRatio})`],
     ["pose rate", `${d.poseHz} Hz`],
@@ -1045,6 +1268,106 @@ function DebugPanel({ d }: { d: GameDebug }) {
       {d.error && (
         <p className="mt-2 text-rose-400">error: {d.error}</p>
       )}
+    </div>
+  );
+}
+
+/** The clinician half of the result screen. Deliberately quieter than
+ *  the two big patient numbers above it. */
+function ClinicalBlock({
+  m,
+  missed,
+}: {
+  m: RoundMetrics | null;
+  missed: number;
+}) {
+  if (!m) return null;
+  const avg = meanCollectSec(m.collectSecs);
+  const rows: [string, string][] = [
+    ["Avg time per fruit", avg === null ? "—" : `${avg.toFixed(2)} s`],
+    [
+      "Accuracy 1st / 2nd half",
+      `${pct(m.firstHalf.hit, m.firstHalf.total)}% / ${pct(m.secondHalf.hit, m.secondHalf.total)}%`,
+    ],
+    ["Missed", String(missed)],
+  ];
+  return (
+    <div className="mt-6 w-full max-w-md rounded-card bg-black/35 px-5 py-3 text-left">
+      {/* Reach — counts only, the same two-value layout the saved
+          report uses, so the clinician sees one thing in both places.
+          max_abduction_deg is still recorded and saved; it is simply
+          not shown. */}
+      <p className="text-xs uppercase tracking-[0.12em] text-white/40">
+        Reach
+      </p>
+      <div className="mt-2 grid grid-cols-2 gap-4">
+        <ResultStat
+          label="Reaches out / up"
+          value={String(m.zoneHits.abduction)}
+        />
+        <ResultStat
+          label="Reaches across body"
+          value={String(m.zoneHits.adduction)}
+        />
+      </div>
+
+      <div className="mt-3 border-t border-white/10 pt-2">
+        {rows.map(([k, v]) => (
+          <div key={k} className="flex justify-between gap-4 py-1 text-base">
+            <span className="min-w-0 break-words text-white/55">{k}</span>
+            <span className="tabular shrink-0 text-white">{v}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Stacked label-over-value, matching GamesBody's Stat. */
+function ResultStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <p className="break-words text-xs uppercase tracking-[0.1em] text-white/40">
+        {label}
+      </p>
+      <p className="mt-1 text-2xl font-semibold tabular text-white">{value}</p>
+    </div>
+  );
+}
+
+function SaveStatus({
+  state,
+  patientName,
+  onRetry,
+}: {
+  state: SaveState;
+  patientName: string | null;
+  onRetry: () => void;
+}) {
+  if (state.status === "idle") return null;
+  if (state.status === "saving") {
+    return <p className="mt-3 text-sm text-white/60">Saving…</p>;
+  }
+  if (state.status === "saved") {
+    return (
+      <p className="mt-3 text-sm text-lime-300">
+        Saved to {patientName ? `${patientName}'s` : "the patient's"} reports
+      </p>
+    );
+  }
+  if (state.status === "none") {
+    return (
+      <p className="mt-3 text-sm text-white/50">
+        Not saved (no patient selected)
+      </p>
+    );
+  }
+  return (
+    <div className="mt-3 flex items-center gap-3">
+      <p className="text-sm text-amber-300">{state.message}</p>
+      <Button size="sm" variant="secondary" onClick={onRetry}>
+        Retry
+      </Button>
     </div>
   );
 }
