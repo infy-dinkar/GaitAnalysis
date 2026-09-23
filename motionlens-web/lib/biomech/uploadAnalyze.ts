@@ -195,6 +195,109 @@ export async function analyzeBiomechVideo(
 }
 
 // ─── Ankle backend dispatch ─────────────────────────────────────
+// ─── Background-job transport ──────────────────────────────────────
+// Biomech uploads go through the job endpoint instead of holding one
+// HTTP connection open for the whole analysis. Vercel's rewrite gives
+// up between ~115 s and ~210 s; a single biomech clip usually beats
+// that, but BatchSession fires one POST per picked file with no limit,
+// so a doctor filling a 10-20 item queue pushes every request past it.
+//
+// biomechPost() is a drop-in for the authedFetch() call each *Backend
+// function already made: it resolves to the same {ok, status, json()}
+// shape, so every error formatter and unwrap below is untouched.
+interface FetchLike {
+  ok: boolean;
+  status: number;
+  // Matches the DOM Response.json() signature exactly, so every
+  // existing call site below — `body.detail`, the wrapper cast —
+  // compiles and behaves unchanged. Narrowing it here would force
+  // edits into code this change is meant to leave alone.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  json: () => Promise<any>;
+}
+
+/** How often to ask whether the job has finished. */
+const BIOMECH_JOB_POLL_MS = 3000;
+
+async function pollBiomechJob(jobId: string): Promise<FetchLike> {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, BIOMECH_JOB_POLL_MS));
+    let job: {
+      status: string;
+      error: string | null;
+      result: unknown;
+    };
+    try {
+      const res = await authedFetch(`/api/jobs/${jobId}`);
+      if (!res.ok) {
+        if (res.status === 404) {
+          return {
+            ok: false,
+            status: 410,
+            json: async () => ({
+              detail: "Analysis was interrupted — please upload again",
+            }),
+          };
+        }
+        continue;               // transient; keep polling
+      }
+      job = (await res.json()) as typeof job;
+    } catch {
+      continue;                 // transient network blip; keep polling
+    }
+
+    if (job.status === "done" && job.result) {
+      const stored = job.result;
+      return { ok: true, status: 200, json: async () => stored };
+    }
+    if (job.status === "error") {
+      // Surface the backend's own detail token so the existing
+      // per-body-part error formatters map it exactly as before.
+      const detail = job.error ?? "Analysis failed";
+      return { ok: false, status: 400, json: async () => ({ detail }) };
+    }
+  }
+}
+
+/**
+ * POST a biomech clip, preferring the background job endpoint.
+ *
+ * AUTOMATIC FALLBACK: a 404 (kill switch, or not deployed), any 5xx,
+ * or a network error BEFORE a job id is received falls back to the
+ * synchronous endpoint with the same form. Once a job id exists we are
+ * committed — a later failure is reported through the normal error
+ * path rather than silently running the whole analysis a second time.
+ */
+async function biomechPost(
+  syncEndpoint: string,
+  form: FormData,
+): Promise<FetchLike> {
+  // "/api/analyze-shoulder" -> "shoulder". The sync endpoints ignore
+  // form fields they do not declare, so the same FormData serves both
+  // paths and the fallback needs no second copy.
+  const bodyPart = syncEndpoint.replace("/api/analyze-", "");
+  try {
+    form.append("body_part", bodyPart);
+    const res = await authedFetch("/api/jobs/analyze-biomech", {
+      method: "POST",
+      body: form,
+    });
+    if (res.ok) {
+      const started = (await res.json()) as { job_id?: unknown };
+      if (typeof started.job_id === "string" && started.job_id.length > 0) {
+        return pollBiomechJob(started.job_id);
+      }
+    } else if (res.status >= 400 && res.status < 500 && res.status !== 404) {
+      // A real rejection of THIS upload (413 too large, 400 bad field).
+      // Falling back would only repeat it.
+      return res;
+    }
+  } catch {
+    // Network error before a job id — fall through to the old path.
+  }
+  return authedFetch(syncEndpoint, { method: "POST", body: form });
+}
+
 // Uploads the video to /api/analyze-ankle (MediaPipe BlazePose Full)
 // and returns the same BiomechDataDTO shape the in-browser path
 // produces, so the existing AssessmentReport renders unchanged.
@@ -235,10 +338,7 @@ export async function analyzeAnkleBlob(
   }
 
   onProgress?.(0.3);
-  const res = await authedFetch("/api/analyze-ankle", {
-    method: "POST",
-    body: form,
-  });
+  const res = await biomechPost("/api/analyze-ankle", form);
   onProgress?.(0.85);
 
   if (!res.ok) {
@@ -283,10 +383,7 @@ async function analyzeShoulderBackend(
   form.append("side", side);
 
   onProgress?.(0.3);
-  const res = await authedFetch("/api/analyze-shoulder", {
-    method: "POST",
-    body: form,
-  });
+  const res = await biomechPost("/api/analyze-shoulder", form);
   onProgress?.(0.85);
 
   if (!res.ok) {
@@ -384,10 +481,7 @@ async function analyzeKneeBackend(
   form.append("side", side);
 
   onProgress?.(0.3);
-  const res = await authedFetch("/api/analyze-knee", {
-    method: "POST",
-    body: form,
-  });
+  const res = await biomechPost("/api/analyze-knee", form);
   onProgress?.(0.85);
 
   if (!res.ok) {
@@ -462,10 +556,7 @@ async function analyzeNeckBackend(
   form.append("movement_type", movement);
 
   onProgress?.(0.3);
-  const res = await authedFetch("/api/analyze-neck", {
-    method: "POST",
-    body: form,
-  });
+  const res = await biomechPost("/api/analyze-neck", form);
   onProgress?.(0.85);
 
   if (!res.ok) {
@@ -550,10 +641,7 @@ async function analyzeHipBackend(
   form.append("side", side);
 
   onProgress?.(0.3);
-  const res = await authedFetch("/api/analyze-hip", {
-    method: "POST",
-    body: form,
-  });
+  const res = await biomechPost("/api/analyze-hip", form);
   onProgress?.(0.85);
 
   if (!res.ok) {
