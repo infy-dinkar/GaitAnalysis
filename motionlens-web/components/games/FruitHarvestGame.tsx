@@ -1087,11 +1087,6 @@ export function FruitHarvestGame() {
             {/* Clinician-facing: smaller, below the fold of attention. */}
             <ClinicalBlock m={roundStats} missed={result.missed} />
 
-            <p className="mt-4 max-w-xl text-sm text-white/50">
-              Game-based estimate — use the Biomechanics module for
-              clinical range of motion.
-            </p>
-
             <SaveStatus
               state={saveState}
               patientName={patient?.name ?? null}
@@ -1289,8 +1284,6 @@ function ClinicalBlock({
   if (!m) return null;
   const avg = meanCollectSec(m.collectSecs);
   const rows: [string, string][] = [
-    ["Max abduction", `${m.maxAbductionDeg}°${m.abductionLowConfidence ? " (low confidence)" : ""}`],
-    ["Reaches across body", String(m.zoneHits.adduction)],
     ["Avg time per fruit", avg === null ? "—" : `${avg.toFixed(2)} s`],
     [
       "Accuracy 1st / 2nd half",
@@ -1300,12 +1293,52 @@ function ClinicalBlock({
   ];
   return (
     <div className="mt-6 w-full max-w-md rounded-card bg-black/35 px-5 py-3 text-left">
-      {rows.map(([k, v]) => (
-        <div key={k} className="flex justify-between gap-4 py-1 text-base">
-          <span className="text-white/55">{k}</span>
-          <span className="tabular text-white">{v}</span>
-        </div>
-      ))}
+      {/* Shoulder range — the same two-value layout the saved report
+          uses, so the clinician sees one thing in both places. */}
+      <p className="text-xs uppercase tracking-[0.12em] text-white/40">
+        Shoulder range
+      </p>
+      <div className="mt-2 grid grid-cols-2 gap-4">
+        <ResultStat
+          label="Max abduction"
+          value={`${m.maxAbductionDeg}°`}
+        />
+        <ResultStat
+          label="Reaches across body"
+          value={String(m.zoneHits.adduction)}
+        />
+      </div>
+      {m.abductionLowConfidence && (
+        <p className="mt-2 break-words text-sm text-amber-300">
+          Lower confidence: the hip was not visible for part of this round.
+        </p>
+      )}
+      {/* One short line. `break-words` so it wraps instead of
+          overflowing at any width. */}
+      <p className="mt-2 break-words text-sm text-white/50">
+        Game-based estimate. Use Biomechanics for clinical range of motion.
+      </p>
+
+      <div className="mt-3 border-t border-white/10 pt-2">
+        {rows.map(([k, v]) => (
+          <div key={k} className="flex justify-between gap-4 py-1 text-base">
+            <span className="min-w-0 break-words text-white/55">{k}</span>
+            <span className="tabular shrink-0 text-white">{v}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Stacked label-over-value, matching GamesBody's Stat. */
+function ResultStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <p className="break-words text-xs uppercase tracking-[0.1em] text-white/40">
+        {label}
+      </p>
+      <p className="mt-1 text-2xl font-semibold tabular text-white">{value}</p>
     </div>
   );
 }

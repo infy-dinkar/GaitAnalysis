@@ -93,21 +93,17 @@ export function GamesBody({ report }: { report: ReportDTO }) {
             value={String(num(zones?.adduction) ?? "—")}
           />
         </div>
-        <p className="mt-3 text-sm text-muted">
-          Across-body reaching is reported as a count, not degrees: it is
-          horizontal adduction, which a front-facing camera cannot
-          measure and which is not comparable with the Biomechanics
-          module&apos;s adduction range.
-        </p>
         {lowConf && (
           <p className="mt-3 text-sm text-warning">
             Lower confidence: the hip was not visible for part of this
             round, so the trunk axis fell back to screen vertical.
           </p>
         )}
-        <p className="mt-3 text-sm text-muted">
-          Game-based estimate — use the Biomechanics module for clinical
-          range of motion.
+        {/* One short line. `break-words` so it wraps rather than
+            overflowing the card on a narrow column or in the PDF. */}
+        <p className="mt-3 break-words text-sm text-muted">
+          Game-based estimate. Use Biomechanics for clinical range of
+          motion.
         </p>
       </section>
 
