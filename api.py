@@ -24,6 +24,10 @@ import logging
 import os
 import queue
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
+from fastapi.encoders import jsonable_encoder
+from utils import job_store
 import threading
 from contextlib import contextmanager
 from typing import Any, Dict, List, Literal, Optional
@@ -511,63 +515,28 @@ async def version() -> dict:
     return _BUILD_INFO
 
 
-@app.post("/api/analyze-gait", response_model=GaitResponse)
-async def analyze_gait(
-    video: UploadFile = File(...),
-    height_cm: float = Form(170.0),
-    patient_name: Optional[str] = Form(None),
-    recording_duration_ms: Optional[int] = Form(None),
+# ══════════════════════════════════════════════════════════════════════
+# Shared gait pipeline
+# ══════════════════════════════════════════════════════════════════════
+# Lifted verbatim out of analyze_gait so the synchronous endpoint and
+# the background job run byte-identical compute and formatting. The
+# only thing that moved with it is the repaired-file cleanup, which now
+# lives in this function's finally instead of the handler's — same file,
+# same moment, one owner.
+#
+# Raises HTTPException for the validation gates exactly as before, so
+# the synchronous endpoint's status codes are unchanged. The job runner
+# catches it and records the detail as the job error.
+def _run_gait_pipeline(
+    tmp_path: str,
+    height_cm: float,
+    patient_name: Optional[str],
+    recording_duration_ms: Optional[int],
 ) -> GaitResponse:
-    """Run the full gait pipeline on an uploaded clip.
-
-    `recording_duration_ms` is supplied by the in-browser "record then
-    upload" path on the frontend — wall-clock duration between
-    MediaRecorder.start() and stop(). MediaRecorder-produced WebMs
-    often ship with broken / missing duration metadata, which makes
-    cv2's CAP_PROP_FPS probe return 0 (or a bogus low frame count)
-    and would falsely reject otherwise-valid live recordings at the
-    FPS gate. When set we re-mux the file with a clean header via
-    tug_engine._ensure_decodable_video BEFORE the gates run. Normal
-    file uploads pass recording_duration_ms=None and the helper is
-    a safe no-op (returns the original path unchanged).
-    """
     from engines.orthopedic.tug_engine import _ensure_decodable_video
 
-    tmp_path: str | None = None
     fixed_path_cleanup: str | None = None
     try:
-        contents = await video.read()
-        if not contents:
-            raise HTTPException(status_code=400, detail="Empty video upload.")
-
-        # ── 1) FILE SIZE GATE — reject before touching the disk ──────
-        size_mb = len(contents) / (1024 * 1024)
-        if size_mb > MAX_GAIT_FILE_SIZE_MB:
-            raise HTTPException(
-                status_code=413,
-                detail=(
-                    f"File too large ({size_mb:.1f} MB). "
-                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB. "
-                    "Please trim or compress the video."
-                ),
-            )
-
-        tmp_path = save_uploaded_video(contents, video.filename or "video.mp4")
-        log.info(
-            "gait: file=%s size=%.2f MB height=%scm recording_ms=%s",
-            video.filename, size_mb, height_cm, recording_duration_ms,
-        )
-
-        # ── 1.5) Normalise MediaRecorder recordings BEFORE the cv2
-        # FPS probe. Record-mode uploads (recording_duration_ms set)
-        # are ALWAYS re-encoded to a clean constant-FPS MP4 with
-        # FPS = decoded_frames / client wall-clock duration — WebM
-        # metadata from MediaRecorder is never trusted, because a
-        # "plausible but wrong" FPS (real ~22, claimed 30) passes the
-        # old mismatch gate yet skews every temporal gait metric
-        # (timings, step length, heel-strike events → gait cycle %).
-        # Normal file uploads (recording_duration_ms=None) are a
-        # no-op and return (tmp_path, None).
         processed_path, fixed_path_cleanup = _ensure_decodable_video(
             tmp_path, recording_duration_ms,
             force_rewrite=bool(recording_duration_ms and recording_duration_ms > 0),
@@ -666,6 +635,73 @@ async def analyze_gait(
             duration_warning=duration_warning,
         )
 
+    finally:
+        # _ensure_decodable_video returns a second path only when it
+        # actually wrote a repaired file — clean that up too.
+        if fixed_path_cleanup and fixed_path_cleanup != tmp_path:
+            cleanup_temp_file(fixed_path_cleanup)
+
+
+@app.post("/api/analyze-gait", response_model=GaitResponse)
+async def analyze_gait(
+    video: UploadFile = File(...),
+    height_cm: float = Form(170.0),
+    patient_name: Optional[str] = Form(None),
+    recording_duration_ms: Optional[int] = Form(None),
+) -> GaitResponse:
+    """Run the full gait pipeline on an uploaded clip.
+
+    `recording_duration_ms` is supplied by the in-browser "record then
+    upload" path on the frontend — wall-clock duration between
+    MediaRecorder.start() and stop(). MediaRecorder-produced WebMs
+    often ship with broken / missing duration metadata, which makes
+    cv2's CAP_PROP_FPS probe return 0 (or a bogus low frame count)
+    and would falsely reject otherwise-valid live recordings at the
+    FPS gate. When set we re-mux the file with a clean header via
+    tug_engine._ensure_decodable_video BEFORE the gates run. Normal
+    file uploads pass recording_duration_ms=None and the helper is
+    a safe no-op (returns the original path unchanged).
+    """
+    from engines.orthopedic.tug_engine import _ensure_decodable_video
+
+    tmp_path: str | None = None
+    try:
+        contents = await video.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty video upload.")
+
+        # ── 1) FILE SIZE GATE — reject before touching the disk ──────
+        size_mb = len(contents) / (1024 * 1024)
+        if size_mb > MAX_GAIT_FILE_SIZE_MB:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"File too large ({size_mb:.1f} MB). "
+                    f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB. "
+                    "Please trim or compress the video."
+                ),
+            )
+
+        tmp_path = save_uploaded_video(contents, video.filename or "video.mp4")
+        log.info(
+            "gait: file=%s size=%.2f MB height=%scm recording_ms=%s",
+            video.filename, size_mb, height_cm, recording_duration_ms,
+        )
+
+        # ── 1.5) Normalise MediaRecorder recordings BEFORE the cv2
+        # FPS probe. Record-mode uploads (recording_duration_ms set)
+        # are ALWAYS re-encoded to a clean constant-FPS MP4 with
+        # FPS = decoded_frames / client wall-clock duration — WebM
+        # metadata from MediaRecorder is never trusted, because a
+        # "plausible but wrong" FPS (real ~22, claimed 30) passes the
+        # old mismatch gate yet skews every temporal gait metric
+        # (timings, step length, heel-strike events → gait cycle %).
+        # Normal file uploads (recording_duration_ms=None) are a
+        # no-op and return (tmp_path, None).
+        return _run_gait_pipeline(
+            tmp_path, float(height_cm), patient_name, recording_duration_ms,
+        )
+
     except HTTPException:
         raise
     except ValueError as e:
@@ -676,10 +712,142 @@ async def analyze_gait(
         return GaitResponse(success=False, data=None, error=f"Analysis failed: {e}")
     finally:
         cleanup_temp_file(tmp_path)
-        # _ensure_decodable_video returns a second path only when it
-        # actually wrote a repaired file — clean that up too.
-        if fixed_path_cleanup and fixed_path_cleanup != tmp_path:
-            cleanup_temp_file(fixed_path_cleanup)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Gait as a background job
+# ══════════════════════════════════════════════════════════════════════
+# Why this exists: /api/analyze-gait holds one HTTP connection open for
+# the whole analysis. A 52 s clip takes ~114 s alone and ~210 s when a
+# second upload overlaps, and Vercel's rewrite gives up somewhere in
+# between — the browser sees a 502 even though the backend finished.
+# One hospital network cuts idle connections at 60-77 s, which no
+# backend timeout can help with.
+#
+# So: POST returns a job id in well under a second, the browser polls,
+# and no connection is held open. /api/analyze-gait is untouched and
+# stays the fallback — reverting the frontend is the whole rollback.
+#
+# Concurrency: exactly one analysis runs machine-wide, enforced by an
+# advisory lock on the shared container filesystem (job_store.RunSlot),
+# because 2 gunicorn workers on 2 vCPUs cannot usefully run two at once
+# — that is what turns 114 s into 210 s.
+_GAIT_JOB_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="gaitjob")
+
+
+def _gait_job_worker(
+    job_id: str,
+    tmp_path: str,
+    height_cm: float,
+    patient_name: Optional[str],
+    recording_duration_ms: Optional[int],
+) -> None:
+    """Run one gait job to completion. Never raises.
+
+    Runs on a pool thread, NOT the event loop, so polls and
+    /api/health stay responsive while MediaPipe is busy. The job owns
+    the uploaded file and deletes it on every exit path.
+    """
+    stop_beat = threading.Event()
+
+    def _beat() -> None:
+        # Proof of life. A worker killed mid-analysis stops beating and
+        # the poll endpoint reports the job interrupted, instead of the
+        # browser polling a corpse forever.
+        while not stop_beat.wait(job_store.HEARTBEAT_EVERY_SEC):
+            job_store.heartbeat(job_id)
+
+    beat = threading.Thread(target=_beat, daemon=True, name=f"beat-{job_id[:8]}")
+    try:
+        # Queued until the single run slot frees up. The wait happens
+        # here, on a pool thread, so the job stays honestly `queued`
+        # and nothing upstream is blocked by it.
+        with job_store.RunSlot():
+            job_store.mark_running(job_id)
+            beat.start()
+            t0 = time.time()
+            try:
+                resp = _run_gait_pipeline(
+                    tmp_path, height_cm, patient_name, recording_duration_ms,
+                )
+            except HTTPException as e:
+                # Validation gates (size / FPS / duration). Same text
+                # the synchronous endpoint would have returned.
+                job_store.mark_error(job_id, str(e.detail))
+                return
+            except Exception as e:                       # noqa: BLE001
+                log.exception("gait job %s failed", job_id)
+                job_store.mark_error(job_id, f"Analysis failed: {e}")
+                return
+
+            log.info(
+                "gait job %s finished in %.1fs (success=%s)",
+                job_id, time.time() - t0, resp.success,
+            )
+            # Store the SAME envelope the synchronous endpoint returns,
+            # so the frontend's success path is byte-identical.
+            job_store.mark_done(job_id, jsonable_encoder(resp))
+    finally:
+        stop_beat.set()
+        cleanup_temp_file(tmp_path)
+
+
+@app.post("/api/jobs/analyze-gait")
+async def start_gait_job(
+    video: UploadFile = File(...),
+    height_cm: float = Form(170.0),
+    patient_name: Optional[str] = Form(None),
+    recording_duration_ms: Optional[int] = Form(None),
+) -> dict:
+    """Accept a gait clip and return a job id immediately.
+
+    Same form fields as /api/analyze-gait. Everything slow happens on a
+    pool thread after this returns.
+    """
+    # Kill switch, checked per request so it needs no restart. A 404
+    # here is what makes the frontend fall back to the synchronous
+    # endpoint, so disabling this file is a complete, instant rollback
+    # of the whole feature without a deploy.
+    if job_store.is_disabled():
+        raise HTTPException(status_code=404, detail="Job endpoint disabled.")
+
+    contents = await video.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Empty video upload.")
+
+    # Same size gate as the synchronous endpoint, applied before the
+    # bytes reach the disk.
+    size_mb = len(contents) / (1024 * 1024)
+    if size_mb > MAX_GAIT_FILE_SIZE_MB:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"File too large ({size_mb:.1f} MB). "
+                f"Maximum allowed: {MAX_GAIT_FILE_SIZE_MB} MB. "
+                "Please trim or compress the video."
+            ),
+        )
+
+    tmp_path = save_uploaded_video(contents, video.filename or "video.mp4")
+    job_id = job_store.create("gait", {"filename": video.filename})
+    log.info(
+        "gait job %s queued: file=%s size=%.2f MB height=%scm recording_ms=%s",
+        job_id, video.filename, size_mb, height_cm, recording_duration_ms,
+    )
+    _GAIT_JOB_POOL.submit(
+        _gait_job_worker,
+        job_id, tmp_path, float(height_cm), patient_name, recording_duration_ms,
+    )
+    return {"job_id": job_id}
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job(job_id: str) -> dict:
+    """Poll a job. Always fast — one small file read, never blocks."""
+    job = job_store.read(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return job_store.public_view(job)
 
 
 # ══════════════════════════════════════════════════════════════════════
