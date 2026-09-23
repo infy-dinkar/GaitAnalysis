@@ -30,6 +30,7 @@ import {
 } from "@/lib/games/fruitEffects";
 import { makeOrchardTexture, makeSprigTexture } from "@/lib/games/orchardScene";
 import { BackgroundLife } from "@/lib/games/backgroundLife";
+import type { MetricsRecorder } from "@/lib/games/gameMetrics";
 import {
   BASE_FRUIT_FRACTION,
   BASE_HIT_FRACTION,
@@ -212,6 +213,9 @@ export interface FruitHarvestControl {
   visualScale: number;
   /** Everything that differs between levels. */
   level: LevelConfig;
+  /** Collects the round's clinical numbers. The pose loop feeds it
+   *  shoulder angles; the scene feeds it the gameplay events below. */
+  metrics: MetricsRecorder;
   audio: GameAudio;
   /** Counters the React layer polls for the HUD-free result screen. */
   harvested: number;
@@ -234,6 +238,8 @@ interface Fruit {
   warned: boolean;
   /** Stem and leaf drawn behind the fruit, so it reads as attached. */
   sprig: Phaser.GameObjects.Image | null;
+  /** Which half of the reach fan this one was placed in. */
+  zone: Zone;
 }
 
 /**
@@ -758,7 +764,7 @@ export class FruitHarvestScene extends Phaser.Scene {
       if (c.state.usable && this.cursorSeeded) {
         const d = Math.hypot(this.cursor.x - f.img.x, this.cursor.y - f.img.y);
         if (d < hitR) {
-          this.harvest(f, i);
+          this.harvest(f, i, time - f.bornAt);
           continue;
         }
       }
@@ -970,15 +976,22 @@ export class FruitHarvestScene extends Phaser.Scene {
       baseScale: base,
       warned: false,
       sprig,
+      zone,
     });
     c.debug.spawnedTotal += 1;
     c.debug.lastSpawn = `${note} px(${Math.round(x)}, ${Math.round(y)})`;
   }
 
-  private harvest(f: Fruit, index: number) {
+  /** 1 for the first half of the round, 2 for the second. */
+  private half(): 1 | 2 {
+    return this.control.remainingMs > ROUND_MS / 2 ? 1 : 2;
+  }
+
+  private harvest(f: Fruit, index: number, ageMs: number) {
     f.dying = true;
     this.fruits.splice(index, 1);
     this.control.harvested += 1;
+    this.control.metrics.onCollect(ageMs, f.zone, this.half());
     this.scoreText.setText(String(this.control.harvested));
     this.control.audio.harvest();
 
@@ -1106,6 +1119,7 @@ export class FruitHarvestScene extends Phaser.Scene {
     f.dying = true;
     this.fruits.splice(index, 1);
     this.control.missed += 1;
+    this.control.metrics.onMiss(this.half());
     this.control.audio.miss();
     this.tweens.killTweensOf(f.img);
 

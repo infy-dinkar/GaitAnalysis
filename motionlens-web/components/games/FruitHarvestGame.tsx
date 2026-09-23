@@ -58,6 +58,14 @@ import {
 } from "@/lib/games/fullscreen";
 import { GameAudio } from "@/lib/games/gameAudio";
 import {
+  MetricsRecorder,
+  meanCollectSec,
+  pct,
+  type RoundMetrics,
+} from "@/lib/games/gameMetrics";
+import { reachGeometry } from "@/lib/games/calibration";
+import type { ReportCreatePayload } from "@/lib/reports";
+import {
   DEFAULT_LEVEL,
   LEVELS,
   levelById,
@@ -105,6 +113,13 @@ interface Live {
   myReach: number;
   otherReach: number;
 }
+
+type SaveState =
+  | { status: "idle" }
+  | { status: "saving" }
+  | { status: "saved" }
+  | { status: "none" }
+  | { status: "error"; message: string };
 
 const BLANK_PROBE: Probe = { x: 0, y: 0, vis: 0, inFrame: false };
 
@@ -224,7 +239,7 @@ export function FruitHarvestGame() {
   // anatomical. On camera they came back reversed. Rather than guess,
   // this makes it switchable so one round settles it.
   const swapOn = search.get("handswap") === "1";
-  const { patientId, patient } = usePatientContext();
+  const { patientId, patient, saveReport } = usePatientContext();
   const { videoRef, active, error: camError, start } = useCamera();
   const { ready: poseReady, error: poseError, detect } = usePoseDetectionLive();
 
@@ -246,6 +261,11 @@ export function FruitHarvestGame() {
   >(null);
   const [fs, setFs] = useState(false);
   const [dbg, setDbg] = useState<GameDebug | null>(null);
+  const [saveState, setSaveState] = useState<SaveState>({ status: "idle" });
+  // Snapshot taken when the round ends. The recorder itself is a ref
+  // (written ~20x/s by the pose loop); React must not read it during
+  // render, so the finished numbers are copied out once.
+  const [roundStats, setRoundStats] = useState<RoundMetrics | null>(null);
   const debugRef = useRef<GameDebug>(createGameDebug());
 
   const stageRef = useRef<HTMLDivElement | null>(null);
@@ -271,6 +291,9 @@ export function FruitHarvestGame() {
   const setupOkFramesRef = useRef(0);
   const autoAdvanceRef = useRef<() => void>(() => {});
   const gameRef = useRef<import("phaser").Game | null>(null);
+  const metricsRef = useRef<MetricsRecorder | null>(null);
+  const pendingSaveRef = useRef<{ key: string; body: ReportCreatePayload } | null>(null);
+  const savedKeysRef = useRef<Set<string>>(new Set());
   const onHoldDoneRef = useRef<(p: Point) => void>(() => {});
 
   // ── Camera. Started from the hand-pick click so the permission
@@ -343,6 +366,12 @@ export function FruitHarvestGame() {
           stage.clientHeight,
           now,
         );
+
+        // Clinical sampling. Raw, un-mirrored keypoints, exactly what
+        // the biomech formulas expect.
+        if (phaseRef.current === "play") {
+          metricsRef.current?.sample(pose?.keypoints ?? null, now);
+        }
 
         // Setup advances by itself: no click, so the patient never has
         // to walk back to the machine mid-framing.
@@ -558,6 +587,7 @@ export function FruitHarvestGame() {
       box,
       visualScale,
       level: levelById(level),
+      metrics: (metricsRef.current = new MetricsRecorder(h, Date.now())),
       audio: audioRef.current ?? new GameAudio(),
       harvested: 0,
       missed: 0,
@@ -566,6 +596,7 @@ export function FruitHarvestGame() {
       debug,
       onFinish: (r) => {
         if (cancelled) return;
+        setRoundStats(metricsRef.current ? { ...metricsRef.current.m } : null);
         setResult(r);
         setPhase("result");
         phaseRef.current = "result";
@@ -692,6 +723,100 @@ export function FruitHarvestGame() {
     setPhase("countdown-play");
     phaseRef.current = "countdown-play";
   }, []);
+
+  // ── Save the finished round.
+  //
+  // One report per round, guarded by the round's own start timestamp:
+  // "Play again" and "Next level" each begin a new round with a new
+  // startedAtMs, so they save separately and can never resave the old
+  // one. A failed save leaves the result on screen untouched — Retry
+  // re-posts the SAME payload rather than re-deriving it.
+  const saveRoundRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    saveRoundRef.current = () => {
+      const payload = pendingSaveRef.current;
+      if (!payload) return;
+      if (!patientId) {
+        setSaveState({ status: "none" });
+        return;
+      }
+      if (savedKeysRef.current.has(payload.key)) return;
+      setSaveState({ status: "saving" });
+      void saveReport(payload.body)
+        .then((out) => {
+          if (out.ok) {
+            savedKeysRef.current.add(payload.key);
+            setSaveState({ status: "saved" });
+          } else {
+            setSaveState({
+              status: "error",
+              message: out.message || "Could not save the report.",
+            });
+          }
+        })
+        .catch((e: unknown) => {
+          setSaveState({
+            status: "error",
+            message: e instanceof Error ? e.message : "Could not save the report.",
+          });
+        });
+    };
+  }, [patientId, saveReport]);
+
+  // Build the payload the moment a round finishes, then save it.
+  useEffect(() => {
+    if (phase !== "result" || !result) return;
+    const rec = metricsRef.current;
+    const h = handRef.current;
+    if (!rec || !h) return;
+
+    const m = rec.m;
+    const total = m.harvested + m.missed;
+    const box = boxRef.current;
+    const st = stateRef.current;
+    const arm = st.armLenPx > 1 ? st.armLenPx : 1;
+    const cal = box && st.shoulderOk
+      ? reachGeometry(box, st.shoulderX, st.shoulderY, st.cover, 0)
+      : null;
+
+    pendingSaveRef.current = {
+      // Identity of THIS round. A new round gets a new key, so the
+      // guard blocks a double-save without blocking the next round.
+      key: `${m.startedAtMs}`,
+      body: {
+        module: "games" as const,
+        movement: "fruit_harvest",
+        side: h,
+        metrics: {
+          game: "fruit_harvest",
+          level: result.level,
+          duration_sec: Math.round(ROUND_MS / 1000),
+          harvested: m.harvested,
+          missed: m.missed,
+          accuracy_pct: pct(m.harvested, total),
+          avg_collect_sec: meanCollectSec(m.collectSecs),
+          max_abduction_deg: m.maxAbductionDeg,
+          max_adduction_deg: m.maxAdductionDeg,
+          abduction_low_confidence: m.abductionLowConfidence,
+          zone_hits: m.zoneHits,
+          first_half_accuracy_pct: pct(m.firstHalf.hit, m.firstHalf.total),
+          second_half_accuracy_pct: pct(m.secondHalf.hit, m.secondHalf.total),
+          calibration: cal
+            ? {
+              // Arm lengths, so the numbers mean the same thing for
+              // any body size at any distance from the camera.
+              up: Math.round((cal.rUp / arm) * 100) / 100,
+              side: Math.round((cal.rSide / arm) * 100) / 100,
+              across: Math.round((cal.rAcross / arm) * 100) / 100,
+              headroom_ratio: Math.round(st.headroomRatio * 100) / 100,
+            }
+            : null,
+          started_at_ms: m.startedAtMs,
+        },
+      },
+    };
+    saveRoundRef.current();
+  }, [phase, result]);
 
   /** Same hand, same calibration, next level. */
   const nextLevel = useCallback(() => {
@@ -950,11 +1075,25 @@ export function FruitHarvestGame() {
             <p className="mt-1 text-lg text-white/60">
               {levelById(result.level).label}
             </p>
-            <div className="mt-8 flex gap-10 text-center">
+            {/* Patient-facing: big, two numbers, nothing else. */}
+            <div className="mt-6 flex gap-12 text-center">
               <Figure value={result.harvested} label="Harvested" tone="text-lime-300" />
-              <Figure value={result.missed} label="Missed" tone="text-rose-300" />
               <Figure value={`${accuracy}%`} label="Accuracy" tone="text-white" />
             </div>
+
+            {/* Clinician-facing: smaller, below the fold of attention. */}
+            <ClinicalBlock m={roundStats} missed={result.missed} />
+
+            <p className="mt-4 max-w-xl text-sm text-white/50">
+              Game-based estimate — use the Biomechanics module for
+              clinical range of motion.
+            </p>
+
+            <SaveStatus
+              state={saveState}
+              patientName={patient?.name ?? null}
+              onRetry={() => saveRoundRef.current()}
+            />
             <div className="mt-10 flex gap-3">
               <Button size="lg" onClick={playAgain}>
                 <RotateCcw className="h-5 w-5" />
@@ -978,9 +1117,6 @@ export function FruitHarvestGame() {
         )}
       </div>
 
-      <p className="mt-3 text-center text-sm text-muted">
-        Results are not saved yet.
-      </p>
     </div>
   );
 }
@@ -1119,6 +1255,76 @@ function DebugPanel({ d }: { d: GameDebug }) {
       {d.error && (
         <p className="mt-2 text-rose-400">error: {d.error}</p>
       )}
+    </div>
+  );
+}
+
+/** The clinician half of the result screen. Deliberately quieter than
+ *  the two big patient numbers above it. */
+function ClinicalBlock({
+  m,
+  missed,
+}: {
+  m: RoundMetrics | null;
+  missed: number;
+}) {
+  if (!m) return null;
+  const avg = meanCollectSec(m.collectSecs);
+  const rows: [string, string][] = [
+    ["Max abduction", `${m.maxAbductionDeg}°${m.abductionLowConfidence ? " (low confidence)" : ""}`],
+    ["Max adduction", `${m.maxAdductionDeg}°`],
+    ["Avg time per fruit", avg === null ? "—" : `${avg.toFixed(2)} s`],
+    [
+      "Accuracy 1st / 2nd half",
+      `${pct(m.firstHalf.hit, m.firstHalf.total)}% / ${pct(m.secondHalf.hit, m.secondHalf.total)}%`,
+    ],
+    ["Missed", String(missed)],
+  ];
+  return (
+    <div className="mt-6 w-full max-w-md rounded-card bg-black/35 px-5 py-3 text-left">
+      {rows.map(([k, v]) => (
+        <div key={k} className="flex justify-between gap-4 py-1 text-base">
+          <span className="text-white/55">{k}</span>
+          <span className="tabular text-white">{v}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SaveStatus({
+  state,
+  patientName,
+  onRetry,
+}: {
+  state: SaveState;
+  patientName: string | null;
+  onRetry: () => void;
+}) {
+  if (state.status === "idle") return null;
+  if (state.status === "saving") {
+    return <p className="mt-3 text-sm text-white/60">Saving…</p>;
+  }
+  if (state.status === "saved") {
+    return (
+      <p className="mt-3 text-sm text-lime-300">
+        Saved to {patientName ? `${patientName}'s` : "the patient's"} reports
+      </p>
+    );
+  }
+  if (state.status === "none") {
+    return (
+      <p className="mt-3 text-sm text-white/50">
+        Not saved (no patient selected)
+      </p>
+    );
+  }
+  return (
+    <div className="mt-3 flex items-center gap-3">
+      <p className="text-sm text-amber-300">{state.message}</p>
+      <Button size="sm" variant="secondary" onClick={onRetry}>
+        Retry
+      </Button>
     </div>
   );
 }
