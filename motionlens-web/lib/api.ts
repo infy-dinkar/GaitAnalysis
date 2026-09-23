@@ -352,6 +352,132 @@ export async function analyzeGait(
   return postMultipart<GaitDataDTO>("/api/analyze-gait", fd, onProgress);
 }
 
+/** Raw POST that resolves with the HTTP status alongside the body, so
+ *  the job starter can tell "server said no" from "analysis failed". */
+function postMultipartRaw(
+  endpoint: string,
+  form: FormData,
+  onProgress?: (uploadedBytes: number, totalBytes: number) => void,
+): Promise<{ status: number; body: unknown }> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${API_BASE_URL}${endpoint}`);
+    xhr.responseType = "json";
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total);
+    };
+    xhr.onload = () => resolve({ status: xhr.status, body: xhr.response });
+    xhr.onerror = () =>
+      reject(new Error(`Network error reaching ${API_BASE_URL}${endpoint}`));
+    xhr.send(form);
+  });
+}
+
+interface JobStatus {
+  job_id: string;
+  status: "queued" | "running" | "done" | "error";
+  error: string | null;
+  result: ApiEnvelope<GaitDataDTO> | null;
+}
+
+/** How often to ask the backend whether the job has finished. */
+const GAIT_JOB_POLL_MS = 3000;
+
+/**
+ * Gait analysis as a background job.
+ *
+ * Resolves with EXACTLY the same envelope as analyzeGait, so every
+ * caller downstream is unchanged. The difference is only on the wire:
+ * the upload returns a job id in well under a second and the result is
+ * polled, instead of one HTTP connection being held open for the whole
+ * analysis. That connection is what Vercel's rewrite gives up on
+ * somewhere between ~115 s and ~210 s, and what a hospital network cuts
+ * at 60-77 s.
+ *
+ * AUTOMATIC FALLBACK: if the job endpoint is unavailable — disabled by
+ * the kill switch (404), broken (5xx), or unreachable — this calls the
+ * original synchronous analyzeGait with the same arguments. Once a job
+ * id exists we are committed: a failure after that point is a real
+ * analysis failure and is reported through the normal error path, not
+ * retried against the synchronous endpoint (which would run the whole
+ * thing a second time).
+ */
+export async function analyzeGaitJob(
+  args: {
+    video: File;
+    heightCm: number;
+    patientName?: string | null;
+    recordingDurationMs?: number | null;
+  },
+  onProgress?: (uploaded: number, total: number) => void,
+): Promise<ApiEnvelope<GaitDataDTO>> {
+  const fd = new FormData();
+  fd.append("video", args.video);
+  fd.append("height_cm", String(args.heightCm));
+  if (args.patientName) fd.append("patient_name", args.patientName);
+  if (args.recordingDurationMs && args.recordingDurationMs > 0) {
+    fd.append("recording_duration_ms", String(args.recordingDurationMs));
+  }
+
+  let jobId: string | null = null;
+  try {
+    const started = await postMultipartRaw(
+      "/api/jobs/analyze-gait", fd, onProgress,
+    );
+    if (started.status >= 200 && started.status < 300) {
+      const id = (started.body as { job_id?: unknown } | null)?.job_id;
+      if (typeof id === "string" && id.length > 0) jobId = id;
+    } else if (started.status >= 400 && started.status < 500
+      && started.status !== 404) {
+      // A real rejection of THIS upload (413 too large, 400 empty).
+      // Falling back would only repeat it, so surface it as-is.
+      const b = started.body as { detail?: string; error?: string } | null;
+      return {
+        success: false,
+        data: null,
+        error: String(b?.detail || b?.error || `HTTP ${started.status}`),
+      };
+    }
+  } catch {
+    // Network error before a job id — fall through to the old path.
+  }
+
+  if (!jobId) {
+    // 404 (kill switch / not deployed), 5xx, or unreachable.
+    return analyzeGait(args, onProgress);
+  }
+
+  for (;;) {
+    await new Promise((r) => setTimeout(r, GAIT_JOB_POLL_MS));
+    let job: JobStatus;
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/jobs/${jobId}`);
+      if (!res.ok) {
+        if (res.status === 404) {
+          return {
+            success: false,
+            data: null,
+            error: "Analysis was interrupted — please upload again",
+          };
+        }
+        continue;   // transient; keep polling
+      }
+      job = (await res.json()) as JobStatus;
+    } catch {
+      continue;     // transient network blip; keep polling
+    }
+
+    if (job.status === "done" && job.result) return job.result;
+    if (job.status === "error") {
+      return {
+        success: false,
+        data: null,
+        error: job.error || "Analysis failed",
+      };
+    }
+  }
+}
+
 export async function analyzeShoulder(
   args: {
     video: File;
