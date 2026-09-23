@@ -29,17 +29,25 @@ import {
   makeSoftDotTexture,
 } from "@/lib/games/fruitEffects";
 import { makeOrchardTexture, makeSprigTexture } from "@/lib/games/orchardScene";
+import { BackgroundLife } from "@/lib/games/backgroundLife";
+import {
+  BASE_FRUIT_FRACTION,
+  BASE_HIT_FRACTION,
+  type LevelConfig,
+} from "@/lib/games/levels";
 
 export const ROUND_MS = 60_000;
-const MAX_FRUIT = 3;
-/** How long a fruit waits to be picked before it falls away. */
-const FRUIT_TTL_MS = 5200;
-/** Gap between spawns so three do not appear on the same frame. */
-const SPAWN_GAP_MS = 600;
+
+// Fruit size, lifetime, spawn gap and the on-screen cap are NOT
+// constants any more — they come from the level config the control
+// object carries (lib/games/levels.ts). Round length stays fixed at
+// 60 s for every level.
 
 const FRUITS = ["🍎", "🍊", "🍐", "🍋", "🍓", "🍇", "🍑", "🥝"];
 const BASKET = "🧺";
 const LEAF = "🍃";
+const MONKEY = "🐒";
+const BIRD = "🐦";
 
 // ── Animation timings. None of these change the round clock, the TTL,
 //    the hit test or the score — they only shape what is drawn.
@@ -202,6 +210,8 @@ export interface FruitHarvestControl {
   box: ReachBox;
   /** 1 = normal, >1 when the patient asked for bigger visuals. */
   visualScale: number;
+  /** Everything that differs between levels. */
+  level: LevelConfig;
   audio: GameAudio;
   /** Counters the React layer polls for the HUD-free result screen. */
   harvested: number;
@@ -209,7 +219,7 @@ export interface FruitHarvestControl {
   remainingMs: number;
   finished: boolean;
   debug: GameDebug;
-  onFinish: (r: { harvested: number; missed: number }) => void;
+  onFinish: (r: { harvested: number; missed: number; level: number }) => void;
 }
 
 interface Fruit {
@@ -334,6 +344,8 @@ export class FruitHarvestScene extends Phaser.Scene {
   private backdropSize = { w: 0, h: 0 };
   private lostText: Phaser.GameObjects.Text | null = null;
   private closeText: Phaser.GameObjects.Text | null = null;
+  private levelText: Phaser.GameObjects.Text | null = null;
+  private life: BackgroundLife | null = null;
   private lostBand: Phaser.GameObjects.Rectangle | null = null;
   /** Milliseconds the hand has been missing, and the total time the
    *  round clock has been held for. */
@@ -370,6 +382,12 @@ export class FruitHarvestScene extends Phaser.Scene {
     makeSoftDotTexture(this, "fx-dot");
     makeRingTexture(this, "fx-ring");
     makeSprigTexture(this, "fx-sprig");
+    // Wildlife glyphs. Same rasterise-and-check as the fruit: if a
+    // platform has no monkey, that animal is simply skipped rather
+    // than drawn as an empty square.
+    const monkeyKey = makeGlyphTexture(this, "fx-monkey", MONKEY) ? "fx-monkey" : null;
+    const birdKey = makeGlyphTexture(this, "fx-bird", BIRD) ? "fx-bird" : null;
+    this.life = new BackgroundLife(this, { monkey: monkeyKey, bird: birdKey });
     this.leafKey = makeGlyphTexture(this, "fx-leaf", LEAF) ? "fx-leaf" : null;
 
     // ── Orchard backdrop. Generated once here, then one sprite per
@@ -419,6 +437,17 @@ export class FruitHarvestScene extends Phaser.Scene {
         strokeThickness: Math.max(2, hud * 0.1),
       })
       .setDepth(30);
+
+    this.levelText = this.add
+      .text(this.scale.width * 0.04, this.scale.height * 0.03, "", {
+        fontFamily: "system-ui, sans-serif",
+        fontSize: "16px",
+        color: "#ffffff",
+        stroke: "#000000",
+        strokeThickness: 3,
+      })
+      .setDepth(30);
+    this.levelText.setText(this.control.level.label);
 
     this.scoreText = this.add
       .text(this.scale.width * 0.96, this.scale.height * 0.03, "0", {
@@ -555,6 +584,11 @@ export class FruitHarvestScene extends Phaser.Scene {
       .setStroke("#000000", Math.max(2, lost * 0.08));
 
     this.fpsText?.setPosition(w * 0.02, h * 0.82).setFontSize(Math.round(u * 0.032));
+    const lvl = Math.round(u * 0.035 * s);
+    this.levelText
+      ?.setPosition(w * 0.04, h * 0.03 + hud * 1.05)
+      .setFontSize(lvl)
+      .setStroke("#000000", Math.max(2, lvl * 0.1));
     this.closeText
       ?.setPosition(w / 2, h * 0.14)
       .setFontSize(Math.round(u * 0.035 * s));
@@ -569,7 +603,7 @@ export class FruitHarvestScene extends Phaser.Scene {
       this.startedAt = time;
       this.lastFrameAt = time;
       // One full gap behind, so the first fruit appears immediately.
-      this.lastSpawnAt = time - SPAWN_GAP_MS - 1;
+      this.lastSpawnAt = time - c.level.spawnGapMs - 1;
       c.debug.sceneState = "running";
     }
 
@@ -590,6 +624,10 @@ export class FruitHarvestScene extends Phaser.Scene {
     this.lostBand?.setVisible(lost);
     this.lostText?.setVisible(lost);
     c.debug.handLost = lost;
+
+    // Wildlife. Paused while the hand is lost so nothing moves behind
+    // the "step back into view" banner.
+    if (!lost) this.life?.update(time);
 
     // Headroom during play: warn, never pause. Hidden while the
     // hand-lost banner is up so the two cannot stack.
@@ -616,7 +654,13 @@ export class FruitHarvestScene extends Phaser.Scene {
     this.timerText.setText(String(Math.ceil(c.remainingMs / 1000)));
     if (c.remainingMs <= 0) {
       c.finished = true;
-      c.onFinish({ harvested: c.harvested, missed: c.missed });
+      this.life?.destroy();
+      this.life = null;
+      c.onFinish({
+        harvested: c.harvested,
+        missed: c.missed,
+        level: c.level.id,
+      });
       return;
     }
 
@@ -683,8 +727,8 @@ export class FruitHarvestScene extends Phaser.Scene {
       // clock is held.
       for (const f of this.fruits) f.bornAt += dtMs;
     } else if (
-      this.fruits.length < MAX_FRUIT
-      && time - this.lastSpawnAt > SPAWN_GAP_MS
+      this.fruits.length < c.level.maxFruit
+      && time - this.lastSpawnAt > c.level.spawnGapMs
     ) {
       this.spawn(time);
       this.lastSpawnAt = time;
@@ -693,7 +737,9 @@ export class FruitHarvestScene extends Phaser.Scene {
     // ── Fruit: reposition (so a resize keeps them in reach), test the
     //    cursor, and expire.
     const cover = c.state.cover;
-    const hitR = this.unit * 0.075 * c.visualScale;
+    // Hit radius scales with the fruit, so a bigger fruit is
+    // proportionally as easy to touch rather than merely easier to see.
+    const hitR = this.unit * BASE_HIT_FRACTION * c.level.fruitScale * c.visualScale;
     for (let i = this.fruits.length - 1; i >= 0; i--) {
       const f = this.fruits[i];
       if (f.dying) continue;
@@ -718,11 +764,11 @@ export class FruitHarvestScene extends Phaser.Scene {
       }
 
       const age = time - f.bornAt;
-      if (!f.warned && age > FRUIT_TTL_MS - MISS_WARN_MS) {
+      if (!f.warned && age > c.level.ttlMs - MISS_WARN_MS) {
         f.warned = true;
         this.startWobble(f);
       }
-      if (age > FRUIT_TTL_MS) this.dropAway(f, i);
+      if (age > c.level.ttlMs) this.dropAway(f, i);
     }
 
     // ── Diagnostics (?gamedebug=1)
@@ -869,7 +915,7 @@ export class FruitHarvestScene extends Phaser.Scene {
     this.nextRegion = this.nextRegion === "same" ? "across" : "same";
 
     const key = this.keys[Math.floor(Math.random() * this.keys.length)];
-    const size = this.unit * 0.13 * c.visualScale;
+    const size = this.unit * BASE_FRUIT_FRACTION * c.level.fruitScale * c.visualScale;
     // Stem and leaf, behind the fruit and slightly above it.
     let sprig: Phaser.GameObjects.Image | null = null;
     if (this.textures.exists("fx-sprig")) {

@@ -17,6 +17,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
   Check,
+  ChevronRight,
   Gamepad2,
   Hand as HandIcon,
   Maximize2,
@@ -56,6 +57,12 @@ import {
   onFullscreenChange,
 } from "@/lib/games/fullscreen";
 import { GameAudio } from "@/lib/games/gameAudio";
+import {
+  DEFAULT_LEVEL,
+  LEVELS,
+  levelById,
+  type LevelId,
+} from "@/lib/games/levels";
 import {
   ROUND_MS,
   createGameDebug,
@@ -224,12 +231,16 @@ export function FruitHarvestGame() {
   const [phase, setPhase] = useState<Phase>("hand");
   const [hand, setHand] = useState<Hand | null>(null);
   const [visualScale, setVisualScale] = useState(1);
+  // Chosen on the hand screen, where the clinician is still at the
+  // device. Kept in a ref too so the play effect reads the current
+  // value without re-running when it changes mid-flow.
+  const [level, setLevel] = useState<LevelId>(DEFAULT_LEVEL);
   const [count, setCount] = useState(3);
   const [holdIndex, setHoldIndex] = useState(0);
   const [live, setLive] = useState<Live>(BLANK_LIVE);
-  const [result, setResult] = useState<{ harvested: number; missed: number } | null>(
-    null,
-  );
+  const [result, setResult] = useState<
+    { harvested: number; missed: number; level: number } | null
+  >(null);
   const [upCheck, setUpCheck] = useState<
     { rUp: number; rSide: number; ratio: number } | null
   >(null);
@@ -546,6 +557,7 @@ export function FruitHarvestGame() {
       state: stateRef.current,
       box,
       visualScale,
+      level: levelById(level),
       audio: audioRef.current ?? new GameAudio(),
       harvested: 0,
       missed: 0,
@@ -612,7 +624,7 @@ export function FruitHarvestGame() {
       gameRef.current = null;
       game?.destroy(true);
     };
-  }, [phase, visualScale]);
+  }, [phase, visualScale, level]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -676,6 +688,15 @@ export function FruitHarvestGame() {
 
   const acceptCalibration = useCallback(() => {
     setUpCheck(null);
+    setCount(3);
+    setPhase("countdown-play");
+    phaseRef.current = "countdown-play";
+  }, []);
+
+  /** Same hand, same calibration, next level. */
+  const nextLevel = useCallback(() => {
+    setLevel(2);
+    setResult(null);
     setCount(3);
     setPhase("countdown-play");
     phaseRef.current = "countdown-play";
@@ -790,7 +811,7 @@ export function FruitHarvestGame() {
             <p className="mt-2 text-lg text-white/70">
               Only that hand controls the game. The other one is ignored.
             </p>
-            <div className="mt-8 flex gap-4">
+            <div className="mt-8 flex flex-wrap items-center justify-center gap-4">
               <Button size="lg" onClick={() => beginWithHand("left")}>
                 <HandIcon className="h-5 w-5 scale-x-[-1]" />
                 Left hand
@@ -799,6 +820,17 @@ export function FruitHarvestGame() {
                 <HandIcon className="h-5 w-5" />
                 Right hand
               </Button>
+              <span className="mx-1 h-8 w-px bg-white/25" aria-hidden />
+              {([1, 2] as LevelId[]).map((id) => (
+                <Button
+                  key={id}
+                  size="lg"
+                  variant={level === id ? "primary" : "secondary"}
+                  onClick={() => setLevel(id)}
+                >
+                  {LEVELS[id].label}
+                </Button>
+              ))}
             </div>
           </Overlay>
         )}
@@ -915,6 +947,9 @@ export function FruitHarvestGame() {
         {phase === "result" && result && (
           <Overlay>
             <h2 className="text-3xl font-semibold text-white">Round complete</h2>
+            <p className="mt-1 text-lg text-white/60">
+              {levelById(result.level).label}
+            </p>
             <div className="mt-8 flex gap-10 text-center">
               <Figure value={result.harvested} label="Harvested" tone="text-lime-300" />
               <Figure value={result.missed} label="Missed" tone="text-rose-300" />
@@ -925,6 +960,12 @@ export function FruitHarvestGame() {
                 <RotateCcw className="h-5 w-5" />
                 Play again
               </Button>
+              {result.level === 1 && (
+                <Button size="lg" onClick={nextLevel}>
+                  <ChevronRight className="h-5 w-5" />
+                  Next level
+                </Button>
+              )}
               {/* Leaving the game leaves fullscreen. "Play again"
                   deliberately stays in it. */}
               <Link href={backHref} onClick={() => void exitFullscreen()}>
