@@ -796,7 +796,10 @@ export function FruitHarvestGame() {
           accuracy_pct: pct(m.harvested, total),
           avg_collect_sec: meanCollectSec(m.collectSecs),
           max_abduction_deg: m.maxAbductionDeg,
-          max_adduction_deg: m.maxAdductionDeg,
+          // No max_adduction_deg: see lib/games/gameMetrics.ts. The
+          // across-body reach count below is what the game can honestly
+          // report for adduction.
+
           abduction_low_confidence: m.abductionLowConfidence,
           zone_hits: m.zoneHits,
           first_half_accuracy_pct: pct(m.firstHalf.hit, m.firstHalf.total),
@@ -1201,6 +1204,21 @@ function DebugPanel({ d }: { d: GameDebug }) {
         : "none",
     ],
     ["hand lost", d.handLost ? "YES — round held" : "no"],
+    [
+      "angle",
+      `${d.angleDeg === null ? "—" : `${d.angleDeg}°`}  dir ${d.angleDir}`,
+    ],
+    ["decided by", d.angleDecidedBy],
+    [
+      "elbow (shoulder widths)",
+      `dx ${d.elbowDx}  dy ${d.elbowDy}  fromMid ${d.elbowFromMid}`,
+    ],
+    [
+      "wrist (shoulder widths)",
+      `dx ${d.wristDx}  fromMid ${d.wristFromMid}`,
+    ],
+    ["counted this frame", d.angleCounted],
+    ["running max abduction", `${d.maxAbductionDeg}°`],
     ["arm length", `${d.armLenPx} px`],
     ["headroom", `${d.headroomPx} px  (ratio ${d.headroomRatio})`],
     ["pose rate", `${d.poseHz} Hz`],
@@ -1272,7 +1290,7 @@ function ClinicalBlock({
   const avg = meanCollectSec(m.collectSecs);
   const rows: [string, string][] = [
     ["Max abduction", `${m.maxAbductionDeg}°${m.abductionLowConfidence ? " (low confidence)" : ""}`],
-    ["Max adduction", `${m.maxAdductionDeg}°`],
+    ["Reaches across body", String(m.zoneHits.adduction)],
     ["Avg time per fruit", avg === null ? "—" : `${avg.toFixed(2)} s`],
     [
       "Accuracy 1st / 2nd half",

@@ -36,7 +36,11 @@ export function GamesBody({ report }: { report: ReportDTO }) {
   const accuracy = num(m.accuracy_pct);
   const avg = num(m.avg_collect_sec);
   const abd = num(m.max_abduction_deg);
-  const add = num(m.max_adduction_deg);
+  // max_adduction_deg is deliberately NOT read. Rounds saved before
+  // this change still carry the field; it is a horizontal-plane value
+  // that a frontal camera cannot measure and that is not comparable
+  // with the biomech adduction range, so it is not shown for any
+  // report, old or new.
   const h1 = num(m.first_half_accuracy_pct);
   const h2 = num(m.second_half_accuracy_pct);
   const zones = (m.zone_hits ?? null) as Record<string, unknown> | null;
@@ -85,10 +89,16 @@ export function GamesBody({ report }: { report: ReportDTO }) {
             value={abd === null ? "—" : `${abd}°`}
           />
           <Stat
-            label="Max adduction"
-            value={add === null ? "—" : `${add}°`}
+            label="Reaches across body"
+            value={String(num(zones?.adduction) ?? "—")}
           />
         </div>
+        <p className="mt-3 text-sm text-muted">
+          Across-body reaching is reported as a count, not degrees: it is
+          horizontal adduction, which a front-facing camera cannot
+          measure and which is not comparable with the Biomechanics
+          module&apos;s adduction range.
+        </p>
         {lowConf && (
           <p className="mt-3 text-sm text-warning">
             Lower confidence: the hip was not visible for part of this
@@ -110,10 +120,6 @@ export function GamesBody({ report }: { report: ReportDTO }) {
           <Stat
             label="Reaches out / up"
             value={String(num(zones?.abduction) ?? "—")}
-          />
-          <Stat
-            label="Reaches across body"
-            value={String(num(zones?.adduction) ?? "—")}
           />
           <Stat
             label="Accuracy, first half"

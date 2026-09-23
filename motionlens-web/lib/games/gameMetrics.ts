@@ -13,6 +13,16 @@
 // detectShoulderAbAdDirection(). Reusing both is the only way the
 // game's degrees can be compared with a biomech assessment at all.
 //
+// ADDUCTION DEGREES ARE DELIBERATELY NOT MEASURED. The across-body
+// reaches this game produces are HORIZONTAL adduction (transverse
+// plane). The biomech module's adduction figure is frontal-plane
+// adduction, whose reference range is 30-50 deg. They share one
+// formula and are not the same measurement, so reporting the game's
+// number as "adduction" would put a ~90 deg transverse value against a
+// 30-50 deg frontal range. A frontal 2-D camera cannot separate the
+// planes at all. The across-body reach COUNT (zone_hits.adduction) is
+// what the game can honestly report, and it is what it reports.
+//
 // These are still a GAME estimate. The patient is reaching for fruit,
 // not holding a measured pose side-on to the camera, and the result
 // screen says so.
@@ -45,11 +55,34 @@ export interface CalibrationSummary {
   headroom_ratio: number;
 }
 
+/** Live readout for ?gamedebug=1 — why the direction came out the way
+ *  it did, in the same units the biomech rule uses. */
+export interface AngleDebug {
+  angleDeg: number | null;
+  dir: string;
+  /** Which branch of detectShoulderAbAdDirection decided it. */
+  decidedBy: string;
+  /** Elbow, in shoulder widths: + = outward from the shoulder. */
+  elbowDx: number;
+  /** Elbow height above the shoulder, in shoulder widths. */
+  elbowDy: number;
+  /** Wrist, in shoulder widths: + = outward from the shoulder. */
+  wristDx: number;
+  /** Elbow and wrist relative to the MID-SHOULDER line: + = outward,
+   *  negative = across the body. The biomech rule never looks at
+   *  these; they are here to show what it is missing. */
+  elbowFromMid: number;
+  wristFromMid: number;
+  /** Did this frame contribute to the abduction peak, and if not why. */
+  counted: string;
+}
+
 export interface RoundMetrics {
   startedAtMs: number;
+  /** Diagnostics only — never saved to a report. */
+  dbg: AngleDebug;
   // ── written by the pose loop
   maxAbductionDeg: number;
-  maxAdductionDeg: number;
   /** True when any peak was taken without a visible hip, so the trunk
    *  axis fell back to screen vertical. */
   abductionLowConfidence: boolean;
@@ -66,8 +99,18 @@ export interface RoundMetrics {
 export function createRoundMetrics(startedAtMs: number): RoundMetrics {
   return {
     startedAtMs,
+    dbg: {
+      angleDeg: null,
+      dir: "-",
+      decidedBy: "-",
+      elbowDx: 0,
+      elbowDy: 0,
+      wristDx: 0,
+      elbowFromMid: 0,
+      wristFromMid: 0,
+      counted: "-",
+    },
     maxAbductionDeg: 0,
-    maxAdductionDeg: 0,
     abductionLowConfidence: false,
     angleFrames: 0,
     harvested: 0,
@@ -118,7 +161,6 @@ export class MetricsRecorder {
   readonly m: RoundMetrics;
   private hand: Hand;
   private abPeak = new HeldPeak();
-  private adPeak = new HeldPeak();
 
   constructor(hand: Hand, startedAtMs: number) {
     this.hand = hand;
@@ -145,7 +187,7 @@ export class MetricsRecorder {
     const ok = (p: Keypoint | undefined) => !!p && (p.score ?? 0) >= VIS_FLOOR;
     if (!ok(sh) || !ok(el)) {
       this.abPeak.reset();
-      this.adPeak.reset();
+      this.m.dbg.counted = "no — shoulder or elbow not visible";
       return;
     }
 
@@ -165,19 +207,65 @@ export class MetricsRecorder {
 
     this.m.angleFrames += 1;
     const dir = detectShoulderAbAdDirection(kp, this.hand);
-    if (dir === "abduction") {
-      this.abPeak.push(nowMs, deg);
-      this.adPeak.reset();
-      this.m.maxAbductionDeg = Math.round(this.abPeak.peak);
-    } else if (dir === "adduction") {
-      this.adPeak.push(nowMs, deg);
-      this.abPeak.reset();
-      this.m.maxAdductionDeg = Math.round(this.adPeak.peak);
-    } else {
-      // Inside the direction deadband — commit to neither.
-      this.abPeak.reset();
-      this.adPeak.reset();
+
+    // Mirror the biomech rule's own arithmetic so the overlay can show
+    // WHICH branch decided the label. Read-only: lib/biomech is not
+    // touched, this only re-derives the same ratios for display.
+    const d = this.m.dbg;
+    d.angleDeg = Math.round(deg);
+    d.dir = dir ?? "none (deadband)";
+    let wristOwnSide: boolean | null = null;
+    const ls = kp[LM_LIVE.LEFT_SHOULDER];
+    const rs = kp[LM_LIVE.RIGHT_SHOULDER];
+    const wr = kp[this.hand === "left" ? LM_LIVE.LEFT_WRIST : LM_LIVE.RIGHT_WRIST];
+    if (ls && rs) {
+      const width = Math.abs(rs.x - ls.x) || 1;
+      const midX = (ls.x + rs.x) / 2;
+      const outward = Math.sign(sh!.x - midX) || 1;
+      const dy = (sh!.y - el!.y) / width;
+      d.elbowDx = round2(((el!.x - sh!.x) * outward) / width);
+      d.elbowDy = round2(dy);
+      d.elbowFromMid = round2(((el!.x - midX) * outward) / width);
+      if (wr && (wr.score ?? 0) >= VIS_FLOOR) {
+        d.wristDx = round2(((wr.x - sh!.x) * outward) / width);
+        d.wristFromMid = round2(((wr.x - midX) * outward) / width);
+        // Positive = still on the patient's own side of the midline.
+        wristOwnSide = d.wristFromMid > 0;
+      }
+      // The rule checks the y override first, then the x deadband.
+      d.decidedBy = dy > 0.20
+        ? "elbow ABOVE shoulder (y-override -> abduction)"
+        : Math.abs(d.elbowDx) < 0.03
+          ? "elbow inside x deadband (no direction)"
+          : "elbow x vs shoulder";
     }
+    // ABDUCTION GUARD.
+    //
+    // The biomech direction rule reads the ELBOW only, and returns
+    // "abduction" whenever the elbow is raised more than 0.20 shoulder
+    // widths — even when the hand is reaching ACROSS the body. That is
+    // how an across-and-up reach was being scored as 167 deg of
+    // abduction. A frame only counts now when the chosen WRIST is still
+    // on its own side of the mid-shoulder line.
+    //
+    // Excluding resets the window rather than skipping it, so the
+    // 150 ms hold must be 150 ms of COUNTED frames — a hold cannot be
+    // certified across a gap where the arm was across the body.
+    if (dir !== "abduction") {
+      this.abPeak.reset();
+      this.m.dbg.counted = `no — direction ${dir ?? "undecided"}`;
+      return;
+    }
+    if (wristOwnSide !== true) {
+      this.abPeak.reset();
+      this.m.dbg.counted = wristOwnSide === null
+        ? "no — wrist not visible"
+        : "no — wrist has crossed the midline";
+      return;
+    }
+    this.abPeak.push(nowMs, deg);
+    this.m.maxAbductionDeg = Math.round(this.abPeak.peak);
+    this.m.dbg.counted = "yes";
   }
 
   /** A fruit was collected. `ageMs` is spawn -> touch. */
@@ -215,4 +303,8 @@ export function pct(hit: number, total: number): number {
 export function meanCollectSec(secs: number[]): number | null {
   if (secs.length === 0) return null;
   return Math.round((secs.reduce((a, b) => a + b, 0) / secs.length) * 100) / 100;
+}
+
+function round2(v: number): number {
+  return Math.round(v * 100) / 100;
 }

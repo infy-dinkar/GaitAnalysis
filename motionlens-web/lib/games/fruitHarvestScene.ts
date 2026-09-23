@@ -163,6 +163,20 @@ export interface GameDebug {
   headroomRatio: number;
   /** Round is held because the hand has not been seen for a second. */
   handLost: boolean;
+  /** Shoulder-angle diagnostics: the current angle, the direction the
+   *  biomech rule returned, which branch decided it, and where the
+   *  elbow and wrist actually are. */
+  angleDeg: number | null;
+  angleDir: string;
+  angleDecidedBy: string;
+  elbowDx: number;
+  elbowDy: number;
+  wristDx: number;
+  elbowFromMid: number;
+  wristFromMid: number;
+  maxAbductionDeg: number;
+  /** Whether this frame fed the abduction peak, and if not why. */
+  angleCounted: string;
 }
 
 export function createGameDebug(): GameDebug {
@@ -202,6 +216,16 @@ export function createGameDebug(): GameDebug {
     headroomPx: 0,
     headroomRatio: 0,
     handLost: false,
+    angleDeg: null,
+    angleDir: "-",
+    angleDecidedBy: "-",
+    elbowDx: 0,
+    elbowDy: 0,
+    wristDx: 0,
+    elbowFromMid: 0,
+    wristFromMid: 0,
+    maxAbductionDeg: 0,
+    angleCounted: "-",
   };
 }
 
@@ -810,6 +834,17 @@ export class FruitHarvestScene extends Phaser.Scene {
     d.armLenPx = Math.round(c.state.armLenPx);
     d.headroomPx = Math.round(c.state.headroomPx);
     d.headroomRatio = Math.round(c.state.headroomRatio * 100) / 100;
+    const am = c.metrics.m;
+    d.angleDeg = am.dbg.angleDeg;
+    d.angleDir = am.dbg.dir;
+    d.angleDecidedBy = am.dbg.decidedBy;
+    d.elbowDx = am.dbg.elbowDx;
+    d.elbowDy = am.dbg.elbowDy;
+    d.wristDx = am.dbg.wristDx;
+    d.elbowFromMid = am.dbg.elbowFromMid;
+    d.wristFromMid = am.dbg.wristFromMid;
+    d.maxAbductionDeg = am.maxAbductionDeg;
+    d.angleCounted = am.dbg.counted;
     if (this.fpsText) {
       const sh = d.shoulderPx ? `${d.shoulderPx.x},${d.shoulderPx.y}` : "—";
       const rr = d.reachR
