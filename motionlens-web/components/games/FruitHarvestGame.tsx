@@ -101,6 +101,12 @@ interface Live {
 
 const BLANK_PROBE: Probe = { x: 0, y: 0, vis: 0, inFrame: false };
 
+/** Consecutive passing pose frames before the setup screen advances.
+ *  At ~20 Hz this is about a quarter of a second — long enough that a
+ *  single flickering landmark cannot trigger it, short enough that it
+ *  still feels immediate. */
+const SETUP_OK_FRAMES = 5;
+
 /**
  * Why the calibration ring is currently held, or null to let it fill.
  *
@@ -247,6 +253,12 @@ export function FruitHarvestGame() {
   // by Redo and by the post-hold sanity check.
   const calibModeRef = useRef<"all" | HoldId>("all");
   const poseMsgRef = useRef("");
+  // Consecutive pose frames with the setup fully passing. The setup
+  // screen advances on its own once this is reached, so one noisy
+  // frame cannot launch the countdown while the patient is still
+  // getting into position.
+  const setupOkFramesRef = useRef(0);
+  const autoAdvanceRef = useRef<() => void>(() => {});
   const gameRef = useRef<import("phaser").Game | null>(null);
   const onHoldDoneRef = useRef<(p: Point) => void>(() => {});
 
@@ -320,6 +332,20 @@ export function FruitHarvestGame() {
           stage.clientHeight,
           now,
         );
+
+        // Setup advances by itself: no click, so the patient never has
+        // to walk back to the machine mid-framing.
+        if (phaseRef.current === "setup") {
+          if (stateRef.current.setupOk) {
+            setupOkFramesRef.current += 1;
+            if (setupOkFramesRef.current >= SETUP_OK_FRAMES) {
+              setupOkFramesRef.current = 0;
+              autoAdvanceRef.current();
+            }
+          } else {
+            setupOkFramesRef.current = 0;
+          }
+        }
 
         if (phaseRef.current === "calibrate") {
           const s = stateRef.current;
@@ -636,6 +662,16 @@ export function FruitHarvestGame() {
     phaseRef.current = "countdown-calib";
   }, []);
 
+  // The pose loop calls this through a ref, so the loop does not have
+  // to be torn down and rebuilt when the callback identity changes.
+  // The phase guard makes a second call during the same setup a no-op.
+  useEffect(() => {
+    autoAdvanceRef.current = () => {
+      if (phaseRef.current !== "setup") return;
+      startCalibration();
+    };
+  }, [startCalibration]);
+
   /** Repeat the "arm up" hold only; side and across are kept. */
 
   const acceptCalibration = useCallback(() => {
@@ -800,9 +836,6 @@ export function FruitHarvestGame() {
                   onClick={() => setVisualScale((v) => Math.min(2.2, v * 1.35))}
                 >
                   Make bigger
-                </Button>
-                <Button onClick={startCalibration} disabled={!live.setupOk}>
-                  Yes — continue
                 </Button>
               </div>
             </div>
