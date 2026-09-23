@@ -1293,31 +1293,23 @@ function ClinicalBlock({
   ];
   return (
     <div className="mt-6 w-full max-w-md rounded-card bg-black/35 px-5 py-3 text-left">
-      {/* Shoulder range — the same two-value layout the saved report
-          uses, so the clinician sees one thing in both places. */}
+      {/* Reach — counts only, the same two-value layout the saved
+          report uses, so the clinician sees one thing in both places.
+          max_abduction_deg is still recorded and saved; it is simply
+          not shown. */}
       <p className="text-xs uppercase tracking-[0.12em] text-white/40">
-        Shoulder range
+        Reach
       </p>
       <div className="mt-2 grid grid-cols-2 gap-4">
         <ResultStat
-          label="Max abduction"
-          value={`${m.maxAbductionDeg}°`}
+          label="Reaches out / up"
+          value={String(m.zoneHits.abduction)}
         />
         <ResultStat
           label="Reaches across body"
           value={String(m.zoneHits.adduction)}
         />
       </div>
-      {m.abductionLowConfidence && (
-        <p className="mt-2 break-words text-sm text-amber-300">
-          Lower confidence: the hip was not visible for part of this round.
-        </p>
-      )}
-      {/* One short line. `break-words` so it wraps instead of
-          overflowing at any width. */}
-      <p className="mt-2 break-words text-sm text-white/50">
-        Game-based estimate. Use Biomechanics for clinical range of motion.
-      </p>
 
       <div className="mt-3 border-t border-white/10 pt-2">
         {rows.map(([k, v]) => (

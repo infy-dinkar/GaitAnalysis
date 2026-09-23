@@ -29,13 +29,17 @@ export function GamesBody({ report }: { report: ReportDTO }) {
   const title = GAME_LABELS[game] ?? "Camera game";
   const level = num(m.level);
   const side = str(report.side);
-  const lowConf = m.abduction_low_confidence === true;
 
   const harvested = num(m.harvested);
   const missed = num(m.missed);
   const accuracy = num(m.accuracy_pct);
   const avg = num(m.avg_collect_sec);
-  const abd = num(m.max_abduction_deg);
+  // Neither max_abduction_deg nor max_adduction_deg is read. Both are
+  // still SAVED — abduction deliberately, for possible later use — but
+  // a frontal 2-D camera during a reaching game cannot produce a
+  // degree figure worth putting in front of a clinician next to the
+  // Biomechanics module's. The reach counts are what this game can
+  // honestly report, so they are all it shows.
   // max_adduction_deg is deliberately NOT read. Rounds saved before
   // this change still carry the field; it is a horizontal-plane value
   // that a frontal camera cannot measure and that is not comparable
@@ -78,33 +82,22 @@ export function GamesBody({ report }: { report: ReportDTO }) {
         </div>
       </section>
 
-      {/* Shoulder range */}
+      {/* Reach — counts only. No degree figure is shown: see the
+          note on max_abduction_deg above. */}
       <section className="rounded-card border border-border bg-surface p-5">
         <h2 className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
-          Shoulder range
+          Reach
         </h2>
         <div className="mt-3 grid grid-cols-2 gap-4">
           <Stat
-            label="Max abduction"
-            value={abd === null ? "—" : `${abd}°`}
+            label="Reaches out / up"
+            value={String(num(zones?.abduction) ?? "—")}
           />
           <Stat
             label="Reaches across body"
             value={String(num(zones?.adduction) ?? "—")}
           />
         </div>
-        {lowConf && (
-          <p className="mt-3 text-sm text-warning">
-            Lower confidence: the hip was not visible for part of this
-            round, so the trunk axis fell back to screen vertical.
-          </p>
-        )}
-        {/* One short line. `break-words` so it wraps rather than
-            overflowing the card on a narrow column or in the PDF. */}
-        <p className="mt-3 break-words text-sm text-muted">
-          Game-based estimate. Use Biomechanics for clinical range of
-          motion.
-        </p>
       </section>
 
       {/* Movement pattern */}
@@ -113,10 +106,6 @@ export function GamesBody({ report }: { report: ReportDTO }) {
           Movement pattern
         </h2>
         <div className="mt-3 grid grid-cols-2 gap-4">
-          <Stat
-            label="Reaches out / up"
-            value={String(num(zones?.abduction) ?? "—")}
-          />
           <Stat
             label="Accuracy, first half"
             value={h1 === null ? "—" : `${h1}%`}
