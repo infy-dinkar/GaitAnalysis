@@ -31,20 +31,57 @@ import {
   type CloudburstZone,
 } from "@/lib/games/cloudburstMetrics";
 import {
+  AIMED_LIGHTNING_FRACTION,
   BASE_HIT_FRACTION,
   BASE_ITEM_FRACTION,
   MAX_ITEMS,
+  MIN_LANE_SEPARATION,
   ROUND_MS,
   SPAWN_LEAD,
   SPEED_RAMP_TO,
+  STRIKE_BAND_FRACTION,
+  STRIKE_FLASH_MS,
+  STRIKE_WARN_MS,
 } from "@/lib/games/cloudburstLevels";
 import { makeCloudTexture, makeSkyTexture, SKY_GROUND } from "@/lib/games/skyScene";
 import { makeRingTexture, makeSoftDotTexture } from "@/lib/games/fruitEffects";
 import { BackgroundLife } from "@/lib/games/backgroundLife";
+import { FrogPond } from "@/lib/games/cloudburstFrogs";
 
 const DROP = "💧";
 const BOLT = "⚡";
 const BIRD = "🐦";
+const FROG = "🐸";
+
+/** How many frogs sit on the ground. Two or three: enough to feel
+ *  alive, few enough that the eye is pulled down off the play area.
+ *  Rolled per round in create(), not once per module load. */
+const FROG_MIN = 2;
+const FROG_MAX = 3;
+
+// ── Big centre strike.
+/** Warning glow under the band. Pulsed with a yoyo of this duration,
+ *  i.e. about 0.67 Hz — well under the 3 Hz photosensitivity ceiling. */
+const STRIKE_PULSE_MS = 750;
+/** The struck band's colours. Warm rather than white, and the core is
+ *  the only bright part; the surround stays translucent. */
+const STRIKE_WARN_TINT = 0xb91c1c;
+const STRIKE_BOLT_TINT = 0xfde68a;
+const STRIKE_WARN_ALPHA_LO = 0.1;
+const STRIKE_WARN_ALPHA_HI = 0.2;
+const STRIKE_BOLT_ALPHA = 0.55;
+
+/**
+ * Minimum gap between two error tints, in ms.
+ *
+ * PHOTOSENSITIVITY GUARD. A patient flailing through a cluster of bolts
+ * could otherwise retrigger the red tint several times a second. The
+ * error is still counted every time and the buzz still plays — only
+ * the light is rate-limited, to at most 2.5 per second.
+ */
+const SAFE_FLASH_GAP_MS = 400;
+
+type StrikePhase = "idle" | "warning" | "striking";
 
 /** Halo colours. These, not the glyphs, are what the patient reads at
  *  2 m — an emoji is a few dozen pixels at that distance, a halo is a
@@ -172,6 +209,7 @@ export class CloudburstScene extends GameSceneBase {
   private backdrop: Phaser.GameObjects.Image | null = null;
   private flash: Phaser.GameObjects.Rectangle | null = null;
   private life: BackgroundLife | null = null;
+  private frogs: FrogPond | null = null;
 
   private items: Item[] = [];
   private lastSpawnAt = -1;
@@ -181,8 +219,32 @@ export class CloudburstScene extends GameSceneBase {
   private res: CloudburstResult = blankCloudburstResult(1);
   private spawnedDrops = 0;
   private spawnedBolts = 0;
+  private aimedBolts = 0;
   private speedMult = 1;
   private lastReactionMs: number | null = null;
+  /** Last time the error tint was shown, for the flash rate limit. */
+  private lastFlashAt = -1e9;
+
+  // ── Big centre strike.
+  private strikePhase: StrikePhase = "idle";
+  /** Scene-clock time the next phase change is due. */
+  private strikeDueAt = -1;
+  /** When the current warning began, for the dodge time. */
+  private strikeWarnedAt = -1;
+  /** Was the palm inside the band when the warning appeared? Only then
+   *  is there a dodge to time. */
+  private strikeWasInside = false;
+  /** First moment the palm left the band during this warning. */
+  private strikeLeftAt: number | null = null;
+  /** Band edges in canvas px, fixed for the life of one strike so the
+   *  target cannot slide out from under the patient mid-warning. */
+  private bandLoX = 0;
+  private bandHiX = 0;
+  private strikeBand: Phaser.GameObjects.Rectangle | null = null;
+  private strikeBolt: Phaser.GameObjects.Rectangle | null = null;
+  private strikeCloud: Phaser.GameObjects.Image | null = null;
+  private strikeText: Phaser.GameObjects.Text | null = null;
+  private strikeCue: Phaser.GameObjects.Text | null = null;
 
   constructor() {
     super("cloudburst");
@@ -229,6 +291,16 @@ export class CloudburstScene extends GameSceneBase {
     // so the orchard's monkey is simply not asked for.
     const birdKey = makeGlyphTexture(this, "fx-bird", BIRD) ? "fx-bird" : null;
     this.life = new BackgroundLife(this, { monkey: null, bird: birdKey });
+
+    // Frogs on the ground strip. Decoration: no hit test, and they sit
+    // below the ground line, which the miss line is clamped to — so a
+    // frog is never inside the catch area.
+    const frogKey = makeGlyphTexture(this, "cb-frog", FROG) ? "cb-frog" : null;
+    this.frogs = new FrogPond(
+      this,
+      frogKey,
+      FROG_MIN + Math.floor(Math.random() * (FROG_MAX - FROG_MIN + 1)),
+    );
 
     this.cursor = this.add
       .image(this.scale.width / 2, this.scale.height / 2, "cursor")
@@ -303,8 +375,60 @@ export class CloudburstScene extends GameSceneBase {
         .setDepth(31);
     }
 
-    // Full-screen tint for the error flash. Invisible until a bolt is
-    // touched; one object rather than one per event.
+    // ── Big centre strike furniture. All built here and left hidden,
+    //    so nothing has to be created in the middle of an event.
+    //
+    //    Depths: the warning band sits at 8, UNDER the items (9/10), so
+    //    a drop falling through the danger zone is still readable. The
+    //    bolt itself is at 12, over them, because at that moment it is
+    //    the only thing that matters.
+    this.strikeBand = this.add
+      .rectangle(0, 0, 10, 10, STRIKE_WARN_TINT, 1)
+      .setOrigin(0, 0)
+      .setDepth(8)
+      .setAlpha(0)
+      .setVisible(false);
+    this.strikeBolt = this.add
+      .rectangle(0, 0, 10, 10, STRIKE_BOLT_TINT, 1)
+      .setOrigin(0, 0)
+      .setDepth(12)
+      .setAlpha(0)
+      .setVisible(false);
+    if (makeCloudTexture(this, "cb-storm", 21)) {
+      this.strikeCloud = this.add
+        .image(0, 0, "cb-storm")
+        .setTint(0x1f2937)
+        .setAlpha(0)
+        .setDepth(7)
+        .setVisible(false);
+    }
+    this.strikeText = this.add
+      .text(this.scale.width / 2, this.scale.height * 0.16, "Move to the side!", {
+        fontFamily: "system-ui, sans-serif",
+        fontSize: `${Math.round(this.unit * 0.075 * s)}px`,
+        color: "#fecaca",
+        align: "center",
+        stroke: "#000000",
+        strokeThickness: Math.max(3, this.unit * 0.008),
+      })
+      .setOrigin(0.5)
+      .setDepth(33)
+      .setVisible(false);
+    this.strikeCue = this.add
+      .text(this.scale.width / 2, this.scale.height * 0.28, "", {
+        fontFamily: "system-ui, sans-serif",
+        fontSize: `${Math.round(this.unit * 0.06 * s)}px`,
+        color: "#ffffff",
+        align: "center",
+        stroke: "#000000",
+        strokeThickness: Math.max(3, this.unit * 0.007),
+      })
+      .setOrigin(0.5)
+      .setDepth(34)
+      .setAlpha(0);
+
+    // Partial red tint for the error feedback. NOT white and NOT full
+    // brightness; rate-limited in zap(). One object, not one per event.
     this.flash = this.add
       .rectangle(0, 0, this.scale.width, this.scale.height, 0xff3b30, 1)
       .setOrigin(0, 0)
@@ -360,21 +484,39 @@ export class CloudburstScene extends GameSceneBase {
     };
     // Created here, in the order the debug panel should print them.
     d.extra["items spawned"] = "drops 0 / bolts 0";
+    d.extra["lightning share"] =
+      `${Math.round(this.control.level.lightningFraction * 100)}%`;
+    d.extra["aimed bolts"] = "0";
     d.extra["speed"] = "1.00x";
     d.extra["last reaction"] = "none yet";
     d.extra["lightning touched"] = "0";
+    d.extra["next strike"] = "—";
+    d.extra["strike band"] = "—";
+    d.extra["palm in band"] = "—";
   }
 
-  /** The first update frame anchors the spawn timer to the same clock,
-   *  one full gap behind so the first item appears immediately. */
+  /** The first update frame anchors every timer to the same clock: the
+   *  spawn gap one full gap behind so the first item appears at once,
+   *  and the first strike a full interval away so the round does not
+   *  open with one. */
   protected onClockSeeded(time: number): void {
-    this.lastSpawnAt = time - this.control.level.spawnGapMs - 1;
+    const lv = this.control.level;
+    this.lastSpawnAt = time - lv.spawnGapMs - 1;
+    this.strikeDueAt = time + this.nextStrikeGap();
+  }
+
+  private nextStrikeGap(): number {
+    const lv = this.control.level;
+    return lv.strikeGapMinMs
+      + Math.random() * (lv.strikeGapMaxMs - lv.strikeGapMinMs);
   }
 
   protected finishRound(): void {
     const c = this.control;
     this.life?.destroy();
     this.life = null;
+    this.frogs?.destroy();
+    this.frogs = null;
     c.onFinish({ ...this.res, level: c.level.id });
   }
 
@@ -424,6 +566,17 @@ export class CloudburstScene extends GameSceneBase {
       ?.setPosition(w * 0.04, h * 0.03 + hud * 1.05)
       .setFontSize(lvl)
       .setStroke("#000000", Math.max(2, lvl * 0.1));
+
+    this.strikeText
+      ?.setPosition(w / 2, h * 0.16)
+      .setFontSize(Math.round(u * 0.075 * s));
+    this.strikeCue
+      ?.setPosition(w / 2, h * 0.28)
+      .setFontSize(Math.round(u * 0.06 * s));
+    this.frogs?.layout();
+    // A strike in flight was sized against the old canvas; re-measure
+    // the band so the danger zone still matches the patient's reach.
+    if (this.strikePhase !== "idle") this.sizeStrikeBand();
   }
 
   update(time: number) {
@@ -435,7 +588,10 @@ export class CloudburstScene extends GameSceneBase {
     if (!frame) return;
     const { dtMs, lost } = frame;
 
-    if (!lost) this.life?.update(time);
+    if (!lost) {
+      this.life?.update(time);
+      this.frogs?.update(time);
+    }
 
     this.syncCanvasSize();
 
@@ -449,6 +605,21 @@ export class CloudburstScene extends GameSceneBase {
     const t = Math.min(1, Math.max(0, frame.elapsedMs / ROUND_MS));
     this.speedMult = 1 + (SPEED_RAMP_TO - 1) * t;
 
+    // ── Big centre strike. Runs before spawning, because the warning
+    //    and the strike hold normal spawning: the patient is being
+    //    asked to move their whole body out of a band, and new items
+    //    arriving mid-dodge would only punish them for doing it.
+    if (lost) {
+      this.strikeDueAt += dtMs;
+      // Both ends of the dodge measurement move together, or a pause
+      // between the warning and the strike would shorten — and with a
+      // dodge already stamped, invert — the recorded time.
+      if (this.strikeWarnedAt >= 0) this.strikeWarnedAt += dtMs;
+      if (this.strikeLeftAt !== null) this.strikeLeftAt += dtMs;
+    } else {
+      this.stepStrike(time);
+    }
+
     // ── Spawn. Held while the hand is lost: a new item would only fall
     //    past unseen and count against a patient who could not see to
     //    move. The gap is nudged forward so nothing bursts out at once
@@ -456,6 +627,9 @@ export class CloudburstScene extends GameSceneBase {
     if (lost) {
       this.lastSpawnAt += dtMs;
       for (const it of this.items) it.bornAt += dtMs;
+    } else if (this.strikePhase !== "idle") {
+      // Same nudge during a strike event, for the same reason.
+      this.lastSpawnAt += dtMs;
     } else if (
       this.items.length < MAX_ITEMS
       && time - this.lastSpawnAt > c.level.spawnGapMs
@@ -464,6 +638,8 @@ export class CloudburstScene extends GameSceneBase {
       this.lastSpawnAt = time;
     }
 
+    // Items already falling keep falling through a strike — freezing
+    // them mid-air would look broken, and they are still catchable.
     if (!lost) this.stepItems(frame);
 
     // ── Diagnostics (?gamedebug=1). Everything generic is the base's;
@@ -472,11 +648,25 @@ export class CloudburstScene extends GameSceneBase {
     const d = c.debug;
     d.extra["items spawned"] =
       `drops ${this.spawnedDrops} / bolts ${this.spawnedBolts}`;
+    d.extra["lightning share"] =
+      `${Math.round(c.level.lightningFraction * 100)}%`;
+    d.extra["aimed bolts"] =
+      `${this.aimedBolts} of ${this.spawnedBolts}`;
     d.extra["speed"] = `${this.speedMult.toFixed(2)}x`;
     d.extra["last reaction"] = this.lastReactionMs === null
       ? "none yet"
       : `${Math.round(this.lastReactionMs)} ms`;
     d.extra["lightning touched"] = String(this.res.lightningTouched);
+    d.extra["next strike"] = this.strikePhase === "idle"
+      ? `${Math.max(0, (this.strikeDueAt - time) / 1000).toFixed(1)}s`
+      : `${this.strikePhase.toUpperCase()} `
+        + `(${Math.max(0, (this.strikeDueAt - time) / 1000).toFixed(2)}s)`;
+    d.extra["strike band"] = this.strikePhase === "idle"
+      ? "—"
+      : `x ${Math.round(this.bandLoX)}..${Math.round(this.bandHiX)}`;
+    d.extra["palm in band"] = this.strikePhase === "idle"
+      ? "—"
+      : this.palmInBand() ? "YES — will be hit" : "no";
     if (this.fpsText) {
       this.fpsText.setText(
         `fps ${d.fps} min ${d.fpsMin}  pose ${d.poseHz}Hz  `
@@ -505,31 +695,104 @@ export class CloudburstScene extends GameSceneBase {
     return this.control.box.yHi;
   }
 
+  /** Where the palm sits in the lane space, or null when it cannot be
+   *  read this frame. */
+  private palmNx(): number | null {
+    const c = this.control;
+    const cover = c.state.cover;
+    if (!c.state.usable || !this.cursorSeeded || cover.dispW <= 0) return null;
+    const nx = (this.cursor.x - cover.offX) / cover.dispW;
+    return Number.isFinite(nx) ? nx : null;
+  }
+
+  /**
+   * Is this lane clear of any DROP still near the spawn height?
+   *
+   * Without this an aimed bolt can land exactly on top of a drop that
+   * has only just appeared, and the two read as one object — the
+   * patient cannot tell whether to reach or pull away, which is not a
+   * test of anything.
+   */
+  private laneIsClear(nx: number, sepNx: number, sepNy: number): boolean {
+    for (const it of this.items) {
+      if (it.dying || it.kind !== "drop") continue;
+      // Only drops still near the spawn height can be overlapped; one
+      // that has fallen away is no longer in the way.
+      if (Math.abs(it.ny - this.fallTop) > sepNy) continue;
+      if (Math.abs(it.nx - nx) < sepNx) return false;
+    }
+    return true;
+  }
+
   private spawn(time: number) {
     const c = this.control;
-    const region = this.nextRegion;
-    const zone: CloudburstZone = region === "same" ? "same_side" : "across";
-    // Alternate the halves so the across-midline lane is never crowded
-    // out by chance — the same rule Fruit Harvest uses for its zones.
-    this.nextRegion = region === "same" ? "across" : "same";
-
-    // Only the x is used. spawnPoint already splits the calibrated box
-    // into a same-side and an across-the-midline half, with its own
-    // fallback for a patient whose box never crossed the midline.
-    const p = spawnPoint(c.box, region, Math.random);
-    if (!Number.isFinite(p.nx)) {
-      c.debug.extra["items spawned"] = "REJECTED: non-finite lane";
-      return;
-    }
-
-    const kind: ItemKind = Math.random() < c.level.lightningFraction ? "bolt" : "drop";
-    if (kind === "drop") this.spawnedDrops += 1;
-    else this.spawnedBolts += 1;
-
     const cover = c.state.cover;
     const size = this.unit * BASE_ITEM_FRACTION * c.level.itemScale * c.visualScale;
+    // nx is a fraction of dispW and ny a fraction of dispH, so the
+    // same pixel separation is a different number on each axis.
+    const sepNx = cover.dispW > 0
+      ? (size * MIN_LANE_SEPARATION) / cover.dispW
+      : 0.08;
+    const sepNy = cover.dispH > 0
+      ? (size * MIN_LANE_SEPARATION) / cover.dispH
+      : 0.08;
+
+    // Decide WHAT before WHERE: an aimed bolt takes its lane from the
+    // hand, and only an unaimed item consumes the same/across
+    // alternation — so the drops keep alternating exactly even as
+    // bolts are steered.
+    const kind: ItemKind = Math.random() < c.level.lightningFraction ? "bolt" : "drop";
+    const palmNx = this.palmNx();
+    const aimed = kind === "bolt"
+      && palmNx !== null
+      && Math.random() < AIMED_LIGHTNING_FRACTION;
+
+    let nx: number;
+    let zone: CloudburstZone;
+    if (aimed && palmNx !== null) {
+      // The patient's own lane, clamped into the reach box — "or the
+      // nearest lane" when the hand is outside the calibrated width.
+      nx = Math.min(c.box.xHi, Math.max(c.box.xLo, palmNx));
+      const sameIsHighX = c.box.hand === "right";
+      zone = (nx >= c.box.midX) === sameIsHighX ? "same_side" : "across";
+    } else {
+      const region = this.nextRegion;
+      zone = region === "same" ? "same_side" : "across";
+      // Alternate the halves so the across-midline lane is never
+      // crowded out by chance — the rule Fruit Harvest uses for zones.
+      this.nextRegion = region === "same" ? "across" : "same";
+
+      // Only the x is used. spawnPoint already splits the calibrated
+      // box into a same-side and an across-the-midline half, with its
+      // own fallback for a patient whose box never crossed the midline.
+      const p = spawnPoint(c.box, region, Math.random);
+      if (!Number.isFinite(p.nx)) {
+        c.debug.extra["items spawned"] = "REJECTED: non-finite lane";
+        return;
+      }
+      nx = p.nx;
+    }
+
+    // A bolt must not be laid on a drop. Try nudging aside first —
+    // an aimed bolt stays aimed to within one item width — and skip
+    // the spawn entirely rather than overlap. The caller has already
+    // reset the gap, so it simply tries again next time.
+    if (kind === "bolt" && !this.laneIsClear(nx, sepNx, sepNy)) {
+      const nudged = [nx + sepNx * 1.2, nx - sepNx * 1.2]
+        .map((v) => Math.min(c.box.xHi, Math.max(c.box.xLo, v)))
+        .find((v) => this.laneIsClear(v, sepNx, sepNy));
+      if (nudged === undefined) return;
+      nx = nudged;
+    }
+
+    if (kind === "drop") this.spawnedDrops += 1;
+    else {
+      this.spawnedBolts += 1;
+      if (aimed) this.aimedBolts += 1;
+    }
+
     const ny = this.fallTop;
-    const x = cover.dispW > 0 ? cover.offX + p.nx * cover.dispW : this.scale.width / 2;
+    const x = cover.dispW > 0 ? cover.offX + nx * cover.dispW : this.scale.width / 2;
     const y = cover.dispH > 0 ? cover.offY + ny * cover.dispH : 0;
 
     // Halo first, so it sits behind the glyph. It is the thing the
@@ -552,7 +815,7 @@ export class CloudburstScene extends GameSceneBase {
       img,
       halo,
       kind,
-      nx: p.nx,
+      nx,
       ny,
       bornAt: time,
       reactedAt: null,
@@ -639,7 +902,7 @@ export class CloudburstScene extends GameSceneBase {
         const d = Math.hypot(this.cursor.x - it.img.x, this.cursor.y - it.img.y);
         if (d < hitR) {
           if (it.kind === "drop") this.catchDrop(it, i);
-          else this.zap(it, i);
+          else this.zap(it, i, frame.time);
           continue;
         }
       }
@@ -725,7 +988,7 @@ export class CloudburstScene extends GameSceneBase {
     });
   }
 
-  private zap(it: Item, index: number) {
+  private zap(it: Item, index: number, time: number) {
     it.dying = true;
     this.items.splice(index, 1);
     const c = this.control;
@@ -734,9 +997,16 @@ export class CloudburstScene extends GameSceneBase {
     this.errorText?.setText(`⚡ ${this.res.lightningTouched}`);
     c.audio.error();
 
-    // Brief full-screen flash. Short and low-alpha on purpose: this is
-    // feedback, not a penalty screen, and the round keeps running.
-    if (this.flash) {
+    // Brief red tint. Short, partial and never white: this is feedback,
+    // not a penalty screen, and the round keeps running.
+    //
+    // RATE-LIMITED. A patient flailing through a cluster of bolts could
+    // otherwise retrigger it several times a second. The error is still
+    // counted and the buzz still plays; only the light is capped, at
+    // 2.5 per second, well under the 3 Hz photosensitivity ceiling.
+    // `time` is update()'s own clock, the only one this scene uses.
+    if (this.flash && time - this.lastFlashAt >= SAFE_FLASH_GAP_MS) {
+      this.lastFlashAt = time;
       this.tweens.killTweensOf(this.flash);
       this.flash.setAlpha(0.28);
       this.tweens.add({
@@ -766,6 +1036,207 @@ export class CloudburstScene extends GameSceneBase {
       duration: ZAP_MS,
       ease: "Quad.easeOut",
       onComplete: () => it.img.destroy(),
+    });
+  }
+
+  // ── Big centre strike ───────────────────────────────────────────
+
+  /** Measure the band against the CURRENT canvas and reach box, and
+   *  lay the warning and bolt rectangles over it. Called when a strike
+   *  starts, and again on a resize so the danger zone keeps matching
+   *  the patient's reach. */
+  private sizeStrikeBand(): void {
+    const c = this.control;
+    const cover = c.state.cover;
+    const box = c.box;
+    const midNx = (box.xLo + box.xHi) / 2;
+    const halfNx = ((box.xHi - box.xLo) * STRIKE_BAND_FRACTION) / 2;
+
+    if (cover.dispW > 0) {
+      this.bandLoX = cover.offX + (midNx - halfNx) * cover.dispW;
+      this.bandHiX = cover.offX + (midNx + halfNx) * cover.dispW;
+    } else {
+      // No pose geometry yet: fall back to the middle of the canvas so
+      // the event is still coherent rather than zero-width.
+      const half = (this.scale.width * STRIKE_BAND_FRACTION) / 2;
+      this.bandLoX = this.scale.width / 2 - half;
+      this.bandHiX = this.scale.width / 2 + half;
+    }
+
+    // Top of the play area down to the miss line — the band covers
+    // exactly the height the patient's hand works in.
+    const top = cover.dispH > 0
+      ? cover.offY + this.fallTop * cover.dispH
+      : 0;
+    const bottom = Math.min(
+      cover.dispH > 0 ? cover.offY + this.fallBottom * cover.dispH : this.scale.height,
+      this.scale.height * SKY_GROUND,
+    );
+    const w = Math.max(2, this.bandHiX - this.bandLoX);
+    const h = Math.max(2, bottom - Math.max(0, top));
+    const y = Math.max(0, top);
+
+    this.strikeBand?.setPosition(this.bandLoX, y).setSize(w, h);
+    // The bolt is a narrower core inside the band: a strike, not a
+    // wall. Being narrower also keeps the bright area small.
+    const coreW = Math.max(2, w * 0.38);
+    this.strikeBolt
+      ?.setPosition(this.bandLoX + (w - coreW) / 2, y)
+      .setSize(coreW, h);
+    this.strikeCloud
+      ?.setPosition((this.bandLoX + this.bandHiX) / 2, Math.max(0, top) + this.unit * 0.02)
+      .setDisplaySize(w * 1.5, this.unit * 0.22);
+  }
+
+  /** Is the drawn palm cursor inside the struck band right now? An
+   *  unreadable hand counts as inside: the patient has not been seen to
+   *  move out, and crediting a dodge nobody saw would be generous in
+   *  the wrong direction. */
+  private palmInBand(): boolean {
+    if (!this.control.state.usable || !this.cursorSeeded) return true;
+    return this.cursor.x >= this.bandLoX && this.cursor.x <= this.bandHiX;
+  }
+
+  /** The whole event, driven from update(). */
+  private stepStrike(time: number): void {
+    if (this.strikeDueAt < 0) return;
+
+    if (this.strikePhase === "idle") {
+      if (time < this.strikeDueAt) return;
+      this.beginWarning(time);
+      return;
+    }
+
+    if (this.strikePhase === "warning") {
+      // Keep the band matched to a patient who is walking sideways,
+      // but NOT to one who is only moving their hand — the band is
+      // fixed at sizeStrikeBand() and only a resize re-measures it.
+      if (this.strikeWasInside && this.strikeLeftAt === null && !this.palmInBand()) {
+        this.strikeLeftAt = time;
+      }
+      if (time >= this.strikeDueAt) this.fireStrike(time);
+      return;
+    }
+
+    // striking
+    if (time >= this.strikeDueAt) {
+      this.strikePhase = "idle";
+      this.strikeDueAt = time + this.nextStrikeGap();
+      this.strikeWarnedAt = -1;
+    }
+  }
+
+  private beginWarning(time: number): void {
+    this.strikePhase = "warning";
+    this.strikeWarnedAt = time;
+    this.strikeDueAt = time + STRIKE_WARN_MS;
+    this.strikeLeftAt = null;
+    this.sizeStrikeBand();
+    this.strikeWasInside = this.palmInBand();
+
+    // A faint red wash under the items, pulsed slowly. 750 ms each way
+    // is ~0.67 Hz: this is the fastest repeating light in the game and
+    // it is well under the 3 Hz ceiling.
+    if (this.strikeBand) {
+      this.strikeBand.setVisible(true).setAlpha(STRIKE_WARN_ALPHA_LO);
+      this.tweens.killTweensOf(this.strikeBand);
+      this.tweens.add({
+        targets: this.strikeBand,
+        alpha: STRIKE_WARN_ALPHA_HI,
+        duration: STRIKE_PULSE_MS,
+        yoyo: true,
+        repeat: -1,
+        ease: "Sine.easeInOut",
+      });
+    }
+    if (this.strikeCloud) {
+      this.strikeCloud.setVisible(true).setAlpha(0);
+      this.tweens.killTweensOf(this.strikeCloud);
+      this.tweens.add({
+        targets: this.strikeCloud,
+        alpha: 0.85,
+        duration: STRIKE_WARN_MS * 0.6,
+        ease: "Quad.easeOut",
+      });
+    }
+    this.strikeText?.setVisible(true).setAlpha(1);
+    this.control.audio.rumble();
+  }
+
+  private fireStrike(time: number): void {
+    const c = this.control;
+    this.strikePhase = "striking";
+    this.strikeDueAt = time + STRIKE_FLASH_MS;
+
+    // Judgement happens HERE, on the frame the bolt lands — not over
+    // the warning. A patient who steps out and back in is hit, which
+    // is the honest answer.
+    const hit = this.palmInBand();
+    this.res.bigStrikes += 1;
+    if (hit) {
+      this.res.bigStrikesHit += 1;
+      c.audio.error();
+      // A shake, not a flash: it carries the impact without adding
+      // another light event.
+      this.cameras.main.shake(180, 0.006);
+      this.showCue("Hit!", "#fca5a5");
+    } else {
+      this.res.bigStrikesDodged += 1;
+      if (this.strikeWasInside && this.strikeLeftAt !== null) {
+        this.res.dodgeSecs.push(
+          Math.round(this.strikeLeftAt - this.strikeWarnedAt) / 1000,
+        );
+      }
+      c.audio.harvest();
+      this.showCue("Dodged!", "#86efac");
+    }
+
+    // Warning down, bolt up. ONE flash: alpha on, then a single fade —
+    // no yoyo and no repeat.
+    if (this.strikeBand) {
+      this.tweens.killTweensOf(this.strikeBand);
+      this.tweens.add({
+        targets: this.strikeBand,
+        alpha: 0,
+        duration: STRIKE_FLASH_MS,
+        onComplete: () => this.strikeBand?.setVisible(false),
+      });
+    }
+    if (this.strikeCloud) {
+      this.tweens.killTweensOf(this.strikeCloud);
+      this.tweens.add({
+        targets: this.strikeCloud,
+        alpha: 0,
+        duration: STRIKE_FLASH_MS * 2,
+        onComplete: () => this.strikeCloud?.setVisible(false),
+      });
+    }
+    this.strikeText?.setVisible(false);
+    if (this.strikeBolt) {
+      this.tweens.killTweensOf(this.strikeBolt);
+      this.strikeBolt.setVisible(true).setAlpha(STRIKE_BOLT_ALPHA);
+      this.tweens.add({
+        targets: this.strikeBolt,
+        alpha: 0,
+        duration: STRIKE_FLASH_MS,
+        ease: "Quad.easeOut",
+        onComplete: () => this.strikeBolt?.setVisible(false),
+      });
+    }
+  }
+
+  /** Short centred word after a strike resolves. */
+  private showCue(text: string, colour: string): void {
+    const cue = this.strikeCue;
+    if (!cue) return;
+    this.tweens.killTweensOf(cue);
+    cue.setText(text).setColor(colour).setAlpha(1);
+    this.tweens.add({
+      targets: cue,
+      alpha: 0,
+      delay: 500,
+      duration: 400,
+      ease: "Quad.easeIn",
     });
   }
 

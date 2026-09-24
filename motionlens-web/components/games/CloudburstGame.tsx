@@ -84,11 +84,16 @@ export function CloudburstGame() {
  *  see lib/games/cloudburstMetrics.ts. */
 function ClinicalBlock({ r }: { r: CloudburstResult }) {
   const avg = meanSec(r.reactionSecs);
+  const dodge = meanSec(r.dodgeSecs);
   const rows: [string, string][] = [
     [
       "Lightning touched",
       `${r.lightningTouched} of ${r.lightningTouched + r.lightningAvoided}`,
     ],
+    ["Strikes dodged", `${r.bigStrikesDodged} of ${r.bigStrikes}`],
+    // Blank when every strike found the hand already outside the band:
+    // there was no dodge to time. See cloudburstMetrics.ts.
+    ["Average dodge time", dodge === null ? "—" : `${dodge.toFixed(2)} s`],
     ["Avg reaction", avg === null ? "—" : `${avg.toFixed(2)} s`],
     [
       "Catch accuracy 1st / 2nd half",

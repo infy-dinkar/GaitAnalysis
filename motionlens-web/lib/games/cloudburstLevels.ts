@@ -43,6 +43,46 @@ export const SPEED_RAMP_TO = 1.6;
  *  so it is visible and trackable before it becomes catchable. */
 export const SPAWN_LEAD = 0.1;
 
+/**
+ * Share of lightning AIMED at the lane the patient's hand is already
+ * in, rather than placed at random.
+ *
+ * This is what turns avoiding from a decision into a movement: park the
+ * hand in one lane and wait, and about half the bolts come to you. The
+ * other half stays random, so the whole width still has to be watched.
+ */
+export const AIMED_LIGHTNING_FRACTION = 0.5;
+
+/** A new bolt must clear any drop still near the spawn height by this
+ *  many item widths in x, so a bolt is never laid on top of a drop
+ *  where the two read as one object. */
+export const MIN_LANE_SEPARATION = 1.15;
+
+// ── Big centre strike.
+//
+// A whole-band hazard on a timer, aimed at the middle of the reach. It
+// asks for something the falling items do not: commit to a direction
+// and move the body out of the way.
+
+/** Width of the struck band, as a fraction of the calibrated reach
+ *  width, centred on the middle of that reach. */
+export const STRIKE_BAND_FRACTION = 0.4;
+
+/** Warning before the strike lands. Long enough to see it, read it and
+ *  move a whole arm; short enough to still be a hurry. */
+export const STRIKE_WARN_MS = 1500;
+
+/**
+ * The strike itself: ONE flash, never a strobe.
+ *
+ * PHOTOSENSITIVITY. Nothing in this game flashes faster than 3 Hz. The
+ * warning glow pulses at ~0.67 Hz, the strike is a single 150 ms event
+ * once every 9-15 s, the error tint is rate-limited (SAFE_FLASH_GAP_MS
+ * in the scene), and no flash is full-screen white: the strike is
+ * band-limited and warm, the error tint is partial red.
+ */
+export const STRIKE_FLASH_MS = 150;
+
 export interface CloudburstLevel extends BaseLevel {
   /** Multiplier on the drawn size AND on the hit radius, so a bigger
    *  item stays proportionally as easy to touch. Same rule as Fruit
@@ -59,6 +99,11 @@ export interface CloudburstLevel extends BaseLevel {
   spawnGapMs: number;
   /** Share of spawns that are lightning rather than water. */
   lightningFraction: number;
+  /** Gap between big centre strikes, sampled uniformly in this range.
+   *  A range rather than a fixed period so the patient cannot learn to
+   *  count the beat instead of watching for the warning. */
+  strikeGapMinMs: number;
+  strikeGapMaxMs: number;
 }
 
 export const LEVELS: Record<LevelId, CloudburstLevel> = {
@@ -70,7 +115,11 @@ export const LEVELS: Record<LevelId, CloudburstLevel> = {
     itemScale: 1.3,
     fallMs: 3000,
     spawnGapMs: 900,
-    lightningFraction: 0.2,
+    // A third of everything falling is now a hazard. Below about this
+    // the patient can catch on reflex and never has to decide.
+    lightningFraction: 0.35,
+    strikeGapMinMs: 12_000,
+    strikeGapMaxMs: 15_000,
   },
   2: {
     id: 2,
@@ -81,7 +130,11 @@ export const LEVELS: Record<LevelId, CloudburstLevel> = {
     // second of warning.
     fallMs: 2200,
     spawnGapMs: 700,
-    lightningFraction: 0.3,
+    // Close to half: more hazard than reward, so catching has to be
+    // chosen rather than done to everything that falls.
+    lightningFraction: 0.45,
+    strikeGapMinMs: 9_000,
+    strikeGapMaxMs: 11_000,
   },
 };
 

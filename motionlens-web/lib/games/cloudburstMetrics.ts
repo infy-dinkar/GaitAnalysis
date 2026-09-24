@@ -28,6 +28,21 @@ export interface CloudburstResult extends GameResult {
   firstHalf: { hit: number; total: number };
   secondHalf: { hit: number; total: number };
   zoneHits: Record<CloudburstZone, number>;
+
+  // ── Big centre strikes
+  bigStrikes: number;
+  bigStrikesDodged: number;
+  bigStrikesHit: number;
+  /**
+   * Warning-to-clear time, one entry per strike the patient actually
+   * had to move for.
+   *
+   * A strike that found the hand already outside the band counts as
+   * dodged but contributes NO time: there was no dodge to measure, and
+   * including it as a zero would make a patient who stood still off to
+   * one side look like the fastest mover in the clinic.
+   */
+  dodgeSecs: number[];
 }
 
 export function blankCloudburstResult(level: CloudburstResult["level"]): CloudburstResult {
@@ -41,6 +56,10 @@ export function blankCloudburstResult(level: CloudburstResult["level"]): Cloudbu
     firstHalf: { hit: 0, total: 0 },
     secondHalf: { hit: 0, total: 0 },
     zoneHits: { same_side: 0, across: 0 },
+    bigStrikes: 0,
+    bigStrikesDodged: 0,
+    bigStrikesHit: 0,
+    dodgeSecs: [],
   };
 }
 
@@ -75,6 +94,13 @@ export function buildCloudburstMetrics({
     lightning_touched: result.lightningTouched,
     lightning_avoided: result.lightningAvoided,
     avoidance_pct: pct(result.lightningAvoided, boltsSeen),
+
+    // ── Big centre strikes. A whole-body dodge rather than a hand
+    //    movement, so they are counted apart from the bolts above.
+    big_strikes_total: result.bigStrikes,
+    big_strikes_dodged: result.bigStrikesDodged,
+    big_strikes_hit: result.bigStrikesHit,
+    avg_dodge_sec: meanSec(result.dodgeSecs),
 
     // Caught drops only — a drop that was never reached for has no
     // reaction time, and averaging in the misses would flatter a

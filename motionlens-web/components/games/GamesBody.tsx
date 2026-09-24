@@ -182,6 +182,13 @@ function CloudburstBody({ m }: { m: Metrics }) {
   const h1 = num(m.first_half_catch_accuracy_pct);
   const h2 = num(m.second_half_catch_accuracy_pct);
   const zones = (m.zone_hits ?? null) as Record<string, unknown> | null;
+  // Rounds saved before the big strike existed carry none of these;
+  // the section below is skipped entirely for them rather than shown
+  // as a row of dashes.
+  const strikes = num(m.big_strikes_total);
+  const dodged = num(m.big_strikes_dodged);
+  const struck = num(m.big_strikes_hit);
+  const dodgeSec = num(m.avg_dodge_sec);
   // max_abduction_deg is saved but not read, for the same reason as in
   // Fruit Harvest: a frontal camera during a moving task cannot produce
   // a degree figure fit to sit beside the Biomechanics module's.
@@ -231,6 +238,34 @@ function CloudburstBody({ m }: { m: Metrics }) {
           />
         </div>
       </section>
+
+      {/* Big centre strikes. A whole-body dodge out of a marked band,
+          rather than the hand movement the bolts above ask for — so it
+          gets its own section rather than being mixed in. */}
+      {strikes !== null && strikes > 0 && (
+        <section className="rounded-card border border-border bg-surface p-5">
+          <h2 className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+            Storm strikes
+          </h2>
+          <p className="mt-1 text-sm text-muted">
+            A warning marked the middle of the reach for 1.5 s before each
+            strike. Moving clear of it is a dodge.
+          </p>
+          <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-3">
+            <Stat
+              label="Strikes dodged"
+              value={`${dodged === null ? "—" : dodged} of ${strikes}`}
+            />
+            <Stat label="Struck" value={struck === null ? "—" : String(struck)} />
+            {/* Blank when every strike found the hand already outside
+                the band: there was no dodge to time. */}
+            <Stat
+              label="Avg dodge time"
+              value={dodgeSec === null ? "—" : `${dodgeSec.toFixed(2)} s`}
+            />
+          </div>
+        </section>
+      )}
 
       {/* Reach */}
       <section className="rounded-card border border-border bg-surface p-5">
