@@ -41,6 +41,19 @@ export class GameAudio {
     this.blip(240, 150, 0.22, "sine");
   }
 
+  /**
+   * Short low buzz — the patient touched something they should have
+   * left alone (Cloudburst's lightning).
+   *
+   * A square wave well below miss()'s range: it has to be instantly
+   * distinguishable from "you let one go", because the two mean
+   * opposite things about what the patient should do next. Fruit
+   * Harvest never calls this.
+   */
+  error(): void {
+    this.blip(150, 90, 0.18, "square");
+  }
+
   private blip(
     from: number,
     to: number,
