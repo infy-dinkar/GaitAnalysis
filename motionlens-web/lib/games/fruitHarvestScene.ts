@@ -1,17 +1,19 @@
-// Fruit Harvest — the play phase only.
+// Fruit Harvest — the play phase only, and only the fruit part of it.
 //
 // Every phase before and after this one (hand pick, setup check,
-// countdowns, calibration, result) is plain DOM in FruitHarvestGame.tsx.
+// countdowns, calibration, result) is plain DOM in GameShell.tsx.
 // Phaser is mounted for the 60 s round and torn down straight after, so
 // no other route pays for it.
+//
+// The frame clock, the hand-lost pause, the palm cursor and the round
+// timer are GameSceneBase's — this scene calls them in order from its
+// own update() and adds the orchard, the fruit and the basket.
 //
 // SIZING RULE: every dimension below is a fraction of the canvas, never
 // a fixed pixel count. A 2 m viewing distance and an unknown display
 // size make absolute pixels meaningless.
 
 import Phaser from "phaser";
-import type { HandState, PalmSource } from "@/lib/games/handTracker";
-import type { ReachBox } from "@/lib/games/calibration";
 import {
   reachGeometry,
   spawnAtReachEdge,
@@ -19,8 +21,8 @@ import {
   type Zone,
 } from "@/lib/games/calibration";
 import { PALM_REACH } from "@/lib/games/handTracker";
-import { OneEuro2D } from "@/lib/games/oneEuro";
-import type { GameAudio } from "@/lib/games/gameAudio";
+import { GameSceneBase } from "@/lib/games/gameSceneBase";
+import type { FruitHarvestControl } from "@/lib/games/fruitHarvestControl";
 import {
   collectBurst,
   floatScore,
@@ -30,19 +32,17 @@ import {
 } from "@/lib/games/fruitEffects";
 import { makeOrchardTexture, makeSprigTexture } from "@/lib/games/orchardScene";
 import { BackgroundLife } from "@/lib/games/backgroundLife";
-import type { MetricsRecorder } from "@/lib/games/gameMetrics";
 import {
   BASE_FRUIT_FRACTION,
   BASE_HIT_FRACTION,
-  type LevelConfig,
+  ROUND_MS,
 } from "@/lib/games/levels";
-
-export const ROUND_MS = 60_000;
 
 // Fruit size, lifetime, spawn gap and the on-screen cap are NOT
 // constants any more — they come from the level config the control
 // object carries (lib/games/levels.ts). Round length stays fixed at
-// 60 s for every level.
+// 60 s for every level and now lives there too, so the React shell can
+// read it without importing this Phaser-bearing module.
 
 const FRUITS = ["🍎", "🍊", "🍐", "🍋", "🍓", "🍇", "🍑", "🥝"];
 const BASKET = "🧺";
@@ -63,34 +63,11 @@ const SNAP_MS = 140;
  */
 const MISS_WARN_MS = 300;
 
-// ── Cursor responsiveness.
-//
-// Measured against a simulated 1500 px/s sweep at pose 22 Hz / render
-// 60 fps. The headline finding: the filter is NOT the main source of
-// trailing. Half a pose interval alone is ~34 px of lag at that speed,
-// and opening the filter right up (beta 0.02 -> 0.25) only moved the
-// total from 45 px to 37 px. Short prediction is what actually helps —
-// it halves the lag to ~19 px.
-/** Cutoff at zero speed. As low as it can go without visible jitter. */
-const CURSOR_MIN_CUTOFF = 0.9;
-/** Opens the cutoff with speed. 6x the old value; costs ~0.2 px of
- *  jitter at rest and removes the filter as the limiting factor. */
-const CURSOR_BETA = 0.12;
-/** Extrapolate forward by this fraction of a pose interval. */
-const PREDICT_HORIZON = 0.5;
-/** Hard cap on the extrapolation, as a fraction of the canvas unit.
- *  Sized so a hard stop overshoots ~25 px — under half the hit radius
- *  (0.075 unit). Without a cap a fast stop overshoots much further. */
-const PREDICT_CAP = 0.035;
-/** Below this speed (canvas units/second) prediction is switched off
- *  entirely, so a still hand cannot drift. */
-const PREDICT_DEADBAND = 0.25;
-/** Assumed pose rate before a real measurement arrives. */
-const FALLBACK_POSE_HZ = 20;
+// The cursor constants (CURSOR_MIN_CUTOFF, CURSOR_BETA, PREDICT_*,
+// FALLBACK_POSE_HZ) and HAND_LOST_MS moved to lib/games/gameSceneBase.ts
+// with the loop code that uses them. Their values are unchanged — they
+// were measured, not chosen.
 
-/** How long the hand may be missing before the round pauses. The
- *  patient can no longer see themselves, so they need telling. */
-const HAND_LOST_MS = 1000;
 /** Below this headroom ratio during PLAY the patient is warned, but the
  *  round is not held — they are mid-game and a hard stop would be worse
  *  than a slightly clipped overhead reach. Calibration uses the
@@ -103,152 +80,15 @@ const FALL_MS = 520;
 
 /** Glyph texture size. Generous so a large sprite stays crisp. */
 const GLYPH_TEX = 256;
+// GameDebug and createGameDebug moved to lib/games/gameDebug.ts (as
+// GameDebugCore), and FruitHarvestControl to
+// lib/games/fruitHarvestControl.ts. Both are now Phaser-free, so the
+// React shell can use them without pulling this module in.
+//
+// The three fruit counters that were fields on GameDebug are written
+// into debug.extra instead; the spawn diagnostics that only the
+// in-canvas fps line reads are private fields on the scene.
 
-/** Diagnostics surfaced by the ?gamedebug=1 overlay. Written by the
- *  scene, polled by React. Keep it cheap — it is updated every frame. */
-export interface GameDebug {
-  phaserCreated: boolean;
-  sceneState: string;
-  canvasW: number;
-  canvasH: number;
-  canvasZ: string;
-  /** Reach box projected into canvas pixels, as the scene sees it. */
-  boxPx: { x0: number; x1: number; y0: number; y1: number } | null;
-  boxN: { x0: number; x1: number; y0: number; y1: number } | null;
-  spawnedTotal: number;
-  onScreen: number;
-  lastSpawn: string;
-  handLive: boolean;
-  handInFrame: boolean;
-  cursorX: number;
-  cursorY: number;
-  elapsedMs: number;
-  remainingMs: number;
-  texturesOk: boolean;
-  error: string | null;
-  /** Smoothed framerate from Phaser's own loop. */
-  fps: number;
-  /** Worst framerate seen since the round began — where a costly
-   *  effect would show up. Ignores the first second of warm-up. */
-  fpsMin: number;
-  /** Live tween count; the animation cost in one number. */
-  tweens: number;
-  /** Display-list size, so a leak would be visible as steady growth. */
-  objects: number;
-  /** Detector callbacks per second — the freshness ceiling. */
-  poseHz: number;
-  /** One-euro cutoff actually applied this frame, in Hz. */
-  cutoffHz: number;
-  /** Distance from the raw mapped palm to the drawn cursor, px. */
-  lagPx: number;
-  /** Where the palm came from this frame. */
-  palmSource: PalmSource;
-  /** Frames per source SINCE THE ROUND STARTED, so setup and
-   *  calibration do not pollute the tally. */
-  palmCounts: { hand: number; elbow: number; wrist: number };
-  /** Spawn anchor — the chosen side's shoulder, canvas px. */
-  shoulderPx: { x: number; y: number } | null;
-  /** Reach radius in each calibrated direction, canvas px. */
-  reachR: { across: number; side: number; up: number } | null;
-  /** Last spawn's direction, degrees from straight-out on the playing
-   *  side: positive = toward overhead, negative = across the body. */
-  lastSpawnDeg: number;
-  /** Last spawn's distance as a percentage of the reach that way. */
-  lastSpawnPct: number;
-  /** Shoulder -> elbow -> wrist, canvas px. */
-  armLenPx: number;
-  /** Space above the chosen shoulder on the VISIBLE canvas, px. */
-  headroomPx: number;
-  /** headroomPx / armLenPx. Below ~1.1 a raised arm cannot be seen. */
-  headroomRatio: number;
-  /** Round is held because the hand has not been seen for a second. */
-  handLost: boolean;
-  /** Shoulder-angle diagnostics: the current angle, the direction the
-   *  biomech rule returned, which branch decided it, and where the
-   *  elbow and wrist actually are. */
-  angleDeg: number | null;
-  angleDir: string;
-  angleDecidedBy: string;
-  elbowDx: number;
-  elbowDy: number;
-  wristDx: number;
-  elbowFromMid: number;
-  wristFromMid: number;
-  maxAbductionDeg: number;
-  /** Whether this frame fed the abduction peak, and if not why. */
-  angleCounted: string;
-}
-
-export function createGameDebug(): GameDebug {
-  return {
-    phaserCreated: false,
-    sceneState: "not started",
-    canvasW: 0,
-    canvasH: 0,
-    canvasZ: "—",
-    boxPx: null,
-    boxN: null,
-    spawnedTotal: 0,
-    onScreen: 0,
-    lastSpawn: "none yet",
-    handLive: false,
-    handInFrame: false,
-    cursorX: 0,
-    cursorY: 0,
-    elapsedMs: 0,
-    remainingMs: ROUND_MS,
-    texturesOk: false,
-    error: null,
-    fps: 0,
-    fpsMin: 0,
-    tweens: 0,
-    objects: 0,
-    poseHz: 0,
-    cutoffHz: 0,
-    lagPx: 0,
-    palmSource: "wrist",
-    palmCounts: { hand: 0, elbow: 0, wrist: 0 },
-    shoulderPx: null,
-    reachR: null,
-    lastSpawnDeg: 0,
-    lastSpawnPct: 0,
-    armLenPx: 0,
-    headroomPx: 0,
-    headroomRatio: 0,
-    handLost: false,
-    angleDeg: null,
-    angleDir: "-",
-    angleDecidedBy: "-",
-    elbowDx: 0,
-    elbowDy: 0,
-    wristDx: 0,
-    elbowFromMid: 0,
-    wristFromMid: 0,
-    maxAbductionDeg: 0,
-    angleCounted: "-",
-  };
-}
-
-export interface FruitHarvestControl {
-  /** Live hand state, mutated by the React pose loop. */
-  state: HandState;
-  box: ReachBox;
-  /** 1 = normal, >1 when the patient asked for bigger visuals. */
-  visualScale: number;
-  /** Everything that differs between levels. */
-  level: LevelConfig;
-  /** Collects the round's clinical numbers. The pose loop feeds it
-   *  shoulder angles; the scene feeds it the gameplay events below. */
-  metrics: MetricsRecorder;
-  audio: GameAudio;
-  /** Counters the React layer polls for the HUD-free result screen. */
-  harvested: number;
-  missed: number;
-  remainingMs: number;
-  finished: boolean;
-  debug: GameDebug;
-  onFinish: (r: { harvested: number; missed: number; level: number }) => void;
-}
 
 interface Fruit {
   img: Phaser.GameObjects.Image;
@@ -334,65 +174,42 @@ function makeDiscTexture(scene: Phaser.Scene, key: string, colour: number): void
   tex.refresh();
 }
 
-export class FruitHarvestScene extends Phaser.Scene {
-  private control!: FruitHarvestControl;
-  private cursor!: Phaser.GameObjects.Image;
+export class FruitHarvestScene extends GameSceneBase {
+  // `cursor`, `timerText`, `lostBand`, `lostText` and `fpsText` are the
+  // base's fields; this scene still creates them in create(), so the
+  // draw order is unchanged.
+  protected declare control: FruitHarvestControl;
   private basket!: Phaser.GameObjects.Image;
-  private timerText!: Phaser.GameObjects.Text;
   private scoreText!: Phaser.GameObjects.Text;
   private fruits: Fruit[] = [];
   private keys: string[] = [];
-  private filter = new OneEuro2D({
-    minCutoff: CURSOR_MIN_CUTOFF,
-    beta: CURSOR_BETA,
-  });
-  /**
-   * -1 until the first update frame seeds it.
-   *
-   * It MUST come from update()'s own `time` argument and nothing else.
-   * Phaser has two unrelated clocks: `time` here is the raw rAF
-   * timestamp (ms since the PAGE loaded), while `this.time.now` is
-   * `game.loop.time`, which starts at 0 when THIS game boots. Seeding
-   * this from `this.time.now` and comparing it against `time` measured
-   * the age of the page, so the round ended on frame one with nothing
-   * spawned. Seed from the same clock you compare against.
-   */
-  private startedAt = -1;
   private lastSpawnAt = -1;
-  private lastFrameAt = -1;
   private nextRegion: "same" | "across" = "same";
-  private cursorSeeded = false;
   private fruitColour: Record<string, number> = {};
   private leafKey: string | null = null;
-  private fpsText: Phaser.GameObjects.Text | null = null;
-  private fpsMin = Infinity;
   /** Where the previous fruit went, for the separation rule. */
   private lastSpawnPoint: { x: number; y: number } | null = null;
-  /** Palm-source tallies as they stood when the round began. */
-  private palmBase = { hand: 0, elbow: 0, wrist: 0 };
   private backdrop: Phaser.GameObjects.Image | null = null;
-  private backdropSize = { w: 0, h: 0 };
-  private lostText: Phaser.GameObjects.Text | null = null;
   private closeText: Phaser.GameObjects.Text | null = null;
   private levelText: Phaser.GameObjects.Text | null = null;
   private life: BackgroundLife | null = null;
-  private lostBand: Phaser.GameObjects.Rectangle | null = null;
-  /** Milliseconds the hand has been missing, and the total time the
-   *  round clock has been held for. */
-  private handLostMs = 0;
-  private pausedMs = 0;
+
+  // ── Spawn diagnostics. These were fields on GameDebug; only the
+  //    in-canvas fps line reads them, and that line is drawn here, so
+  //    they never needed to cross into React.
+  private spawnedTotal = 0;
+  /** Spawn anchor — the chosen side's shoulder, canvas px. */
+  private shoulderPx: { x: number; y: number } | null = null;
+  /** Reach radius in each calibrated direction, canvas px. */
+  private reachR: { across: number; side: number; up: number } | null = null;
+  /** Last spawn's direction, degrees from straight-out on the playing
+   *  side: positive = toward overhead, negative = across the body. */
+  private lastSpawnDeg = 0;
+  /** Last spawn's distance as a percentage of the reach that way. */
+  private lastSpawnPct = 0;
 
   constructor() {
     super("fruit-harvest");
-  }
-
-  init(data: { control: FruitHarvestControl }) {
-    this.control = data.control;
-  }
-
-  /** Shortest canvas edge — the unit every size is expressed in. */
-  private get unit(): number {
-    return Math.min(this.scale.width, this.scale.height);
   }
 
   create() {
@@ -431,7 +248,7 @@ export class FruitHarvestScene extends Phaser.Scene {
         .setOrigin(0, 0)
         .setDisplaySize(bw, bh)
         .setDepth(-10);
-      this.backdropSize = { w: bw, h: bh };
+      this.canvasSize = { w: bw, h: bh };
     } else {
       // Texture creation failed — a flat wash still hides the camera.
       this.add
@@ -571,6 +388,29 @@ export class FruitHarvestScene extends Phaser.Scene {
       y0: this.control.box.yLo,
       y1: this.control.box.yHi,
     };
+    // Create the game's debug rows here, in the order the panel should
+    // print them — the map keeps insertion order, and spawn() would
+    // otherwise decide it by whichever event happened first.
+    d.extra["fruit spawned"] = "0";
+    d.extra["fruit on screen"] = "0";
+    d.extra["last spawn"] = "none yet";
+  }
+
+  /** The first update frame anchors the spawn timer to the same clock,
+   *  one full gap behind so the first fruit appears immediately. */
+  protected onClockSeeded(time: number): void {
+    this.lastSpawnAt = time - this.control.level.spawnGapMs - 1;
+  }
+
+  protected finishRound(): void {
+    const c = this.control;
+    this.life?.destroy();
+    this.life = null;
+    c.onFinish({
+      harvested: c.harvested,
+      missed: c.missed,
+      level: c.level.id,
+    });
   }
 
   /**
@@ -582,12 +422,12 @@ export class FruitHarvestScene extends Phaser.Scene {
    * re-mapped from the live object-cover geometry every frame, so they
    * stay reachable across a resize on their own.
    */
-  private layout(): void {
+  protected layout(): void {
     const w = this.scale.width;
     const h = this.scale.height;
     const u = Math.min(w, h);
     const s = this.control.visualScale;
-    this.backdropSize = { w, h };
+    this.canvasSize = { w, h };
 
     this.backdrop?.setDisplaySize(w, h);
 
@@ -626,34 +466,12 @@ export class FruitHarvestScene extends Phaser.Scene {
 
   update(time: number) {
     const c = this.control;
-    if (c.finished) return;
 
-    // First frame: anchor every clock to update()'s own time base.
-    if (this.startedAt < 0) {
-      this.startedAt = time;
-      this.lastFrameAt = time;
-      // One full gap behind, so the first fruit appears immediately.
-      this.lastSpawnAt = time - c.level.spawnGapMs - 1;
-      c.debug.sceneState = "running";
-    }
-
-    const dtMs = Math.max(0, Math.min(200, time - this.lastFrameAt));
-    const dt = Math.max(0.001, (time - this.lastFrameAt) / 1000);
-    this.lastFrameAt = time;
-
-    // ── Hand lost. With the camera hidden the patient cannot tell why
-    //    nothing is happening, so say so, and hold the round rather
-    //    than burning their time.
-    if (c.state.usable) {
-      this.handLostMs = 0;
-    } else {
-      this.handLostMs += dtMs;
-    }
-    const lost = this.handLostMs > HAND_LOST_MS;
-    if (lost) this.pausedMs += dtMs;
-    this.lostBand?.setVisible(lost);
-    this.lostText?.setVisible(lost);
-    c.debug.handLost = lost;
+    // Clocks and the hand-lost pause. Null means the round is over.
+    // Named `frame` rather than `f`, which below means a Fruit.
+    const frame = this.beginFrame(time);
+    if (!frame) return;
+    const { dtMs, lost } = frame;
 
     // Wildlife. Paused while the hand is lost so nothing moves behind
     // the "step back into view" banner.
@@ -667,83 +485,15 @@ export class FruitHarvestScene extends Phaser.Scene {
       && c.state.headroomRatio < PLAY_HEADROOM_MIN,
     );
 
-    // Entering or leaving fullscreen changes the canvas under us.
-    // Everything positioned in create() has to be laid out again, or
-    // the HUD and basket stay where they were on the old canvas.
-    if (
-      this.backdropSize.w !== this.scale.width
-      || this.backdropSize.h !== this.scale.height
-    ) {
-      this.layout();
-    }
+    // Fullscreen enter/exit changes the canvas under us; re-lay-out the
+    // HUD and basket when it does.
+    this.syncCanvasSize();
 
-    // ── Clock. Paused time is subtracted, so a round always gives the
-    //    patient the full ROUND_MS of play.
-    const elapsed = time - this.startedAt - this.pausedMs;
-    c.remainingMs = Math.max(0, ROUND_MS - elapsed);
-    this.timerText.setText(String(Math.ceil(c.remainingMs / 1000)));
-    if (c.remainingMs <= 0) {
-      c.finished = true;
-      this.life?.destroy();
-      this.life = null;
-      c.onFinish({
-        harvested: c.harvested,
-        missed: c.missed,
-        level: c.level.id,
-      });
-      return;
-    }
+    // The round clock, with held time already subtracted. True means it
+    // just ran out and finishRound() has been called.
+    if (this.advanceRoundClock(frame)) return;
 
-    // ── Cursor. Map FIRST, then smooth: filtering in canvas space keeps
-    //    the cutoff in the same units as the on-screen motion the
-    //    patient sees, and survives a resize without a jump.
-    //    The target is the PALM, not the wrist — the ✋ glyph reads as a
-    //    palm and the hit test below uses the same point, so what the
-    //    patient sees is what collects the fruit.
-    if (c.state.usable) {
-      const rawX = c.state.palmX;
-      const rawY = c.state.palmY;
-      if (!this.cursorSeeded) {
-        // Snap on the first good frame instead of sliding in from the
-        // middle of the screen.
-        this.filter.reset();
-        this.cursor.setPosition(rawX, rawY);
-        this.cursor.setAlpha(1);
-        this.cursorSeeded = true;
-        this.filter.filter(rawX, rawY, dt);
-      } else {
-        const p = this.filter.filter(rawX, rawY, dt);
-
-        // Light prediction. Uses the filter's OWN low-passed velocity
-        // rather than differencing the output again, which would put
-        // back the noise the filter just removed.
-        const hz = c.state.poseHz > 1 ? c.state.poseHz : FALLBACK_POSE_HZ;
-        const ahead = (PREDICT_HORIZON / hz);
-        const { vx, vy } = this.filter.velocity;
-        const speed = Math.hypot(vx, vy);
-        let ex = 0;
-        let ey = 0;
-        if (speed > PREDICT_DEADBAND * this.unit) {
-          const cap = PREDICT_CAP * this.unit;
-          const dx = vx * ahead;
-          const dy = vy * ahead;
-          const mag = Math.hypot(dx, dy);
-          // Scale the vector as a whole so capping cannot bend its
-          // direction the way clamping each axis would.
-          const k = mag > cap ? cap / mag : 1;
-          ex = dx * k;
-          ey = dy * k;
-        }
-        this.cursor.setPosition(p.x + ex, p.y + ey);
-        this.cursor.setAlpha(1);
-      }
-      // Lag: raw mapped palm vs where the cursor is actually drawn.
-      c.debug.lagPx = Math.round(
-        Math.hypot(this.cursor.x - rawX, this.cursor.y - rawY),
-      );
-    } else {
-      this.cursor.setAlpha(0.25);
-    }
+    this.updateCursor(frame);
 
     // ── Spawn. Held while the hand is lost: new fruit would only time
     //    out unseen and count as misses the patient never had a chance
@@ -801,54 +551,17 @@ export class FruitHarvestScene extends Phaser.Scene {
       if (age > c.level.ttlMs) this.dropAway(f, i);
     }
 
-    // ── Diagnostics (?gamedebug=1)
+    // ── Diagnostics (?gamedebug=1). Everything generic is the
+    //    base's; these are Fruit Harvest's own rows.
+    this.writeCoreDebug(frame);
     const d = c.debug;
-    d.elapsedMs = elapsed;
-    d.remainingMs = c.remainingMs;
-    d.onScreen = this.fruits.length;
-    d.handLive = c.state.live;
-    d.handInFrame = c.state.inFrame;
-    d.cursorX = Math.round(this.cursor.x);
-    d.cursorY = Math.round(this.cursor.y);
-    d.canvasW = Math.round(this.scale.width);
-    d.canvasH = Math.round(this.scale.height);
-
-    const fps = this.game.loop.actualFps;
-    d.fps = Math.round(fps);
-    // Skip the first second: the very first frames are always slow
-    // (shader compile, texture upload) and would mask a real dip.
-    if (elapsed > 1000 && fps > 0) this.fpsMin = Math.min(this.fpsMin, fps);
-    d.fpsMin = Number.isFinite(this.fpsMin) ? Math.round(this.fpsMin) : 0;
-    d.tweens = this.tweens.getTweens().length;
-    d.objects = this.children.list.length;
-    d.poseHz = Math.round(c.state.poseHz * 10) / 10;
-    d.cutoffHz = Math.round(this.filter.lastCutoff * 100) / 100;
-    d.palmSource = c.state.palmSource;
-    // Report deltas against the baseline taken in create(), so the
-    // tally covers this round only.
-    d.palmCounts = {
-      hand: c.state.palmCounts.hand - this.palmBase.hand,
-      elbow: c.state.palmCounts.elbow - this.palmBase.elbow,
-      wrist: c.state.palmCounts.wrist - this.palmBase.wrist,
-    };
-    d.armLenPx = Math.round(c.state.armLenPx);
-    d.headroomPx = Math.round(c.state.headroomPx);
-    d.headroomRatio = Math.round(c.state.headroomRatio * 100) / 100;
-    const am = c.metrics.m;
-    d.angleDeg = am.dbg.angleDeg;
-    d.angleDir = am.dbg.dir;
-    d.angleDecidedBy = am.dbg.decidedBy;
-    d.elbowDx = am.dbg.elbowDx;
-    d.elbowDy = am.dbg.elbowDy;
-    d.wristDx = am.dbg.wristDx;
-    d.elbowFromMid = am.dbg.elbowFromMid;
-    d.wristFromMid = am.dbg.wristFromMid;
-    d.maxAbductionDeg = am.maxAbductionDeg;
-    d.angleCounted = am.dbg.counted;
+    d.extra["fruit on screen"] = String(this.fruits.length);
     if (this.fpsText) {
-      const sh = d.shoulderPx ? `${d.shoulderPx.x},${d.shoulderPx.y}` : "—";
-      const rr = d.reachR
-        ? `across ${d.reachR.across} side ${d.reachR.side} up ${d.reachR.up}`
+      const sh = this.shoulderPx
+        ? `${this.shoulderPx.x},${this.shoulderPx.y}`
+        : "—";
+      const rr = this.reachR
+        ? `across ${this.reachR.across} side ${this.reachR.side} up ${this.reachR.up}`
         : "—";
       this.fpsText.setText(
         `fps ${d.fps} min ${d.fpsMin}  pose ${d.poseHz}Hz  `
@@ -858,17 +571,9 @@ export class FruitHarvestScene extends Phaser.Scene {
         + `shoulder ${sh}  reach px: ${rr}\n`
         + `arm ${d.armLenPx}px  headroom ${d.headroomPx}px  `
         + `ratio ${d.headroomRatio}\n`
-        + `last spawn ${d.lastSpawnDeg >= 0 ? "+" : ""}${d.lastSpawnDeg}deg `
-        + `@ ${d.lastSpawnPct}% of reach`,
+        + `last spawn ${this.lastSpawnDeg >= 0 ? "+" : ""}${this.lastSpawnDeg}deg `
+        + `@ ${this.lastSpawnPct}% of reach`,
       );
-    }
-    if (cover.dispW > 0) {
-      d.boxPx = {
-        x0: Math.round(cover.offX + c.box.xLo * cover.dispW),
-        x1: Math.round(cover.offX + c.box.xHi * cover.dispW),
-        y0: Math.round(cover.offY + c.box.yLo * cover.dispH),
-        y1: Math.round(cover.offY + c.box.yHi * cover.dispH),
-      };
     }
   }
 
@@ -909,14 +614,14 @@ export class FruitHarvestScene extends Phaser.Scene {
       });
       x = r.x;
       y = r.y;
-      c.debug.lastSpawnDeg = r.angleDeg;
-      c.debug.lastSpawnPct = r.reachPct;
-      c.debug.reachR = {
+      this.lastSpawnDeg = r.angleDeg;
+      this.lastSpawnPct = r.reachPct;
+      this.reachR = {
         across: Math.round(geo.rAcross),
         side: Math.round(geo.rSide),
         up: Math.round(geo.rUp),
       };
-      c.debug.shoulderPx = { x: Math.round(geo.sx), y: Math.round(geo.sy) };
+      this.shoulderPx = { x: Math.round(geo.sx), y: Math.round(geo.sy) };
       note =
         `${zone} ${r.angleDeg}deg ${r.reachPct}% of reach`
         + `${r.clamped ? " (pulled in)" : ""}`
@@ -926,7 +631,7 @@ export class FruitHarvestScene extends Phaser.Scene {
       // rather than stalling the round, and say so on the overlay.
       const p = spawnPoint(c.box, region, Math.random);
       if (!Number.isFinite(p.nx) || !Number.isFinite(p.ny)) {
-        c.debug.lastSpawn = "REJECTED: non-finite point from reach box";
+        c.debug.extra["last spawn"] = "REJECTED: non-finite point from reach box";
         return;
       }
       x = cover.dispW > 0
@@ -935,13 +640,13 @@ export class FruitHarvestScene extends Phaser.Scene {
       y = cover.dispH > 0
         ? cover.offY + p.ny * cover.dispH
         : this.scale.height / 2;
-      c.debug.lastSpawnDeg = 0;
-      c.debug.lastSpawnPct = 0;
+      this.lastSpawnDeg = 0;
+      this.lastSpawnPct = 0;
       note = `${zone} FALLBACK uniform box (no live shoulder)`;
     }
 
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
-      c.debug.lastSpawn = "REJECTED: non-finite spawn point";
+      c.debug.extra["last spawn"] = "REJECTED: non-finite spawn point";
       return;
     }
     this.lastSpawnPoint = { x, y };
@@ -1013,8 +718,9 @@ export class FruitHarvestScene extends Phaser.Scene {
       sprig,
       zone,
     });
-    c.debug.spawnedTotal += 1;
-    c.debug.lastSpawn = `${note} px(${Math.round(x)}, ${Math.round(y)})`;
+    this.spawnedTotal += 1;
+    c.debug.extra["fruit spawned"] = String(this.spawnedTotal);
+    c.debug.extra["last spawn"] = `${note} px(${Math.round(x)}, ${Math.round(y)})`;
   }
 
   /** 1 for the first half of the round, 2 for the second. */

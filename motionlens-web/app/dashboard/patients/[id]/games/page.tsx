@@ -7,7 +7,7 @@
 
 import { useEffect, useState, use as usePromise } from "react";
 import Link from "next/link";
-import { ArrowUpRight, Gamepad2 } from "lucide-react";
+import { ArrowUpRight, CloudLightning, Gamepad2 } from "lucide-react";
 import { AuthGuard } from "@/components/auth/AuthGuard";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { Button } from "@/components/ui/Button";
@@ -62,30 +62,69 @@ function Content({ patientId }: { patientId: string }) {
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <Link
-          href={`/games/fruit-harvest?patientId=${patientId}`}
-          className="group rounded-card border border-border bg-elevated p-5 shadow-glow-sm transition hover:border-accent/50"
-        >
-          <span className="flex h-12 w-12 items-center justify-center rounded-card bg-stone-500/10 text-stone-700 dark:text-stone-400">
-            <Gamepad2 className="h-6 w-6" />
-          </span>
-          <h2 className="mt-4 flex items-center gap-1 text-lg font-semibold">
-            Fruit Harvest
-            <ArrowUpRight className="h-4 w-4 opacity-0 transition group-hover:opacity-100" />
-          </h2>
-          <p className="mt-1 text-sm text-muted">
-            Reach out and collect fruit with one hand, including across the
-            midline. 60 seconds.
-          </p>
-          <Button className="mt-4" size="sm">
-            Play
-          </Button>
-        </Link>
+        {GAMES.map((g) => (
+          <GameCard key={g.slug} game={g} patientId={patientId} />
+        ))}
       </div>
 
       <p className="text-sm text-muted">
         More games arrive as they are built.
       </p>
     </div>
+  );
+}
+
+interface GameCard {
+  slug: string;
+  title: string;
+  blurb: string;
+  icon: typeof Gamepad2;
+  tone: string;
+}
+
+/** One entry per activity page under /games. Order is the order the
+ *  cards appear in. */
+const GAMES: GameCard[] = [
+  {
+    slug: "fruit-harvest",
+    title: "Fruit Harvest",
+    blurb:
+      "Reach out and collect fruit with one hand, including across the "
+      + "midline. 60 seconds.",
+    icon: Gamepad2,
+    tone: "bg-stone-500/10 text-stone-700 dark:text-stone-400",
+  },
+  {
+    slug: "cloudburst",
+    title: "Cloudburst",
+    blurb:
+      "Catch falling water drops and leave the lightning alone. Speed rises "
+      + "through the round. 60 seconds.",
+    icon: CloudLightning,
+    tone: "bg-sky-500/10 text-sky-700 dark:text-sky-400",
+  },
+];
+
+function GameCard({ game, patientId }: { game: GameCard; patientId: string }) {
+  const Icon = game.icon;
+  return (
+    <Link
+      href={`/games/${game.slug}?patientId=${patientId}`}
+      className="group rounded-card border border-border bg-elevated p-5 shadow-glow-sm transition hover:border-accent/50"
+    >
+      <span
+        className={`flex h-12 w-12 items-center justify-center rounded-card ${game.tone}`}
+      >
+        <Icon className="h-6 w-6" />
+      </span>
+      <h2 className="mt-4 flex items-center gap-1 text-lg font-semibold">
+        {game.title}
+        <ArrowUpRight className="h-4 w-4 opacity-0 transition group-hover:opacity-100" />
+      </h2>
+      <p className="mt-1 text-sm text-muted">{game.blurb}</p>
+      <Button className="mt-4" size="sm">
+        Play
+      </Button>
+    </Link>
   );
 }

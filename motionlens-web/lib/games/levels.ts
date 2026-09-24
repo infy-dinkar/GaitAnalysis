@@ -8,9 +8,22 @@
 // only quickens the timing. One axis at a time, so a patient moving
 // between them meets one new demand rather than two.
 
-export type LevelId = 1 | 2;
+import type { BaseLevel, LevelId } from "@/lib/games/gameDefinition";
 
-export interface LevelConfig {
+export type { LevelId };
+
+/**
+ * Round length. Fixed at 60 s for every level — levels change what
+ * happens during the round, never how long it lasts.
+ *
+ * It lives here rather than in the scene because the React shell needs
+ * it too (for `duration_sec` on the report), and the scene file imports
+ * Phaser. Importing it from there dragged 1.3 MB into the shell's
+ * chunk and made the scene's dynamic import pointless.
+ */
+export const ROUND_MS = 60_000;
+
+export interface LevelConfig extends BaseLevel {
   id: LevelId;
   /** Shown on the HUD and the result screen. */
   label: string;
