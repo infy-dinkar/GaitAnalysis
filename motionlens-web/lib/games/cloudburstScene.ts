@@ -45,6 +45,10 @@ import {
 } from "@/lib/games/cloudburstLevels";
 import { makeCloudTexture, makeSkyTexture, SKY_GROUND } from "@/lib/games/skyScene";
 import { StormStrike } from "@/lib/games/stormStrike";
+import {
+  chooseStrikeBand,
+  STRIKE_AIMED_FRACTION,
+} from "@/lib/games/cloudburstBand";
 import { makeRingTexture, makeSoftDotTexture } from "@/lib/games/fruitEffects";
 import { BackgroundLife } from "@/lib/games/backgroundLife";
 import { FrogPond } from "@/lib/games/cloudburstFrogs";
@@ -236,6 +240,15 @@ export class CloudburstScene extends GameSceneBase {
    *  target cannot slide out from under the patient mid-warning. */
   private bandLoX = 0;
   private bandHiX = 0;
+  /** The chosen band in nx. Held separately from the pixel edges so a
+   *  resize re-projects the same band instead of choosing a new one. */
+  private bandCentreNx = 0.5;
+  private bandHalfNx = 0.2;
+  /** Previous strike's centre, for the "never twice in the same place"
+   *  rule. Null until the first strike of the round. */
+  private prevBandCentreNx: number | null = null;
+  private bandAimed = false;
+  private bandShiftNx: number | null = null;
   /** Every pixel of the strike's art. The band itself is no longer
    *  drawn as a shape — the storm IS the marker. */
   private storm: StormStrike | null = null;
@@ -497,6 +510,8 @@ export class CloudburstScene extends GameSceneBase {
     d.extra["lightning touched"] = "0";
     d.extra["next strike"] = "—";
     d.extra["strike band"] = "—";
+    d.extra["strike aim"] = "—";
+    d.extra["strike shift"] = "first of round";
     d.extra["palm in band"] = "—";
   }
 
@@ -675,6 +690,13 @@ export class CloudburstScene extends GameSceneBase {
     d.extra["strike band"] = this.strikePhase === "idle"
       ? "—"
       : `x ${Math.round(this.bandLoX)}..${Math.round(this.bandHiX)}`;
+    d.extra["strike aim"] = this.strikePhase === "idle"
+      ? "—"
+      : this.bandAimed ? "AIMED at palm" : "random";
+    d.extra["strike shift"] = this.bandShiftNx === null
+      ? "first of round"
+      : `${(this.bandShiftNx / Math.max(1e-6, this.bandHalfNx * 2)).toFixed(2)}`
+        + ` band-widths (${this.bandShiftNx.toFixed(3)} nx)`;
     d.extra["palm in band"] = this.strikePhase === "idle"
       ? "—"
       : this.palmInBand() ? "YES — will be hit" : "no";
@@ -1052,16 +1074,43 @@ export class CloudburstScene extends GameSceneBase {
 
   // ── Big centre strike ───────────────────────────────────────────
 
-  /** Measure the band against the CURRENT canvas and reach box, and
-   *  lay the warning and bolt rectangles over it. Called when a strike
-   *  starts, and again on a resize so the danger zone keeps matching
-   *  the patient's reach. */
+  /**
+   * Pick where this strike lands. Once per strike, never on a resize.
+   *
+   * The band is no longer pinned to the middle of the reach: it can be
+   * anywhere the rules in lib/games/cloudburstBand.ts allow — inside
+   * reach, with a full band-width of escape space on at least one side,
+   * and at least a band-width from where the last one fell. About half
+   * are placed on the patient's hand, so standing still is not a
+   * strategy.
+   */
+  private chooseBand(): void {
+    const box = this.control.box;
+    const choice = chooseStrikeBand({
+      loNx: box.xLo,
+      hiNx: box.xHi,
+      fraction: STRIKE_BAND_FRACTION,
+      palmNx: this.palmNx(),
+      prevCentreNx: this.prevBandCentreNx,
+      aimedChance: STRIKE_AIMED_FRACTION,
+      rand: Math.random,
+    });
+    this.bandCentreNx = choice.centreNx;
+    this.bandHalfNx = choice.halfNx;
+    this.bandAimed = choice.aimed;
+    this.bandShiftNx = choice.shiftNx;
+    this.prevBandCentreNx = choice.centreNx;
+    this.sizeStrikeBand();
+  }
+
+  /** Project the chosen band onto the CURRENT canvas. Called when a
+   *  strike starts, and again on a resize so the danger zone keeps
+   *  matching the patient's reach. */
   private sizeStrikeBand(): void {
     const c = this.control;
     const cover = c.state.cover;
-    const box = c.box;
-    const midNx = (box.xLo + box.xHi) / 2;
-    const halfNx = ((box.xHi - box.xLo) * STRIKE_BAND_FRACTION) / 2;
+    const midNx = this.bandCentreNx;
+    const halfNx = this.bandHalfNx;
 
     if (cover.dispW > 0) {
       this.bandLoX = cover.offX + (midNx - halfNx) * cover.dispW;
@@ -1122,9 +1171,9 @@ export class CloudburstScene extends GameSceneBase {
     }
 
     if (this.strikePhase === "warning") {
-      // Keep the band matched to a patient who is walking sideways,
-      // but NOT to one who is only moving their hand — the band is
-      // fixed at sizeStrikeBand() and only a resize re-measures it.
+      // The band does NOT chase the hand during the warning: it is
+      // chosen once in chooseBand() and only re-projected on a resize.
+      // A band that followed the palm could never be dodged.
       if (this.strikeWasInside && this.strikeLeftAt === null && !this.palmInBand()) {
         this.strikeLeftAt = time;
       }
@@ -1147,7 +1196,10 @@ export class CloudburstScene extends GameSceneBase {
     this.strikeWarnedAt = time;
     this.strikeDueAt = time + STRIKE_WARN_MS;
     this.strikeLeftAt = null;
-    this.sizeStrikeBand();
+    // Choose BEFORE reading the palm: the storm, the ground glow and
+    // the heavier rain are all built from this band, so they follow
+    // wherever it lands.
+    this.chooseBand();
     this.strikeWasInside = this.palmInBand();
 
     // The storm IS the warning: clouds rolling in and piling over the
