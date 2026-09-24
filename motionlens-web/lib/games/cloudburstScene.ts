@@ -44,6 +44,7 @@ import {
   STRIKE_WARN_MS,
 } from "@/lib/games/cloudburstLevels";
 import { makeCloudTexture, makeSkyTexture, SKY_GROUND } from "@/lib/games/skyScene";
+import { StormStrike } from "@/lib/games/stormStrike";
 import { makeRingTexture, makeSoftDotTexture } from "@/lib/games/fruitEffects";
 import { BackgroundLife } from "@/lib/games/backgroundLife";
 import { FrogPond } from "@/lib/games/cloudburstFrogs";
@@ -59,17 +60,12 @@ const FROG = "🐸";
 const FROG_MIN = 2;
 const FROG_MAX = 3;
 
-// ── Big centre strike.
-/** Warning glow under the band. Pulsed with a yoyo of this duration,
- *  i.e. about 0.67 Hz — well under the 3 Hz photosensitivity ceiling. */
-const STRIKE_PULSE_MS = 750;
-/** The struck band's colours. Warm rather than white, and the core is
- *  the only bright part; the surround stays translucent. */
-const STRIKE_WARN_TINT = 0xb91c1c;
-const STRIKE_BOLT_TINT = 0xfde68a;
-const STRIKE_WARN_ALPHA_LO = 0.1;
-const STRIKE_WARN_ALPHA_HI = 0.2;
-const STRIKE_BOLT_ALPHA = 0.55;
+// ── Big centre strike. Everything the event DRAWS lives in
+//    lib/games/stormStrike.ts; what is left here is the timing, the
+//    band, and who was hit.
+/** How long after the flash the thunder arrives. Short enough to read
+ *  as the same event, long enough to read as sound chasing light. */
+const THUNDER_DELAY_MS = 190;
 
 /**
  * Minimum gap between two error tints, in ms.
@@ -240,9 +236,19 @@ export class CloudburstScene extends GameSceneBase {
    *  target cannot slide out from under the patient mid-warning. */
   private bandLoX = 0;
   private bandHiX = 0;
-  private strikeBand: Phaser.GameObjects.Rectangle | null = null;
-  private strikeBolt: Phaser.GameObjects.Rectangle | null = null;
-  private strikeCloud: Phaser.GameObjects.Image | null = null;
+  /** Every pixel of the strike's art. The band itself is no longer
+   *  drawn as a shape — the storm IS the marker. */
+  private storm: StormStrike | null = null;
+  /** Vertical extent of the band, kept alongside bandLoX/bandHiX. */
+  private bandTopY = 0;
+  private bandBottomY = 0;
+  /** update()-clock moment the thunder should follow the flash, or
+   *  null when none is pending. */
+  private thunderAt: number | null = null;
+  /** Set by the debug-only S key or Strike now button; consumed on the
+   *  next idle frame. Never set in normal play. */
+  private strikeRequested = false;
+  private strikeButton: Phaser.GameObjects.Text | null = null;
   private strikeText: Phaser.GameObjects.Text | null = null;
   private strikeCue: Phaser.GameObjects.Text | null = null;
 
@@ -373,35 +379,34 @@ export class CloudburstScene extends GameSceneBase {
           padding: { x: 6, y: 3 },
         })
         .setDepth(31);
+
+      // ── Review shortcut, debug builds only. Waiting 12-15 s to look
+      //    at one strike makes it impossible to iterate on how it
+      //    looks, so S — or this button — brings the next one forward.
+      //    Neither exists without ?gamedebug=1.
+      this.input.keyboard?.on("keydown-S", () => {
+        this.strikeRequested = true;
+      });
+      const btn = this.add
+        .text(this.scale.width * 0.02, this.scale.height * 0.76, " ⚡ Strike now ", {
+          fontFamily: "ui-monospace, monospace",
+          fontSize: `${Math.round(this.unit * 0.03)}px`,
+          color: "#0b1220",
+          backgroundColor: "#a3e635",
+          padding: { x: 8, y: 5 },
+        })
+        .setDepth(31)
+        .setInteractive({ useHandCursor: true });
+      btn.on("pointerdown", () => {
+        this.strikeRequested = true;
+      });
+      this.strikeButton = btn;
     }
 
-    // ── Big centre strike furniture. All built here and left hidden,
-    //    so nothing has to be created in the middle of an event.
-    //
-    //    Depths: the warning band sits at 8, UNDER the items (9/10), so
-    //    a drop falling through the danger zone is still readable. The
-    //    bolt itself is at 12, over them, because at that moment it is
-    //    the only thing that matters.
-    this.strikeBand = this.add
-      .rectangle(0, 0, 10, 10, STRIKE_WARN_TINT, 1)
-      .setOrigin(0, 0)
-      .setDepth(8)
-      .setAlpha(0)
-      .setVisible(false);
-    this.strikeBolt = this.add
-      .rectangle(0, 0, 10, 10, STRIKE_BOLT_TINT, 1)
-      .setOrigin(0, 0)
-      .setDepth(12)
-      .setAlpha(0)
-      .setVisible(false);
-    if (makeCloudTexture(this, "cb-storm", 21)) {
-      this.strikeCloud = this.add
-        .image(0, 0, "cb-storm")
-        .setTint(0x1f2937)
-        .setAlpha(0)
-        .setDepth(7)
-        .setVisible(false);
-    }
+    // Everything the strike DRAWS lives in lib/games/stormStrike.ts.
+    // It reuses the soft white radial the effects module already
+    // generates, so no new texture is created per event.
+    this.storm = new StormStrike(this, "fx-dot");
     this.strikeText = this.add
       .text(this.scale.width / 2, this.scale.height * 0.16, "Move to the side!", {
         fontFamily: "system-ui, sans-serif",
@@ -517,6 +522,8 @@ export class CloudburstScene extends GameSceneBase {
     this.life = null;
     this.frogs?.destroy();
     this.frogs = null;
+    this.storm?.destroy();
+    this.storm = null;
     c.onFinish({ ...this.res, level: c.level.id });
   }
 
@@ -561,6 +568,9 @@ export class CloudburstScene extends GameSceneBase {
       .setStroke("#000000", Math.max(2, lost * 0.08));
 
     this.fpsText?.setPosition(w * 0.02, h * 0.82).setFontSize(Math.round(u * 0.032));
+    this.strikeButton
+      ?.setPosition(w * 0.02, h * 0.76)
+      .setFontSize(Math.round(u * 0.03));
     const lvl = Math.round(u * 0.035 * s);
     this.levelText
       ?.setPosition(w * 0.04, h * 0.03 + hud * 1.05)
@@ -616,6 +626,7 @@ export class CloudburstScene extends GameSceneBase {
       // dodge already stamped, invert — the recorded time.
       if (this.strikeWarnedAt >= 0) this.strikeWarnedAt += dtMs;
       if (this.strikeLeftAt !== null) this.strikeLeftAt += dtMs;
+      if (this.thunderAt !== null) this.thunderAt += dtMs;
     } else {
       this.stepStrike(time);
     }
@@ -1072,20 +1083,10 @@ export class CloudburstScene extends GameSceneBase {
       cover.dispH > 0 ? cover.offY + this.fallBottom * cover.dispH : this.scale.height,
       this.scale.height * SKY_GROUND,
     );
-    const w = Math.max(2, this.bandHiX - this.bandLoX);
-    const h = Math.max(2, bottom - Math.max(0, top));
-    const y = Math.max(0, top);
-
-    this.strikeBand?.setPosition(this.bandLoX, y).setSize(w, h);
-    // The bolt is a narrower core inside the band: a strike, not a
-    // wall. Being narrower also keeps the bright area small.
-    const coreW = Math.max(2, w * 0.38);
-    this.strikeBolt
-      ?.setPosition(this.bandLoX + (w - coreW) / 2, y)
-      .setSize(coreW, h);
-    this.strikeCloud
-      ?.setPosition((this.bandLoX + this.bandHiX) / 2, Math.max(0, top) + this.unit * 0.02)
-      .setDisplaySize(w * 1.5, this.unit * 0.22);
+    // The band's WIDTH is bandLoX..bandHiX; only its vertical extent
+    // has to be derived, and it is what the storm is drawn into.
+    this.bandTopY = Math.max(0, top);
+    this.bandBottomY = this.bandTopY + Math.max(2, bottom - this.bandTopY);
   }
 
   /** Is the drawn palm cursor inside the struck band right now? An
@@ -1101,7 +1102,20 @@ export class CloudburstScene extends GameSceneBase {
   private stepStrike(time: number): void {
     if (this.strikeDueAt < 0) return;
 
+    // Thunder trails the flash, and outlives the 150 ms strike phase.
+    if (this.thunderAt !== null && time >= this.thunderAt) {
+      this.thunderAt = null;
+      this.control.audio.rumble();
+    }
+
     if (this.strikePhase === "idle") {
+      // ?gamedebug=1 only: S, or the on-canvas button, brings the next
+      // strike forward so it can be reviewed without waiting.
+      if (this.strikeRequested) {
+        this.strikeRequested = false;
+        this.beginWarning(time);
+        return;
+      }
       if (time < this.strikeDueAt) return;
       this.beginWarning(time);
       return;
@@ -1123,6 +1137,8 @@ export class CloudburstScene extends GameSceneBase {
       this.strikePhase = "idle";
       this.strikeDueAt = time + this.nextStrikeGap();
       this.strikeWarnedAt = -1;
+      // Clouds drift apart over ~1.5 s rather than blinking out.
+      this.storm?.dissipate();
     }
   }
 
@@ -1134,31 +1150,19 @@ export class CloudburstScene extends GameSceneBase {
     this.sizeStrikeBand();
     this.strikeWasInside = this.palmInBand();
 
-    // A faint red wash under the items, pulsed slowly. 750 ms each way
-    // is ~0.67 Hz: this is the fastest repeating light in the game and
-    // it is well under the 3 Hz ceiling.
-    if (this.strikeBand) {
-      this.strikeBand.setVisible(true).setAlpha(STRIKE_WARN_ALPHA_LO);
-      this.tweens.killTweensOf(this.strikeBand);
-      this.tweens.add({
-        targets: this.strikeBand,
-        alpha: STRIKE_WARN_ALPHA_HI,
-        duration: STRIKE_PULSE_MS,
-        yoyo: true,
-        repeat: -1,
-        ease: "Sine.easeInOut",
-      });
-    }
-    if (this.strikeCloud) {
-      this.strikeCloud.setVisible(true).setAlpha(0);
-      this.tweens.killTweensOf(this.strikeCloud);
-      this.tweens.add({
-        targets: this.strikeCloud,
-        alpha: 0.85,
-        duration: STRIKE_WARN_MS * 0.6,
-        ease: "Quad.easeOut",
-      });
-    }
+    // The storm IS the warning: clouds rolling in and piling over the
+    // band, the sky darkening under them as a soft gradient, heavier
+    // rain inside the band and a glow on the ground where the bolt will
+    // land. No filled rectangle is drawn anywhere.
+    this.storm?.beginWarning(
+      {
+        loX: this.bandLoX,
+        hiX: this.bandHiX,
+        top: this.bandTopY,
+        bottom: this.bandBottomY,
+      },
+      STRIKE_WARN_MS,
+    );
     this.strikeText?.setVisible(true).setAlpha(1);
     this.control.audio.rumble();
   }
@@ -1191,38 +1195,16 @@ export class CloudburstScene extends GameSceneBase {
       this.showCue("Dodged!", "#86efac");
     }
 
-    // Warning down, bolt up. ONE flash: alpha on, then a single fade —
-    // no yoyo and no repeat.
-    if (this.strikeBand) {
-      this.tweens.killTweensOf(this.strikeBand);
-      this.tweens.add({
-        targets: this.strikeBand,
-        alpha: 0,
-        duration: STRIKE_FLASH_MS,
-        onComplete: () => this.strikeBand?.setVisible(false),
-      });
-    }
-    if (this.strikeCloud) {
-      this.tweens.killTweensOf(this.strikeCloud);
-      this.tweens.add({
-        targets: this.strikeCloud,
-        alpha: 0,
-        duration: STRIKE_FLASH_MS * 2,
-        onComplete: () => this.strikeCloud?.setVisible(false),
-      });
-    }
+    // Warning text down, bolt up. The bolt, the ground impact, the
+    // sparks and the clouds lighting from inside all land on this
+    // frame and fade together: ONE bright event, no strobe.
     this.strikeText?.setVisible(false);
-    if (this.strikeBolt) {
-      this.tweens.killTweensOf(this.strikeBolt);
-      this.strikeBolt.setVisible(true).setAlpha(STRIKE_BOLT_ALPHA);
-      this.tweens.add({
-        targets: this.strikeBolt,
-        alpha: 0,
-        duration: STRIKE_FLASH_MS,
-        ease: "Quad.easeOut",
-        onComplete: () => this.strikeBolt?.setVisible(false),
-      });
-    }
+    this.storm?.fire();
+
+    // Thunder arrives after the light, the way it does outdoors. Kept
+    // on update()'s clock rather than a scene timer so it pauses with
+    // the round if the hand is lost.
+    this.thunderAt = time + THUNDER_DELAY_MS;
   }
 
   /** Short centred word after a strike resolves. */
