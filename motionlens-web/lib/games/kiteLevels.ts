@@ -68,9 +68,14 @@ export interface KiteLevel extends BaseLevel {
    * Target amplitude, as a share of the room left over once the
    * corridor's own half-width is taken out of the vertical reach.
    *
-   * A TARGET, not a guarantee: the speed ceiling below wins whenever
-   * the two disagree, which at these wave counts is most of the time.
-   * makeCorridor() reports which bound actually applied.
+   * THAT ROOM IS A HARD CEILING. The centreline cannot swing further
+   * than `span/2 - halfMax` without the corridor's edge leaving the
+   * patient's reach, so the deepest possible curve is 27.9% of the
+   * reach at level 1 and 39.2% at level 2 — the wider the lane, the
+   * less room is left to move it in. No scroll speed changes that.
+   *
+   * Below that ceiling the speed ceiling can still win; makeCorridor()
+   * reports which bound actually applied.
    */
   curveAmp: number;
   /**
@@ -92,27 +97,42 @@ export const LEVELS: Record<LevelId, KiteLevel> = {
     id: 1,
     label: "Level 1",
     // A bigger kite in a lane about three times its height, drifting
-    // past slowly over two long waves.
+    // past slowly over two deep waves.
     kiteFraction: 0.13,
     widthFactorMin: 2.6,
     widthFactorMax: 3.4,
     waves: 2,
-    curveAmp: 0.55,
+    // 90% of the room, leaving a tenth as margin rather than letting
+    // the corridor's edge kiss the measured limit of the reach at every
+    // peak — the reach box is an estimate from three held points, not a
+    // survey.
+    curveAmp: 0.9,
     maxHandSpeedArmPerSec: 0.6,
-    scrollPerSec: 0.1,
+    // Slow enough that the reach ceiling, not the hand-speed ceiling,
+    // is what limits the curve. At the old 0.10 the speed cap flattened
+    // the path to 7.5% of the reach; here it is about 25%.
+    scrollPerSec: 0.045,
   },
   2: {
     id: 2,
     label: "Level 2",
     // A smaller kite in a lane about twice its height — so the margin
-    // for error is roughly half — with three waves at 1.5x the scroll.
+    // for error is roughly half — and a deeper curve, which its higher
+    // hand-speed ceiling is what pays for.
     kiteFraction: 0.09,
     widthFactorMin: 1.8,
     widthFactorMax: 2.4,
-    waves: 3,
-    curveAmp: 0.75,
+    // Two waves, not three. A third wave costs amplitude twice over —
+    // the slope scales with frequency, so the speed ceiling pushes the
+    // curve down further, and a shallower curve was the complaint.
+    waves: 2,
+    curveAmp: 0.9,
     maxHandSpeedArmPerSec: 0.9,
-    scrollPerSec: 0.15,
+    // 0.07 was asked for and was not enough: at that speed the hand
+    // speed ceiling still bound and the curve stopped at 26% of the
+    // reach. 0.05 lets it reach about 35%, which is close to the 39.2%
+    // its lane width allows at all.
+    scrollPerSec: 0.05,
   },
 };
 
