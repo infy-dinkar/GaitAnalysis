@@ -30,8 +30,7 @@
 
 import type { ReachBox } from "@/lib/games/calibration";
 import {
-  LEAD_IN_MS,
-  RAMP_MS,
+  scoredFromMs,
   WIDTH_WAVE_FREQ,
   type KiteLevel,
 } from "@/lib/games/kiteLevels";
@@ -89,6 +88,11 @@ export interface Corridor {
    * The scene sets it once per frame with amplitudeEnvelope().
    */
   ampScale: number;
+  /** The round's opening, carried here so the scene and the scoring
+   *  read one source rather than each consulting the level. */
+  leadInMs: number;
+  rampMs: number;
+  scoredFromMs: number;
 }
 
 /**
@@ -99,9 +103,9 @@ export interface Corridor {
  * linear ramp would put a visible kink in the path at the moment the
  * waves start, and a kink is a step change in the hand speed demanded.
  */
-export function amplitudeEnvelope(elapsedMs: number): number {
-  if (elapsedMs <= LEAD_IN_MS) return 0;
-  const u = Math.min(1, (elapsedMs - LEAD_IN_MS) / RAMP_MS);
+export function amplitudeEnvelope(c: Corridor, elapsedMs: number): number {
+  if (elapsedMs <= c.leadInMs) return 0;
+  const u = Math.min(1, (elapsedMs - c.leadInMs) / c.rampMs);
   return u * u * (3 - 2 * u);
 }
 
@@ -225,6 +229,9 @@ export function makeCorridor(
     nyToArm,
     // Straight to begin with; the scene advances this every frame.
     ampScale: 0,
+    leadInMs: level.leadInMs,
+    rampMs: level.rampMs,
+    scoredFromMs: scoredFromMs(level),
   };
 }
 

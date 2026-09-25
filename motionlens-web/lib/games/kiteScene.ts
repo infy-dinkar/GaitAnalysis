@@ -36,10 +36,8 @@ import {
 } from "@/lib/games/kiteCorridor";
 import {
   FALL_AFTER_MS,
-  LEAD_IN_MS,
   RESPAWN_MS,
   ROUND_MS,
-  SCORED_FROM_MS,
   TUMBLE_MS,
 } from "@/lib/games/kiteLevels";
 import { makeMeadowTexture, MEADOW_GROUND } from "@/lib/games/meadowScene";
@@ -514,6 +512,7 @@ export class KiteScene extends GameSceneBase {
       ...this.session.totals,
       level: c.level.id,
       hand: c.hand,
+      scoredMs: Math.max(0, c.roundMs - this.corridor.scoredFromMs),
       peaksPerSec: this.analyser.peaksPerSec,
       peakCount: this.analyser.peakCount,
       movingSec: Math.round(this.analyser.movingSec * 10) / 10,
@@ -587,7 +586,7 @@ export class KiteScene extends GameSceneBase {
     // The lane's shape this frame. Set BEFORE anything reads the
     // corridor, so the ribbon that is drawn and the lane that is scored
     // are the same lane.
-    this.corridor.ampScale = amplitudeEnvelope(frame.elapsedMs);
+    this.corridor.ampScale = amplitudeEnvelope(this.corridor, frame.elapsedMs);
 
     if (!lost) {
       this.scrollU += c.level.scrollPerSec * dt;
@@ -649,7 +648,7 @@ export class KiteScene extends GameSceneBase {
     // The straight lead-in and the fade-in are not a tracking task, so
     // nothing in them is scored. The kite still flies and can still
     // fall — that is feedback, and the patient is meant to be flying.
-    const scored = frame.elapsedMs >= SCORED_FROM_MS;
+    const scored = frame.elapsedMs >= this.corridor.scoredFromMs;
     const measurable = c.state.live && c.state.inFrame && !this.falling && scored;
     const step = cover.dispH > 0
       ? this.session.step({
@@ -987,9 +986,10 @@ export class KiteScene extends GameSceneBase {
     const d = c.debug;
     const t = this.session.totals;
 
-    const leadLeft = Math.max(0, SCORED_FROM_MS - frame.elapsedMs) / 1000;
-    d.extra["lead-in"] = frame.elapsedMs < LEAD_IN_MS
-      ? `straight, ${((LEAD_IN_MS - frame.elapsedMs) / 1000).toFixed(1)}s left`
+    const leadLeft =
+      Math.max(0, this.corridor.scoredFromMs - frame.elapsedMs) / 1000;
+    d.extra["lead-in"] = frame.elapsedMs < this.corridor.leadInMs
+      ? `straight, ${((this.corridor.leadInMs - frame.elapsedMs) / 1000).toFixed(1)}s left`
       : leadLeft > 0
         ? `fading in, ${leadLeft.toFixed(1)}s to scoring`
         : "over — scoring";

@@ -46,12 +46,9 @@ export const WIDTH_WAVE_FREQ = 0.37;
 // band is not a tracking task, and letting it into the averages would
 // flatter every patient by the same arbitrary amount.
 
-/** Dead straight for this long. */
-export const LEAD_IN_MS = 5000;
-/** Then the amplitude eases from 0 to full over this. */
-export const RAMP_MS = 3000;
-/** Nothing before this is scored. */
-export const SCORED_FROM_MS = LEAD_IN_MS + RAMP_MS;
+// Both are per level — the easier level gets a longer straight run to
+// settle into before it is asked for anything. See `leadInMs` and
+// `rampMs` on KiteLevel.
 
 /** How long the palm may sit outside the corridor before the kite
  *  tumbles. Long enough to survive a wobble, short enough that drifting
@@ -135,81 +132,65 @@ export interface KiteLevel extends BaseLevel {
   maxHandSpeedArmPerSec: number;
   /** Scroll speed, in canvas widths per second. */
   scrollPerSec: number;
+  /** Dead straight for this long at the start of a round. */
+  leadInMs: number;
+  /** Then the amplitude eases from 0 to full over this. */
+  rampMs: number;
+}
+
+/** Nothing before the end of the fade-in is scored. */
+export function scoredFromMs(level: KiteLevel): number {
+  return level.leadInMs + level.rampMs;
 }
 
 export const LEVELS: Record<LevelId, KiteLevel> = {
   1: {
     id: 1,
     label: "Level 1",
-    // A bigger kite in a lane about three times its height, drifting
-    // past slowly over two deep waves.
-    // An UPPER BOUND now, not the answer: maxHalfOverAmp below almost
-    // always scales the lane — and the kite with it — down from here.
+    // An introduction. Everything level 2 asks for, asked more slowly:
+    // the lane drifts past at 0.6x the speed, the path has fewer and
+    // shallower turns, the lane itself is a quarter wider, and there is
+    // an extra second of straight run before any of it starts.
+    //
+    // The amplitude is held down by curveAmp rather than by the speed
+    // ceiling. At this scroll the ceiling would allow a much deeper
+    // wave than is wanted here, so the level asks for less of the room
+    // available instead — which is what curveAmp is for.
     kiteFraction: 0.13,
-    // Back to the floor the brief allows. The lane's width is fixed by
-    // the anti-cheat cap below, NOT by this factor, so lowering it does
-    // not narrow the lane — it enlarges the kite inside the same lane.
-    // 1.6 is as big as the kite can be made without the lane ceasing to
-    // read as a lane around it.
+    widthFactorMin: 1.9,
+    widthFactorMax: 2.5,
+    waves: 1.5,
+    secondShare: 0.25,
+    secondRatio: 1.7,
+    // Far looser than level 2's 0.2475 — this is the ratio that
+    // decides whether a still hand can pass, and this level is meant
+    // to be passable. Set to deliver the 1.25x lane and left there;
+    // the still-hand score is reported, not used as a brake.
+    maxHalfOverAmp: 0.494,
+    curveAmp: 0.47,
+    maxHandSpeedArmPerSec: 0.45,
+    scrollPerSec: 0.025,
+    leadInMs: 6000,
+    rampMs: 3000,
+  },
+  2: {
+    id: 2,
+    label: "Level 2",
+    // Was level 1 until a level below it existed. Copied unchanged
+    // rather than retuned, so a patient who has played the old level 1
+    // is playing the same task under a new name.
+    kiteFraction: 0.13,
     widthFactorMin: 1.6,
     widthFactorMax: 2.1,
     waves: 2,
     secondShare: 0.25,
     secondRatio: 1.7,
-    // 0.16 -> 0.165. Measured, not derived: this is the value at which
-    // the lane comes out about a fifth wider across the range of reach
-    // geometries, with the width factors above raised in step so the
-    // kite keeps its size.
     maxHalfOverAmp: 0.2475,
-    // 90% of the room, leaving a tenth as margin rather than letting
-    // the corridor's edge kiss the measured limit of the reach at every
-    // peak — the reach box is an estimate from three held points, not a
-    // survey.
     curveAmp: 0.9,
     maxHandSpeedArmPerSec: 0.6,
-    // Slower again. A deeper wave is what stops a still hand passing —
-    // the lane is capped as a share of the amplitude, so a bigger
-    // amplitude buys a bigger lane and a bigger kite at the same
-    // cheat-resistance — and depth is bought with scroll speed.
     scrollPerSec: 0.04,
-  },
-  2: {
-    id: 2,
-    label: "Level 2",
-    // A smaller kite in a lane about twice its height — so the margin
-    // for error is roughly half — and a deeper curve, which its higher
-    // hand-speed ceiling is what pays for.
-    kiteFraction: 0.09,
-    // 1.6-2.1 x 1.19, in step with maxHalfOverAmp below — see level 1.
-    widthFactorMin: 1.9,
-    widthFactorMax: 2.5,
-    secondShare: 0.25,
-    // Livelier than level 1's: it shortens the turnaround a still hand
-    // can sit in, at the cost of some amplitude.
-    secondRatio: 2.6,
-    // Two waves, not three. A third wave costs amplitude twice over —
-    // the slope scales with frequency, so the speed ceiling pushes the
-    // curve down further, and a shallower curve was the complaint.
-    waves: 2,
-    curveAmp: 0.95,
-    // 0.14 x 1.2. Still tighter than level 1's: this ratio is the only
-    // thing that decides whether a still hand can pass, and level 2's
-    // bar is 25% against level 1's 35%.
-    // 0.14 -> 0.158, measured the same way. Still tighter than level
-    // 1's: this ratio is the only thing that decides whether a still
-    // hand can pass, and level 2's bar is 25% against level 1's 35%.
-    // 0.158 x ~1.62. The sizes are the requirement here and this
-    // ratio is the only thing that sets them, so it is chosen to
-    // deliver a 1.5x lane and left there — the still-hand score is
-    // reported rather than used as a brake.
-    maxHalfOverAmp: 0.256,
-    maxHandSpeedArmPerSec: 0.9,
-    // Slower than level 1's, which looks wrong for a harder level and
-    // is not: level 2's difficulty is its narrower lane and its deeper
-    // wave, and the deeper wave is only affordable under its hand-speed
-    // ceiling at this scroll. It still demands 0.90 arm/s of vertical
-    // hand speed against level 1's 0.60.
-    scrollPerSec: 0.035,
+    leadInMs: 5000,
+    rampMs: 3000,
   },
 };
 
