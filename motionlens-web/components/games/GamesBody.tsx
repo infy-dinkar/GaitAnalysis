@@ -33,6 +33,7 @@ function str(v: unknown): string | null {
 const GAME_LABELS: Record<string, string> = {
   fruit_harvest: "Fruit Harvest",
   cloudburst: "Cloudburst",
+  kite_flying: "Kite Flying",
 };
 
 type Metrics = Record<string, unknown>;
@@ -61,7 +62,13 @@ export function GamesBody({ report }: { report: ReportDTO }) {
         </div>
       </section>
 
-      {game === "cloudburst" ? <CloudburstBody m={m} /> : <FruitHarvestBody m={m} />}
+      {game === "cloudburst" ? (
+        <CloudburstBody m={m} />
+      ) : game === "kite_flying" ? (
+        <KiteFlyingBody m={m} />
+      ) : (
+        <FruitHarvestBody m={m} />
+      )}
 
       {/* Calibration */}
       {cal && (
@@ -307,6 +314,101 @@ function CloudburstBody({ m }: { m: Metrics }) {
         {h1 !== null && h2 !== null && h2 < h1 - 15 && (
           <p className="mt-3 text-sm text-warning">
             Catch accuracy fell {h1 - h2} points as the speed rose.
+          </p>
+        )}
+      </section>
+    </>
+  );
+}
+
+// ─── Kite Flying ──────────────────────────────────────────────────
+
+function KiteFlyingBody({ m }: { m: Metrics }) {
+  const inside = num(m.time_in_corridor_pct);
+  const dev = num(m.mean_deviation_pct);
+  const falls = num(m.kite_falls);
+  const peaks = num(m.velocity_peaks_per_sec);
+  const smooth = num(m.smoothness_score);
+  const h1 = num(m.first_half_time_in_corridor_pct);
+  const h2 = num(m.second_half_time_in_corridor_pct);
+  // max_abduction_deg is saved but not read, for the same reason as in
+  // the other two games.
+
+  return (
+    <>
+      {/* Holding the line */}
+      <section className="rounded-card border border-border bg-surface p-5">
+        <h2 className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+          Holding the line
+        </h2>
+        <p className="mt-1 text-sm text-muted">
+          A ribbon of wind drifted across the sky; the task was to keep the
+          kite inside it. Deviation is the average distance from the middle
+          of the ribbon, as a share of its half-width — 100% is the edge.
+        </p>
+        <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-3">
+          <Stat
+            label="Time in the wind"
+            value={inside === null ? "—" : `${inside}%`}
+          />
+          <Stat
+            label="Avg deviation"
+            value={dev === null ? "—" : `${dev}%`}
+          />
+          <Stat label="Kite falls" value={falls === null ? "—" : String(falls)} />
+        </div>
+      </section>
+
+      {/* Movement quality. This is what Kite Flying measures that the
+          other two games do not: not how many targets were reached but
+          how steadily the hand moved between them. */}
+      <section className="rounded-card border border-border bg-surface p-5">
+        <h2 className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+          Movement quality
+        </h2>
+        <p className="mt-1 text-sm text-muted">
+          Measured from the unsmoothed hand position. Velocity peaks count
+          the separate corrections a movement was broken into; smoothness is
+          an ordinal 0–100 score derived from them, for comparing a patient
+          with themselves across sessions.
+        </p>
+        <div className="mt-3 grid grid-cols-2 gap-4">
+          <Stat
+            label="Smoothness"
+            value={smooth === null ? "—" : `${smooth} / 100`}
+          />
+          <Stat
+            label="Velocity peaks"
+            value={peaks === null ? "—" : `${peaks.toFixed(2)} / s`}
+          />
+        </div>
+        {smooth === null && (
+          <p className="mt-3 text-sm text-muted">
+            Not scored — the hand did not move enough during the round for
+            the measure to mean anything.
+          </p>
+        )}
+      </section>
+
+      {/* Endurance */}
+      <section className="rounded-card border border-border bg-surface p-5">
+        <h2 className="text-xs font-semibold uppercase tracking-[0.12em] text-subtle">
+          Endurance
+        </h2>
+        <div className="mt-3 grid grid-cols-2 gap-4">
+          <Stat
+            label="In the wind, first half"
+            value={h1 === null ? "—" : `${h1}%`}
+          />
+          <Stat
+            label="In the wind, second half"
+            value={h2 === null ? "—" : `${h2}%`}
+          />
+        </div>
+        {h1 !== null && h2 !== null && h2 < h1 - 15 && (
+          <p className="mt-3 text-sm text-warning">
+            Time in the wind fell {h1 - h2} points between halves — possible
+            fatigue.
           </p>
         )}
       </section>
