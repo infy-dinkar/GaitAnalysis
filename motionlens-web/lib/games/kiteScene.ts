@@ -47,31 +47,66 @@ import { makeCloudTexture } from "@/lib/games/skyScene";
 import { makeSoftDotTexture } from "@/lib/games/fruitEffects";
 import { BackgroundLife } from "@/lib/games/backgroundLife";
 
-const KITE = "🪁";
 const BIRD = "🐦";
 
 /** Glyph texture size. Generous so a large sprite stays crisp. */
 const GLYPH_TEX = 256;
 
-/** The ribbon, drawn as three stacked fills so its edge is soft rather
- *  than a hard band. Light blue: the one thing on screen that is not
- *  sky, hill or grass. */
-const RIBBON_TINT = 0x7dd3fc;
-const RIBBON_LAYERS: { widthMul: number; alpha: number }[] = [
-  { widthMul: 1.9, alpha: 0.1 },
-  { widthMul: 1.35, alpha: 0.16 },
-  { widthMul: 1.0, alpha: 0.3 },
-];
+// -- Palette.
+//
+// The first version put a light-blue ribbon and a blue kite on a blue
+// sky, and on camera neither could be found from 2 m. NOTHING in the
+// play area is blue any more: the sky and the clouds own that end of
+// the spectrum, so the corridor is gold and the kite is red.
+//
+// The corridor also has to separate from WHITE cloud as well as from
+// blue sky, which a fill alone cannot do at any alpha -- so it carries
+// solid orange rails, and a thin dark line outside those, which is what
+// gives it an edge against anything behind it.
+
+/** Semi-opaque warm gold. Alpha kept below half so a cloud passing
+ *  behind still reads as a cloud rather than as part of the ribbon. */
+const RIBBON_FILL = 0xfbbf24;
+const RIBBON_FILL_ALPHA = 0.45;
+/** Solid orange rails down both sides. */
+const RIBBON_EDGE = 0xf97316;
+const RIBBON_EDGE_W = 0.009;
+/** A thin dark line just outside the orange, so the band still has an
+ *  edge when it crosses a white cloud. */
+const RIBBON_OUTLINE = 0x5c3a00;
+const RIBBON_OUTLINE_ALPHA = 0.55;
+const RIBBON_OUTLINE_W = 0.014;
+
 /** Horizontal samples across the ribbon. Enough that the curve reads as
  *  smooth, few enough that redrawing it every frame is free. */
 const RIBBON_COLS = 48;
 
-/** Kite glow: green inside the wind, amber outside. At 2 m this, not
- *  the glyph, is what tells the patient how they are doing. */
+// -- Wind streaks: faint white dashes flowing right to left inside the
+//    band, so it reads as moving air rather than as a painted stripe.
+const STREAK_COUNT = 22;
+const STREAK_TINT = 0xffffff;
+const STREAK_ALPHA = 0.5;
+/** Canvas widths per second. Faster than the corridor itself scrolls,
+ *  which is what sells the flow. */
+const STREAK_SPEED = 0.55;
+const STREAK_LEN_MIN = 0.05;
+const STREAK_LEN_MAX = 0.12;
+
+/** Kite glow: green inside the wind, amber outside. It is a separate
+ *  sprite BEHIND the kite and is never tinted onto the body, so the
+ *  kite stays unmistakably red whatever the state. */
 const GLOW_IN = 0x4ade80;
 const GLOW_OUT = 0xfbbf24;
-const GLOW_SCALE = 2.0;
-const GLOW_ALPHA = 0.55;
+const GLOW_SCALE = 1.7;
+const GLOW_ALPHA = 0.7;
+/** Greyed while the hand is lost, so the kite stays visible behind the
+ *  message without looking live. */
+const KITE_LOST_TINT = 0x8b8b8b;
+
+/** The instruction shown over the opening seconds of the round. */
+const INTRO_TEXT = "Keep the kite inside the wind";
+const INTRO_MS = 2600;
+const INTRO_FADE_MS = 600;
 
 /** Gentle sway while flying, and a faster wobble while outside. */
 const SWAY_DEG = 7;
@@ -132,32 +167,70 @@ function makeGlyphTexture(
   return true;
 }
 
-/** Fallback art when the kite glyph is unavailable: a lit diamond. The
- *  glow already carries the meaning, so a round without emoji support
- *  is still playable. */
-function makeKiteFallback(scene: Phaser.Scene, key: string): void {
-  if (scene.textures.exists(key)) return;
+/**
+ * The kite, drawn rather than rasterised from an emoji.
+ *
+ * The kite glyph is BLUE on most platforms, which is the exact problem
+ * this replaces, and a sprite tint cannot fix one colour without
+ * staining the whole thing. A diamond costs a few lines and looks the
+ * same on every device: a red body with a white outline and white
+ * spars, which holds up against blue sky, white cloud and green grass
+ * alike.
+ */
+function makeKiteTexture(scene: Phaser.Scene, key: string): boolean {
+  if (scene.textures.exists(key)) return true;
   const tex = scene.textures.createCanvas(key, GLYPH_TEX, GLYPH_TEX);
-  if (!tex) return;
+  if (!tex) return false;
   const ctx = tex.getContext();
-  if (!ctx) return;
+  if (!ctx) {
+    scene.textures.remove(key);
+    return false;
+  }
+  ctx.clearRect(0, 0, GLYPH_TEX, GLYPH_TEX);
   const c = GLYPH_TEX / 2;
+  // Short of the texture edge, so the outline has room.
   const r = GLYPH_TEX * 0.4;
-  ctx.beginPath();
-  ctx.moveTo(c, c - r);
-  ctx.lineTo(c + r * 0.72, c);
-  ctx.lineTo(c, c + r);
-  ctx.lineTo(c - r * 0.72, c);
-  ctx.closePath();
+  const wide = r * 0.74;
+
+  const path = () => {
+    ctx.beginPath();
+    ctx.moveTo(c, c - r);
+    ctx.lineTo(c + wide, c - r * 0.12);
+    ctx.lineTo(c, c + r);
+    ctx.lineTo(c - wide, c - r * 0.12);
+    ctx.closePath();
+  };
+
+  // Body: red at the top shading deeper below, so it has some form
+  // rather than reading as a flat cut-out.
   const g = ctx.createLinearGradient(c, c - r, c, c + r);
-  g.addColorStop(0, "#fef3c7");
-  g.addColorStop(1, "#f59e0b");
+  g.addColorStop(0, "#ff5a4d");
+  g.addColorStop(0.45, "#ef4444");
+  g.addColorStop(1, "#b91c1c");
+  path();
   ctx.fillStyle = g;
   ctx.fill();
-  ctx.strokeStyle = "#78350f";
-  ctx.lineWidth = GLYPH_TEX * 0.02;
+
+  // White outline — the part that does the work against a dark or a
+  // busy background.
+  path();
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = GLYPH_TEX * 0.045;
   ctx.stroke();
+
+  // Spars, so the shape reads as a kite and not a lozenge.
+  ctx.strokeStyle = "rgba(255,255,255,0.9)";
+  ctx.lineWidth = GLYPH_TEX * 0.022;
+  ctx.beginPath();
+  ctx.moveTo(c, c - r * 0.86);
+  ctx.lineTo(c, c + r * 0.86);
+  ctx.moveTo(c - wide * 0.86, c - r * 0.12);
+  ctx.lineTo(c + wide * 0.86, c - r * 0.12);
+  ctx.stroke();
+
   tex.refresh();
+  return true;
 }
 
 export class KiteScene extends GameSceneBase {
@@ -192,6 +265,11 @@ export class KiteScene extends GameSceneBase {
   private wasInside = true;
   /** Live deviation, for the debug overlay. */
   private lastDev = 0;
+  /** Wind streaks inside the band. `u` is in canvas widths, `v` is an
+   *  offset from the centreline as a fraction of the half-width. */
+  private streaks: { u: number; v: number; len: number }[] = [];
+  private introText: Phaser.GameObjects.Text | null = null;
+  private introDone = false;
 
   constructor() {
     super("kite-flying");
@@ -217,7 +295,7 @@ export class KiteScene extends GameSceneBase {
     this.canvasSize = { w, h };
 
     makeSoftDotTexture(this, "fx-dot");
-    if (!makeGlyphTexture(this, "kf-kite", KITE)) makeKiteFallback(this, "kf-kite");
+    makeKiteTexture(this, "kf-kite");
 
     if (makeCloudTexture(this, "kf-cloud", 31)) {
       for (let i = 0; i < CLOUD_COUNT; i++) this.spawnCloud(true);
@@ -226,9 +304,16 @@ export class KiteScene extends GameSceneBase {
     const birdKey = makeGlyphTexture(this, "fx-bird", BIRD) ? "fx-bird" : null;
     this.life = new BackgroundLife(this, { monkey: null, bird: birdKey });
 
-    // The ribbon sits under the kite but over the clouds.
+    // The ribbon sits under the kite but OVER the clouds (depth 1) and
+    // the birds (depth 2), so nothing is ever drawn across the corridor
+    // or the kite.
     this.ribbon = this.add.graphics().setDepth(4);
     this.string = this.add.graphics().setDepth(9);
+    this.streaks = Array.from({ length: STREAK_COUNT }, () => ({
+      u: Math.random() * 1.4,
+      v: (Math.random() * 2 - 1) * 0.8,
+      len: STREAK_LEN_MIN + Math.random() * (STREAK_LEN_MAX - STREAK_LEN_MIN),
+    }));
 
     this.glow = this.textures.exists("fx-dot")
       ? this.add
@@ -319,7 +404,9 @@ export class KiteScene extends GameSceneBase {
     // ── "Hand lost" banner. Hidden until needed.
     const lost = Math.round(this.unit * 0.062 * s);
     this.lostBand = this.add
-      .rectangle(w / 2, h / 2, w, this.unit * 0.3, 0x000000, 0.72)
+      // Lighter than the other two games' banner: here the corridor
+      // and the kite are meant to stay readable behind the message.
+      .rectangle(w / 2, h / 2, w, this.unit * 0.3, 0x000000, 0.45)
       .setDepth(40)
       .setVisible(false);
     this.lostText = this.add
@@ -334,6 +421,30 @@ export class KiteScene extends GameSceneBase {
       .setOrigin(0.5)
       .setDepth(41)
       .setVisible(false);
+
+    // Opening instruction. The corridor and the kite are already drawn
+    // behind it, so the patient reads what to do while looking at the
+    // thing they have to do it to.
+    //
+    // NOTE ON PLACEMENT: the brief asked for this during the shell's
+    // 3-2-1, but the Phaser canvas is not mounted until the play phase
+    // — showing it there would mean changing GameShell, which is shared
+    // with the other two games and out of scope here. It runs over the
+    // opening seconds of the round instead. The clock is NOT paused: the
+    // corridor is live and playable from the first frame, so this is an
+    // overlay, not a delay.
+    const intro = Math.round(this.unit * 0.062 * s);
+    this.introText = this.add
+      .text(w / 2, h * 0.2, INTRO_TEXT, {
+        fontFamily: "system-ui, sans-serif",
+        fontSize: `${intro}px`,
+        color: "#ffffff",
+        align: "center",
+        stroke: "#000000",
+        strokeThickness: Math.max(3, intro * 0.14),
+      })
+      .setOrigin(0.5)
+      .setDepth(32);
 
     // NOTE: startedAt / lastFrameAt are deliberately left at -1 here and
     // seeded on the first update frame — see GameSceneBase for why this
@@ -408,6 +519,9 @@ export class KiteScene extends GameSceneBase {
       .setFontSize(lost)
       .setStroke("#000000", Math.max(2, lost * 0.08));
     this.fpsText?.setPosition(w * 0.02, h * 0.82).setFontSize(Math.round(u * 0.032));
+    this.introText
+      ?.setPosition(w / 2, h * 0.2)
+      .setFontSize(Math.round(u * 0.062 * s));
   }
 
   update(time: number) {
@@ -426,17 +540,39 @@ export class KiteScene extends GameSceneBase {
     // The wind keeps blowing even while the round is held — but it does
     // not while the hand is lost, or the corridor would scroll past
     // unseen and the patient would come back to a different shape.
-    if (!lost) this.scrollU += c.level.scrollPerSec * dt;
+    if (!lost) {
+      this.scrollU += c.level.scrollPerSec * dt;
+      this.stepStreaks(dt);
+    }
     this.drawRibbon();
+
+    if (!this.introDone && frame.elapsedMs > INTRO_MS) {
+      this.introDone = true;
+      const t = this.introText;
+      if (t) {
+        this.tweens.add({
+          targets: t,
+          alpha: 0,
+          duration: INTRO_FADE_MS,
+          onComplete: () => t.setVisible(false),
+        });
+      }
+    }
 
     if (lost) {
       // Nothing to measure and nothing to steer. Break the movement
       // trace so the gap is not read as one enormous slow movement.
       this.analyser.breakTrace();
       if (this.fallEndsAt >= 0) this.fallEndsAt += dtMs;
+      // The corridor keeps being drawn above and the kite stays where
+      // it was, greyed — so the patient can see what they are coming
+      // back to rather than a black band over an empty sky.
+      this.kite.setTint(KITE_LOST_TINT);
+      this.glow?.setTint(KITE_LOST_TINT).setAlpha(GLOW_ALPHA * 0.4);
       this.writeDebug(frame, false);
       return;
     }
+    this.kite.clearTint();
 
     // ── The kite. It follows the DRAWN cursor, because what the
     //    patient sees has to be what the game responds to.
@@ -511,36 +647,98 @@ export class KiteScene extends GameSceneBase {
     return this.control.remainingMs > ROUND_MS / 2 ? 1 : 2;
   }
 
-  /** Redraw the ribbon for the current scroll. Three stacked fills, so
-   *  the edge is soft rather than a ruled band. */
+  /** Height of the centreline at a screen x, in canvas px. */
+  private centrePx(x: number, cover: { offY: number; dispH: number }): number {
+    const W = this.scale.width || 1;
+    return cover.offY + centreNy(this.corridor, this.scrollU + x / W) * cover.dispH;
+  }
+
+  /**
+   * Redraw the ribbon for the current scroll.
+   *
+   * Four passes, outermost first: a dark outline, the orange rails, the
+   * gold fill, then the wind streaks. The rails and the outline are what
+   * make it readable over a white cloud — a translucent fill alone
+   * vanishes against one at any alpha that still lets the sky through.
+   */
   private drawRibbon(): void {
     const cover = this.control.state.cover;
     const g = this.ribbon;
     g.clear();
     if (cover.dispH <= 0) return;
     const W = this.scale.width || 1;
+    const u = this.unit;
     const halfPx = this.corridor.halfNy * cover.dispH;
     if (halfPx <= 0) return;
 
-    for (const L of RIBBON_LAYERS) {
-      const hp = halfPx * L.widthMul;
-      g.fillStyle(RIBBON_TINT, L.alpha);
+    // Sample the centreline once and reuse it for every pass.
+    const xs: number[] = [];
+    const cy: number[] = [];
+    for (let i = 0; i <= RIBBON_COLS; i++) {
+      const x = (i / RIBBON_COLS) * W;
+      xs.push(x);
+      cy.push(this.centrePx(x, cover));
+    }
+
+    const rail = (offset: number, colour: number, alpha: number, width: number) => {
+      g.lineStyle(width, colour, alpha);
       g.beginPath();
       for (let i = 0; i <= RIBBON_COLS; i++) {
-        const x = (i / RIBBON_COLS) * W;
-        const y = cover.offY
-          + centreNy(this.corridor, this.scrollU + x / W) * cover.dispH - hp;
-        if (i === 0) g.moveTo(x, y);
-        else g.lineTo(x, y);
+        const y = cy[i] + offset;
+        if (i === 0) g.moveTo(xs[i], y);
+        else g.lineTo(xs[i], y);
       }
-      for (let i = RIBBON_COLS; i >= 0; i--) {
-        const x = (i / RIBBON_COLS) * W;
-        const y = cover.offY
-          + centreNy(this.corridor, this.scrollU + x / W) * cover.dispH + hp;
-        g.lineTo(x, y);
+      g.strokePath();
+    };
+
+    // Dark outline, just outside the rails.
+    const ow = u * RIBBON_OUTLINE_W;
+    rail(-halfPx, RIBBON_OUTLINE, RIBBON_OUTLINE_ALPHA, ow);
+    rail(halfPx, RIBBON_OUTLINE, RIBBON_OUTLINE_ALPHA, ow);
+
+    // Gold fill between the rails.
+    g.fillStyle(RIBBON_FILL, RIBBON_FILL_ALPHA);
+    g.beginPath();
+    for (let i = 0; i <= RIBBON_COLS; i++) {
+      const y = cy[i] - halfPx;
+      if (i === 0) g.moveTo(xs[i], y);
+      else g.lineTo(xs[i], y);
+    }
+    for (let i = RIBBON_COLS; i >= 0; i--) g.lineTo(xs[i], cy[i] + halfPx);
+    g.closePath();
+    g.fillPath();
+
+    // Solid orange rails on top of the fill's own edge.
+    const ew = u * RIBBON_EDGE_W;
+    rail(-halfPx, RIBBON_EDGE, 1, ew);
+    rail(halfPx, RIBBON_EDGE, 1, ew);
+
+    // Wind streaks, inside the band only.
+    g.lineStyle(Math.max(1, u * 0.004), STREAK_TINT, STREAK_ALPHA);
+    for (const st of this.streaks) {
+      const x0 = st.u * W;
+      const x1 = (st.u + st.len) * W;
+      if (x1 < 0 || x0 > W) continue;
+      const a = Math.max(0, x0);
+      const b = Math.min(W, x1);
+      if (b - a < 1) continue;
+      g.beginPath();
+      g.moveTo(a, this.centrePx(a, cover) + st.v * halfPx);
+      g.lineTo(b, this.centrePx(b, cover) + st.v * halfPx);
+      g.strokePath();
+    }
+  }
+
+  /** Advance the streaks with the wind and recycle the ones that leave
+   *  on the left. Positions are in canvas widths, like the scroll. */
+  private stepStreaks(dt: number): void {
+    for (const st of this.streaks) {
+      st.u -= STREAK_SPEED * dt;
+      if (st.u + st.len < 0) {
+        st.u = 1 + Math.random() * 0.4;
+        st.v = (Math.random() * 2 - 1) * 0.8;
+        st.len = STREAK_LEN_MIN + Math.random() * (STREAK_LEN_MAX - STREAK_LEN_MIN);
       }
-      g.closePath();
-      g.fillPath();
     }
   }
 
@@ -558,19 +756,41 @@ export class KiteScene extends GameSceneBase {
     g.lineTo(mx, my);
     g.lineTo(this.kite.x, this.kite.y);
     g.strokePath();
+
+    // A short tail below the kite, hanging the opposite way to the
+    // string so the two never lie on top of each other. Drawn in the
+    // kite's own red with white bows, and it drifts with the wobble,
+    // which is a second cue that something has gone wrong.
+    const len = this.kite.displayHeight * 0.75;
+    const lean = Math.sin(this.lastFrameAt / 600) * len * 0.22;
+    const tx = this.kite.x + lean;
+    const ty = this.kite.y + this.kite.displayHeight * 0.5 + len;
+    g.lineStyle(Math.max(1, this.unit * 0.005), 0xef4444, 0.9);
+    g.beginPath();
+    g.moveTo(this.kite.x, this.kite.y + this.kite.displayHeight * 0.45);
+    g.lineTo(this.kite.x + lean * 0.5, this.kite.y + this.kite.displayHeight * 0.45 + len * 0.55);
+    g.lineTo(tx, ty);
+    g.strokePath();
+    g.fillStyle(0xffffff, 0.95);
+    for (const f of [0.45, 0.85]) {
+      const bx = this.kite.x + lean * f;
+      const by = this.kite.y + this.kite.displayHeight * 0.45 + len * f;
+      g.fillCircle(bx, by, Math.max(1.5, this.unit * 0.008));
+    }
   }
 
   /** Green and swaying, or amber and wobbling. */
   private applyKiteMood(inside: boolean): void {
-    if (!this.glow) {
-      this.kite.setAngle(inside ? this.kite.angle : this.kite.angle);
-      return;
+    // The glow is a separate sprite BEHIND the kite, so the body keeps
+    // its red whichever state it is in — the colour change is the halo
+    // around it, never the kite itself.
+    if (this.glow) {
+      const size = this.kite.displayWidth * GLOW_SCALE;
+      this.glow
+        .setDisplaySize(size, size)
+        .setTint(inside ? GLOW_IN : GLOW_OUT)
+        .setAlpha(GLOW_ALPHA);
     }
-    const size = this.kite.displayWidth * GLOW_SCALE;
-    this.glow
-      .setDisplaySize(size, size)
-      .setTint(inside ? GLOW_IN : GLOW_OUT)
-      .setAlpha(GLOW_ALPHA);
 
     // Sway and wobble are driven off the round clock rather than tweens
     // so they cannot fight the per-frame position updates.

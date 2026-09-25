@@ -15,8 +15,16 @@ export type { LevelId };
  *  half-by-half numbers mean the same thing across all three. */
 export const ROUND_MS = 60_000;
 
-/** Kite size as a fraction of the canvas unit. */
-export const KITE_FRACTION = 0.11;
+/**
+ * Kite size as a fraction of the canvas unit.
+ *
+ * At least as large as a Fruit Harvest fruit at its biggest — that
+ * game's level 1 draws fruit at 0.13 * 1.3 = 0.169 — because on camera
+ * the kite at 0.11 was simply too small to find from 2 m. This is a
+ * drawing size, not a level value: nothing in LEVELS below changes with
+ * it and the difficulty is unaffected.
+ */
+export const KITE_FRACTION = 0.17;
 
 /** How long the palm may sit outside the corridor before the kite
  *  tumbles. Long enough to survive a wobble, short enough that drifting
