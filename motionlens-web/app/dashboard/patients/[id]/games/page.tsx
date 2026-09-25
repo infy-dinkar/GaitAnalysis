@@ -78,6 +78,11 @@ interface GameCard {
   slug: string;
   title: string;
   blurb: string;
+  /** What a round of this game actually measures. */
+  measures: string;
+  /** The presentations it is meant for. Guidance for choosing between
+   *  the games, not a claim that any of them is diagnostic. */
+  usefulFor: string;
   icon: typeof Gamepad2;
   tone: string;
 }
@@ -91,6 +96,12 @@ const GAMES: GameCard[] = [
     blurb:
       "Reach out and collect fruit with one hand, including across the "
       + "midline. 60 seconds.",
+    measures:
+      "shoulder reach up and out, reach across the midline, accuracy and "
+      + "speed of reaching.",
+    usefulFor:
+      "post-stroke arm weakness, shoulder rehabilitation, recovery after "
+      + "shoulder surgery.",
     icon: Gamepad2,
     tone: "bg-stone-500/10 text-stone-700 dark:text-stone-400",
   },
@@ -100,6 +111,12 @@ const GAMES: GameCard[] = [
     blurb:
       "Catch falling water drops and leave the lightning alone. Speed rises "
       + "through the round. 60 seconds.",
+    measures:
+      "reaction time, catch accuracy, ability to withhold a movement "
+      + "(lightning), dodging a sudden strike.",
+    usefulFor:
+      "cognitive slowing, post-concussion, frontal/attention problems, "
+      + "reactive movement training.",
     icon: CloudLightning,
     tone: "bg-sky-500/10 text-sky-700 dark:text-sky-400",
   },
@@ -109,6 +126,11 @@ const GAMES: GameCard[] = [
     blurb:
       "Keep a kite inside a drifting ribbon of wind. Measures how "
       + "steadily the hand holds a moving line. 60 seconds.",
+    measures:
+      "movement smoothness and steadiness — how steadily the hand holds a "
+      + "moving path.",
+    usefulFor:
+      "Parkinson's disease, ataxia, tremor, cerebellar involvement.",
     icon: Wind,
     tone: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
   },
@@ -131,6 +153,18 @@ function GameCard({ game, patientId }: { game: GameCard; patientId: string }) {
         <ArrowUpRight className="h-4 w-4 opacity-0 transition group-hover:opacity-100" />
       </h2>
       <p className="mt-1 text-sm text-muted">{game.blurb}</p>
+      {/* The two lines a clinician chooses between games on. Each is
+          one paragraph with a bold lead-in rather than a label beside
+          the text, so a long line wraps under its own label instead of
+          forming a ragged second column. */}
+      <p className="mt-3 text-sm text-muted">
+        <span className="font-semibold text-foreground">Measures: </span>
+        {game.measures}
+      </p>
+      <p className="mt-1 text-sm text-muted">
+        <span className="font-semibold text-foreground">Useful for: </span>
+        {game.usefulFor}
+      </p>
       <Button className="mt-4" size="sm">
         Play
       </Button>
