@@ -32,13 +32,9 @@ export const ROUND_MS = 60_000;
  */
 export const WIDTH_WAVE_FREQ = 0.37;
 
-/** How the centreline's two sines are weighted, and how much faster the
- *  second one is. The second is there to stop the path repeating
- *  visibly; it is not meant to be a second set of turns, so it stays
- *  small. Both are on the same amplitude budget. */
-export const WAVE_MAIN_SHARE = 0.75;
-export const WAVE_SECOND_SHARE = 0.25;
-export const WAVE_SECOND_RATIO = 1.7;
+// The centreline's second sine moved into the level config below: it
+// turned out to be the lever that stops a still hand passing, and the
+// two levels want different amounts of it.
 
 /** How long the palm may sit outside the corridor before the kite
  *  tumbles. Long enough to survive a wobble, short enough that drifting
@@ -65,6 +61,21 @@ export interface KiteLevel extends BaseLevel {
   /** Full waves of the centreline visible across the screen at once. */
   waves: number;
   /**
+   * The centreline is a main sine plus a second one at
+   * `waves * secondRatio`, weighted `1 - secondShare` and `secondShare`.
+   *
+   * The second sine started as decoration — something to stop the path
+   * repeating visibly. It is load-bearing now. A single sine spends
+   * most of its time near its own extremes, which is exactly where a
+   * patient can park a still hand and be covered by the passing lane;
+   * the second sine wiggles through those turnarounds and breaks the
+   * dwell up. Raising either number shortens the dwell and costs
+   * amplitude, because slope scales with frequency and the hand-speed
+   * ceiling is enforced.
+   */
+  secondShare: number;
+  secondRatio: number;
+  /**
    * Target amplitude, as a share of the room left over once the
    * corridor's own half-width is taken out of the vertical reach.
    *
@@ -78,6 +89,23 @@ export interface KiteLevel extends BaseLevel {
    * reports which bound actually applied.
    */
   curveAmp: number;
+  /**
+   * THE ANTI-CHEAT INVARIANT: the lane's half-width may not exceed this
+   * share of the wave's amplitude.
+   *
+   * A patient can pass this game by holding their hand still whenever
+   * the lane is wide enough to keep covering one fixed height as it
+   * sweeps past — and that is decided by half-width OVER amplitude,
+   * nothing else. Sizing the lane from the kite alone is not enough,
+   * because the hand-speed ceiling shrinks the amplitude for some
+   * patients (a short arm on a tall canvas) and the cheat reopens for
+   * exactly them.
+   *
+   * So the lane is capped here too, and when the cap bites the KITE is
+   * scaled down with it, which keeps `width = factor x kite height`
+   * true and the kite visibly fitting its lane.
+   */
+  maxHalfOverAmp: number;
   /**
    * Ceiling on the vertical hand speed the path demands, in ARM LENGTHS
    * per second, at the steepest point.
@@ -98,20 +126,29 @@ export const LEVELS: Record<LevelId, KiteLevel> = {
     label: "Level 1",
     // A bigger kite in a lane about three times its height, drifting
     // past slowly over two deep waves.
+    // An UPPER BOUND now, not the answer: maxHalfOverAmp below almost
+    // always scales the lane — and the kite with it — down from here.
     kiteFraction: 0.13,
-    widthFactorMin: 2.6,
-    widthFactorMax: 3.4,
+    // At the floor the brief allows. The lane's width is fixed by the
+    // anti-cheat cap, so the SMALLER this factor is the BIGGER the kite
+    // inside that lane; 1.6 is as large as the kite can be made.
+    widthFactorMin: 1.6,
+    widthFactorMax: 2.1,
     waves: 2,
+    secondShare: 0.25,
+    secondRatio: 1.7,
+    maxHalfOverAmp: 0.16,
     // 90% of the room, leaving a tenth as margin rather than letting
     // the corridor's edge kiss the measured limit of the reach at every
     // peak — the reach box is an estimate from three held points, not a
     // survey.
     curveAmp: 0.9,
     maxHandSpeedArmPerSec: 0.6,
-    // Slow enough that the reach ceiling, not the hand-speed ceiling,
-    // is what limits the curve. At the old 0.10 the speed cap flattened
-    // the path to 7.5% of the reach; here it is about 25%.
-    scrollPerSec: 0.045,
+    // Slower again. A deeper wave is what stops a still hand passing —
+    // the lane is capped as a share of the amplitude, so a bigger
+    // amplitude buys a bigger lane and a bigger kite at the same
+    // cheat-resistance — and depth is bought with scroll speed.
+    scrollPerSec: 0.04,
   },
   2: {
     id: 2,
@@ -120,19 +157,27 @@ export const LEVELS: Record<LevelId, KiteLevel> = {
     // for error is roughly half — and a deeper curve, which its higher
     // hand-speed ceiling is what pays for.
     kiteFraction: 0.09,
-    widthFactorMin: 1.8,
-    widthFactorMax: 2.4,
+    widthFactorMin: 1.6,
+    widthFactorMax: 2.1,
+    secondShare: 0.25,
+    // Livelier than level 1's: it shortens the turnaround a still hand
+    // can sit in, at the cost of some amplitude.
+    secondRatio: 2.6,
     // Two waves, not three. A third wave costs amplitude twice over —
     // the slope scales with frequency, so the speed ceiling pushes the
     // curve down further, and a shallower curve was the complaint.
     waves: 2,
-    curveAmp: 0.9,
+    curveAmp: 0.95,
+    // Tighter than level 1's: its still-hand bar is 20% rather than
+    // 30%, and this ratio is the only thing that sets it.
+    maxHalfOverAmp: 0.14,
     maxHandSpeedArmPerSec: 0.9,
-    // 0.07 was asked for and was not enough: at that speed the hand
-    // speed ceiling still bound and the curve stopped at 26% of the
-    // reach. 0.05 lets it reach about 35%, which is close to the 39.2%
-    // its lane width allows at all.
-    scrollPerSec: 0.05,
+    // Slower than level 1's, which looks wrong for a harder level and
+    // is not: level 2's difficulty is its narrower lane and its deeper
+    // wave, and the deeper wave is only affordable under its hand-speed
+    // ceiling at this scroll. It still demands 0.90 arm/s of vertical
+    // hand speed against level 1's 0.60.
+    scrollPerSec: 0.035,
   },
 };
 

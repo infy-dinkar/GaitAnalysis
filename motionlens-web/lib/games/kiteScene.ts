@@ -351,7 +351,7 @@ export class KiteScene extends GameSceneBase {
     this.anchorDot = this.textures.exists("fx-dot")
       ? this.add
         .image(w / 2, h / 2, "fx-dot")
-        .setDisplaySize(this.kitePx * 0.3, this.kitePx * 0.3)
+        .setDisplaySize(this.anchorPx(), this.anchorPx())
         .setTint(0xffffff)
         .setAlpha(0.95)
         .setDepth(12)
@@ -527,7 +527,7 @@ export class KiteScene extends GameSceneBase {
     this.backdrop?.setDisplaySize(w, h);
     this.kitePx = this.kiteSizePx();
     this.kite?.setDisplaySize(this.kitePx, this.kitePx);
-    this.anchorDot?.setDisplaySize(this.kitePx * 0.3, this.kitePx * 0.3);
+    this.anchorDot?.setDisplaySize(this.anchorPx(), this.anchorPx());
 
     // The string is tied to the ground, off to the side the patient is
     // NOT playing with, so it never cuts across the working area.
@@ -699,6 +699,19 @@ export class KiteScene extends GameSceneBase {
     const cover = this.control.state.cover;
     if (cover.dispH > 0) return this.corridor.kiteNy * cover.dispH;
     return this.unit * 0.12;
+  }
+
+  /**
+   * The anchor dot's size.
+   *
+   * A share of the kite, but never below a fraction of the canvas: the
+   * anti-cheat cap can drive the kite down to about 30 px on a 1080
+   * screen, and three tenths of that is a speck. The dot marks the
+   * point the game actually judges, so it has to stay findable at 2 m
+   * whatever the kite ends up as.
+   */
+  private anchorPx(): number {
+    return Math.max(this.kitePx * 0.3, this.unit * 0.018);
   }
 
   /** 1 for the first half of the round, 2 for the second. */

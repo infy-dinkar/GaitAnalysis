@@ -29,13 +29,13 @@
 //     not assumed — see makeCorridor.
 
 import type { ReachBox } from "@/lib/games/calibration";
-import {
-  WAVE_MAIN_SHARE,
-  WAVE_SECOND_RATIO,
-  WAVE_SECOND_SHARE,
-  WIDTH_WAVE_FREQ,
-  type KiteLevel,
-} from "@/lib/games/kiteLevels";
+import { WIDTH_WAVE_FREQ, type KiteLevel } from "@/lib/games/kiteLevels";
+
+/** However tight the anti-cheat cap gets, one pass may not shrink the
+ *  lane and kite below this fraction of their previous size — a kite
+ *  reduced to a speck would be unplayable, and an unplayable game is
+ *  not an improvement on a cheatable one. */
+const MIN_KITE_SCALE = 0.35;
 
 export interface Corridor {
   /** Centre of the patient's vertical reach, and its bounds. */
@@ -55,9 +55,11 @@ export interface Corridor {
   /** What the target amplitude would have been on the reach bound
    *  alone, for the debug readout. */
   ampNominalNy: number;
-  /** Centreline waves, in cycles per canvas width. */
+  /** Centreline waves, in cycles per canvas width, and their weights. */
   f1: number;
   f2: number;
+  mainShare: number;
+  secondShare: number;
   p1: number;
   p2: number;
   /** Width wave. */
@@ -96,7 +98,7 @@ export function makeCorridor(
   const span = Math.max(1e-4, box.yHi - box.yLo);
   const midNy = (box.yLo + box.yHi) / 2;
 
-  const kiteNy = kiteHeightNy(box, level);
+  let kiteNy = kiteHeightNy(box, level);
   let halfMinNy = (kiteNy * level.widthFactorMin) / 2;
   let halfMaxNy = (kiteNy * level.widthFactorMax) / 2;
 
@@ -112,14 +114,10 @@ export function makeCorridor(
     halfMinNy *= k;
   }
 
-  // Room left for the centreline once the WIDEST part of the corridor
-  // is accounted for, so the edges are safe everywhere rather than only
-  // where the lane happens to be narrow.
-  const room = Math.max(0, span / 2 - halfMaxNy);
-  const ampNominalNy = room * level.curveAmp;
-
   const f1 = level.waves;
-  const f2 = f1 * WAVE_SECOND_RATIO;
+  const f2 = f1 * level.secondRatio;
+  const secondShare = level.secondShare;
+  const mainShare = 1 - secondShare;
 
   // Guarantee 3. The centreline is
   //   amp * (m*sin(2*pi*f1*x + p1) + s*sin(2*pi*f2*x + p2))
@@ -127,18 +125,39 @@ export function makeCorridor(
   //   amp * 2*pi * (m*f1 + s*f2)
   // and the vertical speed that demands is that times the scroll speed,
   // converted from ny into arm lengths.
-  const slopeShape =
-    2 * Math.PI * (WAVE_MAIN_SHARE * f1 + WAVE_SECOND_SHARE * f2);
+  const slopeShape = 2 * Math.PI * (mainShare * f1 + secondShare * f2);
   const perAmp = slopeShape * level.scrollPerSec * nyToArm;
 
-  let ampNy = ampNominalNy;
+  // ── Amplitude and lane width are solved together.
+  //
+  // They depend on each other: the lane's width comes out of the reach
+  // before the centreline gets its room, and the lane is then capped as
+  // a share of the amplitude that leaves. Three passes settle it — each
+  // narrowing of the lane frees room, which raises the amplitude, which
+  // raises the cap, and it converges from below.
+  let ampNy = 0;
+  let ampNominalNy = 0;
   let ampLimitedBy: "reach" | "speed" = "reach";
-  if (perAmp > 0) {
-    const ampFromSpeed = level.maxHandSpeedArmPerSec / perAmp;
-    if (ampFromSpeed < ampNy) {
-      ampNy = ampFromSpeed;
-      ampLimitedBy = "speed";
+  for (let pass = 0; pass < 4; pass++) {
+    const room = Math.max(0, span / 2 - halfMaxNy);
+    ampNominalNy = room * level.curveAmp;
+    ampNy = ampNominalNy;
+    ampLimitedBy = "reach";
+    if (perAmp > 0) {
+      const ampFromSpeed = level.maxHandSpeedArmPerSec / perAmp;
+      if (ampFromSpeed < ampNy) {
+        ampNy = ampFromSpeed;
+        ampLimitedBy = "speed";
+      }
     }
+    const capHalf = level.maxHalfOverAmp * ampNy;
+    if (halfMaxNy <= capHalf + 1e-12) break;
+    // Scale the lane AND the kite by the same factor, so the kite still
+    // fits its lane exactly as the level specifies.
+    const k = Math.max(MIN_KITE_SCALE, capHalf / halfMaxNy);
+    halfMaxNy *= k;
+    halfMinNy *= k;
+    kiteNy *= k;
   }
 
   return {
@@ -153,6 +172,8 @@ export function makeCorridor(
     ampNominalNy,
     f1,
     f2,
+    mainShare,
+    secondShare,
     p1: rand() * Math.PI * 2,
     p2: rand() * Math.PI * 2,
     widthPhase: rand() * Math.PI * 2,
@@ -200,8 +221,7 @@ export function isNarrowAt(c: Corridor, worldX: number): boolean {
 export function centreNy(c: Corridor, worldX: number): number {
   const a = Math.sin(2 * Math.PI * c.f1 * worldX + c.p1);
   const b = Math.sin(2 * Math.PI * c.f2 * worldX + c.p2);
-  const raw = c.midNy
-    + c.ampNy * (WAVE_MAIN_SHARE * a + WAVE_SECOND_SHARE * b);
+  const raw = c.midNy + c.ampNy * (c.mainShare * a + c.secondShare * b);
   const half = halfNyAt(c, worldX);
   return Math.min(c.hiNy - half, Math.max(c.loNy + half, raw));
 }
@@ -234,8 +254,8 @@ export function requiredHandSpeed(
   scrollPerSec: number,
 ): number {
   const da = 2 * Math.PI * c.f1
-    * Math.cos(2 * Math.PI * c.f1 * worldX + c.p1) * WAVE_MAIN_SHARE;
+    * Math.cos(2 * Math.PI * c.f1 * worldX + c.p1) * c.mainShare;
   const db = 2 * Math.PI * c.f2
-    * Math.cos(2 * Math.PI * c.f2 * worldX + c.p2) * WAVE_SECOND_SHARE;
+    * Math.cos(2 * Math.PI * c.f2 * worldX + c.p2) * c.secondShare;
   return Math.abs(c.ampNy * (da + db)) * scrollPerSec * c.nyToArm;
 }
