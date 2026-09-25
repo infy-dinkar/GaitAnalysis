@@ -331,6 +331,10 @@ function KiteFlyingBody({ m }: { m: Metrics }) {
   const smooth = num(m.smoothness_score);
   const h1 = num(m.first_half_time_in_corridor_pct);
   const h2 = num(m.second_half_time_in_corridor_pct);
+  // Rounds saved before the corridor's width started varying carry
+  // neither; the row is skipped for them rather than shown as dashes.
+  const narrow = num(m.narrow_time_in_corridor_pct);
+  const wide = num(m.wide_time_in_corridor_pct);
   // max_abduction_deg is saved but not read, for the same reason as in
   // the other two games.
 
@@ -357,6 +361,20 @@ function KiteFlyingBody({ m }: { m: Metrics }) {
           />
           <Stat label="Kite falls" value={falls === null ? "—" : String(falls)} />
         </div>
+        {/* The lane breathes between the level's two width factors.
+            Holding the line through a narrow stretch is a harder thing
+            than holding it through a wide one, so the two are reported
+            apart — a patient who keeps the wide stretches and loses the
+            narrow ones has a precision problem, not a tracking one. */}
+        {narrow !== null && (
+          <div className="mt-4 grid grid-cols-2 gap-4 border-t border-border pt-4">
+            <Stat label="In narrow stretches" value={`${narrow}%`} />
+            <Stat
+              label="In wide stretches"
+              value={wide === null ? "—" : `${wide}%`}
+            />
+          </div>
+        )}
       </section>
 
       {/* Movement quality. This is what Kite Flying measures that the

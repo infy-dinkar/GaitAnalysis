@@ -95,6 +95,14 @@ function ClinicalBlock({ r }: { r: KiteResult }) {
   const dev = r.devCount > 0 ? Math.round((r.devSum / r.devCount) * 100) : null;
   const rows: [string, string][] = [
     [
+      "In narrow stretches",
+      r.narrowMs > 0 ? `${pct(r.narrowInsideMs, r.narrowMs)}%` : "—",
+    ],
+    [
+      "In wide stretches",
+      r.wideMs > 0 ? `${pct(r.wideInsideMs, r.wideMs)}%` : "—",
+    ],
+    [
       "Velocity peaks",
       pps === null ? "—" : `${pps.toFixed(2)} / s of movement`,
     ],

@@ -23,21 +23,19 @@
 import Phaser from "phaser";
 import { GameSceneBase, type FrameInfo } from "@/lib/games/gameSceneBase";
 import type { KiteControl } from "@/lib/games/kiteControl";
-import {
-  blankKiteResult,
-  pct,
-  type KiteResult,
-} from "@/lib/games/kiteMetrics";
+import { pct, type KiteResult } from "@/lib/games/kiteMetrics";
+import { KiteSession } from "@/lib/games/kiteSession";
 import { MovementAnalyser } from "@/lib/games/kiteMovement";
 import {
   centreNy,
-  deviationRatio,
+
+  halfNyAt,
   makeCorridor,
+  requiredHandSpeed,
   type Corridor,
 } from "@/lib/games/kiteCorridor";
 import {
   FALL_AFTER_MS,
-  KITE_FRACTION,
   RESPAWN_MS,
   ROUND_MS,
   TUMBLE_MS,
@@ -247,7 +245,15 @@ export class KiteScene extends GameSceneBase {
 
   private corridor!: Corridor;
   private analyser = new MovementAnalyser();
-  private res: KiteResult = blankKiteResult(1, "right");
+  /** Owns every accumulated number and the inside/fall rules. */
+  private session!: KiteSession;
+  /** Kite height in canvas px, from the level and the reach — never
+   *  from the display scale. */
+  private kitePx = 0;
+  /** Live readings for the overlay. */
+  private lastFactor = 0;
+  private lastHalfPx = 0;
+  private lastNeedSpeed = 0;
 
   /** Distance scrolled, in canvas widths. The ribbon's whole shape is
    *  a function of this. */
@@ -256,8 +262,6 @@ export class KiteScene extends GameSceneBase {
   private anchorX = 0;
   private anchorY = 0;
 
-  /** Continuous time the kite has been outside the ribbon. */
-  private outsideMs = 0;
   /** While falling the patient has nothing to steer, so neither the
    *  corridor clock nor the movement trace runs. */
   private falling = false;
@@ -270,15 +274,30 @@ export class KiteScene extends GameSceneBase {
   private streaks: { u: number; v: number; len: number }[] = [];
   private introText: Phaser.GameObjects.Text | null = null;
   private introDone = false;
+  /** The point the game actually judges: the palm, drawn so the patient
+   *  can see what is being asked of them. Because the corridor is a
+   *  fixed multiple of the kite, "this dot is inside" and "the kite
+   *  looks inside" agree. */
+  private anchorDot: Phaser.GameObjects.Image | null = null;
 
   constructor() {
     super("kite-flying");
   }
 
   create() {
+    // `s` scales TEXT AND HUD ONLY. The kite and the corridor are sized
+    // from the level and the patient's reach — see kiteLevels.ts.
     const s = this.control.visualScale;
-    this.res = blankKiteResult(this.control.level.id, this.control.hand);
-    this.corridor = makeCorridor(this.control.box, this.control.level);
+
+    // Arm lengths per unit of ny, measured now, so the level's hand
+    // speed ceiling can be enforced in units that mean the same for
+    // every patient at every distance from the camera.
+    const st = this.control.state;
+    const nyToArm = st.armLenPx > 1 && st.cover.dispH > 0
+      ? st.cover.dispH / st.armLenPx
+      : 0;
+    this.corridor = makeCorridor(this.control.box, this.control.level, nyToArm);
+    this.session = new KiteSession(this.corridor, FALL_AFTER_MS);
 
     const w = Math.round(this.scale.width);
     const h = Math.round(this.scale.height);
@@ -322,10 +341,21 @@ export class KiteScene extends GameSceneBase {
         .setAlpha(0)
         .setDepth(10)
       : null;
+    this.kitePx = this.kiteSizePx();
     this.kite = this.add
       .image(w / 2, h / 2, "kf-kite")
-      .setDisplaySize(this.unit * KITE_FRACTION * s, this.unit * KITE_FRACTION * s)
+      .setDisplaySize(this.kitePx, this.kitePx)
       .setDepth(11);
+
+    // The anchor: the point the corridor test actually uses.
+    this.anchorDot = this.textures.exists("fx-dot")
+      ? this.add
+        .image(w / 2, h / 2, "fx-dot")
+        .setDisplaySize(this.kitePx * 0.3, this.kitePx * 0.3)
+        .setTint(0xffffff)
+        .setAlpha(0.95)
+        .setDepth(12)
+      : null;
 
     // The base drives `cursor`: position and alpha, every frame. Here
     // that is an INVISIBLE stand-in, because the kite has to be free to
@@ -462,9 +492,12 @@ export class KiteScene extends GameSceneBase {
       y1: this.control.box.yHi,
     };
     // Created here, in the order the debug panel should print them.
+    d.extra["kite height"] = "—";
     d.extra["corridor width"] = "—";
+    d.extra["anchor inside"] = "—";
     d.extra["deviation"] = "—";
-    d.extra["inside"] = "—";
+    d.extra["needs hand speed"] = "—";
+    d.extra["amplitude"] = "—";
     d.extra["raw vs drawn"] = "—";
     d.extra["velocity peaks"] = "0";
   }
@@ -473,10 +506,15 @@ export class KiteScene extends GameSceneBase {
     const c = this.control;
     this.life?.destroy();
     this.life = null;
-    this.res.peaksPerSec = this.analyser.peaksPerSec;
-    this.res.peakCount = this.analyser.peakCount;
-    this.res.movingSec = Math.round(this.analyser.movingSec * 10) / 10;
-    c.onFinish({ ...this.res, level: c.level.id, hand: c.hand });
+    const result: KiteResult = {
+      ...this.session.totals,
+      level: c.level.id,
+      hand: c.hand,
+      peaksPerSec: this.analyser.peaksPerSec,
+      peakCount: this.analyser.peakCount,
+      movingSec: Math.round(this.analyser.movingSec * 10) / 10,
+    };
+    c.onFinish(result);
   }
 
   protected layout(): void {
@@ -487,7 +525,9 @@ export class KiteScene extends GameSceneBase {
     this.canvasSize = { w, h };
 
     this.backdrop?.setDisplaySize(w, h);
-    this.kite?.setDisplaySize(u * KITE_FRACTION * s, u * KITE_FRACTION * s);
+    this.kitePx = this.kiteSizePx();
+    this.kite?.setDisplaySize(this.kitePx, this.kitePx);
+    this.anchorDot?.setDisplaySize(this.kitePx * 0.3, this.kitePx * 0.3);
 
     // The string is tied to the ground, off to the side the patient is
     // NOT playing with, so it never cuts across the working area.
@@ -582,27 +622,44 @@ export class KiteScene extends GameSceneBase {
       this.kite.setPosition(this.cursor.x, this.cursor.y);
     }
     this.glow?.setPosition(this.kite.x, this.kite.y);
+    this.anchorDot
+      ?.setPosition(this.cursor.x, this.cursor.y)
+      .setVisible(!this.falling);
     this.drawString();
 
     const cover = c.state.cover;
     const W = this.scale.width || 1;
 
-    // Kite against the corridor — this drives the feedback.
-    let kiteInside = false;
-    if (cover.dispH > 0 && !this.falling) {
-      const ny = (this.kite.y - cover.offY) / cover.dispH;
-      const worldX = this.scrollU + this.kite.x / W;
-      const dev = deviationRatio(this.corridor, worldX, ny);
-      this.lastDev = dev;
-      kiteInside = dev <= 1;
-      this.applyKiteMood(kiteInside);
+    // ── One frame through the session, which owns every rule and
+    //    every total. The kite point is the DRAWN anchor and the palm
+    //    point is the RAW one; see lib/games/kiteSession.ts.
+    const toPoint = (x: number, y: number) => ({
+      worldX: this.scrollU + x / W,
+      ny: (y - cover.offY) / cover.dispH,
+    });
+    const measurable = c.state.live && c.state.inFrame && !this.falling;
+    const step = cover.dispH > 0
+      ? this.session.step({
+        dtMs,
+        half: this.half(),
+        kite: this.falling ? null : toPoint(this.kite.x, this.kite.y),
+        palm: measurable ? toPoint(c.state.palmX, c.state.palmY) : null,
+      })
+      : null;
 
-      if (kiteInside) {
-        this.outsideMs = 0;
-      } else {
-        this.outsideMs += dtMs;
-        if (this.outsideMs >= FALL_AFTER_MS) this.startFall(time);
-      }
+    const kiteInside = step?.kiteInside ?? false;
+    if (step && !this.falling) {
+      this.lastDev = step.devRatio;
+      this.lastFactor = step.factor;
+      this.lastHalfPx = step.localHalfNy * 2 * cover.dispH;
+      this.lastNeedSpeed = requiredHandSpeed(
+        this.corridor,
+        this.scrollU + this.kite.x / W,
+        c.level.scrollPerSec,
+      );
+      this.applyKiteMood(kiteInside);
+      if (step.fellNow) this.startFall(time);
+
       if (kiteInside !== this.wasInside) {
         this.wasInside = kiteInside;
         // A short cue on the crossing rather than a tone held while
@@ -613,33 +670,35 @@ export class KiteScene extends GameSceneBase {
       }
     }
 
-    // ── Metrics, from the RAW palm. Only while the hand is genuinely
-    //    visible and the patient has a kite to steer.
-    const measurable = c.state.live && c.state.inFrame && !this.falling;
+    // The movement analyser takes the raw palm on exactly the frames
+    // the session scored, so the two measures cover the same time.
     if (measurable && cover.dispH > 0) {
-      const rawNy = (c.state.palmY - cover.offY) / cover.dispH;
-      const rawWorldX = this.scrollU + c.state.palmX / W;
-      const rawDev = deviationRatio(this.corridor, rawWorldX, rawNy);
-      const palmInside = rawDev <= 1;
-
-      this.res.measuredMs += dtMs;
-      this.res.devSum += rawDev;
-      this.res.devCount += 1;
-      if (palmInside) this.res.insideMs += dtMs;
-
-      const half = this.half() === 1 ? this.res.firstHalf : this.res.secondHalf;
-      half.total += dtMs;
-      if (palmInside) half.inside += dtMs;
-
       this.analyser.push(time, c.state.palmX, c.state.palmY, c.state.armLenPx);
     } else {
       this.analyser.breakTrace();
     }
 
-    c.insidePct = pct(this.res.insideMs, this.res.measuredMs);
+    const t = this.session.totals;
+    c.insidePct = pct(t.insideMs, t.measuredMs);
+    c.falls = t.falls;
     this.pctText.setText(`${c.insidePct}%`);
+    this.fallText?.setText(t.falls > 0 ? `Falls: ${t.falls}` : "");
 
     this.writeDebug(frame, kiteInside);
+  }
+
+  /**
+   * Kite height in canvas px.
+   *
+   * From the level and the calibrated reach, projected through the live
+   * object-cover geometry — and NOT from `visualScale`. Before a pose
+   * has arrived there is no reach to measure against, so it falls back
+   * to a fraction of the canvas unit just so something is drawn.
+   */
+  private kiteSizePx(): number {
+    const cover = this.control.state.cover;
+    if (cover.dispH > 0) return this.corridor.kiteNy * cover.dispH;
+    return this.unit * 0.12;
   }
 
   /** 1 for the first half of the round, 2 for the second. */
@@ -647,18 +706,16 @@ export class KiteScene extends GameSceneBase {
     return this.control.remainingMs > ROUND_MS / 2 ? 1 : 2;
   }
 
-  /** Height of the centreline at a screen x, in canvas px. */
-  private centrePx(x: number, cover: { offY: number; dispH: number }): number {
-    const W = this.scale.width || 1;
-    return cover.offY + centreNy(this.corridor, this.scrollU + x / W) * cover.dispH;
-  }
-
   /**
    * Redraw the ribbon for the current scroll.
    *
-   * Four passes, outermost first: a dark outline, the orange rails, the
-   * gold fill, then the wind streaks. The rails and the outline are what
-   * make it readable over a white cloud — a translucent fill alone
+   * The half-width varies along the path now, so every pass samples it
+   * per column rather than using one number — that is what makes the
+   * lane visibly breathe between the level's two factors.
+   *
+   * Four passes, outermost first: a dark outline, the gold fill, the
+   * orange rails, then the wind streaks. The rails and the outline are
+   * what make it readable over a white cloud — a translucent fill alone
    * vanishes against one at any alpha that still lets the sky through.
    */
   private drawRibbon(): void {
@@ -668,23 +725,25 @@ export class KiteScene extends GameSceneBase {
     if (cover.dispH <= 0) return;
     const W = this.scale.width || 1;
     const u = this.unit;
-    const halfPx = this.corridor.halfNy * cover.dispH;
-    if (halfPx <= 0) return;
 
-    // Sample the centreline once and reuse it for every pass.
+    // Sample the centreline and the local half-width once per column
+    // and reuse both for every pass.
     const xs: number[] = [];
     const cy: number[] = [];
+    const hp: number[] = [];
     for (let i = 0; i <= RIBBON_COLS; i++) {
       const x = (i / RIBBON_COLS) * W;
+      const worldX = this.scrollU + x / W;
       xs.push(x);
-      cy.push(this.centrePx(x, cover));
+      cy.push(cover.offY + centreNy(this.corridor, worldX) * cover.dispH);
+      hp.push(halfNyAt(this.corridor, worldX) * cover.dispH);
     }
 
-    const rail = (offset: number, colour: number, alpha: number, width: number) => {
+    const rail = (sign: number, colour: number, alpha: number, width: number) => {
       g.lineStyle(width, colour, alpha);
       g.beginPath();
       for (let i = 0; i <= RIBBON_COLS; i++) {
-        const y = cy[i] + offset;
+        const y = cy[i] + sign * hp[i];
         if (i === 0) g.moveTo(xs[i], y);
         else g.lineTo(xs[i], y);
       }
@@ -693,27 +752,36 @@ export class KiteScene extends GameSceneBase {
 
     // Dark outline, just outside the rails.
     const ow = u * RIBBON_OUTLINE_W;
-    rail(-halfPx, RIBBON_OUTLINE, RIBBON_OUTLINE_ALPHA, ow);
-    rail(halfPx, RIBBON_OUTLINE, RIBBON_OUTLINE_ALPHA, ow);
+    rail(-1, RIBBON_OUTLINE, RIBBON_OUTLINE_ALPHA, ow);
+    rail(1, RIBBON_OUTLINE, RIBBON_OUTLINE_ALPHA, ow);
 
     // Gold fill between the rails.
     g.fillStyle(RIBBON_FILL, RIBBON_FILL_ALPHA);
     g.beginPath();
     for (let i = 0; i <= RIBBON_COLS; i++) {
-      const y = cy[i] - halfPx;
+      const y = cy[i] - hp[i];
       if (i === 0) g.moveTo(xs[i], y);
       else g.lineTo(xs[i], y);
     }
-    for (let i = RIBBON_COLS; i >= 0; i--) g.lineTo(xs[i], cy[i] + halfPx);
+    for (let i = RIBBON_COLS; i >= 0; i--) g.lineTo(xs[i], cy[i] + hp[i]);
     g.closePath();
     g.fillPath();
 
     // Solid orange rails on top of the fill's own edge.
     const ew = u * RIBBON_EDGE_W;
-    rail(-halfPx, RIBBON_EDGE, 1, ew);
-    rail(halfPx, RIBBON_EDGE, 1, ew);
+    rail(-1, RIBBON_EDGE, 1, ew);
+    rail(1, RIBBON_EDGE, 1, ew);
 
-    // Wind streaks, inside the band only.
+    // Wind streaks, inside the band only. Their offset is a fraction of
+    // the LOCAL half-width, so they narrow with the lane instead of
+    // spilling over the rails where it pinches.
+    const at = (x: number) => {
+      const worldX = this.scrollU + x / W;
+      return {
+        c: cover.offY + centreNy(this.corridor, worldX) * cover.dispH,
+        h: halfNyAt(this.corridor, worldX) * cover.dispH,
+      };
+    };
     g.lineStyle(Math.max(1, u * 0.004), STREAK_TINT, STREAK_ALPHA);
     for (const st of this.streaks) {
       const x0 = st.u * W;
@@ -722,9 +790,11 @@ export class KiteScene extends GameSceneBase {
       const a = Math.max(0, x0);
       const b = Math.min(W, x1);
       if (b - a < 1) continue;
+      const pa = at(a);
+      const pb = at(b);
       g.beginPath();
-      g.moveTo(a, this.centrePx(a, cover) + st.v * halfPx);
-      g.lineTo(b, this.centrePx(b, cover) + st.v * halfPx);
+      g.moveTo(a, pa.c + st.v * pa.h);
+      g.lineTo(b, pb.c + st.v * pb.h);
       g.strokePath();
     }
   }
@@ -805,10 +875,11 @@ export class KiteScene extends GameSceneBase {
   private startFall(time: number): void {
     if (this.falling) return;
     this.falling = true;
-    this.outsideMs = 0;
-    this.res.falls += 1;
-    this.control.falls = this.res.falls;
-    this.fallText?.setText(`Falls: ${this.res.falls}`);
+    // The session counted the fall on the frame it decided; here we
+    // only stop its grace clock and play the tumble.
+    this.session.setAway(true);
+    this.control.falls = this.session.totals.falls;
+    this.fallText?.setText(`Falls: ${this.session.totals.falls}`);
     this.control.audio.error();
     // The trace ends here: the patient has nothing to steer until the
     // kite comes back, so that time is not theirs to be judged on.
@@ -838,7 +909,7 @@ export class KiteScene extends GameSceneBase {
   private respawn(): void {
     this.falling = false;
     this.fallEndsAt = -1;
-    this.outsideMs = 0;
+    this.session.setAway(false);
     this.wasInside = true;
     this.tweens.killTweensOf(this.kite);
     this.kite
@@ -888,14 +959,23 @@ export class KiteScene extends GameSceneBase {
     this.writeCoreDebug(frame);
     const c = this.control;
     const d = c.debug;
-    const cover = c.state.cover;
-    const halfPx = cover.dispH > 0 ? this.corridor.halfNy * cover.dispH : 0;
-    d.extra["corridor width"] =
-      `${Math.round(halfPx * 2)} px (${(this.corridor.halfNy * 2).toFixed(3)} ny)`;
-    d.extra["deviation"] = `${(this.lastDev * 100).toFixed(0)}% of half-width`;
-    d.extra["inside"] = this.falling
+    const t = this.session.totals;
+
+    d.extra["kite height"] = `${Math.round(this.kitePx)} px`
+      + ` (${(this.corridor.kiteNy * 100).toFixed(1)}% of reach)`;
+    d.extra["corridor width"] = `${Math.round(this.lastHalfPx)} px`
+      + ` = ${this.lastFactor.toFixed(2)}x kite`
+      + ` (${this.corridor.factorMin}-${this.corridor.factorMax})`;
+    d.extra["anchor inside"] = this.falling
       ? "falling"
-      : inside ? "yes" : `no (${Math.round(this.outsideMs)} ms)`;
+      : inside ? "yes" : `no (${Math.round(this.session.outsideForMs)} ms)`;
+    d.extra["deviation"] = `${(this.lastDev * 100).toFixed(0)}% of local half-width`;
+    d.extra["needs hand speed"] = `${this.lastNeedSpeed.toFixed(2)} arm/s`
+      + ` (peak ${this.corridor.peakHandSpeedArmPerSec.toFixed(2)},`
+      + ` cap ${c.level.maxHandSpeedArmPerSec})`;
+    d.extra["amplitude"] =
+      `${(this.corridor.ampNy * 100).toFixed(1)}% of reach`
+      + ` (limited by ${this.corridor.ampLimitedBy})`;
     d.extra["raw vs drawn"] = `${Math.round(
       Math.hypot(this.cursor.x - c.state.palmX, this.cursor.y - c.state.palmY),
     )} px`;
@@ -908,11 +988,13 @@ export class KiteScene extends GameSceneBase {
       this.fpsText.setText(
         `fps ${d.fps} min ${d.fpsMin}  pose ${d.poseHz}Hz  `
         + `cutoff ${d.cutoffHz}Hz  lag ${d.lagPx}px  `
-        + `palm ${d.palmSource}\n`
-        + `arm ${d.armLenPx}px  headroom ${d.headroomPx}px  `
-        + `ratio ${d.headroomRatio}\n`
+        + `palm ${d.palmSource}
+`
+        + `kite ${Math.round(this.kitePx)}px  lane ${Math.round(this.lastHalfPx)}px `
+        + `= ${this.lastFactor.toFixed(2)}x  needs ${this.lastNeedSpeed.toFixed(2)} arm/s
+`
         + `in corridor ${c.insidePct}%  dev ${(this.lastDev * 100).toFixed(0)}%  `
-        + `falls ${this.res.falls}  peaks ${this.analyser.peakCount}`,
+        + `falls ${t.falls}  peaks ${this.analyser.peakCount}`,
       );
     }
   }
