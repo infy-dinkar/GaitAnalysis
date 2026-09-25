@@ -7,7 +7,7 @@
 
 import { useEffect, useState, use as usePromise } from "react";
 import Link from "next/link";
-import { ArrowUpRight, CloudLightning, Gamepad2 } from "lucide-react";
+import { ArrowUpRight, CloudLightning, Gamepad2, Wind } from "lucide-react";
 import { AuthGuard } from "@/components/auth/AuthGuard";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { Button } from "@/components/ui/Button";
@@ -102,6 +102,15 @@ const GAMES: GameCard[] = [
       + "through the round. 60 seconds.",
     icon: CloudLightning,
     tone: "bg-sky-500/10 text-sky-700 dark:text-sky-400",
+  },
+  {
+    slug: "kite-flying",
+    title: "Kite Flying",
+    blurb:
+      "Keep a kite inside a drifting ribbon of wind. Measures how "
+      + "steadily the hand holds a moving line. 60 seconds.",
+    icon: Wind,
+    tone: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
   },
 ];
 
