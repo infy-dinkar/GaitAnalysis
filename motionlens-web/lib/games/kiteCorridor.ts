@@ -132,13 +132,23 @@ export function makeCorridor(
   //
   // They depend on each other: the lane's width comes out of the reach
   // before the centreline gets its room, and the lane is then capped as
-  // a share of the amplitude that leaves. Three passes settle it — each
-  // narrowing of the lane frees room, which raises the amplitude, which
-  // raises the cap, and it converges from below.
+  // a share of the amplitude that leaves. So this walks to the fixed
+  // point of
+  //     halfMax = min(nominal, maxHalfOverAmp * amp(halfMax))
+  // rather than just shrinking until it is under the cap.
+  //
+  // The difference matters. A shrink-only loop overshoots on its first
+  // pass — it divides by an amplitude computed from the OLD, wider lane
+  // — and then stops, because it is already below the cap and will not
+  // come back up. Where the amplitude is limited by the reach rather
+  // than by hand speed that left the lane about 10% narrower than
+  // `maxHalfOverAmp` asked for, which made the setting mean something
+  // other than what it says and made tuning guesswork.
+  const nominalHalfMaxNy = halfMaxNy;
   let ampNy = 0;
   let ampNominalNy = 0;
   let ampLimitedBy: "reach" | "speed" = "reach";
-  for (let pass = 0; pass < 4; pass++) {
+  for (let pass = 0; pass < 8; pass++) {
     const room = Math.max(0, span / 2 - halfMaxNy);
     ampNominalNy = room * level.curveAmp;
     ampNy = ampNominalNy;
@@ -150,11 +160,13 @@ export function makeCorridor(
         ampLimitedBy = "speed";
       }
     }
-    const capHalf = level.maxHalfOverAmp * ampNy;
-    if (halfMaxNy <= capHalf + 1e-12) break;
+    // The cap is a CEILING, never a target: a level that asks for a
+    // narrower lane than the cap allows keeps its narrower lane.
+    const target = Math.min(nominalHalfMaxNy, level.maxHalfOverAmp * ampNy);
+    if (halfMaxNy <= 0 || Math.abs(target - halfMaxNy) < span * 1e-6) break;
     // Scale the lane AND the kite by the same factor, so the kite still
     // fits its lane exactly as the level specifies.
-    const k = Math.max(MIN_KITE_SCALE, capHalf / halfMaxNy);
+    const k = Math.max(MIN_KITE_SCALE, target / halfMaxNy);
     halfMaxNy *= k;
     halfMinNy *= k;
     kiteNy *= k;

@@ -129,15 +129,20 @@ export const LEVELS: Record<LevelId, KiteLevel> = {
     // An UPPER BOUND now, not the answer: maxHalfOverAmp below almost
     // always scales the lane — and the kite with it — down from here.
     kiteFraction: 0.13,
-    // At the floor the brief allows. The lane's width is fixed by the
-    // anti-cheat cap, so the SMALLER this factor is the BIGGER the kite
-    // inside that lane; 1.6 is as large as the kite can be made.
-    widthFactorMin: 1.6,
-    widthFactorMax: 2.1,
+    // 1.6-2.1 x 1.19, matching the measured widening of the lane. The
+    // lane's width is fixed by the anti-cheat cap below and the kite is
+    // that width divided by this factor, so raising both by the SAME
+    // amount widens the lane and leaves the kite where it was.
+    widthFactorMin: 1.9,
+    widthFactorMax: 2.5,
     waves: 2,
     secondShare: 0.25,
     secondRatio: 1.7,
-    maxHalfOverAmp: 0.16,
+    // 0.16 -> 0.165. Measured, not derived: this is the value at which
+    // the lane comes out about a fifth wider across the range of reach
+    // geometries, with the width factors above raised in step so the
+    // kite keeps its size.
+    maxHalfOverAmp: 0.165,
     // 90% of the room, leaving a tenth as margin rather than letting
     // the corridor's edge kiss the measured limit of the reach at every
     // peak — the reach box is an estimate from three held points, not a
@@ -157,8 +162,9 @@ export const LEVELS: Record<LevelId, KiteLevel> = {
     // for error is roughly half — and a deeper curve, which its higher
     // hand-speed ceiling is what pays for.
     kiteFraction: 0.09,
-    widthFactorMin: 1.6,
-    widthFactorMax: 2.1,
+    // 1.6-2.1 x 1.19, in step with maxHalfOverAmp below — see level 1.
+    widthFactorMin: 1.9,
+    widthFactorMax: 2.5,
     secondShare: 0.25,
     // Livelier than level 1's: it shortens the turnaround a still hand
     // can sit in, at the cost of some amplitude.
@@ -168,9 +174,13 @@ export const LEVELS: Record<LevelId, KiteLevel> = {
     // curve down further, and a shallower curve was the complaint.
     waves: 2,
     curveAmp: 0.95,
-    // Tighter than level 1's: its still-hand bar is 20% rather than
-    // 30%, and this ratio is the only thing that sets it.
-    maxHalfOverAmp: 0.14,
+    // 0.14 x 1.2. Still tighter than level 1's: this ratio is the only
+    // thing that decides whether a still hand can pass, and level 2's
+    // bar is 25% against level 1's 35%.
+    // 0.14 -> 0.158, measured the same way. Still tighter than level
+    // 1's: this ratio is the only thing that decides whether a still
+    // hand can pass, and level 2's bar is 25% against level 1's 35%.
+    maxHalfOverAmp: 0.158,
     maxHandSpeedArmPerSec: 0.9,
     // Slower than level 1's, which looks wrong for a harder level and
     // is not: level 2's difficulty is its narrower lane and its deeper
