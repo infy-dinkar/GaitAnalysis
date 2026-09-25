@@ -27,8 +27,8 @@ import { pct, type KiteResult } from "@/lib/games/kiteMetrics";
 import { KiteSession } from "@/lib/games/kiteSession";
 import { MovementAnalyser } from "@/lib/games/kiteMovement";
 import {
+  amplitudeEnvelope,
   centreNy,
-
   halfNyAt,
   makeCorridor,
   requiredHandSpeed,
@@ -36,8 +36,10 @@ import {
 } from "@/lib/games/kiteCorridor";
 import {
   FALL_AFTER_MS,
+  LEAD_IN_MS,
   RESPAWN_MS,
   ROUND_MS,
+  SCORED_FROM_MS,
   TUMBLE_MS,
 } from "@/lib/games/kiteLevels";
 import { makeMeadowTexture, MEADOW_GROUND } from "@/lib/games/meadowScene";
@@ -492,6 +494,8 @@ export class KiteScene extends GameSceneBase {
       y1: this.control.box.yHi,
     };
     // Created here, in the order the debug panel should print them.
+    d.extra["lead-in"] = "—";
+    d.extra["amplitude now"] = "—";
     d.extra["kite height"] = "—";
     d.extra["corridor width"] = "—";
     d.extra["anchor inside"] = "—";
@@ -580,6 +584,11 @@ export class KiteScene extends GameSceneBase {
     // The wind keeps blowing even while the round is held — but it does
     // not while the hand is lost, or the corridor would scroll past
     // unseen and the patient would come back to a different shape.
+    // The lane's shape this frame. Set BEFORE anything reads the
+    // corridor, so the ribbon that is drawn and the lane that is scored
+    // are the same lane.
+    this.corridor.ampScale = amplitudeEnvelope(frame.elapsedMs);
+
     if (!lost) {
       this.scrollU += c.level.scrollPerSec * dt;
       this.stepStreaks(dt);
@@ -637,7 +646,11 @@ export class KiteScene extends GameSceneBase {
       worldX: this.scrollU + x / W,
       ny: (y - cover.offY) / cover.dispH,
     });
-    const measurable = c.state.live && c.state.inFrame && !this.falling;
+    // The straight lead-in and the fade-in are not a tracking task, so
+    // nothing in them is scored. The kite still flies and can still
+    // fall — that is feedback, and the patient is meant to be flying.
+    const scored = frame.elapsedMs >= SCORED_FROM_MS;
+    const measurable = c.state.live && c.state.inFrame && !this.falling && scored;
     const step = cover.dispH > 0
       ? this.session.step({
         dtMs,
@@ -974,6 +987,14 @@ export class KiteScene extends GameSceneBase {
     const d = c.debug;
     const t = this.session.totals;
 
+    const leadLeft = Math.max(0, SCORED_FROM_MS - frame.elapsedMs) / 1000;
+    d.extra["lead-in"] = frame.elapsedMs < LEAD_IN_MS
+      ? `straight, ${((LEAD_IN_MS - frame.elapsedMs) / 1000).toFixed(1)}s left`
+      : leadLeft > 0
+        ? `fading in, ${leadLeft.toFixed(1)}s to scoring`
+        : "over — scoring";
+    d.extra["amplitude now"] =
+      `${Math.round(this.corridor.ampScale * 100)}% of full`;
     d.extra["kite height"] = `${Math.round(this.kitePx)} px`
       + ` (${(this.corridor.kiteNy * 100).toFixed(1)}% of reach)`;
     d.extra["corridor width"] = `${Math.round(this.lastHalfPx)} px`

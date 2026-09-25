@@ -18,6 +18,7 @@
 import type { GameResult, MetricsContext } from "@/lib/games/gameDefinition";
 import type { Hand } from "@/lib/games/handTracker";
 import { smoothnessScore } from "@/lib/games/kiteMovement";
+import { SCORED_FROM_MS } from "@/lib/games/kiteLevels";
 import type { KiteTotals } from "@/lib/games/kiteSession";
 
 /**
@@ -53,6 +54,11 @@ export function buildKiteMetrics({
     level: result.level,
     hand: result.hand,
     duration_sec: Math.round(roundMs / 1000),
+    // The round is 60 s but the opening is a straight lead-in and a
+    // fade-in, which is not a tracking task — nothing below is measured
+    // over it. Recorded so a clinician comparing two rounds can see
+    // what window the percentages are percentages OF.
+    scored_sec: Math.round((roundMs - SCORED_FROM_MS) / 1000),
 
     // ── Holding the line
     time_in_corridor_pct: pct(result.insideMs, result.measuredMs),

@@ -36,6 +36,23 @@ export const WIDTH_WAVE_FREQ = 0.37;
 // turned out to be the lever that stops a still hand passing, and the
 // two levels want different amounts of it.
 
+// ── The opening of a round.
+//
+// The corridor arrives straight and level at mid-reach, so the patient
+// can find the kite, see where the lane is and get into it before the
+// task begins. Then the waves fade in.
+//
+// It is also why the scored window is shorter than the round: a flat
+// band is not a tracking task, and letting it into the averages would
+// flatter every patient by the same arbitrary amount.
+
+/** Dead straight for this long. */
+export const LEAD_IN_MS = 5000;
+/** Then the amplitude eases from 0 to full over this. */
+export const RAMP_MS = 3000;
+/** Nothing before this is scored. */
+export const SCORED_FROM_MS = LEAD_IN_MS + RAMP_MS;
+
 /** How long the palm may sit outside the corridor before the kite
  *  tumbles. Long enough to survive a wobble, short enough that drifting
  *  out is not free. */
@@ -129,12 +146,13 @@ export const LEVELS: Record<LevelId, KiteLevel> = {
     // An UPPER BOUND now, not the answer: maxHalfOverAmp below almost
     // always scales the lane — and the kite with it — down from here.
     kiteFraction: 0.13,
-    // 1.6-2.1 x 1.19, matching the measured widening of the lane. The
-    // lane's width is fixed by the anti-cheat cap below and the kite is
-    // that width divided by this factor, so raising both by the SAME
-    // amount widens the lane and leaves the kite where it was.
-    widthFactorMin: 1.9,
-    widthFactorMax: 2.5,
+    // Back to the floor the brief allows. The lane's width is fixed by
+    // the anti-cheat cap below, NOT by this factor, so lowering it does
+    // not narrow the lane — it enlarges the kite inside the same lane.
+    // 1.6 is as big as the kite can be made without the lane ceasing to
+    // read as a lane around it.
+    widthFactorMin: 1.6,
+    widthFactorMax: 2.1,
     waves: 2,
     secondShare: 0.25,
     secondRatio: 1.7,
@@ -142,7 +160,7 @@ export const LEVELS: Record<LevelId, KiteLevel> = {
     // the lane comes out about a fifth wider across the range of reach
     // geometries, with the width factors above raised in step so the
     // kite keeps its size.
-    maxHalfOverAmp: 0.165,
+    maxHalfOverAmp: 0.2475,
     // 90% of the room, leaving a tenth as margin rather than letting
     // the corridor's edge kiss the measured limit of the reach at every
     // peak — the reach box is an estimate from three held points, not a
@@ -180,7 +198,11 @@ export const LEVELS: Record<LevelId, KiteLevel> = {
     // 0.14 -> 0.158, measured the same way. Still tighter than level
     // 1's: this ratio is the only thing that decides whether a still
     // hand can pass, and level 2's bar is 25% against level 1's 35%.
-    maxHalfOverAmp: 0.158,
+    // 0.158 x ~1.62. The sizes are the requirement here and this
+    // ratio is the only thing that sets them, so it is chosen to
+    // deliver a 1.5x lane and left there — the still-hand score is
+    // reported rather than used as a brake.
+    maxHalfOverAmp: 0.256,
     maxHandSpeedArmPerSec: 0.9,
     // Slower than level 1's, which looks wrong for a harder level and
     // is not: level 2's difficulty is its narrower lane and its deeper

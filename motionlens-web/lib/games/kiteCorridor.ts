@@ -29,7 +29,12 @@
 //     not assumed — see makeCorridor.
 
 import type { ReachBox } from "@/lib/games/calibration";
-import { WIDTH_WAVE_FREQ, type KiteLevel } from "@/lib/games/kiteLevels";
+import {
+  LEAD_IN_MS,
+  RAMP_MS,
+  WIDTH_WAVE_FREQ,
+  type KiteLevel,
+} from "@/lib/games/kiteLevels";
 
 /** However tight the anti-cheat cap gets, one pass may not shrink the
  *  lane and kite below this fraction of their previous size — a kite
@@ -74,6 +79,30 @@ export interface Corridor {
   peakHandSpeedArmPerSec: number;
   /** Arm lengths per unit of ny, as measured when the round began. */
   nyToArm: number;
+  /**
+   * How much of the amplitude is in play right now, 0..1.
+   *
+   * The one mutable field here, and deliberately so: the lead-in is a
+   * property of THIS round at THIS moment, and the scene and the
+   * scoring have to agree on it exactly. Two copies of an envelope
+   * would be two chances to disagree about where the lane is.
+   * The scene sets it once per frame with amplitudeEnvelope().
+   */
+  ampScale: number;
+}
+
+/**
+ * How much amplitude is in play at `elapsedMs`.
+ *
+ * Flat zero through the lead-in, then a smoothstep to 1. Smoothstep
+ * rather than linear because its derivative is zero at both ends: a
+ * linear ramp would put a visible kink in the path at the moment the
+ * waves start, and a kink is a step change in the hand speed demanded.
+ */
+export function amplitudeEnvelope(elapsedMs: number): number {
+  if (elapsedMs <= LEAD_IN_MS) return 0;
+  const u = Math.min(1, (elapsedMs - LEAD_IN_MS) / RAMP_MS);
+  return u * u * (3 - 2 * u);
 }
 
 /** Kite height in ny, from the level and the patient's reach. */
@@ -194,6 +223,8 @@ export function makeCorridor(
     factorMax: level.widthFactorMax,
     peakHandSpeedArmPerSec: ampNy * perAmp,
     nyToArm,
+    // Straight to begin with; the scene advances this every frame.
+    ampScale: 0,
   };
 }
 
@@ -233,7 +264,8 @@ export function isNarrowAt(c: Corridor, worldX: number): boolean {
 export function centreNy(c: Corridor, worldX: number): number {
   const a = Math.sin(2 * Math.PI * c.f1 * worldX + c.p1);
   const b = Math.sin(2 * Math.PI * c.f2 * worldX + c.p2);
-  const raw = c.midNy + c.ampNy * (c.mainShare * a + c.secondShare * b);
+  const raw = c.midNy
+    + c.ampNy * c.ampScale * (c.mainShare * a + c.secondShare * b);
   const half = halfNyAt(c, worldX);
   return Math.min(c.hiNy - half, Math.max(c.loNy + half, raw));
 }
@@ -269,5 +301,5 @@ export function requiredHandSpeed(
     * Math.cos(2 * Math.PI * c.f1 * worldX + c.p1) * c.mainShare;
   const db = 2 * Math.PI * c.f2
     * Math.cos(2 * Math.PI * c.f2 * worldX + c.p2) * c.secondShare;
-  return Math.abs(c.ampNy * (da + db)) * scrollPerSec * c.nyToArm;
+  return Math.abs(c.ampNy * c.ampScale * (da + db)) * scrollPerSec * c.nyToArm;
 }
